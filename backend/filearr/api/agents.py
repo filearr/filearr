@@ -28,6 +28,7 @@ info.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -59,6 +60,7 @@ def require_agents_enabled() -> None:
 # Map an EnrollmentError.reason onto an HTTP status.
 _AUTH_REASONS = {"unknown_token", "consumed", "expired", "bad_secret"}
 _CONFLICT_REASONS = {"already_bound"}
+_FORBIDDEN_REASONS = {"revoked", "not_active"}
 
 
 def _enrollment_http(err: EnrollmentError) -> HTTPException:
@@ -66,6 +68,8 @@ def _enrollment_http(err: EnrollmentError) -> HTTPException:
         return HTTPException(status.HTTP_401_UNAUTHORIZED, str(err))
     if err.reason in _CONFLICT_REASONS:
         return HTTPException(status.HTTP_409_CONFLICT, str(err))
+    if err.reason in _FORBIDDEN_REASONS:
+        return HTTPException(status.HTTP_403_FORBIDDEN, str(err))
     if err.reason in {"unknown_agent"}:
         return HTTPException(status.HTTP_404_NOT_FOUND, str(err))
     return HTTPException(status.HTTP_400_BAD_REQUEST, str(err))
@@ -418,6 +422,83 @@ async def bind_certificate(
         request=request,
         details={"agent_id": str(agent_id), "cert_fingerprint": body.cert_fingerprint},
     )
+    return _agent_out(agent)
+
+
+class RebindIn(BaseModel):
+    """Proof-of-possession cert rotation (see filearr.agentcert). The chain is
+    leaf-first PEM (leaf + step-ca intermediate); the signature is base64 ASN.1
+    ECDSA over ``agentcert.canonical_payload(agent_id, timestamp, leaf_fp)``."""
+
+    cert_chain_pem: str = Field(min_length=1, max_length=32768)
+    timestamp: int
+    signature: str = Field(min_length=1, max_length=2048)
+
+
+@router.post(
+    "/agents/{agent_id}/rebind",
+    response_model=AgentOut,
+    dependencies=[Depends(require_agents_enabled)],
+)
+async def rebind_certificate(
+    agent_id: uuid.UUID,
+    body: RebindIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> AgentOut:
+    """Rotate an active agent's bound cert fingerprint after a renewal
+    (credential-drift fix 2026-07-24: renewal used to silently invalidate the
+    fingerprint-mode bearer ~32h after enroll, and 403-lock mtls-header mode).
+
+    Auth is proof-of-possession, NOT the bearer (which is exactly what has
+    drifted when this is needed): the presented chain must verify to the
+    pinned step-ca root, name this agent in its SAN, and the caller must sign
+    a fresh timestamped payload with the leaf key. Mode-agnostic — it keeps
+    the stored fingerprint current for every ``agent_auth_mode``."""
+    from filearr import agentcert
+
+    settings = get_settings()
+    try:
+        sig = base64.b64decode(body.signature, validate=True)
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "signature is not valid base64"
+        ) from exc
+    try:
+        root = await agentcert.get_ca_root(settings)
+        fingerprint = agentcert.verify_rebind(
+            chain_pem=body.cert_chain_pem,
+            agent_id=str(agent_id),
+            timestamp=body.timestamp,
+            signature=sig,
+            root=root,
+            max_skew_s=settings.agent_rebind_max_skew_seconds,
+        )
+    except agentcert.RebindError as err:
+        if err.reason == "ca_root_unavailable":
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(err)) from err
+        if err.reason == "san_mismatch":
+            # A valid CA-issued cert for a DIFFERENT agent — identity confusion,
+            # not a credential failure.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(err)) from err
+        if err.reason == "bad_request":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(err)) from err
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(err)) from err
+
+    try:
+        agent, changed = await agentsync.rebind_agent_certificate(
+            session, agent_id=agent_id, cert_fingerprint=fingerprint
+        )
+    except EnrollmentError as err:
+        await session.rollback()
+        raise _enrollment_http(err) from err
+    await session.commit()
+    if changed:
+        await audit.emit(
+            audit.AGENT_CERT_REBOUND,
+            request=request,
+            details={"agent_id": str(agent_id), "cert_fingerprint": fingerprint},
+        )
     return _agent_out(agent)
 
 

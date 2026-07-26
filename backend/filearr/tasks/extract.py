@@ -4,7 +4,9 @@ content_hash only when the library's resolved hash policy (T7) permits it and th
 file is at/below the (per-library or global) size ceiling."""
 
 import logging
+import random
 import re
+from pathlib import PurePath
 from typing import Any
 
 import xxhash
@@ -13,6 +15,7 @@ from procrastinate.retry import BaseRetryStrategy, RetryDecision
 from sqlalchemy import select, text
 
 from filearr import taxonomy
+from filearr.backpressure import extract_limiter
 from filearr.config import get_settings
 from filearr.db import SessionLocal
 from filearr.errors import sanitize_error
@@ -31,6 +34,27 @@ QUICK_CHUNK = 65536  # 64 KiB head + tail
 # column. Matches errors.MAX_ERROR_CHARS so a single pathological tag can never
 # bloat a row; ``title`` (Text) has no DB-level length limit, so we enforce one.
 STR_CAP = 500
+
+
+def _error_kind(exc: BaseException) -> str:
+    """Classify an extraction failure for the errors surface.
+
+    ``dependency`` = a module missing from the image (deployment bug — must
+    stand out from file problems); ``corrupt`` = the file's own bytes defeated
+    a parser; ``error`` = everything else (I/O, unexpected). Typed extractor
+    errors (DocumentError/Model3DError/ArchiveError) carry their own ``kind``
+    and never reach this fallback.
+    """
+    if isinstance(exc, ImportError):  # ModuleNotFoundError included
+        return "dependency"
+    # ET.ParseError subclasses SyntaxError; BadZipFile/UnidentifiedImageError
+    # matched by name so neither zipfile nor PIL is imported just to classify.
+    if isinstance(exc, SyntaxError) or type(exc).__name__ in (
+        "BadZipFile",
+        "UnidentifiedImageError",
+    ):
+        return "corrupt"
+    return "error"
 
 
 def coerce_year(raw: Any) -> int | None:
@@ -97,6 +121,30 @@ def quick_hash(path: str, size: int) -> str:
             # <=128 KiB: hash the WHOLE file. ``read()`` with no argument sizes the
             # buffer to the actual data — no fixed head cap, no 1 MiB over-alloc.
             h.update(f.read())
+    return h.hexdigest()
+
+
+def mid_hash(path: str, size: int | None) -> str | None:
+    """xxh3-64 of one ``QUICK_CHUNK`` window centred on the file's midpoint —
+    the roadmap-§13 sampling tier that rescues ambiguous moves.
+
+    quick_hash covers only head+tail, so distinct large files sharing an intro/
+    outro and size (padded containers, templated formats) collide and their
+    moves are refused as ambiguous under a ``quick_only`` policy (no
+    content_hash to disambiguate). A midpoint sample is byte-cheap (one seek +
+    64 KiB) yet almost never shared by such families, letting move detection
+    confirm identity without a full re-hash.
+
+    ``None`` for files ``size <= 2*QUICK_CHUNK``: quick_hash already covers
+    every byte of those, so a mid sample adds no information. Central-only for
+    now — agent-owned items never pass through central move detection, so the
+    Go walker does not mirror this tier (unlike ``quick_hash``)."""
+    if size is None or size <= QUICK_CHUNK * 2:
+        return None
+    h = xxhash.xxh3_64()
+    with open(path, "rb") as f:
+        f.seek((size - QUICK_CHUNK) // 2)
+        h.update(f.read(QUICK_CHUNK))
     return h.hexdigest()
 
 
@@ -234,7 +282,81 @@ def extract_audio(path: str) -> dict[str, Any]:
     }
 
 
+# Vector formats Pillow has no decoder for (the ``vector-image`` taxonomy group
+# minus svg/svgz, which get a real XML parse below). Before this split, EVERY
+# file in the group was a guaranteed UnidentifiedImageError in the errors
+# report (live incident 2026-07-24) — routed to Pillow because the group maps
+# to file_category "image".
+_VECTOR_EXTS = frozenset(
+    {
+        "ai", "eps", "epsf", "epsi", "cdr", "cmx", "cgm", "wmf", "emf", "emz",
+        "wmz", "vsd", "vsdx", "vss", "drw", "fig", "odg", "fodg", "hpgl",
+        "plt", "drawio", "dia",
+    }
+)
+
+# Only unitless/px SVG lengths are trusted as pixel dimensions; mm/pt/% depend
+# on rendering context and would store misleading numbers.
+_SVG_LEN_RE = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*$")
+
+
+def _svg_px(value: str | None) -> int | None:
+    if not value:
+        return None
+    m = _SVG_LEN_RE.match(value)
+    if m is None:
+        return None
+    try:
+        return round(float(m.group(1))) or None
+    except ValueError:
+        return None
+
+
+def _extract_svg(path: str, *, gzipped: bool) -> dict[str, Any]:
+    """Dimensions from an SVG/SVGZ root element WITHOUT a raster decode.
+
+    defusedxml iterparse (entity/bomb-hardened), stopped at the FIRST start
+    event — only the root tag's bytes are ever read, so a multi-MB path-heavy
+    SVG costs one buffered read. ``width``/``height`` attributes win; the
+    ``viewBox`` is the fallback. Malformed XML raises ParseError (a
+    SyntaxError), which the blanket handler classifies ``corrupt``.
+    """
+    import gzip
+
+    from defusedxml.ElementTree import iterparse
+
+    opener = gzip.open if gzipped else open
+    root = None
+    with opener(path, "rb") as fh:
+        for _event, el in iterparse(fh, events=("start",)):
+            root = el
+            break
+    meta: dict[str, Any] = {"format": "SVG"}
+    if root is None:
+        return meta
+    w = _svg_px(root.get("width"))
+    h = _svg_px(root.get("height"))
+    if w is None or h is None:
+        vb = (root.get("viewBox") or "").replace(",", " ").split()
+        if len(vb) == 4:
+            w = w if w is not None else _svg_px(vb[2])
+            h = h if h is not None else _svg_px(vb[3])
+    if w:
+        meta["width"] = w
+    if h:
+        meta["height"] = h
+    return meta
+
+
 def extract_image(path: str) -> dict[str, Any]:
+    ext = PurePath(path).suffix.lstrip(".").lower()
+    if ext in ("svg", "svgz"):
+        return _extract_svg(path, gzipped=ext == "svgz")
+    if ext in _VECTOR_EXTS:
+        # Same ``unsupported`` marker documents.py/model3d.py emit for formats
+        # with no safe parser — a fact, not an error.
+        return {"unsupported": True}
+
     from PIL import Image
 
     with Image.open(path) as img:
@@ -296,6 +418,7 @@ def extract_video(path: str) -> dict[str, Any]:
         )
     except FfprobeError as exc:
         meta["_extract_error"] = str(exc)
+        meta["_extract_error_kind"] = "error"
 
     return meta
 
@@ -314,6 +437,7 @@ def extract_audiobook(path: str) -> dict[str, Any]:
         meta.update(extract_chapters(path))
     except AudiobookError as exc:
         meta["_extract_error"] = str(exc)
+        meta["_extract_error_kind"] = "corrupt"
     return meta
 
 
@@ -326,7 +450,7 @@ def extract_model3d(path: str) -> dict[str, Any]:
     try:
         return _extract(path, max_bytes=get_settings().model3d_max_bytes)
     except Model3DError as exc:
-        return {"_extract_error": str(exc)}
+        return {"_extract_error": str(exc), "_extract_error_kind": exc.kind}
 
 
 def extract_document(path: str) -> dict[str, Any]:
@@ -354,7 +478,7 @@ def extract_document(path: str) -> dict[str, Any]:
     except DocumentError as exc:
         # Property parse failed (or the bomb guard rejected the file) — record the
         # error and stop before the body pass (which would re-hit the same guard).
-        return {"_extract_error": str(exc)}
+        return {"_extract_error": str(exc), "_extract_error_kind": exc.kind}
 
     try:
         body = extract_body(
@@ -365,6 +489,7 @@ def extract_document(path: str) -> dict[str, Any]:
         )
     except DocumentError as exc:
         meta["_extract_error"] = str(exc)
+        meta["_extract_error_kind"] = exc.kind
         body = {}
     if body:
         # A txt/md file has no property parser (``unsupported`` marker); once body
@@ -423,6 +548,23 @@ class RescheduleExtract(Exception):
     library). It is NOT a failure -- :class:`StagedExtractRetry` turns it into an
     attempt-agnostic reschedule, never a ``failed`` job."""
 
+    # Roadmap §18: control-flow signal, not an error — the joberrors worker
+    # middleware must not persist a failure row for it (checked by attribute,
+    # not isinstance, to avoid a joberrors->extract->worker import cycle).
+    filearr_transient = True
+
+
+class BackpressureReschedule(RescheduleExtract):
+    """Roadmap §17: the adaptive limiter refused a slot (host under load).
+    Same attempt-agnostic never-fails semantics as the staged gate, but with a
+    SHORT jittered delay — pressure passes in seconds-to-minutes, not the
+    scan-walk timescale ``extract_reschedule_seconds`` is sized for, and the
+    jitter keeps a burst of capped jobs from re-arriving in one thundering
+    herd."""
+
+    RETRY_MIN_S = 15
+    RETRY_MAX_S = 45
+
 
 class StagedExtractRetry(BaseRetryStrategy):
     """Retry strategy for ``extract_item`` (UI-T14).
@@ -449,6 +591,16 @@ class StagedExtractRetry(BaseRetryStrategy):
     def get_retry_decision(
         self, *, exception: BaseException, job: Job
     ) -> RetryDecision | None:
+        if isinstance(exception, BackpressureReschedule):
+            # §17: short + jittered (see BackpressureReschedule docstring).
+            return RetryDecision(
+                retry_in={
+                    "seconds": random.randint(
+                        BackpressureReschedule.RETRY_MIN_S,
+                        BackpressureReschedule.RETRY_MAX_S,
+                    )
+                }
+            )
         if isinstance(exception, RescheduleExtract):
             return RetryDecision(
                 retry_in={"seconds": get_settings().extract_reschedule_seconds}
@@ -465,7 +617,22 @@ class StagedExtractRetry(BaseRetryStrategy):
     priority=get_settings().extract_priority,
 )
 async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
+    # Roadmap §17 adaptive backpressure: take a limiter slot BEFORE any DB or
+    # disk work (a refused job has zero side effects). While the host-load trip
+    # is engaged, jobs beyond the capped concurrency reschedule with a short
+    # jittered delay instead of occupying a worker slot.
     settings = get_settings()
+    if not extract_limiter.try_acquire(settings):
+        raise BackpressureReschedule("host under load; deferring extract")
+    try:
+        return await _extract_item_impl(item_id, scan_run_id, settings)
+    finally:
+        extract_limiter.release()
+
+
+async def _extract_item_impl(
+    item_id: str, scan_run_id: str | None, settings
+) -> None:
     async with SessionLocal() as session:
         item = (
             await session.execute(select(Item).where(Item.id == item_id))
@@ -541,6 +708,9 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
             item.policy_version = policy_version(library, settings)
         try:
             item.quick_hash = quick_hash(item.path, item.size)
+            # Roadmap §13: midpoint sample for the move-detection rescue tier
+            # (None for small files quick_hash already covers in full).
+            item.mid_hash = mid_hash(item.path, item.size)
             # QH-T2: a file <= 2*QUICK_CHUNK (128 KiB) ALWAYS gets a real
             # content_hash, independent of hash_policy (even quick_only) and of the
             # T7 ceiling — it is cheap enough to hash exactly (§5a) and a sampled
@@ -568,7 +738,10 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
             except Exception as exc:  # extraction must never kill the scan
                 # T11: error strings are untrusted (filenames/parser output) --
                 # sanitize + length-cap before persisting into JSONB.
-                meta = {"_extract_error": sanitize_error(exc)}
+                meta = {
+                    "_extract_error": sanitize_error(exc),
+                    "_extract_error_kind": _error_kind(exc),
+                }
                 extract_failed = True
 
         # P3-T11 EXIF deep extraction (images v1). Curated exif.* keys — camera/
@@ -628,6 +801,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
                 archive_ok = True
             except ArchiveError as exc:
                 meta["_extract_error"] = str(exc)
+                meta["_extract_error_kind"] = exc.kind
                 extract_failed = True
 
         # P4-T2: validate the extractor output against its file_category profile
@@ -701,6 +875,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
         ran_extractor = extractor is not None or archive_ok
         if ran_extractor and not extract_failed:
             merged.pop("_extract_error", None)
+            merged.pop("_extract_error_kind", None)
             if "_validation_errors" not in meta:
                 merged.pop("_validation_errors", None)
         item.metadata_ = merged
@@ -729,7 +904,11 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
             ).scalar_one_or_none()
             if item is None:
                 return
-            item.metadata_ = {**item.metadata_, "_extract_error": sanitize_error(exc)}
+            item.metadata_ = {
+                **item.metadata_,
+                "_extract_error": sanitize_error(exc),
+                "_extract_error_kind": "error",
+            }
             extract_failed = True
             await session.commit()
 

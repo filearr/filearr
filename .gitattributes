@@ -1,0 +1,4 @@
+# Shell scripts must checkout LF everywhere: a CRLF entrypoint inside a Linux
+# container dies on `/bin/sh^M`. (This repo is developed on Windows with
+# core.autocrlf=true, which would otherwise rewrite them on checkout.)
+*.sh text eol=lf

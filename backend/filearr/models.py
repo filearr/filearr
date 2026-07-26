@@ -264,6 +264,10 @@ class Item(Base):
     # xxh3: quick = first+last 64 KiB (move detection tier 1); content = full/chunked
     quick_hash: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str | None] = mapped_column(Text)
+    # Roadmap §13 move-rescue tier: 64 KiB xxh3 sampled at the file midpoint.
+    # NULL for files <=128 KiB (quick_hash already covers every byte) and for
+    # rows hashed before this column existed (backfilled lazily by extraction).
+    mid_hash: Mapped[str | None] = mapped_column(Text)
 
     title: Mapped[str | None] = mapped_column(Text)
     year: Mapped[int | None] = mapped_column(Integer)
@@ -575,6 +579,37 @@ class ScanRun(Base):
     # FULL scan (which a scoped defer skips behind) from a running scoped scan.
     rel_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     stats: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
+
+
+class JobError(Base):
+    """Roadmap §18: the sanitized message + capped traceback of a failed
+    Procrastinate job, recorded by the ``joberrors`` worker middleware.
+
+    ``job_id`` references ``procrastinate_jobs.id`` WITHOUT a foreign key —
+    that table is owned by Procrastinate (alembic's ``include_name`` excludes
+    it) and its history purge must never cascade or block on our rows; both
+    tables are purged on the same ``job_history_retention_days`` window
+    instead. One row per failed ATTEMPT (``attempt`` disambiguates), so a
+    retried-then-dead job keeps its full failure history for the window."""
+
+    __tablename__ = "job_errors"
+    __table_args__ = (
+        Index("ix_job_errors_job_id", "job_id"),
+        Index("ix_job_errors_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    job_id: Mapped[int | None] = mapped_column(BigInteger)
+    task_name: Mapped[str] = mapped_column(Text)
+    queue: Mapped[str] = mapped_column(Text)
+    attempt: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    message: Mapped[str] = mapped_column(Text)
+    traceback: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
 
 class ScanPath(Base):

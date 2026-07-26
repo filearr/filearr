@@ -68,6 +68,70 @@ Logging is definable per install or per configuration group:
 `error`, `warn`, `info`, `verbose`, `debug` — with rotating file logs
 (10 MiB × 5, compressed) in the platform log directory.
 
+## Running the agent in Docker (Unraid)
+
+For NAS boxes — Unraid first among them — the agent also ships as a
+standalone container: `ghcr.io/<owner>/filearr-agent`. The image bundles the
+static agent binary, `ffmpeg` (for video poster thumbnails), and an
+entrypoint that enrolls on first start, then runs the replication daemon
+alongside interval rescans of your mounted shares.
+
+!!! info "Why interval rescans, not watch mode"
+    Unraid's `/mnt/user` is a FUSE (shfs) mount where inotify is unreliable —
+    the same caveat that applies to SMB/NFS everywhere in Filearr. The
+    container therefore re-walks its roots on a timer (default every 6 h;
+    `FILEARR_AGENT_SCAN_INTERVAL`). Rescans are mtime+size cheap: unchanged
+    files cost a `stat`, nothing more.
+
+### Unraid setup
+
+A Community Applications template ships in the repo
+(`unraid/filearr-agent.xml`). Three fields matter on first start:
+
+1. **Central URL** — your Filearr server (`https://filearr.example.com`).
+2. **Enrollment token** — mint one in the console (Agents → *Mint token*);
+   it is single-use and short-lived. After the log shows `enrolled.` the
+   identity lives in appdata and the token field can be cleared.
+3. **Scan roots** — comma-separated directories to inventory. Prefer listing
+   specific shares (`/mnt/user/media,/mnt/user/documents`) over all of
+   `/mnt/user`, which drags appdata/system churn into the catalog.
+
+The template mounts `/mnt/user` **read-only and 1:1** (container path equals
+host path), so the paths central records are your real Unraid paths — no
+remote-path-mapping needed. If you narrow the mount to one share, keep it 1:1
+(`/mnt/user/media` → `/mnt/user/media`) to preserve that property. Agent
+state persists in `/mnt/user/appdata/filearr-agent` (keep it on the cache
+pool); the agent runs as `PUID`/`PGID` 99/100 and only ever connects
+*outbound* over mutual TLS — the container exposes no ports.
+
+### Any other container host
+
+```yaml
+services:
+  filearr-agent:
+    image: ghcr.io/<owner>/filearr-agent:latest
+    restart: unless-stopped
+    environment:
+      FILEARR_AGENT_CENTRAL_URL: https://filearr.example.com
+      FILEARR_AGENT_TOKEN: "<single-use token>"   # remove after first start
+      FILEARR_AGENT_NAME: nas-01
+      FILEARR_AGENT_SCAN_ROOTS: /srv/media
+    volumes:
+      - ./agent-data:/config
+      - /srv/media:/srv/media:ro
+```
+
+All `FILEARR_AGENT_*` environment variables pass straight through to the
+binary; the data directory is pinned to `/config`.
+
+!!! warning "Container updates replace self-update"
+    The container image is built **without** a release-signing key, so the
+    signed self-update channel is fail-closed inside it (by design — the
+    filesystem is meant to be immutable). Update by pulling the new image;
+    the enrolled identity and local index in `/config` carry over. The local
+    web UI binds loopback-only and is not reachable through port mapping —
+    use the central console.
+
 ## Configuration groups (remote configuration)
 
 Agents can be assigned to **configuration groups** managed on the Agents

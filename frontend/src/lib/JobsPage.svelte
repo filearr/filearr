@@ -590,14 +590,14 @@
         {@const cpu = summary.resources.cpu}
         {@const pct = cpu.percent ?? 0}
         {@const barPct = Math.min(100, Math.max(0, pct))}
-        {@const hot = pct >= 100}
+        {@const hot = pct >= 95}
         {@const warm = pct >= 80}
         <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex items-center justify-between gap-2">
-            <span class="font-medium">CPU load</span>
+            <span class="font-medium">CPU</span>
             <span
               class="tabular-nums text-xs text-slate-500"
-              title="1-minute load average as a percent of available cores. Can exceed 100% when the run queue is deeper than the core count (work is waiting on CPU).">
+              title="Utilization sampled across ALL cores between polls (busy time / total time from /proc/stat) — 100% means every core fully busy.">
               {pct}%
             </span>
           </div>
@@ -612,7 +612,7 @@
           </div>
           <div
             class="mt-1.5 tabular-nums text-xs text-slate-500"
-            title="Unix run-queue load averages over 1 / 5 / 15 minutes (os.getloadavg), and the number of cores the percent is measured against.">
+            title="Unix run-queue load averages over 1 / 5 / 15 minutes (saturation: can exceed the core count when work is queued waiting for CPU) and the core count.">
             load {cpu.load1?.toFixed(2) ?? "—"} / {cpu.load5?.toFixed(2) ?? "—"} / {cpu.load15?.toFixed(2) ?? "—"}
             {#if cpu.cores != null}· {cpu.cores} core{cpu.cores === 1 ? "" : "s"}{/if}
           </div>
@@ -1025,6 +1025,7 @@
           <th class="py-2 pr-3">Queue</th>
           <th class="py-2 pr-3" title="Tries used against the task's genuine-failure retry budget (attempts/cap). A large legacy number can include reschedules/requeues, not repeated failures.">Attempts</th>
           <th class="py-2 pr-3">Last attempt</th>
+          <th class="py-2 pr-3" title="Sanitized failure message recorded per attempt; hover a row's error for its traceback. Pre-middleware failures show — (worker logs only).">Error</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
@@ -1037,6 +1038,9 @@
               {av.main}{#if av.extra > 0}<span class="ml-1 text-[10px] font-normal text-slate-400">{av.extraLabel}</span>{/if}
             </td>
             <td class="py-2 pr-3 text-slate-500">{j.attempted_at ? new Date(j.attempted_at).toLocaleString() : "—"}</td>
+            <td
+              class="max-w-[24rem] truncate py-2 pr-3 font-mono text-xs text-red-600 dark:text-red-400 {j.traceback ? 'cursor-help' : ''}"
+              title={j.traceback ?? undefined}>{j.error ?? "—"}</td>
           </tr>
         {/each}
       </tbody>

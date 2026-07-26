@@ -19,17 +19,20 @@ import (
 // later slice (documented deviation). Central still generates PDF thumbs for
 // CENTRAL-hosted libraries.
 const (
-	categoryImage = "image"
-	categoryVideo = "video"
-	categoryAudio = "audio"
+	categoryImage   = "image"
+	categoryVideo   = "video"
+	categoryAudio   = "audio"
+	categoryModel3D = "three-d-cad"
 )
 
 // isThumbnailable reports whether the agent can produce a thumbnail for a
 // file_category. Video is included only when ffmpeg is available (capability-gated
-// by the Thumbnailer); the category gate here is format-agnostic.
+// by the Thumbnailer); the category gate here is format-agnostic. three-d-cad is
+// STL-only in practice (GenerateModelThumb gates by extension) — other CAD
+// extensions just skip.
 func isThumbnailable(category string) bool {
 	switch category {
-	case categoryImage, categoryVideo, categoryAudio:
+	case categoryImage, categoryVideo, categoryAudio, categoryModel3D:
 		return true
 	default:
 		return false
@@ -320,6 +323,9 @@ func (t *Thumbnailer) generate(ctx context.Context, c Candidate, spec TierSpec) 
 			return nil
 		}
 		return GenerateVideoThumb(ctx, t.ffmpegPath, full, spec, VideoMinSeekSeconds)
+	case categoryModel3D:
+		// Roadmap §20: STL preview via the pure-Go fauxgl software renderer.
+		return GenerateModelThumb(full, spec)
 	default:
 		return nil
 	}

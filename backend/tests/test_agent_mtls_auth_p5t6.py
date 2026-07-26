@@ -169,14 +169,22 @@ async def test_mtls_mode_bearer_refused(client):
     assert (await _poll(c, agent_id, _bearer(fp))).status_code == 401
 
 
-async def test_mtls_mode_fingerprint_secondary_check(client):
+async def test_mtls_mode_fingerprint_self_heal(client):
+    """Drift fix 2026-07-24: a proxy-verified fp that contradicts the bound one
+    UPDATES the binding instead of 403ing. The old must-agree rule locked every
+    agent out after its first cert renewal, because the shipped Caddyfile
+    forwards the fp header unconditionally (the docstring's skipped-when-absent
+    escape never fired) and renewal rotates the fingerprint."""
     c, maker, settings = client
     settings.agent_auth_mode = "mtls-header"
     agent_id = await _seed_agent(maker, fingerprint="the-bound-fp")
-    # matching fp header -> ok
+    # matching fp header -> ok, binding untouched
     assert (await _poll(c, agent_id, _mtls(agent_id, fp="the-bound-fp"))).status_code == 200
-    # contradicting fp header (agent HAS a bound fp) -> 403
-    assert (await _poll(c, agent_id, _mtls(agent_id, fp="a-different-fp"))).status_code == 403
+    # renewed cert: same SAN, new fp -> authenticated AND binding rotates
+    assert (await _poll(c, agent_id, _mtls(agent_id, fp="renewed-fp"))).status_code == 200
+    async with maker() as s:
+        a = await s.get(Agent, agent_id)
+        assert a.cert_fingerprint == "renewed-fp"
 
 
 async def test_mtls_mode_fp_check_skipped_when_agent_unbound(client):

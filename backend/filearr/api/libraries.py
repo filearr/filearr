@@ -177,6 +177,28 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
         )
     ).scalars().all()
     by_library = {run.library_id: run for run in latest_runs}
+    # Roadmap §17: rolling per-library walk-throughput median over recent
+    # finished FULL scans (scoped runs walk subtrees of arbitrary size — their
+    # files/s is not comparable). One grouped aggregate, same 30-day window as
+    # jobs_stats.scan_throughput.
+    medians: dict = {}
+    try:
+        rows = await session.execute(
+            text(
+                "SELECT library_id, "
+                "       percentile_cont(0.5) WITHIN GROUP "
+                "         (ORDER BY (stats->>'files_per_s')::float) AS median, "
+                "       count(*) AS runs "
+                "FROM scan_runs "
+                "WHERE status = 'finished' AND rel_path IS NULL "
+                "  AND stats ? 'files_per_s' "
+                "  AND started_at > now() - interval '30 days' "
+                "GROUP BY library_id"
+            )
+        )
+        medians = {r.library_id: (float(r.median), int(r.runs)) for r in rows}
+    except Exception:  # noqa: BLE001 — the annotation must never break listing
+        medians = {}
 
     out: list[LibraryOut] = []
     for library in libraries:
@@ -203,6 +225,11 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
                 pruned_files=stats.get("pruned_files"),
                 pruned_counted=stats.get("pruned_counted"),
                 pruned_paths=stats.get("pruned_paths"),
+                # §17 throughput annotation (median only for full scans; this
+                # run's own rate rides along for the comparison).
+                files_per_s=stats.get("files_per_s"),
+                median_files_per_s=(medians.get(library.id) or (None, 0))[0],
+                throughput_runs=(medians.get(library.id) or (None, 0))[1],
             )
         out.append(_library_out(library, last_scan))
     return out
@@ -620,7 +647,11 @@ async def delete_library(
 
 @router.post("/{library_id}/scan", status_code=202,
              dependencies=[Depends(require_scope("write"))])
-async def trigger_scan(library_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+async def trigger_scan(
+    library_id: uuid.UUID,
+    force_empty: bool = False,
+    session: AsyncSession = Depends(get_session),
+):
     library = (
         await session.execute(select(Library).where(Library.id == library_id))
     ).scalar_one_or_none()
@@ -661,7 +692,10 @@ async def trigger_scan(library_id: uuid.UUID, session: AsyncSession = Depends(ge
     await session.commit()
     # force=True: the operator explicitly asked for a scan and we just confirmed no
     # unfinished job exists, so bypass defer_scan's (now redundant) dedupe.
-    job_id = await defer_scan(str(library_id), force=True)
+    # force_empty (roadmap §19, query param): the operator's consent to a walk
+    # that sees ZERO files over a previously-populated library — bypasses the
+    # N->0 empty-mount guard for a deliberate everything-was-deleted rescan.
+    job_id = await defer_scan(str(library_id), force=True, force_empty=force_empty)
     return {"job_id": job_id}
 
 

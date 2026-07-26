@@ -222,12 +222,21 @@ export const cancelTransfer = (id: string) =>
   });
 
 /** SSE URL for a transfer's progress stream. ``EventSource`` can't set headers,
- *  so the read-scope key rides as ``?api_key=`` exactly like the scans SSE. */
-export function transferEventsUrl(id: string): string {
-  const key = KEY();
-  const qs = key ? `?api_key=${encodeURIComponent(key)}` : "";
+ *  so a single-use scoped stream token (minted per connect via
+ *  ``mintTransferEventsToken``) rides as ``?stream_token=`` — never the real
+ *  API key (query strings land in proxy logs). Tokenless when auth is off. */
+export function transferEventsUrl(id: string, streamToken = ""): string {
+  const qs = streamToken ? `?stream_token=${encodeURIComponent(streamToken)}` : "";
   return `${API_BASE}/transfers/${id}/events${qs}`;
 }
+
+/** Mint a single-use, 60 s token scoped to one transfer's SSE stream. Callers
+ *  mint a fresh one per (re)connect — the token is consumed on first use. */
+export const mintTransferEventsToken = (id: string) =>
+  request<{ token: string; expires_in: number }>(
+    `/transfers/${id}/events-token`,
+    { method: "POST" },
+  );
 
 /** Fetch the verified staged file (auth header) and save it as ``filename``.
  *  Mirrors ``downloadExport`` — a blob save so the Bearer header is sent (an
@@ -305,6 +314,12 @@ export interface LastScan {
   /** Capped sample of pruned directory paths, so the UI can name the culprits
    *  (".git", ".venv") instead of showing an opaque count. */
   pruned_paths?: string[] | null;
+  /** §17 throughput: this run's walk rate, the library's rolling median over
+   *  recent finished FULL scans (30-day window), and how many runs back that
+   *  median. Drives the "slower than usual" badge (only when runs >= 3). */
+  files_per_s?: number | null;
+  median_files_per_s?: number | null;
+  throughput_runs?: number;
 }
 
 export interface Library {
@@ -739,15 +754,22 @@ export const forceClearScan = (id: string) =>
 
 /**
  * URL for the scan-progress SSE stream. `EventSource` cannot set an
- * Authorization header, so when an API key is present we pass it as the
- * `api_key` query param — the backend accepts it ONLY on this read-only events
- * endpoint. When auth is disabled (dev) no key is appended.
+ * Authorization header, so a single-use scoped stream token (minted per
+ * connect via `mintScanEventsToken`) rides as `?stream_token=` — never the
+ * real API key (query strings land in proxy logs). When auth is disabled
+ * (dev) the stream needs no token at all.
  */
-export function scanEventsUrl(id: string): string {
-  const key = KEY();
-  const qs = key ? `?api_key=${encodeURIComponent(key)}` : "";
+export function scanEventsUrl(id: string, streamToken = ""): string {
+  const qs = streamToken ? `?stream_token=${encodeURIComponent(streamToken)}` : "";
   return `${API_BASE}/scans/${id}/events${qs}`;
 }
+
+/** Mint a single-use, 60 s token scoped to one scan's SSE stream. Callers
+ *  mint a fresh one per (re)connect — the token is consumed on first use. */
+export const mintScanEventsToken = (id: string) =>
+  request<{ token: string; expires_in: number }>(`/scans/${id}/events-token`, {
+    method: "POST",
+  });
 
 // ---- UI-T4 server-side folder browser ----
 export interface FsEntry {
@@ -774,6 +796,9 @@ export interface FailingItem {
   id: string;
   rel_path: string;
   error: string;
+  /** dependency (deployment bug) | guard (intentional ceiling) | corrupt (bad
+   *  file) | error (I/O/unexpected; also pre-classification rows). */
+  kind: "dependency" | "guard" | "corrupt" | "error";
 }
 
 export interface LibraryErrors {
@@ -792,7 +817,11 @@ export interface FailedJob {
   retry_cap: number | null;
   scheduled_at: string | null;
   attempted_at: string | null;
+  /** Sanitized failure message recorded by the §18 worker middleware; null for
+   *  jobs that failed before it existed. */
   error: string | null;
+  /** Length-capped traceback matching `error` (same provenance/nullability). */
+  traceback: string | null;
 }
 
 /** Paginated failed-jobs response (FIX-8). ``total`` is the full failed-row
@@ -893,14 +922,17 @@ export interface StalledSummary {
   by_queue: Record<string, number>;
 }
 
-/** Coarse CPU-load indicator riding the Jobs poll (NOT a metrics system). All
- *  fields are null on a host without `os.getloadavg` (Windows / restricted). */
+/** Coarse CPU indicator riding the Jobs poll (NOT a metrics system). All
+ *  fields are null on a host without /proc + `os.getloadavg` (Windows /
+ *  restricted). */
 export interface CpuLoad {
+  /** Run-queue load averages — saturation, CAN exceed the core count. */
   load1: number | null;
   load5: number | null;
   load15: number | null;
   cores: number | null;
-  /** 100 * load1 / cores — may exceed 100 under overload (not clamped). */
+  /** True all-core utilization %, 0–100: busy/total jiffies delta between
+   *  polls (/proc/stat). Null on the first poll (no delta yet). */
   percent: number | null;
 }
 

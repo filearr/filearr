@@ -15,6 +15,7 @@
     friendlyError,
     initiateTransfer,
     transferEventsUrl,
+    mintTransferEventsToken,
     type TransferEvent,
   } from "./api";
 
@@ -122,9 +123,24 @@
     }
   }
 
-  function openStream(id: string) {
+  let opening = false;
+
+  async function openStream(id: string) {
+    if (opening) return;
+    opening = true;
     closeStream();
-    es = new EventSource(transferEventsUrl(id));
+    // EventSource can't set headers, so mint a single-use scoped stream token
+    // (?stream_token=) per connect — the real API key never rides the URL. A
+    // failed mint tries tokenless (works with auth off; 401s into the error
+    // path with auth on).
+    let token = "";
+    try {
+      token = (await mintTransferEventsToken(id)).token;
+    } catch {
+      /* tokenless attempt below */
+    }
+    opening = false;
+    es = new EventSource(transferEventsUrl(id, token));
     let terminated = false;
     const onFrame = (ev: MessageEvent) => {
       try {
@@ -142,11 +158,18 @@
     });
     es.addEventListener("error", (ev) => {
       // A named server `error` frame carries `.data` (failed transfer / unknown
-      // id); a bare connection drop does not (the browser auto-reconnects).
+      // id); a bare connection drop does not. The browser's native reconnect
+      // would replay the SAME (already-consumed) stream token and 401, so we
+      // reconnect ourselves with a freshly-minted token instead.
       if ((ev as MessageEvent).data) {
         onFrame(ev as MessageEvent);
       } else if (terminated) {
         closeStream();
+      } else {
+        closeStream();
+        setTimeout(() => {
+          if (transferId === id && !opening) openStream(id);
+        }, 2000);
       }
     });
   }

@@ -55,7 +55,15 @@ from filearr.tasks.documents import (
 
 class ArchiveError(RuntimeError):
     """An archive could not be listed. Message is safe to store under
-    ``_extract_error`` (no raw member content, no unbounded parser output)."""
+    ``_extract_error`` (no raw member content, no unbounded parser output).
+
+    ``kind`` classifies the failure for the errors surface: ``corrupt``
+    (default), ``guard`` (decompression ceiling), ``error`` (I/O).
+    """
+
+    def __init__(self, message: str, *, kind: str = "corrupt") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 # Default caps (overridable via config at call time; module constants keep the
@@ -211,7 +219,8 @@ def _list_zip(
             ratio_min_bytes=ratio_min_bytes,
         )
     except DocumentError as exc:
-        raise ArchiveError(str(exc)) from exc
+        # Preserve the guard/corrupt classification the shared guard assigned.
+        raise ArchiveError(str(exc), kind=getattr(exc, "kind", "corrupt")) from exc
 
     try:
         with zipfile.ZipFile(path) as zf:
@@ -225,14 +234,14 @@ def _list_zip(
     except zipfile.BadZipFile as exc:
         raise ArchiveError(f"not a valid zip archive: {exc}") from exc
     except OSError as exc:
-        raise ArchiveError(f"cannot read zip archive: {exc}") from exc
+        raise ArchiveError(f"cannot read zip archive: {exc}", kind="error") from exc
 
 
 def _list_tar(path: str, acc: _Accumulator, *, scan_max_bytes: int) -> None:
     try:
         raw = open(path, "rb")
     except OSError as exc:
-        raise ArchiveError(f"cannot open tar archive: {exc}") from exc
+        raise ArchiveError(f"cannot open tar archive: {exc}", kind="error") from exc
     reader = _CountingReader(raw, scan_max_bytes)
     tar = None
     try:

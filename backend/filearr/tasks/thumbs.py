@@ -142,7 +142,17 @@ async def _resolve_source(session, item: Item, tier: int, settings):
                 return "pdf", tb
         return None
 
-    # Everything else (three-d-cad/development/archive/system/other): slice 3+ /
+    if item.file_category == "three-d-cad":
+        # Roadmap §20: shaded isometric mesh preview via the in-process software
+        # rasterizer (see thumbs.generate_model3d_thumb — headless, no GL, no new
+        # dependency). Non-geometry CAD extensions return None inside and fall
+        # through to the placeholder icon.
+        tb = th.generate_model3d_thumb(item.path, tier, settings)
+        if tb is not None:
+            return "model3d", tb
+        return None
+
+    # Everything else (development/archive/system/other): slice 3+ /
     # placeholder icon.
     return None
 

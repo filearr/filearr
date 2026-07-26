@@ -259,13 +259,15 @@ async def test_schedule_scans_task_returns_count(tick_env):
 @pytest.mark.asyncio
 async def test_watch_debounce_triggers_one_scan(monkeypatch):
     """A burst of change batches within one settle window triggers a single
-    scan; a later batch triggers another."""
+    scan; a later batch triggers another. The trigger receives the §14 narrowed
+    scope (relative to the watched root) — here the events sit directly under
+    the root, so the scope collapses to the whole-tree value."""
     import filearr.watch as watch_mod
 
-    triggered: list[str] = []
+    triggered: list[object] = []
 
-    async def trigger(library_id: str):
-        triggered.append(library_id)
+    async def trigger(narrowed):
+        triggered.append(narrowed)
 
     async def fake_awatch(root, *, stop_event=None, debounce=0):
         # Two rapid batches, then stop.
@@ -277,6 +279,162 @@ async def test_watch_debounce_triggers_one_scan(monkeypatch):
     stop = asyncio.Event()
     await watch_mod._watch_library("lib1", "/x", trigger, stop=stop, debounce_s=0.01)
     # Each yielded batch fires one trigger (awatch itself does the OS-level
-    # debounce; our settle sleep just avoids mid-copy fires).
-    assert triggered.count("lib1") >= 1
-    assert set(triggered) == {"lib1"}
+    # debounce; our settle sleep just avoids mid-copy fires). Events directly
+    # under the root narrow to "" (or None when narrowing is off) — either way
+    # the whole watched tree.
+    assert len(triggered) >= 1
+    assert set(triggered) <= {"", None}
+
+
+# --------------------------------------------------------------------------- #
+# roadmap §14 — incremental watch narrowing
+# --------------------------------------------------------------------------- #
+def test_narrow_scope_single_file(tmp_path):
+    """One changed file narrows to its parent directory, library-relative."""
+    import filearr.watch as watch_mod
+
+    sub = tmp_path / "movies" / "Alien (1979)"
+    sub.mkdir(parents=True)
+    changed = sub / "alien.mkv"
+    changed.write_bytes(b"x")
+    rel = watch_mod._narrow_scope(str(tmp_path), {("added", str(changed))}, 64)
+    assert rel == "movies/Alien (1979)"
+
+
+def test_narrow_scope_lca_of_siblings(tmp_path):
+    """Events across sibling dirs narrow to their common ancestor."""
+    import filearr.watch as watch_mod
+
+    a = tmp_path / "movies" / "A"
+    b = tmp_path / "movies" / "B"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    events = {("added", str(a / "a.mkv")), ("deleted", str(b / "b.mkv"))}
+    assert watch_mod._narrow_scope(str(tmp_path), events, 64) == "movies"
+
+
+def test_narrow_scope_deleted_subtree_ascends_to_existing(tmp_path):
+    """A deleted directory's events name paths that no longer exist; the scope
+    ascends to the nearest surviving ancestor so the scan target is walkable
+    (and its recursive diff tombstones the vanished subtree)."""
+    import filearr.watch as watch_mod
+
+    keep = tmp_path / "shows"
+    keep.mkdir()
+    gone = keep / "Cancelled" / "Season 1"
+    events = {("deleted", str(gone / "e1.mkv")), ("deleted", str(gone / "e2.mkv"))}
+    assert watch_mod._narrow_scope(str(tmp_path), events, 64) == "shows"
+
+
+def test_narrow_scope_root_events_and_big_bursts(tmp_path):
+    """Events at the root give '' (whole tree); a burst over the cap gives None
+    (fall back to the legacy whole-tree scan)."""
+    import filearr.watch as watch_mod
+
+    f = tmp_path / "loose.mkv"
+    f.write_bytes(b"x")
+    assert watch_mod._narrow_scope(str(tmp_path), {("added", str(f))}, 64) == ""
+    burst = {("added", str(tmp_path / f"f{i}.mkv")) for i in range(10)}
+    assert watch_mod._narrow_scope(str(tmp_path), burst, 9) is None
+    assert watch_mod._narrow_scope(str(tmp_path), set(), 64) is None
+
+
+def test_narrow_scope_escaping_root_refused(tmp_path):
+    """Event paths outside the watched root never narrow (scan the whole tree
+    rather than trust a confused path)."""
+    import filearr.watch as watch_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "x.mkv"
+    assert watch_mod._narrow_scope(str(root), {("added", str(outside))}, 64) is None
+
+
+@pytest.mark.asyncio
+async def test_watch_narrowed_scope_reaches_trigger(monkeypatch, tmp_path):
+    """End-to-end through _watch_library: a single-file event batch hands the
+    trigger the narrowed subdirectory, not the whole-tree scope."""
+    import filearr.watch as watch_mod
+
+    sub = tmp_path / "incoming"
+    sub.mkdir()
+    f = sub / "drop.mkv"
+    f.write_bytes(b"x")
+
+    triggered: list[object] = []
+
+    async def trigger(narrowed):
+        triggered.append(narrowed)
+
+    async def fake_awatch(root, *, stop_event=None, debounce=0):
+        yield {("added", str(f))}
+        stop_event.set()
+
+    monkeypatch.setattr(watch_mod, "awatch", fake_awatch)
+    stop = asyncio.Event()
+    await watch_mod._watch_library(
+        "lib1", str(tmp_path), trigger, stop=stop, debounce_s=0.01
+    )
+    assert triggered == ["incoming"]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_bound_combines_scan_path_scope(monkeypatch):
+    """A scan_paths watcher's narrowed events compose under ITS subtree: the
+    deferred scan targets `<scan_path>/<narrowed>` (library-relative), and a
+    whole-tree narrow falls back to the scan_path scope itself."""
+    import filearr.watch as watch_mod
+
+    calls: list[tuple[str, str | None]] = []
+
+    async def trigger(library_id, rel_path):
+        calls.append((library_id, rel_path))
+
+    sup = watch_mod.WatchSupervisor(None, trigger)
+    captured = {}
+
+    def fake_create_task(coro, name=None):
+        # Don't run the watcher; just capture the _bound closure via the coro's
+        # frame — instead we grab it from _start_one by intercepting
+        # _watch_library. Simpler: close the coro and reconstruct below.
+        coro.close()
+
+        class _T:
+            def done(self):
+                return False
+
+            def cancel(self):
+                pass
+
+        return _T()
+
+    real_watch_library = watch_mod._watch_library
+
+    def capture_watch_library(key, path, bound, *, stop):
+        captured["bound"] = bound
+        return real_watch_library(key, path, bound, stop=stop)
+
+    monkeypatch.setattr(watch_mod, "_watch_library", capture_watch_library)
+    monkeypatch.setattr(watch_mod.asyncio, "create_task", fake_create_task)
+
+    sup._start_one("lib1\x00incoming", "/data/incoming", "lib1", "incoming")
+    bound = captured["bound"]
+
+    await bound("2026/07")  # narrowed inside the watched subtree
+    await bound(None)  # cannot narrow -> the watcher's own scope
+    await bound("")  # narrowed to the watched root -> same
+    assert calls == [
+        ("lib1", "incoming/2026/07"),
+        ("lib1", "incoming"),
+        ("lib1", "incoming"),
+    ]
+
+    # A ROOT watcher (rel_path None) composing a whole-tree narrow defers the
+    # legacy full-library scan (rel_path None), preserving pre-§14 semantics.
+    calls.clear()
+    sup._start_one("lib1", "/data", "lib1", None)
+    bound_root = captured["bound"]
+    await bound_root(None)
+    await bound_root("")
+    await bound_root("incoming")
+    assert calls == [("lib1", None), ("lib1", None), ("lib1", "incoming")]

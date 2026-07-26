@@ -132,13 +132,15 @@ async def failing_items(
 ) -> list[dict]:
     """Paginated list of active items in a library that failed extraction.
 
-    Returns ``[{id, rel_path, error}]`` ordered by rel_path (stable pagination).
+    Returns ``[{id, rel_path, error, kind}]`` ordered by rel_path (stable
+    pagination).
     The ``error`` string is sanitized before it leaves the DB layer. ``limit`` is
     capped by the caller (API) to a small page size.
     """
     rows = await session.execute(
         text(
-            "SELECT id::text AS id, rel_path, metadata ->> '_extract_error' AS err "
+            "SELECT id::text AS id, rel_path, metadata ->> '_extract_error' AS err, "
+            "metadata ->> '_extract_error_kind' AS kind "
             "FROM items "
             "WHERE library_id = :lib AND status = 'active' "
             "AND metadata ? '_extract_error' "
@@ -146,32 +148,40 @@ async def failing_items(
         ),
         {"lib": str(library_id), "limit": limit, "offset": offset},
     )
+    # Pre-classification rows have no kind sentinel -> "error" (the neutral
+    # bucket), matching the FailingItem schema default.
     return [
-        {"id": r.id, "rel_path": r.rel_path, "error": sanitize_error(r.err)}
+        {
+            "id": r.id,
+            "rel_path": r.rel_path,
+            "error": sanitize_error(r.err),
+            "kind": r.kind if r.kind in ("dependency", "guard", "corrupt") else "error",
+        }
         for r in rows.all()
     ]
 
 
 # NOTE on error snippets: procrastinate 3.9's ``procrastinate_events`` table
 # stores only (job_id, type, at) -- it does NOT persist the exception text/
-# traceback of a failed job (that goes to the worker's logs, not the DB). So the
-# richest DB-side signal we can surface per failed job is *when* the last event
-# fired. We expose that as ``attempted_at`` and set ``error`` to None (kept in
-# the shape for forward-compat + honesty). If a future procrastinate adds an
-# error column this is the one query to extend. The item-level ``_extract_error``
-# path (extract_error_count / failing_items) is where the actual parser messages
-# live and are surfaced.
+# traceback of a failed job (that goes to the worker's logs). Roadmap §18
+# closed that gap on OUR side: the ``joberrors`` worker middleware records a
+# sanitized message + capped traceback per failed attempt into ``job_errors``,
+# and this query surfaces the newest row per job. ``error`` stays null only for
+# jobs that failed before the middleware existed (or whose recording failed —
+# it is best-effort by design). The item-level ``_extract_error`` path
+# (extract_error_count / failing_items) remains where parser messages live.
 async def failed_jobs(session: AsyncSession, *, limit: int = 50, offset: int = 0) -> list[dict]:
     """Recent failed Procrastinate jobs (read-only, capped).
 
     Shape ``[{id, queue, task, status, attempts, retry_cap, scheduled_at,
-    attempted_at, error}]``. ``retry_cap`` is the task's genuine-failure retry
-    budget (FIX-12) so the UI can render ``attempts/cap``; null when the task
-    carries no retry. ``attempted_at`` is the timestamp of the job's most recent event
-    (best proxy for "when it last failed"); ``error`` is always None because
-    procrastinate 3.9 does not store per-job error text in the DB (see module
-    note). Returns ``[]`` when the procrastinate schema is absent so the endpoint
-    stays total on a fresh DB.
+    attempted_at, error, traceback}]``. ``retry_cap`` is the task's
+    genuine-failure retry budget (FIX-12) so the UI can render
+    ``attempts/cap``; null when the task carries no retry. ``attempted_at`` is
+    the timestamp of the job's most recent event (best proxy for "when it last
+    failed"); ``error``/``traceback`` come from the newest ``job_errors`` row
+    the §18 middleware recorded for the job (null for pre-middleware
+    failures). Returns ``[]`` when the procrastinate schema is absent so the
+    endpoint stays total on a fresh DB.
     """
     exists = (
         await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
@@ -187,14 +197,33 @@ async def failed_jobs(session: AsyncSession, *, limit: int = 50, offset: int = 0
         if events_exists is not None
         else "NULL"
     )
+    # §18 annex: LEFT JOIN LATERAL the newest recorded failure per job. Guarded
+    # on to_regclass like the events table so the query stays total mid-upgrade.
+    errors_exists = (
+        await session.execute(text("SELECT to_regclass('job_errors')"))
+    ).scalar()
+    if errors_exists is not None:
+        err_join = (
+            "LEFT JOIN LATERAL ("
+            "  SELECT je.message, je.traceback FROM job_errors je "
+            "  WHERE je.job_id = j.id "
+            "  ORDER BY je.created_at DESC LIMIT 1"
+            ") err ON TRUE "
+        )
+        err_cols = "err.message AS error, err.traceback AS traceback "
+    else:
+        err_join = ""
+        err_cols = "NULL AS error, NULL AS traceback "
 
     rows = await session.execute(
         text(
             "SELECT j.id::text AS id, j.queue_name AS queue, j.task_name AS task, "
             "       j.status::text AS status, j.attempts AS attempts, "
             "       j.scheduled_at AS scheduled_at, "
-            f"      {attempted_expr} AS attempted_at "
+            f"      {attempted_expr} AS attempted_at, "
+            f"      {err_cols}"
             "FROM procrastinate_jobs j "
+            f"{err_join}"
             "WHERE j.status = 'failed' "
             "ORDER BY j.id DESC LIMIT :limit OFFSET :offset"
         ),
@@ -210,7 +239,8 @@ async def failed_jobs(session: AsyncSession, *, limit: int = 50, offset: int = 0
             "retry_cap": retry_cap_for(r.task),  # FIX-12: budget for "attempts/cap"
             "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
             "attempted_at": r.attempted_at.isoformat() if r.attempted_at else None,
-            "error": None,
+            "error": r.error,
+            "traceback": r.traceback,
         }
         for r in rows.all()
     ]

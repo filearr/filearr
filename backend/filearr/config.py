@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # footer "Source" link, so an operator running a FORK can point users at THEIR
     # modified source without rebuilding the frontend (the Vite build-time
     # __SOURCE_URL__ is only the fallback default). Override via FILEARR_SOURCE_URL.
-    source_url: str = "https://github.com/filearr/filearr"
+    source_url: str = "https://github.com/pwsh/filearr"
 
     # --- Phase 6 identity/auth/RBAC (P6-T1) ----------------------------------
     # Interactive session cookie name + lifecycle. Postgres-backed sessions
@@ -274,6 +274,55 @@ class Settings(BaseSettings):
     scan_batch_size: int = 500
     recycle_retention_days: int = 30
 
+    # --- Roadmap §13: cross-library move identity --------------------------
+    # At scan end (after intra-library move detection), new rows still
+    # unmatched are compared against `missing` tombstones in OTHER libraries;
+    # a byte-confirmed (content_hash, or mid_hash sample), unambiguous match
+    # revives the tombstone into this library with its identity (id / tags /
+    # user_metadata / external_ids / first_seen) intact instead of creating a
+    # fresh row. Kill switch for operators who deliberately duplicate trees
+    # across libraries and want re-appearances treated as new items.
+    scan_cross_library_moves: bool = True
+
+    # --- Roadmap §19: N->0 empty-mount scan guard --------------------------
+    # A FULL scan whose walk sees ZERO files over a library that previously
+    # held items refuses to proceed (run fails, nothing tombstoned) unless
+    # explicitly forced. `assert_scannable_root` already aborts on a missing/
+    # unreadable root; this closes the remaining hole — a dead FUSE/SMB bind
+    # that presents as a readable-but-EMPTY mountpoint, which would otherwise
+    # tombstone the entire library. A legitimate "user deleted everything"
+    # rescan is unblocked per-run via the API's `force_empty` flag, or
+    # permanently by disabling the guard.
+    scan_empty_guard: bool = True
+
+    # --- Roadmap §14 (T5 follow-up): incremental watch scans ---------------
+    # A watch event batch used to trigger a FULL library scan regardless of
+    # size. With incremental mode on, a small batch (<= watch_incremental_max_
+    # events) is narrowed to a targeted recursive scan (W9 machinery) of the
+    # nearest EXISTING ancestor directory covering every event path — same
+    # walk/diff/tombstone/move pipeline, blast radius scoped to the subtree
+    # that actually changed. Larger bursts, or events resolving to the library
+    # root, fall back to the full scan (correct, just slower). Scheduled full
+    # scans remain the reconciliation backstop.
+    watch_incremental: bool = True
+    watch_incremental_max_events: int = 64
+
+    # --- Roadmap §17: adaptive extract backpressure ------------------------
+    # The extract queue's static priority already keeps it below scan-control;
+    # this adds a load-aware concurrency ceiling INSIDE the worker: when host
+    # pressure is high (1-min loadavg per core >= high water), extract jobs
+    # beyond `extract_backpressure_min_concurrency` are rescheduled a short
+    # jittered delay into the future instead of running — worker slots stay
+    # free for scan/index/maintenance jobs rather than queueing behind
+    # extraction. Pressure is sampled at most once per sample_seconds; the
+    # ceiling recovers only below the low water mark (hysteresis, no thrash).
+    # No-op on hosts without loadavg (Windows dev) and when disabled.
+    extract_backpressure: bool = True
+    extract_backpressure_min_concurrency: int = 1
+    extract_backpressure_high_load: float = 0.85  # load1/cores ceiling trip
+    extract_backpressure_low_load: float = 0.60  # recovery threshold
+    extract_backpressure_sample_seconds: float = 15.0
+
     # --- FIX-8: procrastinate job-history retention ------------------------
     # Terminal procrastinate rows (succeeded / failed / cancelled / aborted)
     # older than this window are hard-deleted by the daily ``purge_job_history``
@@ -419,7 +468,10 @@ class Settings(BaseSettings):
     # size ceiling caps memory before a hostile/huge asset can OOM a worker.
     # STEP/FBX/BLEND are not parsed for geometry here (no safe pure loader) — they
     # only get a lightweight file-fact record.
-    model3d_max_bytes: int = 268_435_456  # 256 MiB ceiling on files handed to trimesh
+    # 512 MiB ceiling on files handed to trimesh (raised from 256 MiB 2026-07-24:
+    # legitimate print-ready STL/3MF routinely exceed 256 MiB — live errors).
+    # This DIRECTLY caps worker RSS; size it to worker RAM before raising further.
+    model3d_max_bytes: int = 536_870_912
 
     # --- P3-T1: on-demand cryptographic digests (MD5/SHA-256) ---------------
     # POST /api/v1/items/{id}/digests streams the file ONCE and caches the hex
@@ -491,7 +543,11 @@ class Settings(BaseSettings):
     # ratio exceeds doc_decompression_ratio once the payload already exceeds
     # doc_decompression_ratio_min_bytes (so an ordinary tiny, highly-compressible
     # office file is never falsely rejected — only a genuine ratio bomb is).
-    doc_decompressed_max: int = 209_715_200  # 200 MiB total uncompressed
+    # 1 GiB total uncompressed (raised from 200 MiB 2026-07-24: a legitimate
+    # ~954 MiB-declared docx hit the ceiling live). Still the zip-bomb memory
+    # guard — the ratio check below is what catches real bombs; raising this only
+    # widens the absolute ceiling, so keep it within worker RAM headroom.
+    doc_decompressed_max: int = 1_073_741_824
     doc_decompression_ratio: float = 100.0  # uncompressed:compressed
     doc_decompression_ratio_min_bytes: int = 10_485_760  # 10 MiB
 
@@ -799,6 +855,11 @@ class Settings(BaseSettings):
     # OTT lifetime (seconds). SHORT -- it is a single-use bearer the agent
     # exchanges with step-ca immediately after register. Default 5 minutes.
     ca_ott_ttl_seconds: int = 300
+    # Accepted clock skew (seconds) on the signed timestamp in a cert-rebind
+    # request (agentcert.verify_rebind). Bounds replay; a replay inside the
+    # window is idempotent or a same-agent still-valid-cert rollback (no
+    # privilege gain), so minutes-scale is safe. Default 5 minutes.
+    agent_rebind_max_skew_seconds: int = 300
     # P10-T1 agent_commands primitive tunables (all FILEARR_AGENT_COMMAND_*).
     # Default TTL for a newly enqueued command (seconds): a command an agent
     # never picks up flips to ``expired`` after this. "Hours, not minutes"

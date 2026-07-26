@@ -11,6 +11,7 @@ import (
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	"github.com/filearr/filearr/agent/internal/enroll"
 	"github.com/filearr/filearr/agent/internal/install"
+	"github.com/filearr/filearr/agent/internal/inventory"
 )
 
 // runInstall installs the agent as a system service: resolve the OS layout,
@@ -102,6 +103,16 @@ func runInstall(args []string) error {
 	fmt.Printf("  data   : %s\n", eff.DataDir)
 	fmt.Printf("  logs   : %s\n", eff.LogDir)
 	fmt.Printf("  config : %s\n", eff.ConfigPath)
+	// Roadmap §20: optional-dependency check, WARN not fail — image/audio/STL
+	// thumbnails work without ffmpeg; only video poster-frames need it. The same
+	// probe rides the capability advertisement so central's fleet console can
+	// show which agents lack it.
+	if !inventory.HasFFmpeg() {
+		fmt.Println("  note   : ffmpeg was not found on PATH — VIDEO thumbnails will be skipped.")
+		fmt.Println("           Install ffmpeg (winget install ffmpeg / apt install ffmpeg /")
+		fmt.Println("           brew install ffmpeg) or set FILEARR_AGENT_FFMPEG_PATH; image,")
+		fmt.Println("           audio-cover and STL thumbnails work without it.")
+	}
 	return nil
 }
 

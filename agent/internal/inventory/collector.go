@@ -13,6 +13,8 @@ package inventory
 import (
 	"context"
 	"io/fs"
+	"os"
+	"os/exec"
 	"sort"
 )
 
@@ -83,7 +85,10 @@ func DefaultRegistry() *Registry {
 
 // Capabilities is the additive advertisement the agent attaches to its command
 // poll so central can store what this agent supports (and the UI can offer only
-// composable collectors). Shape: {inventory_collectors: [...], inventory_version: N}.
+// composable collectors). Shape: {inventory_collectors: [...], inventory_version: N,
+// ffmpeg: bool}. ``ffmpeg`` (roadmap §20) lets the fleet console show which
+// agents can produce video poster-frames — a missing binary used to be silently
+// absent thumbs with no operator-visible signal.
 func Capabilities() map[string]any {
 	names := DefaultRegistry().Names()
 	sorted := make([]string, len(names))
@@ -92,5 +97,19 @@ func Capabilities() map[string]any {
 	return map[string]any{
 		"inventory_collectors": sorted,
 		"inventory_version":    CapabilityVersion,
+		"ffmpeg":               HasFFmpeg(),
 	}
+}
+
+// HasFFmpeg reports whether an ffmpeg binary is resolvable, mirroring exactly
+// how the thumbnailer resolves it: the FILEARR_AGENT_FFMPEG_PATH override wins
+// (checked for existence), else a PATH lookup. Shared by the capability
+// advertisement above and the install-time requirements check.
+func HasFFmpeg() bool {
+	if p := os.Getenv("FILEARR_AGENT_FFMPEG_PATH"); p != "" {
+		_, err := exec.LookPath(p)
+		return err == nil
+	}
+	_, err := exec.LookPath("ffmpeg")
+	return err == nil
 }

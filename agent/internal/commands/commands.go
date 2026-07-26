@@ -66,6 +66,11 @@ type Config struct {
 	// package rand source).
 	Clock func() time.Time
 	Rand  *rand.Rand
+
+	// OnAuthError, if set, fires when central rejects the agent credential
+	// (401/403) — wired to the cert-rebind trigger so a drifted fingerprint
+	// self-heals (fix 2026-07-24). Must not block; the rebinder debounces.
+	OnAuthError func()
 }
 
 // Poller drains central's per-agent command queue and executes each command.
@@ -84,6 +89,7 @@ type Poller struct {
 	log          *slog.Logger
 	clock        func() time.Time
 	rnd          *rand.Rand
+	onAuthError  func()
 }
 
 // NewPoller wires a Poller, applying defaults.
@@ -103,6 +109,7 @@ func NewPoller(cfg Config) *Poller {
 		log:          cfg.Logger,
 		clock:        cfg.Clock,
 		rnd:          cfg.Rand,
+		onAuthError:  cfg.OnAuthError,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -336,6 +343,9 @@ func (p *Poller) statusError(step string, status int, body []byte) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("commands %s: 404 — agent-command feature disabled or command gone: %s", step, detail)
 	case http.StatusUnauthorized, http.StatusForbidden:
+		if p.onAuthError != nil {
+			p.onAuthError()
+		}
 		return fmt.Errorf("commands %s: central rejected the agent bearer token (%d): %s", step, status, detail)
 	default:
 		return fmt.Errorf("commands %s: central returned %d: %s", step, status, detail)

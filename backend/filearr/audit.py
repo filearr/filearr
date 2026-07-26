@@ -56,6 +56,7 @@ AGENT_TOKEN_MINTED = "agent_token_minted"
 AGENT_TOKEN_REVOKED = "agent_token_revoked"
 AGENT_REGISTERED = "agent_registered"
 AGENT_CERT_BOUND = "agent_cert_bound"
+AGENT_CERT_REBOUND = "agent_cert_rebound"
 # P5-T2 (central half): step-ca JWK one-time token minted at register / re-issue
 # (records agent_id + jti only -- NEVER the token itself).
 AGENT_CA_OTT_MINTED = "agent_ca_ott_minted"

@@ -3,7 +3,7 @@
   import {
     cancelScan, clearFailedJobs, createLibrary, forceClearScan, stopScan, failedJobs, libraryErrors,
     listLibraries, listPresets, listScans, listShareMap, resolveShareHint,
-    retryExtracts, scanEventsUrl, scanLibrary, targetedScan, getTaxonomy,
+    retryExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     type FailedJob, type FailingItem, type Library,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
@@ -242,10 +242,29 @@
     live = { ...live, [id]: d };
   }
 
-  function openStream(id: string) {
+  // Guards concurrent opens for the same scan while a token mint is in flight
+  // (syncStreams may fire again from the safety poll before the mint returns).
+  const opening = new Set<string>();
+
+  async function openStream(id: string) {
+    if (opening.has(id)) return;
+    opening.add(id);
     // A prior stream/backoff timer may exist after a drop — clear before reopen.
     streams.get(id)?.close();
-    const es = new EventSource(scanEventsUrl(id));
+    // EventSource can't set headers, so mint a single-use scoped stream token
+    // and attach it as ?stream_token= (the real API key never rides the URL).
+    // Tokens are consumed on first use — every (re)connect mints a fresh one.
+    // If the mint fails (auth off / transient), try tokenless: with auth
+    // disabled the stream needs none, and with auth on the 401 lands in the
+    // error handler's normal backoff path.
+    let token = "";
+    try {
+      token = (await mintScanEventsToken(id)).token;
+    } catch {
+      /* tokenless attempt below */
+    }
+    opening.delete(id);
+    const es = new EventSource(scanEventsUrl(id, token));
     streams.set(id, es);
     // Guards the post-close `error` the browser fires after a clean server end,
     // so we don't spuriously reconnect a scan that already finished.
@@ -471,6 +490,19 @@
     return "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
   }
 
+  // §17: "slower than usual" verdict from real history — this run's walk rate
+  // vs the library's rolling median over recent finished full scans. Only
+  // speaks with >=3 runs behind the median (less is noise) and only when the
+  // run was meaningfully slower (< 60% of the median).
+  function slowScan(ls: NonNullable<Library["last_scan"]>): string | null {
+    const rate = ls.files_per_s;
+    const median = ls.median_files_per_s;
+    const runs = ls.throughput_runs ?? 0;
+    if (rate == null || median == null || runs < 3 || median <= 0) return null;
+    if (rate >= median * 0.6) return null;
+    return `This scan walked ${rate.toFixed(1)} files/s vs a ${median.toFixed(1)} files/s median over the last ${runs} full scans — check mount/network health or concurrent load.`;
+  }
+
   // FIX-10: compact "seen N, new N" counts from a persisted last scan.
   function lastScanCounts(ls: NonNullable<Library["last_scan"]>): string {
     return (["seen", "new", "changed", "missing"] as const)
@@ -671,6 +703,12 @@
                 <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {lastScanClass(ls.status)}">{ls.status}</span>
                 <span class="ml-1" title={new Date(ls.finished_at ?? ls.started_at).toLocaleString()}>{relTime(ls.finished_at ?? ls.started_at)}</span>
                 {#if lastScanCounts(ls)}<span class="ml-1 text-slate-400">— {lastScanCounts(ls)}</span>{/if}
+                {@const slow = slowScan(ls)}
+                {#if slow}
+                  <span
+                    class="ml-1 cursor-help rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title={slow}>slower than usual</span>
+                {/if}
                 <!-- Render when anything was skipped, INCLUDING the pruned-only
                      case (excluded 0 but whole trees dropped) — that case is
                      exactly the one that silently loses tens of thousands of
@@ -775,7 +813,26 @@
                 {:else}
                   <ul class="space-y-1">
                     {#each failing[lib.id] as f (f.id)}
-                      <li class="flex gap-2">
+                      {@const kindStyle =
+                        f.kind === "dependency"
+                          ? "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300"
+                          : f.kind === "guard"
+                            ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
+                            : f.kind === "corrupt"
+                              ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                              : "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300"}
+                      {@const kindTip =
+                        f.kind === "dependency"
+                          ? "Deployment bug: a python module is missing from the server image — fix the deployment, not the file"
+                          : f.kind === "guard"
+                            ? "An intentional resource ceiling rejected this file (tunable via FILEARR_* limits)"
+                            : f.kind === "corrupt"
+                              ? "The file itself is malformed/truncated — the parser rejected its bytes"
+                              : "I/O or unexpected failure (also shown for errors recorded before classification existed)"}
+                      <li class="flex items-baseline gap-2">
+                        <span
+                          class="shrink-0 cursor-help rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide {kindStyle}"
+                          title={kindTip}>{f.kind}</span>
                         <span class="font-mono text-slate-600 dark:text-slate-300">{f.rel_path}</span>
                         <span class="text-red-500">— {f.error}</span>
                       </li>
@@ -909,6 +966,7 @@
           <th class="py-2 pr-3">Task</th>
           <th class="py-2 pr-3">Attempts</th>
           <th class="py-2 pr-3">Last attempt</th>
+          <th class="py-2 pr-3">Error</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
@@ -920,6 +978,9 @@
             <td class="py-2 pr-3 text-slate-500">
               {j.attempted_at ? new Date(j.attempted_at).toLocaleString() : "—"}
             </td>
+            <td
+              class="max-w-[24rem] truncate py-2 pr-3 font-mono text-xs text-red-600 dark:text-red-400 {j.traceback ? 'cursor-help' : ''}"
+              title={j.traceback ?? undefined}>{j.error ?? "—"}</td>
           </tr>
         {/each}
       </tbody>
@@ -937,7 +998,7 @@
         onclick={() => failedPage(1)}
         disabled={failedOffset + FAILED_PAGE >= failedTotal}>Next</button>
       <span class="grow"></span>
-      <span>Error text isn't stored in the queue DB — check worker logs for tracebacks.</span>
+      <span>Hover an error for its traceback. Failures from before the error-capture middleware show "—" (worker logs only).</span>
     </div>
   {/if}
 </div>

@@ -1,6 +1,6 @@
 # Unraid templates for the Filearr stack
 
-Four Community Applications–format templates (`Container version="2"`):
+Five Community Applications–format templates (`Container version="2"`):
 
 | Install order | Template | Image |
 |---|---|---|
@@ -8,6 +8,13 @@ Four Community Applications–format templates (`Container version="2"`):
 | 2 | `filearr-meilisearch.xml` | getmeili/meilisearch:v1.49.0 (disposable, rebuildable index) |
 | 3 | `filearr.xml` | ghcr.io/CHANGEME/filearr (web UI + API, port 8484) |
 | 4 | `filearr-worker.xml` | same image, Post Arguments run the Procrastinate worker |
+| — | `filearr-agent.xml` | ghcr.io/CHANGEME/filearr-agent (standalone inventory agent — standalone install, needs only a central URL + enrollment token) |
+
+`filearr-agent` is independent of the stack above: install it when this Unraid
+box should *feed* a central Filearr running elsewhere (it inventories
+`/mnt/user` read-only and replicates outbound over mTLS). It needs no
+Postgres/Meilisearch/network setup here — just a token minted from the central
+console. Full runbook: `docs/ops/agents.md` §12.
 
 ## One-time setup
 

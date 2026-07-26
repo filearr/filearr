@@ -81,7 +81,9 @@
   let extension = $state(""); // "" = any extension
   let extQuery = $state("");  // type-ahead-lite filter text over the ext facet
   let includeSidecars = $state(false); // T3 sidecars hidden by default
-  let filtersOpen = $state(false); // advanced filters collapsed to keep box clean
+  // Roadmap §20: the Filters/Saved open-closed choice persists across visits
+  // (same localStorage pattern as the theme choice) — collapsed by default.
+  let filtersOpen = $state(localStorage.getItem("searchFiltersOpen") === "1");
   let hashMode = $state(false);
   // Explicit ordering (P3-T7 deep-linkable): round-trips through save/apply + hash.
   let sortMode = $state("");
@@ -110,7 +112,21 @@
 
   // P3-T7 saved searches (named, persisted param bundles).
   let saved = $state<SavedSearch[]>([]);
-  let savedOpen = $state(false);
+  let savedOpen = $state(localStorage.getItem("searchSavedOpen") === "1");
+
+  function toggleFiltersOpen() {
+    filtersOpen = !filtersOpen;
+    localStorage.setItem("searchFiltersOpen", filtersOpen ? "1" : "0");
+  }
+  function toggleSavedOpen() {
+    savedOpen = !savedOpen;
+    localStorage.setItem("searchSavedOpen", savedOpen ? "1" : "0");
+  }
+
+  // Roadmap §20: the page starts EMPTY — no match-all preload implying the
+  // whole catalog is "a result". Flips true on the first query (typed, chip,
+  // deep link, or saved search) and stays true for the session.
+  let searched = $state(false);
   let savedError = $state("");
   // Range params carried through from an applied/deep-linked search until the user
   // next touches a slider (the sliders are facetStats-derived, not directly
@@ -357,6 +373,7 @@
     controller?.abort();
     const ctrl = new AbortController();
     controller = ctrl;
+    searched = true;
     error = "";
     loading = true;
     reflectHash(); // keep the URL in sync with the query being run (deep-linkable)
@@ -716,10 +733,11 @@
     } catch {
       semanticEnabled = false;
     }
-    // Deep-link entry: restore state from #/search?... then query; else default.
+    // Deep-link entry: restore state from #/search?... then query. A BARE visit
+    // stays empty (roadmap §20) — no match-all preload; results render only
+    // once a search actually starts.
     const initial = parseSearchHash(location.hash);
     if (Object.keys(initial).length) applyParams(initial);
-    else runFresh();
     window.addEventListener("hashchange", onHashChange);
   });
 
@@ -811,46 +829,24 @@
         title="Grid view"
         onclick={() => setView('grid')}>Grid</button>
     </div>
-    <!-- Saved searches (P3-T7). -->
+    <!-- Saved searches (P3-T7). Roadmap §20: the open state reads as ACTIVE
+         (accent fill, matching the chip convention) — the chevron alone was
+         not a legible state indicator. Open/closed persists per browser. -->
     <button
       class="rounded-full border px-3 py-1 text-sm {savedOpen
-        ? 'border-transparent bg-slate-200 dark:bg-slate-700'
+        ? 'border-transparent bg-[var(--accent)] text-white'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={savedOpen}
-      onclick={() => (savedOpen = !savedOpen)}>Saved {savedOpen ? "▲" : "▾"}</button>
-    <!-- Advanced filters stay collapsed to keep the search box clean. -->
+      title={savedOpen ? "Hide the saved-searches panel" : "Show saved searches"}
+      onclick={toggleSavedOpen}>Saved {savedOpen ? "▲" : "▾"}</button>
     <button
       class="rounded-full border px-3 py-1 text-sm {filtersOpen
-        ? 'border-transparent bg-slate-200 dark:bg-slate-700'
+        ? 'border-transparent bg-[var(--accent)] text-white'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={filtersOpen}
-      onclick={() => (filtersOpen = !filtersOpen)}>Filters {filtersOpen ? "▲" : "▾"}</button>
+      title={filtersOpen ? "Hide the filters panel" : "Show filters (group, extension, tags, ranges)"}
+      onclick={toggleFiltersOpen}>Filters {filtersOpen ? "▲" : "▾"}</button>
   </div>
-
-  <!-- File-group chips (MULTI-select). Mirrors the media-type row's chip styling;
-       the vocabulary comes from /system/file-groups (id sent, label shown).
-       Counts are shown only when the backend surfaces a file_group facet, so no
-       fabricated zeros appear when facet stats aren't available. -->
-  {#if fileGroupOptions.length}
-    <div class="mt-2 flex flex-wrap items-center gap-2">
-      <span class="text-xs font-medium text-slate-500">Group</span>
-      {#each fileGroupOptions as g (g.key)}
-        {@const count = facets.file_group?.[g.key]}
-        {@const on = selectedGroups.includes(g.key)}
-        <button
-          class="rounded-full border px-3 py-1 text-sm {on
-            ? 'border-transparent bg-[var(--accent)] text-white'
-            : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
-            ? 'opacity-40'
-            : ''}"
-          title={g.description || g.label}
-          aria-pressed={on}
-          onclick={() => toggleGroup(g.key)}>
-          {g.label}{#if count != null}<span class="ml-1 text-xs opacity-70">{count}</span>{/if}
-        </button>
-      {/each}
-    </div>
-  {/if}
 
   <!-- FIX-12 (Item B): expandable filter-DSL help; chips insert into the box. -->
   <DslHelp onInsert={insertDsl} context="search" />
@@ -905,6 +901,31 @@
 
   {#if filtersOpen}
     <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      <!-- File-group chips (MULTI-select, granular second taxonomy level).
+           Roadmap §20: moved INSIDE the collapsed Filters panel — the row is
+           long and ate vertical space on every visit. Counts are shown only
+           when the backend surfaces a file_group facet, so no fabricated zeros
+           appear when facet stats aren't available. -->
+      {#if fileGroupOptions.length}
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <span class="w-10 text-xs font-medium text-slate-500">Group</span>
+          {#each fileGroupOptions as g (g.key)}
+            {@const count = facets.file_group?.[g.key]}
+            {@const on = selectedGroups.includes(g.key)}
+            <button
+              class="rounded-full border px-3 py-1 text-sm {on
+                ? 'border-transparent bg-[var(--accent)] text-white'
+                : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+                ? 'opacity-40'
+                : ''}"
+              title={g.description || g.label}
+              aria-pressed={on}
+              onclick={() => toggleGroup(g.key)}>
+              {g.label}{#if count != null}<span class="ml-1 text-xs opacity-70">{count}</span>{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
       <!-- Extension type-ahead-lite: bounds come from the live ext facet. -->
       <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
         <span class="w-10 font-medium">Type</span>
@@ -1024,7 +1045,22 @@
     </div>
   {/if}
 
-  {#if error}
+  {#if !searched}
+    <!-- Roadmap §20 empty start: nothing has been queried yet — an honest blank
+         slate instead of a match-all dump of the whole catalog. -->
+    <div class="mt-16 text-center text-slate-500">
+      <p class="text-lg">Search your library</p>
+      <p class="mt-2 text-sm">
+        Type above, pick a category chip, or open
+        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-[var(--accent)]"
+          onclick={() => { if (!savedOpen) toggleSavedOpen(); }}>Saved</button>
+        /
+        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-[var(--accent)]"
+          onclick={() => { if (!filtersOpen) toggleFiltersOpen(); }}>Filters</button>
+        — results appear once a search starts.
+      </p>
+    </div>
+  {:else if error}
     <p class="mt-6 text-red-500">{error}</p>
   {:else}
     {#if hashMode}

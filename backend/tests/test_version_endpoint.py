@@ -42,7 +42,9 @@ async def test_version_exposes_source_url(client):
     point at a fork's modified source at runtime (FILEARR_SOURCE_URL)."""
     r = await client.get("/api/v1/version")
     body = r.json()
-    assert body["source_url"]  # default placeholder is non-empty
+    # The shipped default must point at the REAL public repo — the footer went
+    # live to github.com/filearr/filearr (nonexistent) before this pin.
+    assert body["source_url"] == "https://github.com/pwsh/filearr"
 
 
 async def test_version_source_url_honours_setting(client, monkeypatch):

@@ -75,7 +75,7 @@ async def session(pg_uri):
 # helpers                                                                      #
 # --------------------------------------------------------------------------- #
 
-async def _run_scan(session, library):
+async def _run_scan(session, library, *, force_empty=False):
     from filearr.tasks import scan as scan_mod
 
     async def _noop_defer(item_ids, scan_run_id=None):
@@ -92,7 +92,7 @@ async def _run_scan(session, library):
         run = ScanRun(library_id=library.id, stats={})
         session.add(run)
         await session.commit()
-        return await scan_mod._scan_body(session, library, run)
+        return await scan_mod._scan_body(session, library, run, force_empty=force_empty)
     finally:
         scan_mod._defer_extract_batch = orig_defer
         scan_mod._reindex_library = orig_reindex
@@ -230,7 +230,10 @@ async def test_deleted_event_captured(session, tmp_path):
 
     await _hash_all(session, lib)
     (root / "gone.mkv").unlink()
-    await _run_scan(session, lib)
+    # Deleting the library's ONLY file makes the rescan an N->0 empty walk —
+    # exactly what the §19 dead-mount guard refuses — so this deliberate
+    # everything-was-deleted case consents via force_empty (the API flag).
+    await _run_scan(session, lib, force_empty=True)
 
     evs = await _events(session)
     assert len(evs) == 1 and evs[0].event_type == "deleted"

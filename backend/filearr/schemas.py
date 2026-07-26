@@ -118,6 +118,14 @@ class LastScan(BaseModel):
     # Capped SAMPLE of pruned directory paths, so the UI can name the culprits
     # (".git", ".venv") rather than reporting an opaque count.
     pruned_paths: list[str] | None = None
+    # Roadmap §17: this run's own walk throughput plus the library's rolling
+    # median over recent finished FULL scans (30-day window), so the UI can
+    # flag "this scan was slower than usual" from real history instead of a
+    # guess. ``throughput_runs`` is how many runs back the median (a median of
+    # 1-2 runs is noise — the UI only badges at >=3).
+    files_per_s: float | None = None
+    median_files_per_s: float | None = None
+    throughput_runs: int = 0
 
 
 class LibraryOut(LibraryIn):
@@ -410,16 +418,25 @@ class ScanOut(BaseModel):
 
 
 class FailingItem(BaseModel):
-    """One item that failed metadata extraction (T11). ``error`` is sanitized."""
+    """One item that failed metadata extraction (T11). ``error`` is sanitized.
+
+    ``kind`` classifies the failure: ``dependency`` (module missing from the
+    image — a deployment bug), ``guard`` (intentional resource ceiling),
+    ``corrupt`` (the file's own bytes), ``error`` (I/O/unexpected; also the
+    fallback for rows recorded before classification existed).
+    """
 
     id: uuid.UUID
     rel_path: str
     error: str
+    kind: str = "error"
 
 
 class FailedJob(BaseModel):
-    """A recently-failed Procrastinate job (T11, read-only). ``error`` is always
-    null on procrastinate 3.9 (no per-job error text stored in the DB)."""
+    """A recently-failed Procrastinate job (T11, read-only). ``error`` /
+    ``traceback`` are the sanitized message + capped traceback the §18
+    ``joberrors`` worker middleware recorded for the job's newest failed
+    attempt; null for jobs that failed before the middleware existed."""
 
     id: str
     queue: str
@@ -430,6 +447,7 @@ class FailedJob(BaseModel):
     scheduled_at: str | None = None
     attempted_at: str | None = None
     error: str | None = None
+    traceback: str | None = None
 
 
 class FailedJobPage(BaseModel):

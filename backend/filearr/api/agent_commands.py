@@ -192,9 +192,10 @@ async def _authenticate_agent_mtls(
     consulted here — the weaker path is shut off in this mode.
 
     401 for a missing/wrong shared secret (bearer alone can't authenticate),
-    403 for a SAN that does not match the path agent_id or a fingerprint header
-    that contradicts the bound one, 404 for an unknown agent, 403 for a revoked
-    agent."""
+    403 for a SAN that does not match the path agent_id, 404 for an unknown
+    agent, 403 for a revoked agent. A forwarded fingerprint that disagrees with
+    the bound one UPDATES the binding (the proxy verified the cert; the stored
+    row is the stale side after a renewal — see the drift fix below)."""
     secret = get_settings().proxy_shared_secret or ""
     provided = request.headers.get(_HDR_PROXY_AUTH) or ""
     # Fail closed when the secret is unconfigured: an empty configured secret must
@@ -211,13 +212,18 @@ async def _authenticate_agent_mtls(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
     if agent.revoked_at is not None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "agent revoked")
-    # Secondary defence-in-depth: when the agent row has a bound fingerprint AND
-    # the proxy forwarded one, they must agree. Skipped when either is absent so a
-    # freshly-renewed leaf (new fingerprint, same SAN) is not locked out — SAN is
-    # the authoritative identity.
+    # Fingerprint self-heal (drift fix 2026-07-24): the shipped Caddyfile
+    # forwards the fp header UNCONDITIONALLY, so after a renewal the old
+    # "must agree or 403" rule locked every agent out — the docstring's
+    # "skipped when either is absent" escape never fired. The header fp comes
+    # from a cert Caddy ALREADY verified against the step-ca root for THIS SAN,
+    # so on a mismatch the stored binding is the stale party: update it (keeps
+    # fingerprint-mode bearer auth and the console current too). The /rebind
+    # endpoint is the mode-agnostic cure; this is defence-in-depth for mtls.
     fp = request.headers.get(_HDR_AGENT_FP) or ""
     if agent.cert_fingerprint and fp and not secrets.compare_digest(fp, agent.cert_fingerprint):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "agent fingerprint mismatch")
+        agent.cert_fingerprint = fp
+        await session.commit()
     return agent
 
 

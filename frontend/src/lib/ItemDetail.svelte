@@ -171,10 +171,16 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="fixed inset-0 z-50 overflow-y-auto">
-  <!-- Backdrop: a real <button> so click-to-close carries no a11y warnings. -->
+  <!-- Backdrop: a real <button> so click-to-close carries no a11y warnings.
+       FIXED, not absolute (roadmap §20): an absolute backdrop scrolls away with
+       the container, so on a long details page clicking beside the panel after
+       scrolling missed it — "click outside doesn't close" (live report). A
+       fixed backdrop covers the viewport at every scroll offset. Text-selection
+       drags that end outside the panel are naturally safe: a cross-element
+       mousedown/mouseup pair fires click on the common ancestor, never here. -->
   <button
     type="button"
-    class="absolute inset-0 h-full w-full cursor-default bg-black/50"
+    class="fixed inset-0 cursor-default bg-black/50"
     aria-label="Close details"
     onclick={onClose}
   ></button>

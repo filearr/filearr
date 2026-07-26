@@ -29,13 +29,14 @@ from filearr.models import (
     Library,
     ScanRun,
 )
+from filearr.pgnotify import notify_scan_progress
 from filearr.presets import (
     build_library_spec,
     prune_dir,
 )
 from filearr.sidecar import classify
 from filearr.tasks.associate import associate_sidecars
-from filearr.tasks.move import detect_moves
+from filearr.tasks.move import detect_cross_library_moves, detect_moves
 from filearr.worker import proc_app
 
 # UI-T14: cap on ids per ``batch_defer_async`` multi-row INSERT so a staged
@@ -304,14 +305,19 @@ def _in_scanned_set(rel: str, scope: str, *, is_file: bool, recursive: bool) -> 
 
 @proc_app.task(queue="scan", name="filearr.tasks.scan.scan_library")
 async def scan_library(
-    library_id: str, rel_path: str | None = None, recursive: bool = True
+    library_id: str,
+    rel_path: str | None = None,
+    recursive: bool = True,
+    force_empty: bool = False,
 ) -> dict:
     """Scan a library. ``rel_path`` (P2-T6) confines the walk/diff to a subtree
     (a ``scan_paths`` hot folder) OR, for a W9 targeted scan, a single file;
     ``None`` (default) is a full-library scan and is byte-for-byte the T5
     behaviour. ``recursive`` (W9, additive/defaulted for back-compat with queued
     jobs) is honoured only when the scope resolves to a directory: ``False`` scans
-    just that directory's direct-child files and tombstones only among them."""
+    just that directory's direct-child files and tombstones only among them.
+    ``force_empty`` (roadmap §19, additive/defaulted likewise) bypasses the
+    N->0 empty-walk guard for a deliberate everything-was-deleted rescan."""
     scope = _norm_scope(rel_path)
     async with SessionLocal() as session:
         library = (
@@ -329,7 +335,12 @@ async def scan_library(
 
         try:
             return await _scan_body(
-                session, library, run, scope_rel=rel_path, recursive=recursive
+                session,
+                library,
+                run,
+                scope_rel=rel_path,
+                recursive=recursive,
+                force_empty=force_empty,
             )
         except Exception as exc:
             # a crashed scan must never stay 'running' forever
@@ -339,6 +350,7 @@ async def scan_library(
             # T11: retain the exception message on the failed run (sanitized +
             # length-capped -- the message may embed a crafted filename).
             run.stats = {**(run.stats or {}), "error": sanitize_error(exc)}
+            await notify_scan_progress(session, run.id)
             await session.commit()
             # P8-T9: dogfood the alert pipeline off the failed-scan event that
             # already exists. Fully wrapped so an alert-layer failure can NEVER
@@ -356,7 +368,12 @@ async def scan_library(
 
 
 async def _scan_body(
-    session, library, run, scope_rel: str | None = None, recursive: bool = True
+    session,
+    library,
+    run,
+    scope_rel: str | None = None,
+    recursive: bool = True,
+    force_empty: bool = False,
 ) -> dict:
     # scope == "" => whole library (a full scan, byte-for-byte T5). A non-empty
     # scope confines the WALK and all WRITES/tombstones to that subtree (or, W9, a
@@ -413,6 +430,7 @@ async def _scan_body(
                     run.stats = {**(run.stats or {}), "scope": scope,
                                  "scope_missing": True, "seen": 0,
                                  "recursive": recursive}
+                    await notify_scan_progress(session, run.id)
                     await session.commit()
                     return run.stats
 
@@ -527,6 +545,10 @@ async def _scan_body(
                 except Exception:  # noqa: BLE001
                     pass
                 alert_drafts.clear()
+            # SSE push (roadmap §14): poke listeners on the SAME transaction as
+            # the stats write — delivered at commit, so a stream wakes exactly
+            # when the new stats become visible.
+            await notify_scan_progress(session, run.id)
             await session.commit()
             # Staged mode holds ALL extraction until scan end (one chunked defer
             # after the final commit); non-staged trickles each committed batch out
@@ -638,8 +660,40 @@ async def _scan_body(
                         stop_requested = True
                         break
                     run.stats = {**run.stats, "aborted": True}
+                    await notify_scan_progress(session, run.id)
                     await session.commit()
                     return run.stats  # cancelled via API
+
+        # --- Roadmap §19: N->0 empty-mount guard -------------------------------
+        # `assert_scannable_root` (above) catches a MISSING/unreadable root; the
+        # remaining failure mode is a dead FUSE/SMB bind presenting as a
+        # readable-but-EMPTY mountpoint — a full walk over it "sees" nothing and
+        # would tombstone the entire library. Refuse a FULL scan whose walk
+        # observed literally no entries (nothing seen, excluded, or pruned —
+        # i.e. the tree was empty, not merely filtered) over a library that
+        # previously held active items. A deliberate everything-was-deleted
+        # rescan passes `force_empty` (API flag), or the operator disables the
+        # guard (FILEARR_SCAN_EMPTY_GUARD=false). The raise routes through the
+        # scan_library crash handler: run FAILED with this message, nothing
+        # tombstoned (invariant 7 + invariant 4).
+        if (
+            not stop_requested
+            and scope == ""
+            and not force_empty
+            and get_settings().scan_empty_guard
+            and not seen
+            and excluded_gate + audit.excluded_filtered + audit.pruned_dirs == 0
+        ):
+            prior_active = sum(
+                1 for it in existing.values() if it.status == ItemStatus.active
+            )
+            if prior_active:
+                raise ScanRootError(
+                    f"walk saw an empty tree but the library holds "
+                    f"{prior_active} active items — suspected dead/stale mount "
+                    f"at {library.root_path!r}; nothing was tombstoned. If the "
+                    f"library really was emptied, rescan with force_empty."
+                )
 
         # --- Move/rename detection (T2), BEFORE tombstoning --------------------
         # Candidate tombstones: prior-scan rows that vanished from their rel_path
@@ -723,6 +777,50 @@ async def _scan_body(
             except Exception:  # noqa: BLE001
                 pass
 
+        # --- Cross-library move identity (roadmap §13), after the intra pass --
+        # New rows the intra-library pass left unmatched are compared against
+        # `missing` tombstones in OTHER libraries; a byte-confirmed, unambiguous
+        # match revives the tombstone into THIS library (identity preserved
+        # across the library boundary) and drops the fresh duplicate. Skipped on
+        # a graceful stop for the same partial-walk reason as the intra pass.
+        # Ordering vs tombstoning below is immaterial: this pass only touches
+        # THIS scan's new rows + other libraries' already-tombstoned rows.
+        cross_stats = {"cross_moved": 0, "cross_move_ambiguous": 0}
+        if (
+            not stop_requested
+            and new_item_ids
+            and get_settings().scan_cross_library_moves
+        ):
+            # Re-select by id: rows the intra pass deleted are gone; the rest
+            # come back as the same identity-mapped instances.
+            remaining_new = list(
+                (
+                    await session.execute(
+                        select(Item).where(Item.id.in_(new_item_ids))
+                    )
+                ).scalars()
+            )
+            if remaining_new:
+                cross_stats, cross_survivors = await detect_cross_library_moves(
+                    session,
+                    remaining_new,
+                    library_id=library.id,
+                    full_max_bytes=resolved_policy.full_max_bytes,
+                    compute_content=resolved_policy.compute_content,
+                )
+                if cross_stats["cross_moved"]:
+                    # The deleted duplicates must not reach the extract queue —
+                    # their bytes now live under the survivors — and the
+                    # survivors need a fresh extract (this library's policy
+                    # stamp + a Meili doc refresh for the new library/path).
+                    dropped = {
+                        str(n.id) for n in remaining_new if n not in session
+                    }
+                    pending_extract = [
+                        i for i in pending_extract if i not in dropped
+                    ]
+                    pending_extract.extend(cross_survivors)
+
         # tombstone unseen files. A candidate whose identity was transferred was
         # repointed onto a *seen* new rel_path, so `item.rel_path not in seen` is
         # False for it and it is correctly skipped (no false tombstone).
@@ -792,11 +890,15 @@ async def _scan_body(
             "permission_denied": audit.permission_denied,
             # `moved` rows were counted as `new` during the walk (they were freshly
             # inserted before we recognised them as relocations); reclassify them.
-            "new": new - move_stats["moved"],
+            # Cross-library revivals were also counted `new` during the walk;
+            # like intra moves, they are relocations, not new files.
+            "new": new - move_stats["moved"] - cross_stats["cross_moved"],
             "changed": changed,
             "missing": missing,
             "moved": move_stats["moved"],
             "move_ambiguous": move_stats["move_ambiguous"],
+            "cross_moved": cross_stats["cross_moved"],
+            "cross_move_ambiguous": cross_stats["cross_move_ambiguous"],
             # UI-T13 marker so the API/UI can label a graceful stop distinctly
             # from a full finish (missing/moved are 0 here by construction).
             **({"stopped": True} if stop_requested else {}),
@@ -807,6 +909,7 @@ async def _scan_body(
             except Exception:  # noqa: BLE001
                 pass
             alert_drafts.clear()
+        await notify_scan_progress(session, run.id)
         await session.commit()
         # STAGED CRASH-SAFETY (invariant 5 + 7): this is the ONLY defer in staged
         # mode and it runs after EVERY batch commit above, so it can only enqueue
@@ -831,6 +934,7 @@ async def _scan_body(
         if sidecar_stats.get("parents_updated"):
             await _reindex_library(session, library.id)
         run.stats = {**run.stats, "sidecars": sidecar_stats}
+        await notify_scan_progress(session, run.id)
         await session.commit()
         return run.stats
 

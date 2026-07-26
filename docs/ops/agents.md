@@ -70,6 +70,20 @@ smallstep CVE list** — same discipline as the Meili/Caddy pins.
 
 ## 3. Mint an enrollment token and enroll a machine
 
+**Host requirements (roadmap §20).** The agent binary is static and fully
+self-contained — image, audio-cover and STL thumbnails need nothing installed.
+**Video poster-frame thumbnails additionally need an `ffmpeg` binary** on the
+agent host, resolved from `PATH` or the `FILEARR_AGENT_FFMPEG_PATH` override:
+
+- Windows: `winget install ffmpeg` (or chocolatey / a gyan.dev static build)
+- Debian/Ubuntu: `apt install ffmpeg` · Fedora: `dnf install ffmpeg-free`
+- macOS: `brew install ffmpeg`
+
+Without it the agent still runs — video thumbs are simply skipped (logged once).
+`filearr-agent install` warns when ffmpeg is missing, and every command poll
+advertises `capabilities.ffmpeg` so the fleet console can show which agents
+lack it.
+
 Admin → Agents → **Mint token** (or `POST /api/v1/agents/enrollment-tokens`,
 admin scope). The raw token is shown **once** and never stored — only its
 sha256 is persisted. Hand it to the new machine out-of-band (copy/paste into the
@@ -168,15 +182,29 @@ through `_authenticate_agent`. Three modes:
 
 - `fingerprint` (default) — the **interim** scheme: the agent's bound
   `cert_fingerprint` as a bearer token (the only durable per-agent secret before
-  mTLS). **Caveat:** the fingerprint rotates on cert renewal while central still
-  holds the enrollment fingerprint, so a renewed agent can 401 until it re-pins
-  `FILEARR_AGENT_AUTH_FINGERPRINT` — the reason to migrate to mTLS.
+  mTLS). *Historical caveat, fixed 2026-07-24:* the fingerprint rotates on cert
+  renewal, and central used to keep the enrollment fingerprint forever — every
+  agent started 401ing ~⅔ through its first cert lifetime (~32h at the 48h
+  default). The agent now **rebinds automatically**: `POST
+  /agents/{id}/rebind`, authenticated by proof-of-possession (chain to the
+  pinned step-ca root + SAN == agent_id + an ECDSA signature over a
+  domain-separated timestamped payload with the leaf key, which survives
+  renewal — `backend/filearr/agentcert.py` ⇄ `agent/internal/enroll/rebind.go`).
+  The daemon triggers it after every renewal, once at startup (self-heals a
+  fleet that drifted before this build), and on any 401/403 from the
+  replication/command loops (debounced). `FILEARR_AGENT_AUTH_FINGERPRINT`
+  remains as a manual pin/override only; skew tunable:
+  `FILEARR_AGENT_REBIND_MAX_SKEW_SECONDS` (default 300).
 - `mtls-header` — trust the Caddy `agents.<domain>` site's **already-verified**
   client identity (see `docs/ops/tls.md`): `X-Filearr-Proxy-Auth` must match
   `FILEARR_PROXY_SHARED_SECRET` and `X-Filearr-Agent-San == str(agent_id)`.
-  Identity is the **SAN**, so **the renewal-drift caveat above DIES** — the SAN
-  survives cert rotation. The bearer is refused. Requires the shared secret
-  (fails closed when unset).
+  Identity is the **SAN**, which survives cert rotation. The bearer is refused.
+  Requires the shared secret (fails closed when unset). *Also fixed
+  2026-07-24:* the secondary fingerprint-header check used to 403 after a
+  renewal (Caddy forwards the header unconditionally, so stored-vs-forwarded
+  always disagreed post-renewal); central now **updates** the stored
+  fingerprint on a SAN-matched mismatch — the header comes from a cert Caddy
+  already verified, so the stored row is the stale side.
 - `both` — transition: mtls-header when the proxy header is present (hard-fails
   on a bad secret/SAN), else bearer. Used during the flip.
 
@@ -654,6 +682,119 @@ group `scan_selections` policy through the SAME `pathspec` engine and LOGS +
 PERSISTS the effective roots to `{data_dir}/inventory/scan-roots.json` — it does
 NOT start a scan from them (auto-start is a deliberate follow-up needing the scan
 scheduler/cancellation coordination).
+
+## 12. Docker container (Unraid-first, any container host)
+
+The agent ships as a standalone container image — `ghcr.io/<repo>-agent`,
+built from `agent/Dockerfile`, published by the same CI-gated `build`
+workflow as the main image. This is the supported way to run an inventory
+agent on Unraid (the native `.plg` plugin is deliberately deferred — see
+`docs/research/unraid-agent-plugin.md`: a plugin's only unique power, running
+while the array is stopped, buys a scanner nothing).
+
+### 12.1 What the container does
+
+The entrypoint (`agent/docker/entrypoint.sh`) composes the documented
+"scan + run side by side" operating model:
+
+1. **First start: enroll.** With `FILEARR_AGENT_CENTRAL_URL` +
+   `FILEARR_AGENT_TOKEN` set, it runs `filearr-agent enroll`, retrying every
+   30 s while central is unreachable (a genuinely bad/expired token keeps
+   failing — read the container log, mint a fresh one). The token is
+   single-use; after success the identity (key, cert, `state.json`) lives in
+   `/config` and every later start skips enrollment entirely. Clearing the
+   token variable afterwards is safe and tidy.
+2. **`filearr-agent run`** — the replication daemon (outbox drain, cert
+   renewal + rebind, policy poller, command poller, thumbnailer).
+3. **Interval rescans** — `filearr-agent scan` over
+   `FILEARR_AGENT_SCAN_ROOTS` every `FILEARR_AGENT_SCAN_INTERVAL` (default
+   6 h). Interval, not watch: Unraid's `/mnt/user` is a FUSE (shfs) mount
+   where inotify is unreliable — the same gotcha central documents for
+   SMB/NFS. Rescans are mtime+size cheap; unchanged files cost a stat.
+
+`SIGTERM` (`docker stop`) unwinds both processes cleanly. Logs go to the
+container log (no `log_dir` set); `FILEARR_AGENT_LOG_LEVEL` tunes verbosity.
+
+### 12.2 Environment reference
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FILEARR_AGENT_CENTRAL_URL` | — (required on first start) | central base URL |
+| `FILEARR_AGENT_TOKEN` | — (required on first start) | single-use enrollment token |
+| `FILEARR_AGENT_NAME` | container hostname | name shown in the Agents console |
+| `FILEARR_AGENT_SCAN_ROOTS` | — | comma-separated dirs to inventory |
+| `FILEARR_AGENT_SCAN_INTERVAL` | `6h` | rescan cadence (Go duration) |
+| `FILEARR_AGENT_SCAN_ON_START` | `true` | scan immediately at start |
+| `FILEARR_AGENT_LOG_LEVEL` | `info` | error\|warn\|info\|verbose\|debug |
+| `FILEARR_AGENT_CA_BUNDLE` | — | PEM of extra trusted server roots (private CA) |
+| `PUID` / `PGID` | `99` / `100` | uid/gid the agent runs as (Unraid nobody/users) |
+| `TZ` | `Etc/UTC` | log timestamps |
+
+All other `FILEARR_AGENT_*` knobs (§3 ffmpeg path, thumbnail tuning, poll
+intervals) pass straight through — the entrypoint adds nothing between the
+env and the binary. `FILEARR_AGENT_DATA_DIR` is pinned to `/config`.
+
+**Root-list caveat:** `-root` flags MERGE into `/config/scan.json` (they never
+remove). To retire a root, stop the container, delete it from `scan.json`'s
+`roots` array, start again. Central config-group settings (presets, globs,
+category gates) overlay `scan.json` per §9 exactly as on a host install.
+
+### 12.3 Unraid setup (Community Applications template)
+
+`unraid/filearr-agent.xml`. The template's shape, and why:
+
+- **`/config` → `/mnt/user/appdata/filearr-agent`** (rw, cache pool):
+  identity + SQLite index + outbox. Losing it is recoverable but costly — the
+  agent would need re-enrollment and a full re-walk.
+- **`/mnt/user` → `/mnt/user` read-only, 1:1.** Because container path ==
+  host path, the paths central records ARE the real Unraid paths — no
+  `library.native_prefix` mapping needed. If you narrow the mount to one
+  share, keep it 1:1 (`/mnt/user/media:/mnt/user/media:ro`) to preserve that
+  property; a non-1:1 mount works but then wants a `native_prefix` on the
+  agent's library so share links resolve (the *arr remote-path-mapping
+  pattern).
+- **No ports.** The agent is outbound-only (mTLS to central + step-ca). Its
+  local web UI binds loopback-only by design and refuses anything else, so it
+  is unreachable through Docker port mapping — the central console is the UI
+  for containerized agents.
+- **Network `bridge`** when central runs elsewhere (set the full URL). If
+  central's compose stack runs on the same box, use the shared custom network
+  so `http://filearr:8000`-style names resolve.
+- **PUID 99 / PGID 100** must be able to READ the scanned shares; the media
+  mount being `ro` means the agent couldn't write even if compromised.
+
+Steps: install the three template fields (central URL, token, roots) →
+start → watch the log for `enrolled.` → the agent appears on the console's
+Agents page → first scan replicates and central begins extraction.
+
+### 12.4 Anywhere else (compose example)
+
+```yaml
+services:
+  filearr-agent:
+    image: ghcr.io/<owner>/filearr-agent:latest
+    restart: unless-stopped
+    environment:
+      FILEARR_AGENT_CENTRAL_URL: https://filearr.example.com
+      FILEARR_AGENT_TOKEN: "<paste single-use token>"   # remove after first start
+      FILEARR_AGENT_NAME: nas-01
+      FILEARR_AGENT_SCAN_ROOTS: /srv/media,/srv/documents
+    volumes:
+      - ./agent-data:/config
+      - /srv/media:/srv/media:ro
+      - /srv/documents:/srv/documents:ro
+```
+
+### 12.5 Updates and self-update
+
+The image is built **without** a release-signing key pin, so the §8
+self-update machinery is fail-closed (refuses every manifest) — intentional
+for an immutable container. Updating = pulling the new image (Unraid's
+built-in update flow); the identity and index in `/config` carry over
+unchanged. Do not add the container to §8 rollout groups expecting binary
+swaps; if you truly want in-container self-update, build with
+`--build-arg UPDATE_PUBLIC_KEY=...` and ensure the restart policy relaunches
+on exit code 20 (the service-managed swap handshake).
 
 ## Not yet wired (later phase-5 tasks)
 

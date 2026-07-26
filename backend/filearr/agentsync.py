@@ -503,6 +503,41 @@ async def bind_agent_certificate(
     return agent
 
 
+async def rebind_agent_certificate(
+    session: Any,
+    *,
+    agent_id: Any,
+    cert_fingerprint: str,
+) -> tuple[Any, bool]:
+    """Rotate an ACTIVE agent's bound cert fingerprint after a renewal
+    (credential-drift fix 2026-07-24). The caller (api/agents.py) has ALREADY
+    proven possession of a CA-issued cert for this agent via
+    ``agentcert.verify_rebind`` — this function only enforces state rules:
+
+    * unknown agent → ``unknown_agent``; revoked → ``revoked``.
+    * a PENDING agent (no fingerprint yet) → ``not_active``: activation stays
+      exclusively behind the one-time enroll_secret on ``/certificate`` —
+      rebind must never be an enrollment bypass.
+    * same fingerprint → idempotent ``(agent, False)`` (replays are harmless).
+
+    Returns ``(agent, changed)``; same ``with_for_update`` serialization as
+    :func:`bind_agent_certificate` so racing rebinds are last-writer-wins."""
+    from filearr.models import Agent
+
+    agent = await session.get(Agent, agent_id, with_for_update=True)
+    if agent is None:
+        raise EnrollmentError("unknown_agent", "no such agent")
+    if agent.revoked_at is not None:
+        raise EnrollmentError("revoked", "agent is revoked")
+    if agent.cert_fingerprint is None:
+        raise EnrollmentError("not_active", "agent has no bound certificate yet")
+    if agent.cert_fingerprint == cert_fingerprint:
+        return agent, False
+    agent.cert_fingerprint = cert_fingerprint
+    await session.flush()
+    return agent, True
+
+
 def agent_status(agent: Any) -> str:
     """Derive an agent's console status: ``revoked`` > ``active`` (cert bound) >
     ``pending`` (registered, awaiting its cert)."""

@@ -38,7 +38,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
@@ -46,7 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agentsync, audit, transfers
+from filearr import agentsync, audit, authx, streamtokens, transfers
 from filearr import db as db_mod
 from filearr.api.agent_staging import staged_path
 from filearr.config import get_settings
@@ -57,6 +57,7 @@ from filearr.security import (
     _verify_credentials,
     require_permission,
     require_scope,
+    resolve_session_principal,
 )
 from filearr.transfers import TransferRequest
 
@@ -311,24 +312,55 @@ async def get_transfer(
 # --------------------------------------------------------------------------- #
 async def _require_transfer_events_scope(
     request: Request,
-    api_key: str | None = None,
+    response: Response,
+    transfer_id: uuid.UUID,
+    stream_token: str | None = None,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Auth for the transfer SSE stream (mirrors the scans SSE, scans.py).
 
-    ``EventSource`` cannot set request headers, so a browser cannot send a Bearer
-    token on the stream; we accept the key either via ``Authorization: Bearer``
-    (non-browser clients) OR a ``?api_key=`` query param — ONLY on this read-only
-    events endpoint. Verified through the same constant-time hash lookup + scope
-    check as everything else (``read`` scope). No-op when auth is disabled."""
+    ``EventSource`` cannot set request headers, so a browser cannot send a
+    Bearer token on the stream. The old ``?api_key=`` query param (a long-lived
+    credential in proxy logs) is replaced by a ``?stream_token=`` — single-use,
+    60 s, scoped to exactly this transfer's stream, minted by
+    ``POST /transfers/{id}/events-token`` under normal auth. Bearer headers
+    (non-browser clients) and the interactive session cookie keep working.
+    No-op when auth is disabled."""
     settings = get_settings()
     if not settings.auth_enabled:
         return
-    token = creds.credentials if creds is not None else api_key
-    if not token:
-        raise HTTPException(401, "Missing bearer token or api_key")
-    await _verify_credentials(token, "read", session, request)
+    if creds is not None:
+        await _verify_credentials(creds.credentials, "read", session, request)
+        return
+    if stream_token is not None:
+        if streamtokens.consume(stream_token, "transfer-events", str(transfer_id)):
+            return
+        raise HTTPException(401, "Invalid or expired stream token")
+    principal = await resolve_session_principal(request, response, session)
+    if principal is not None:
+        if "read" not in authx.scopes_for_role(principal.global_role):
+            raise HTTPException(403, "Scope 'read' required")
+        request.state.actor = f"principal:{principal.id}"
+        await session.commit()
+        return
+    raise HTTPException(401, "Missing bearer token or stream_token")
+
+
+@router.post(
+    "/transfers/{transfer_id}/events-token",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def mint_transfer_events_token(
+    transfer_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+):
+    """Mint a single-use stream token for ``GET /transfers/{id}/events`` (the
+    scans SSE token pattern; see ``filearr.streamtokens``)."""
+    t = await session.get(StagingTransfer, transfer_id)
+    if t is None:
+        raise HTTPException(404, "Transfer not found")
+    token = streamtokens.mint("transfer-events", str(transfer_id))
+    return {"token": token, "expires_in": int(streamtokens.TOKEN_TTL_SECONDS)}
 
 
 def _waiting_for_agent(t: StagingTransfer, cmd: AgentCommand | None) -> bool:

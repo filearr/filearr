@@ -16,6 +16,23 @@
     return String(v);
   }
 
+  // Roadmap §20: some values are ENORMOUS (metadata with OCR body text, archive
+  // member lists, ffprobe dumps) and made the Raw view extremely long. Values
+  // over the clamp render collapsed behind a per-row "Show all" toggle; the cut
+  // lands on a line boundary so the preview never ends mid-token. Expansion
+  // always reveals the complete value — nothing is truncated for good.
+  const CLAMP_CHARS = 1500;
+  let expanded = $state<Record<string, boolean>>({});
+
+  function clampAt(text: string): number {
+    const nl = text.lastIndexOf("\n", CLAMP_CHARS);
+    return nl > CLAMP_CHARS / 2 ? nl : CLAMP_CHARS;
+  }
+  const lineCount = (s: string): number => s.split("\n").length;
+  function fmtSize(chars: number): string {
+    return chars >= 4096 ? `${(chars / 1024).toFixed(0)} KB` : `${chars} chars`;
+  }
+
   let copied = $state<string | null>(null);
   async function copy(key: string, v: unknown) {
     try {
@@ -36,15 +53,26 @@
 <table class="w-full border-collapse text-sm">
   <tbody>
     {#each entries as [key, value] (key)}
+      {@const text = pretty(value)}
+      {@const long = text.length > CLAMP_CHARS}
+      {@const open = !long || !!expanded[key]}
       <tr class="border-b border-slate-200 align-top dark:border-slate-800">
         <th class="w-56 py-2 pr-4 text-left align-top font-mono text-xs font-medium text-slate-500">
           {key}
         </th>
         <td class="py-2">
-          {#if isComplex(value)}
-            <pre class="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs">{pretty(value)}</pre>
-          {:else if value === null || value === undefined || value === ""}
+          {#if value === null || value === undefined || value === ""}
             <span class="text-slate-400">—</span>
+          {:else if isComplex(value) || long}
+            <pre class="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs">{open ? text : text.slice(0, clampAt(text))}{#if !open}…{/if}</pre>
+            {#if long}
+              <button
+                type="button"
+                class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700"
+                aria-expanded={open}
+                onclick={() => (expanded[key] = !expanded[key])}
+              >{open ? "Show less" : `Show all (${lineCount(text)} lines, ${fmtSize(text.length)})`}</button>
+            {/if}
           {:else}
             <span class="break-words font-mono text-xs">{String(value)}</span>
           {/if}
@@ -53,7 +81,7 @@
           <button
             type="button"
             class="text-xs text-slate-400 hover:text-[var(--accent)]"
-            title="Copy value"
+            title="Copy value (full value, even when collapsed)"
             onclick={() => copy(key, value)}>{copied === key ? "✓" : "⧉"}</button>
         </td>
       </tr>

@@ -13,9 +13,14 @@ from procrastinate.jobs import Status
 
 from filearr.config import get_settings
 from filearr.db import SessionLocal as SessionLocal  # noqa: PLC0414 (re-export for periodics)
+from filearr.joberrors import capture_job_errors
 
 proc_app = procrastinate.App(
     connector=PsycopgConnector(conninfo=get_settings().procrastinate_dsn),
+    # Roadmap §18: every job runs under the joberrors worker middleware, which
+    # persists a sanitized message + capped traceback to `job_errors` when a
+    # task raises (then re-raises untouched — retries/reaper/status unchanged).
+    worker_defaults={"worker_middleware": [capture_job_errors]},
     import_paths=[
         "filearr.tasks.scan",
         "filearr.tasks.extract",
@@ -489,6 +494,7 @@ async def defer_scan(
     recursive: bool = True,
     queueing_lock: str | None = None,
     force: bool = False,
+    force_empty: bool = False,
 ) -> int | None:
     """Enqueue a scan for a library, or a *scoped* scan of a subtree (P2-T6) or a
     single file (W9).
@@ -527,10 +533,13 @@ async def defer_scan(
     kwargs: dict = {"library_id": library_id}
     if rel_path is not None:
         kwargs["rel_path"] = rel_path
-    # Only carry the flag when non-default so existing (recursive) scan job args
-    # are unchanged and pre-W9 queued jobs keep working (task default is True).
+    # Only carry the flags when non-default so existing scan job args are
+    # unchanged and pre-W9 queued jobs keep working (task defaults apply).
     if not recursive:
         kwargs["recursive"] = False
+    # Roadmap §19: the operator's explicit consent to an N->0 walk rides the job.
+    if force_empty:
+        kwargs["force_empty"] = True
     async with proc_app.open_async():
         if not force and await scan_job_pending(library_id, rel_path):
             return None  # an unfinished scan for this scope already exists
@@ -878,6 +887,30 @@ async def purge_job_history_now() -> dict:
             deleted,
             get_settings().job_history_retention_days,
             ", ".join(f"{k}={v}" for k, v in sorted(by_status.items())),
+        )
+
+    # Roadmap §18: the persisted failure text (job_errors) ages out on the SAME
+    # window, so an error row never outlives — by more than one purge cycle —
+    # the procrastinate row it annotates. Own session/table (ours, not
+    # Procrastinate's); tolerant of the table not existing yet (pre-migration).
+    try:
+        from sqlalchemy import delete as sa_delete
+
+        from filearr.models import JobError
+
+        cutoff = datetime.now(UTC) - timedelta(hours=nb_hours)
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sa_delete(JobError).where(JobError.created_at < cutoff)
+            )
+            await session.commit()
+        if result.rowcount:
+            logging.getLogger("filearr.worker").info(
+                "purge_job_history: deleted %d job_errors rows", result.rowcount
+            )
+    except Exception:  # noqa: BLE001 — never fail the purge over the annex table
+        logging.getLogger("filearr.worker").exception(
+            "purge_job_history: job_errors purge failed"
         )
     return {"deleted": deleted, "by_status": by_status}
 

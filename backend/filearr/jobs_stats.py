@@ -776,18 +776,67 @@ async def _upcoming(session: AsyncSession) -> dict:
     return upcoming
 
 
-def _cpu_load() -> dict:
-    """Coarse CPU-load indicator riding the Jobs poll -- NOT a metrics system.
+# Previous ``(busy, total)`` jiffies sample from /proc/stat's aggregate cpu
+# line, updated once per Jobs poll. Single app process, so a module global is
+# the whole state store.
+_cpu_prev: tuple[float, float] | None = None
 
-    ``os.getloadavg`` is the Unix 1/5/15-minute run-queue average; the product
-    runs in Linux containers where it is the cheapest honest load signal. On a
-    host without it (Windows dev boxes -> AttributeError; some restricted
-    environments -> OSError) every field degrades to ``None`` and the caller never
-    crashes. ``cores`` prefers the process's CPU affinity (the cores actually
-    schedulable) and falls back to the machine count. ``percent`` is
-    ``100 * load1 / cores`` -- it MAY exceed 100 when the run queue is deeper than
-    the core count; that overload is honest, so it is not clamped here (the UI
-    clamps only the bar width, never the number)."""
+
+def _read_proc_stat() -> tuple[float, float] | None:
+    """``(busy, total)`` jiffies from /proc/stat's aggregate ``cpu`` line.
+
+    total = user..steal (guest/guest_nice are already folded into user/nice by
+    the kernel, so summing 10 fields would double-count); busy excludes idle
+    AND iowait (a core waiting on disk is not executing)."""
+    try:
+        with open("/proc/stat", encoding="ascii") as fh:
+            parts = fh.readline().split()
+    except OSError:
+        return None
+    if len(parts) < 6 or parts[0] != "cpu":
+        return None
+    try:
+        vals = [float(v) for v in parts[1:9]]
+    except ValueError:
+        return None
+    idle = vals[3] + (vals[4] if len(vals) > 4 else 0.0)
+    total = sum(vals)
+    return total - idle, total
+
+
+def _cpu_percent() -> float | None:
+    """True all-core CPU utilization (%): busy-jiffies delta between polls.
+
+    Replaces the old ``100 * load1 / cores`` derivation, which was a lagging
+    run-queue proxy with mismatched domains (host-wide /proc/loadavg over
+    affinity-limited cores) — a single pinned core on an 8-core box read
+    ~12.5% while the machine was demonstrably busy (live report 2026-07-24).
+    First poll after boot returns ``None`` (no delta yet); non-Linux hosts
+    (no /proc) always return ``None`` and the UI tile self-hides."""
+    global _cpu_prev
+    cur = _read_proc_stat()
+    if cur is None:
+        return None
+    prev, _cpu_prev = _cpu_prev, cur
+    if prev is None:
+        return None
+    dbusy = cur[0] - prev[0]
+    dtotal = cur[1] - prev[1]
+    if dtotal <= 0:
+        return None
+    return round(max(0.0, min(100.0, 100.0 * dbusy / dtotal)), 1)
+
+
+def _cpu_load() -> dict:
+    """Coarse CPU indicator riding the Jobs poll -- NOT a metrics system.
+
+    ``percent`` is real sampled utilization across every core (see
+    :func:`_cpu_percent`); the 1/5/15-minute load averages ride along as the
+    saturation signal (run-queue depth CAN exceed core count — that is what
+    they are for). On a host without either source every field degrades to
+    ``None`` and the caller never crashes. ``cores`` prefers the process's CPU
+    affinity (the cores actually schedulable) and falls back to the machine
+    count."""
     load1 = load5 = load15 = None
     try:
         load1, load5, load15 = os.getloadavg()
@@ -800,14 +849,10 @@ def _cpu_load() -> dict:
     except (AttributeError, OSError):
         cores = os.cpu_count()
 
-    percent = None
-    if load1 is not None and cores:
-        percent = round(100 * load1 / cores, 1)
-
     return {
         "load1": load1,
         "load5": load5,
         "load15": load15,
         "cores": cores,
-        "percent": percent,
+        "percent": _cpu_percent(),
     }

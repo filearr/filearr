@@ -243,7 +243,7 @@ async def test_trigger_reaps_orphaned_running_rows(engine, monkeypatch):
         lib_id, stale_id = lib.id, stale.id
 
     # stub the enqueue so no Procrastinate connection is needed
-    async def _fake_defer(library_id, *, force=False):
+    async def _fake_defer(library_id, *, force=False, force_empty=False):
         return "job-123"
 
     monkeypatch.setattr(lib_api, "defer_scan", _fake_defer)

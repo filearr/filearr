@@ -53,7 +53,17 @@ from typing import Any
 
 
 class DocumentError(RuntimeError):
-    """A document/spreadsheet could not be parsed. Message is safe to store."""
+    """A document/spreadsheet could not be parsed. Message is safe to store.
+
+    ``kind`` classifies the failure for the errors surface: ``corrupt`` (default
+    — the file's own bytes defeated the parser), ``guard`` (an intentional
+    resource ceiling tripped), ``error`` (I/O or unexpected). Deployment bugs
+    (``dependency``) are classified centrally in extract.py, not here.
+    """
+
+    def __init__(self, message: str, *, kind: str = "corrupt") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +104,11 @@ def _guard_size(path: str, max_bytes: int) -> None:
     try:
         size = os.path.getsize(path)
     except OSError as exc:
-        raise DocumentError(f"cannot stat document: {exc}") from exc
+        raise DocumentError(f"cannot stat document: {exc}", kind="error") from exc
     if size > max_bytes:
-        raise DocumentError(f"document too large ({size} > {max_bytes} bytes)")
+        raise DocumentError(
+            f"document too large ({size} > {max_bytes} bytes)", kind="guard"
+        )
 
 
 def guard_decompression(
@@ -125,7 +137,7 @@ def guard_decompression(
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"not a valid zip container: {exc}") from exc
     except OSError as exc:
-        raise DocumentError(f"cannot open zip container: {exc}") from exc
+        raise DocumentError(f"cannot open zip container: {exc}", kind="error") from exc
 
     total_uncompressed = sum(int(i.file_size) for i in infos)
     total_compressed = sum(int(i.compress_size) for i in infos)
@@ -133,14 +145,16 @@ def guard_decompression(
     if total_uncompressed > decompressed_max:
         raise DocumentError(
             "decompression guard: declared uncompressed size "
-            f"{total_uncompressed} exceeds ceiling {decompressed_max} bytes"
+            f"{total_uncompressed} exceeds ceiling {decompressed_max} bytes",
+            kind="guard",
         )
     if total_compressed > 0:
         ratio = total_uncompressed / total_compressed
         if ratio > ratio_limit and total_uncompressed > ratio_min_bytes:
             raise DocumentError(
                 f"decompression guard: compression ratio {ratio:.1f}:1 exceeds "
-                f"{ratio_limit:.0f}:1 at {total_uncompressed} uncompressed bytes"
+                f"{ratio_limit:.0f}:1 at {total_uncompressed} uncompressed bytes",
+                kind="guard",
             )
 
 
@@ -456,7 +470,7 @@ def _text_body(path: str, *, max_chars: int, max_bytes: int) -> tuple[str, bool]
         with open(path, "rb") as fh:
             raw = fh.read(read_cap + 1)
     except OSError as exc:
-        raise DocumentError(f"cannot read text file: {exc}") from exc
+        raise DocumentError(f"cannot read text file: {exc}", kind="error") from exc
     hit_cap = len(raw) > read_cap
     text = raw[:read_cap].decode("utf-8", errors="replace")
     return _normalize_body_text(text, max_chars, hard_stopped=hit_cap)

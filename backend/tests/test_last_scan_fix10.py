@@ -178,3 +178,69 @@ async def test_libraries_schema_unchanged_for_existing_consumers(client_and_make
     for key in ("id", "name", "root_path", "enabled", "hash_policy", "scan_cron"):
         assert key in lib
     assert "last_scan" in lib
+
+
+# --------------------------------------------------------------------------- #
+# Roadmap §17 — per-library throughput rollup on last_scan
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_last_scan_throughput_median(client_and_maker):
+    """last_scan carries this run's files_per_s + the library's rolling median
+    over recent finished FULL scans; scoped/failed/old runs are excluded from
+    the median."""
+    client, maker = client_and_maker
+    lib_id = await _make_library(client, name="tp", root="/data/tp")
+    now = datetime.now(UTC)
+
+    # Five finished full scans: median of [100, 90, 80, 70, 12] = 80.
+    for i, rate in enumerate([100.0, 90.0, 80.0, 70.0]):
+        await _add_run(
+            maker, lib_id, status="finished",
+            started_at=now - timedelta(hours=5 - i),
+            stats={"seen": 100, "files_per_s": rate},
+        )
+    # Excluded from the median: a scoped run, a failed run, and an ancient run.
+    async with maker() as s:
+        s.add(ScanRun(library_id=lib_id, status="finished", rel_path="sub",
+                      started_at=now - timedelta(hours=2),
+                      finished_at=now - timedelta(hours=2),
+                      stats={"seen": 5, "files_per_s": 9999.0}))
+        s.add(ScanRun(library_id=lib_id, status="failed",
+                      started_at=now - timedelta(hours=2),
+                      finished_at=now - timedelta(hours=2),
+                      stats={"seen": 5, "files_per_s": 9999.0, "error": "x"}))
+        s.add(ScanRun(library_id=lib_id, status="finished",
+                      started_at=now - timedelta(days=45),
+                      finished_at=now - timedelta(days=45),
+                      stats={"seen": 5, "files_per_s": 9999.0}))
+        await s.commit()
+    # The newest run: dramatically slower (the badge case).
+    await _add_run(
+        maker, lib_id, status="finished", started_at=now,
+        stats={"seen": 100, "files_per_s": 12.0},
+    )
+
+    r = await client.get(BASE)
+    assert r.status_code == 200
+    lib = next(x for x in r.json() if x["id"] == lib_id)
+    ls = lib["last_scan"]
+    assert ls["files_per_s"] == 12.0
+    # median over the five in-window FULL finished runs [100, 90, 80, 70, 12]
+    assert ls["median_files_per_s"] == 80.0
+    assert ls["throughput_runs"] == 5
+
+
+@pytest.mark.asyncio
+async def test_last_scan_throughput_absent_without_history(client_and_maker):
+    """A library with no finished full scans reports no median (runs 0) — the
+    UI never badges from noise."""
+    client, maker = client_and_maker
+    lib_id = await _make_library(client, name="tp0", root="/data/tp0")
+    await _add_run(
+        maker, lib_id, status="failed", started_at=datetime.now(UTC),
+        stats={"error": "boom"},
+    )
+    r = await client.get(BASE)
+    lib = next(x for x in r.json() if x["id"] == lib_id)
+    assert lib["last_scan"]["median_files_per_s"] is None
+    assert lib["last_scan"]["throughput_runs"] == 0

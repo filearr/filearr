@@ -356,36 +356,40 @@ async def test_scan_throughput_is_weighted_and_skips_untimed_runs(proc_connector
 
 
 async def test_cpu_load_computed(monkeypatch):
-    """The coarse CPU-load indicator computes ``percent = 100*load1/cores`` from a
-    known load + core count. Pure (no DB, no statvfs) so it runs cross-platform —
-    ``raising=False`` lets it stub the POSIX-only ``os`` calls on a Windows host."""
+    """Fix 2026-07-24: ``percent`` is a real utilization sample (busy/total
+    /proc/stat jiffies delta between polls), no longer ``100*load1/cores`` —
+    the old run-queue proxy under-read a pinned core ~8x on an 8-core box.
+    Loads/cores still ride along as the saturation readout."""
     import os
 
-    from filearr.jobs_stats import _cpu_load
+    from filearr import jobs_stats as js
 
     monkeypatch.setattr(os, "getloadavg", lambda: (4.0, 2.0, 1.0), raising=False)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
+    samples = iter([(100.0, 200.0), (175.0, 300.0)])
+    monkeypatch.setattr(js, "_read_proc_stat", lambda: next(samples))
+    monkeypatch.setattr(js, "_cpu_prev", None)
 
-    cpu = _cpu_load()
+    assert js._cpu_load()["percent"] is None  # first poll: no delta yet
+    cpu = js._cpu_load()
     assert cpu["load1"] == 4.0
     assert cpu["load5"] == 2.0
     assert cpu["load15"] == 1.0
     assert cpu["cores"] == 8
-    assert cpu["percent"] == 50.0  # 100 * 4 / 8
+    assert cpu["percent"] == 75.0  # 75 busy jiffies / 100 total
 
 
-async def test_cpu_load_overload_not_clamped(monkeypatch):
-    """When the run queue is deeper than the core count, ``percent`` exceeds 100 —
-    the backend reports it honestly (only the UI bar width is clamped)."""
-    import os
+async def test_cpu_load_utilization_clamped_0_100(monkeypatch):
+    """Utilization is a ratio of the same interval's jiffies, so it is clamped
+    to [0, 100] — counter wraps/noise must never render a >100% CPU. (The old
+    load-derived percent legitimately exceeded 100; utilization cannot.)"""
+    from filearr import jobs_stats as js
 
-    from filearr.jobs_stats import _cpu_load
-
-    monkeypatch.setattr(os, "getloadavg", lambda: (11.0, 9.0, 7.0), raising=False)
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)), raising=False)
-
-    cpu = _cpu_load()
-    assert cpu["percent"] == 137.5  # 100 * 11 / 8, unclamped
+    samples = iter([(100.0, 200.0), (350.0, 300.0)])  # busy delta > total delta
+    monkeypatch.setattr(js, "_read_proc_stat", lambda: next(samples))
+    monkeypatch.setattr(js, "_cpu_prev", None)
+    assert js._cpu_percent() is None
+    assert js._cpu_percent() == 100.0
 
 
 async def test_cpu_load_nulls_when_getloadavg_unavailable(monkeypatch):
@@ -569,8 +573,8 @@ def test_disk_dedupe_distinct_devices_stay_separate():
 
 
 def test_disk_dedupe_missing_device_never_merges():
-    """A missing/zero `dev` (degraded path / non-POSIX host) is its OWN device, so
-    two such paths never collapse onto a shared falsy key."""
+    """A missing/zero `dev` (degraded path / non-POSIX host) with DISTINCT paths
+    stays distinct — no collapse onto a shared falsy key."""
     from filearr import diskguard as dg
 
     rows = dg.dedupe_by_device([
@@ -580,6 +584,49 @@ def test_disk_dedupe_missing_device_never_merges():
          "used": 0, "pct_free": 100.0, "dev": 0, "status": dg.OK, "reason": "ok"},
     ])
     assert [r["label"] for r in rows] == ["a", "b"]
+
+
+def test_disk_dedupe_same_dead_path_merges():
+    """Fix 2026-07-24 ("0 byte drives listed as duplicates"): the SAME
+    unstatable path (dev=None, total=0) reported by several watch roles
+    collapses to ONE row. The original fallback keyed falsy-dev rows by an
+    incrementing counter, so identical dead paths rendered once per role."""
+    from filearr import diskguard as dg
+
+    dead = {"path": "/mnt/dead", "is_pg": False, "total": 0, "free": 0,
+            "used": 0, "pct_free": 0.0, "dev": None, "status": dg.CRITICAL,
+            "reason": "unreadable"}
+    rows = dg.dedupe_by_device([
+        {**dead, "label": "media"},
+        {**dead, "label": "thumbnails"},
+    ])
+    assert len(rows) == 1
+    assert rows[0]["label"] == "media, thumbnails"
+    assert [m["label"] for m in rows[0]["members"]] == ["media", "thumbnails"]
+
+
+def test_cpu_percent_is_busy_delta_between_polls(monkeypatch):
+    """Fix 2026-07-24: `percent` is a real utilization sample (busy/total
+    jiffies delta from /proc/stat), not the old `100*load1/cores` run-queue
+    proxy. First poll has no delta -> None; second computes the ratio."""
+    from filearr import jobs_stats as js
+
+    samples = iter([(100.0, 200.0), (150.0, 300.0), (150.0, 300.0)])
+    monkeypatch.setattr(js, "_read_proc_stat", lambda: next(samples))
+    monkeypatch.setattr(js, "_cpu_prev", None)
+    assert js._cpu_percent() is None          # first poll: no previous sample
+    assert js._cpu_percent() == 50.0          # 50 busy jiffies / 100 total
+    assert js._cpu_percent() is None          # zero-width interval: no signal
+
+
+def test_cpu_percent_unavailable_off_linux(monkeypatch):
+    """No /proc (Windows dev box) -> None every poll; the tile self-hides."""
+    from filearr import jobs_stats as js
+
+    monkeypatch.setattr(js, "_read_proc_stat", lambda: None)
+    monkeypatch.setattr(js, "_cpu_prev", None)
+    assert js._cpu_percent() is None
+    assert js._cpu_load()["percent"] is None
 
 
 def test_diskstats_parser_sums_whole_disks_only():

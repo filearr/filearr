@@ -232,3 +232,15 @@ jobs:
           load: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build agent image (validation only, no push)
+        # Validated HERE so a broken agent/Dockerfile blocks the gated publish
+        # BEFORE build.yml pushes anything — otherwise the main image could
+        # update while the agent image fails, skewing the two :latest tags.
+        # Same cache scope as build.yml's agent-image job reuses.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ./agent
+          push: false
+          load: false
+          cache-from: type=gha,scope=agent-image
+          cache-to: type=gha,mode=max,scope=agent-image

@@ -220,6 +220,20 @@ exclusion (`is_sidecar` filterable; endpoint hides sidecars unless
 
 
 ## 13. Move/rename detection follow-ups (deferred from T2, 2026-07-07)
+
+> **SHIPPED 2026-07-24** (two of the four): **cross-library moves** — at scan
+> end, after the intra-library pass, unmatched new rows are matched against
+> `missing` tombstones in OTHER libraries and, when byte-confirmed
+> (content_hash, or the new mid_hash sample) AND unambiguous, the tombstone is
+> revived into the scanning library with identity intact
+> (`detect_cross_library_moves`; kill switch
+> `FILEARR_SCAN_CROSS_LIBRARY_MOVES`; agent-owned libraries excluded; a size
+> prefilter keeps the walk free of speculative hashing). **Mid-file sampling**
+> — `items.mid_hash` (64 KiB xxh3 centred on the midpoint, NULL <=128 KiB),
+> stamped by extraction and used by `plan_moves` as the confirm/veto tier when
+> content_hash is unavailable, rescuing quick_only collision-family moves that
+> were previously refused as ambiguous. Still open below: scan-thread hashing
+> policy interplay (first paragraph) and in-place-swap semantics (a non-goal).
 T2 shipped identity transfer on rename/move: at scan end, before tombstoning,
 vanished rows are matched to newly-discovered rows by `(quick_hash, size)`,
 confirmed with `content_hash` when both sides have one, and — only when
@@ -252,6 +266,21 @@ Deliberately out of scope / open for later:
   mid-file sampling tier could rescue more true moves without a full re-hash.
 
 ## 14. SSE live-progress follow-ups (deferred from T4, 2026-07-07)
+
+> **SHIPPED 2026-07-24** (the two actionable items): **push instead of poll**
+> — the scan task fires `pg_notify('filearr_scan_progress', scan_id)` on the
+> same transaction as every stats commit; the API runs ONE listener connection
+> (`filearr.pgnotify.ScanProgressHub`) fanning out to per-stream queues, with
+> a 5 s fallback poll as the degraded path (a lost listener degrades to
+> polling, never a stall). **Query-param key replaced** — `?api_key=` is GONE
+> from the scans AND transfers SSE endpoints; browsers now POST
+> `/scans/{id}/events-token` (or `/transfers/{id}/events-token`) under normal
+> auth and attach the returned single-use, 60 s, resource-scoped
+> `?stream_token=` (`filearr.streamtokens`); session-cookie users need no
+> token at all (EventSource sends cookies). Still open: a multiplexed
+> all-scans firehose (scalability, when it matters); the transfers stream
+> still polls internally (its writers are agent-driven; token auth shipped,
+> push did not).
 T4 shipped native `EventSourceResponse` for `GET /scans/{id}/events` (progress /
 done / error events, framework keepalive pings, clean disconnect teardown), an
 SSE-consuming Admin page (live batch counter + files/s, bounded-backoff
@@ -293,6 +322,18 @@ debounces change bursts into one normal full scan, and is supervised by a
 reconcile loop that starts/stops watchers on config change without a restart.
 
 Follow-ups (deferred):
+- **Incremental watch scans — SHIPPED 2026-07-24** (the pragmatic form of the
+  "incremental single-file updates" item below): a small event batch
+  (<= `FILEARR_WATCH_INCREMENTAL_MAX_EVENTS`, default 64) narrows to ONE
+  targeted recursive scan (the W9 machinery) of the nearest existing ancestor
+  directory covering every event path (`watch._narrow_scope`), composed under
+  the watcher's own scan_path scope. Same pipeline and invariants — scoped
+  diff never tombstones outside the target, move detection works within the
+  scope — so a single dropped file costs one directory walk instead of a
+  1M-item rescan. Big bursts and root-level events fall back to the legacy
+  whole-tree scan; scheduled full scans stay on as the reconciliation
+  backstop. A TRUE per-file upsert path (no walk at all) remains future work,
+  with the same caveats as before.
 - **Run the watch supervisor as a first-class process (medium).** The supervisor
   entrypoint `filearr.worker.run_watch_supervisor()` exists but is not yet wired
   into a container. Options: (a) a dedicated `watcher` compose service running
@@ -410,6 +451,22 @@ Remaining, non-trivial:
   threading a resolved-policy token across the job queue.
 
 ## 17. Extraction throughput (T8 follow-ups)
+
+> **SHIPPED 2026-07-24** (both, in pragmatic form): **adaptive backpressure**
+> — a worker-local, loadavg-per-core-driven trip with hysteresis
+> (`filearr.backpressure.ExtractLimiter`): while tripped, extract jobs beyond
+> `FILEARR_EXTRACT_BACKPRESSURE_MIN_CONCURRENCY` are rescheduled 15-45 s
+> (jittered, attempt-agnostic — never failed) instead of occupying worker
+> slots, so scan/index/maintenance work keeps its slots under host pressure.
+> Queue depth remains untouched as a signal (throttling extract on depth
+> would deepen the very queue) — host load IS the "don't starve the API"
+> signal. No-op on hosts without loadavg and via
+> `FILEARR_EXTRACT_BACKPRESSURE=false`. **Per-library throughput history** —
+> `GET /libraries` now annotates `last_scan` with the run's `files_per_s`
+> plus a rolling 30-day median over finished FULL scans
+> (`median_files_per_s`, `throughput_runs`); the Admin page badges "slower
+> than usual" when a run comes in under 60% of a >=3-run median. A dedicated
+> control loop with metrics history stays future work.
 - **Adaptive extract concurrency / backpressure (major, deferred).** T8 ships
   *static* knobs: per-worker `--concurrency`, per-queue worker pinning, and a
   negative extract priority so scan-control jumps the queue. It does **not**
@@ -429,6 +486,17 @@ Remaining, non-trivial:
   per-run stats; deferred only for UI scope.
 
 ## 18. Error surfacing (T11 follow-ups)
+
+> **SHIPPED 2026-07-24 (first item):** persisted job failure text. A
+> Procrastinate 3.9 **worker middleware** (`filearr.joberrors` — cleaner than
+> the custom failure hook sketched below) records a sanitized message +
+> 8 KB-capped traceback per failed attempt into the new `job_errors` table
+> (no FK into Procrastinate's tables; purged on the same
+> `job_history_retention_days` window by the FIX-8 purge). Control-flow
+> reschedules (`filearr_transient`) and operator aborts are never recorded.
+> `/system/failed-jobs` now fills `error` (+ `traceback`) from the newest
+> recorded attempt; the Admin/Jobs failed tables render the message with the
+> traceback on hover. The per-run counter design note below still stands.
 - **Persisted job error text / tracebacks (major, deferred).** Procrastinate
   3.9's `procrastinate_events` table stores only `(job_id, type, at)` — it does
   **not** persist the exception message or traceback of a failed job (that goes
@@ -454,6 +522,17 @@ Remaining, non-trivial:
   live count + convenience per-run counter) is the confirmed T11 approach.
 
 ## 19. Test suite + CI (T10 follow-ups)
+
+> **SHIPPED 2026-07-24 (first item):** the N->0 empty-mount guard moved from
+> "infra-owned" to a code-level check after all: a FULL scan whose walk
+> observes literally no entries (nothing seen, excluded, or pruned — i.e. the
+> tree is empty, not merely filtered) over a library holding active items now
+> FAILS the run (nothing tombstoned) with a clear dead-mount message. The
+> false-positive escape hatch the note demanded exists twice over:
+> `POST /libraries/{id}/scan?force_empty=true` consents per-run, and
+> `FILEARR_SCAN_EMPTY_GUARD=false` disables globally. A readable-but-filtered
+> tree (entries seen but all excluded) passes the guard — the mount is
+> demonstrably alive, so a genuine bulk deletion still tombstones normally.
 - **Empty-but-mounted root vs dead mount (deferred; infra-owned).** The T10
   `scan.assert_scannable_root` pre-flight aborts a scan when the root is missing,
   not a directory, or `scandir` raises (ENOENT/ENOTCONN/EACCES) — this stops a
@@ -483,3 +562,64 @@ Remaining, non-trivial:
   `str(member)` semantics), init_db `E402` (deliberate `sys.path` shim), and
   `alembic/versions` excluded (autogenerated). Revisit `UP042` only alongside a
   deliberate StrEnum migration with serialization tests.
+
+## 20. UX + preview backlog (user-requested, 2026-07-24)
+
+> **All seven items SHIPPED 2026-07-24** (same-day). The bullets below stay as
+> the design record — notably the STL rendering investigation (central =
+> trimesh + an in-process numpy point-splat rasterizer with a supersample→blur→
+> WebP-ladder pipeline; agent = pure-Go fauxgl, STL-only) and the ffmpeg
+> policy (optional dep: install-time WARN + `capabilities.ffmpeg`
+> advertisement, never a hard requirement).
+
+Small, high-leverage items from live daily use. None are architectural; each is
+scoped enough to ship independently.
+
+- **Search page starts empty.** Do not auto-load results (the match-all query)
+  when the main page opens; render results only once a search/filter is actually
+  submitted. Empty state = the search box + a short hint. Saves the initial
+  Meili round-trip on a 1M+ catalog and stops implying "these files are a
+  result of something".
+- **Collapse the filter + advanced-search boxes by default.** Both panels take
+  vertical space on every visit; collapse them behind their toggles (persist
+  the open/closed choice in localStorage next to the existing theme choice).
+- **File details / raw metadata: clamp long values.** `metadata_` for some
+  items (OCR text, archive member lists, ffprobe dumps) makes the details and
+  Raw views extremely long. Give the metadata area a max height with an
+  expand/collapse control when the rendered content overflows (CSS line-clamp +
+  "show all (N lines)"); never truncate what expansion reveals.
+- **Click-outside closes the file-details view.** Clicking the backdrop around
+  the details window returns to the search results (same path as the existing
+  close button; keep Esc working; ignore clicks that started inside the panel —
+  text selection must not dismiss).
+- **Saved/Filters toggle buttons need a real state affordance.** The header
+  icons for "saved" and "filters" look identical active and inactive. Give the
+  active state a filled icon variant + accent color + `aria-pressed`, so the
+  toggle state is legible at a glance (and to screen readers).
+- **STL/3MF preview thumbnails — what it takes.** Investigated 2026-07-24:
+  - *Central (worker):* no new dependency is strictly needed. trimesh (already
+    a dep) loads the mesh; render via a small in-process software rasterizer —
+    orthographic isometric projection, per-face Lambert shading, numpy
+    z-buffer/painter sort into a Pillow image — then hand the bitmap to the
+    existing tier ladder/byte caps (thumbs.py). trimesh's own
+    `scene.save_image()` is NOT usable headless (pyglet needs a GL context /
+    xvfb). Guard rails: reuse `model3d_max_bytes` for load, cap rendered
+    triangles (decimate/sample above ~1-2M faces), route the `model3d`
+    extractor category into `_resolve_source` beside image/video/document.
+  - *Agent (Go, CGO_ENABLED=0):* `github.com/fogleman/fauxgl` — pure-Go
+    software renderer with a built-in STL loader, MIT — fits the static-binary
+    constraint; encode JPEG like the existing agent thumb path (P12-T13 upload
+    contract unchanged).
+  - 3MF needs the mesh extracted from the zip container first (trimesh handles
+    it centrally; the agent would start STL-only).
+- **ffmpeg on agents: document + install-time check.** Agent video
+  poster-frames require an ffmpeg binary on the agent host (resolved from PATH
+  or `FILEARR_AGENT_FFMPEG_PATH` — thumbs.go). Today a missing binary just
+  means silently absent video thumbs. Needed: (a) a requirements note in
+  docs/ops/agents.md + the install instructions (Windows: winget/choco or a
+  static build; Linux: distro package; macOS: brew), and (b) an install/enroll
+  -time check — `exec.LookPath` in the installer/`filearr-agent install` that
+  WARNS (not fails: ffmpeg is optional, image/audio thumbs work without it)
+  and states what will not work; surface the same probe in the agent's
+  capabilities advertisement so central's fleet console can show which agents
+  lack it.

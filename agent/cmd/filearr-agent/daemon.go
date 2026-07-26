@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -119,12 +120,26 @@ func (p *daemonProgram) Start(s service.Service) error {
 		Logger:     p.log,
 	}
 
+	// Credential-drift fix (2026-07-24): keep central's bound fingerprint in
+	// step with the rotating leaf. Three triggers, one debounced rebinder:
+	// after every renewal (the moment drift is born), once at startup (heals a
+	// crash between renew and rebind AND every fleet already drifted before
+	// this build), and from any loop's 401/403 (belt and braces).
+	rebinder := &enroll.Rebinder{
+		Store:   store,
+		Central: &enroll.CentralClient{BaseURL: id.State.CentralURL, HTTP: httpClient},
+		Logger:  p.log,
+	}
+	renewer.OnRenew = func(_ *x509.Certificate) { go rebinder.Trigger(ctx) }
+	onAuthError := func() { go rebinder.Trigger(ctx) }
+	go rebinder.Trigger(ctx)
+
 	sup, supDone := startSupervisor(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
-	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient)
+	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, onAuthError)
 	pollDone := startPoller(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, sup, httpClient)
 	localDone := startLocalAPI(ctx, p.cfg.DataDir, p.socket, idx, hist)
 	webDone := startWebUI(ctx, p.cfg.DataDir, p.webAddr, idx, hist)
-	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
+	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError)
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
 

@@ -10,7 +10,7 @@ import { VitePWA } from "vite-plugin-pwa";
 // FILEARR_SOURCE_URL (e.g. a fork/tagged release) — defaults to the canonical
 // repository.
 const SOURCE_URL =
-  process.env.FILEARR_SOURCE_URL ?? "https://github.com/filearr/filearr";
+  process.env.FILEARR_SOURCE_URL ?? "https://github.com/pwsh/filearr";
 
 export default defineConfig({
   define: {

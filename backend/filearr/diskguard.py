@@ -271,8 +271,12 @@ def dedupe_by_device(statuses: list[dict]) -> list[dict]:
     lists every ``{label, path}`` for a "which roles share this device" tooltip.
 
     A missing/zero ``dev`` (an unstatable/degraded path, or a non-POSIX host with
-    no ``st_dev``) is treated as its OWN device so distinct such paths never merge
-    on a shared falsy key. Input order is preserved (first-seen device first).
+    no ``st_dev``) is keyed by its PATH: distinct such paths never merge on a
+    shared falsy key, but the SAME dead path reported by several watch roles
+    collapses to one row. (The original fallback keyed these by an incrementing
+    counter, so a 0-byte/unstatable drive rendered once PER ROLE — the
+    "0 byte drives listed as duplicates" live report, 2026-07-24.) Input order
+    is preserved (first-seen device first).
 
     NOTE: this is deliberately NOT applied to the low-space banner list, which is
     per watch-role (an operator wants to know WHICH role hit its floor). The
@@ -280,14 +284,12 @@ def dedupe_by_device(statuses: list[dict]) -> list[dict]:
     """
     order: list[tuple] = []
     groups: dict[tuple, list[dict]] = {}
-    fallback = 0
     for st in statuses:
         dev = st.get("dev")
         if dev:  # truthy int st_dev -> real device identity
             key: tuple = ("dev", dev)
-        else:  # missing/zero -> unique per-path key (never merged)
-            key = ("path", fallback)
-            fallback += 1
+        else:  # missing/zero -> identity is the path itself
+            key = ("path", st.get("path") or "")
         if key not in groups:
             groups[key] = []
             order.append(key)

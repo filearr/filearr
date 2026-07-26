@@ -597,3 +597,139 @@ def generate_pdf_thumb(src_path: str, tier: int, settings) -> ThumbBytes | None:
                 pdf.close()
             except Exception:
                 pass
+
+
+# --- 3D model preview (roadmap §20) ----------------------------------------- #
+
+# Extensions trimesh can load as geometry with its default stack — mirrors
+# tasks.model3d._GEOMETRY_EXTS (stl is stereolithography here, not EBU subtitle).
+MODEL3D_RENDER_EXTS = frozenset({"stl", "obj", "ply", "off", "gltf", "glb", "3mf"})
+
+# Surface-sample bounds for the point-splat rasterizer below. The actual count
+# scales with the render buffer (~1 sample per 3 buffer pixels) so the preview
+# tier is as dense as the grid tier — an undersampled buffer leaves speckle the
+# WebP ladder cannot compress under the tier byte cap (live during bring-up).
+# Independent of source face count (5M-triangle print == 500-face part).
+_MODEL3D_MIN_SAMPLES = 150_000
+_MODEL3D_MAX_SAMPLES = 900_000
+
+
+def generate_model3d_thumb(src_path: str, tier: int, settings) -> ThumbBytes | None:
+    """Render a shaded isometric preview of a 3D model into a WebP thumbnail.
+
+    HEADLESS BY CONSTRUCTION: trimesh's own ``save_image`` needs a GL context
+    (pyglet/xvfb) — a non-starter in the worker container — so this is a small
+    software renderer instead: sample points uniformly over the mesh surface
+    (area-weighted, so density is even), Lambert-shade them by face normal,
+    orthographically project along an isometric view, z-order so near points
+    overwrite far ones, splat into a supersampled buffer, and let the shared
+    WebP ladder downscale/encode. Fully vectorized numpy — no per-face Python
+    loop, so cost is bounded by the SAMPLE count, not the face count.
+
+    Bounded like every other generator: source size capped by
+    ``model3d_max_bytes`` (trimesh loads the whole mesh into RAM), every
+    failure (unloadable, no faces, degenerate extents) returns ``None``.
+    """
+    ext = os.path.splitext(src_path)[1].lstrip(".").lower()
+    if ext not in MODEL3D_RENDER_EXTS:
+        return None
+    try:
+        if os.path.getsize(src_path) > settings.model3d_max_bytes:
+            return None
+    except OSError:
+        return None
+
+    try:
+        import numpy as np
+        import trimesh
+
+        loaded = trimesh.load(src_path, process=False)
+        meshes = []
+        if isinstance(loaded, trimesh.Trimesh):
+            meshes = [loaded]
+        else:
+            geometry = getattr(loaded, "geometry", None)
+            if isinstance(geometry, dict):
+                meshes = [g for g in geometry.values() if isinstance(g, trimesh.Trimesh)]
+        meshes = [m for m in meshes if len(m.faces)]
+        if not meshes:
+            return None
+        mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+
+        spec = spec_for(settings, tier)
+        res = min(1600, spec.max_edge * 2)
+        n_samples = int(min(_MODEL3D_MAX_SAMPLES, max(_MODEL3D_MIN_SAMPLES, res * res // 3)))
+        pts, face_idx = trimesh.sample.sample_surface(mesh, n_samples)
+        normals = mesh.face_normals[face_idx]
+
+        # Isometric-ish orthographic camera: view direction + orthonormal basis.
+        view = np.array([1.0, -1.0, 0.75])
+        view /= np.linalg.norm(view)
+        up_hint = np.array([0.0, 0.0, 1.0])
+        right = np.cross(up_hint, view)
+        right /= np.linalg.norm(right)
+        up = np.cross(view, right)
+
+        x = pts @ right
+        y = pts @ up
+        depth = pts @ view
+
+        span = max(float(x.max() - x.min()), float(y.max() - y.min()))
+        if not (span > 0):
+            return None
+        margin = 0.06
+        scale = (res * (1 - 2 * margin)) / span
+        cx = (x.min() + x.max()) / 2
+        cy = (y.min() + y.max()) / 2
+        xi = np.clip(((x - cx) * scale + res / 2).astype(np.int32), 0, res - 1)
+        yi = np.clip((res / 2 - (y - cy) * scale).astype(np.int32), 0, res - 1)
+
+        # Two-source lighting (key from over-the-shoulder, faint fill) + ambient;
+        # abs() treats faces as double-sided so flipped STL normals still shade.
+        key_light = np.array([0.5, -0.6, 0.7])
+        key_light /= np.linalg.norm(key_light)
+        lam = 0.25 + 0.65 * np.abs(normals @ key_light) + 0.10 * np.abs(normals @ view)
+        lam = np.clip(lam, 0.0, 1.0)
+
+        # Near points last so they overwrite far ones (painter's order).
+        order = np.argsort(depth)
+        xi, yi, lam = xi[order], yi[order], lam[order]
+
+        # Slicer-style neutral scene: light gray bg, steel-blue material.
+        bg = np.array([241, 245, 249], dtype=np.float32)   # slate-100
+        mat = np.array([90, 124, 154], dtype=np.float32)   # steel blue
+        buf = np.empty((res, res, 3), dtype=np.float32)
+        buf[:] = bg
+        shade = (0.35 + 0.65 * lam)[:, None] * mat[None, :]
+        # 2x2 splat: each sample covers its pixel + right/down neighbors, closing
+        # pinholes before the downscale antialiases the rest. ONE point-major
+        # assignment (numpy keeps the LAST write per duplicate index), so all
+        # four pixels of a near point land after every pixel of a farther one —
+        # a per-offset pass would let a far point's neighbor overwrite a near
+        # point's base pixel.
+        offs = ((0, 0), (0, 1), (1, 0), (1, 1))
+        ys4 = np.stack([np.clip(yi + dy, 0, res - 1) for dy, _ in offs], axis=1).reshape(-1)
+        xs4 = np.stack([np.clip(xi + dx, 0, res - 1) for _, dx in offs], axis=1).reshape(-1)
+        buf[ys4, xs4] = np.repeat(shade, len(offs), axis=0)
+
+        from PIL import Image, ImageFilter
+
+        img = Image.fromarray(buf.astype(np.uint8), mode="RGB")
+        try:
+            # Blur ~1 output-pixel at the supersample scale: point-splat speckle
+            # is antialiased into smooth gradients. Load-bearing for the BYTE
+            # cap, not just looks — un-blurred splat noise encoded ~77 KB even
+            # at the quality floor vs the preview tier's 60 KB cap (bring-up
+            # measurement); blurred it fits at the STARTING quality (~35 KB).
+            img = img.filter(ImageFilter.GaussianBlur(res / 800))
+            return _encode_webp_capped(
+                img,
+                spec,
+                quality_floor=settings.thumbnail_quality_floor,
+                quality_step=settings.thumbnail_quality_step,
+            )
+        finally:
+            img.close()
+    except Exception:
+        # Unloadable/hostile/degenerate model -> no thumbnail, never an error.
+        return None

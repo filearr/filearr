@@ -60,14 +60,15 @@ func openHistory(dataDir string) (*history.Store, error) {
 // observer (optional, nil for one-shot push) receives drain-health signals so the
 // run daemon's reconcile Supervisor can trigger a sweep. httpClient is the shared
 // mTLS-aware client (newHTTPClient); nil lets the replicator build its own.
-func newReplicator(idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, observer outbox.Observer, httpClient *http.Client) *outbox.Replicator {
+func newReplicator(idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, observer outbox.Observer, httpClient *http.Client, onAuthError func()) *outbox.Replicator {
 	return outbox.NewReplicator(outbox.New(idx.DB()), outbox.Config{
-		BaseURL:  centralURL,
-		AgentID:  agentID,
-		AuthFn:   authProvider(certStore),
-		HTTP:     httpClient,
-		Logger:   newLogger(),
-		Observer: observer,
+		BaseURL:     centralURL,
+		AgentID:     agentID,
+		AuthFn:      authProvider(certStore),
+		HTTP:        httpClient,
+		Logger:      newLogger(),
+		Observer:    observer,
+		OnAuthError: onAuthError,
 	})
 }
 
@@ -107,7 +108,7 @@ func runPush(args []string) error {
 	if err != nil {
 		return err
 	}
-	rep := newReplicator(idx, certStore, centralURL, st.AgentID, nil, httpClient)
+	rep := newReplicator(idx, certStore, centralURL, st.AgentID, nil, httpClient, nil)
 	counters, err := rep.Push(ctx)
 	fmt.Printf("push: batches=%d rows_sent=%d applied=%d upserted=%d tombstoned=%d central_last_seq=%d\n",
 		counters.Batches, counters.Rows, counters.Applied, counters.Upserted, counters.Tombstoned, counters.LastSeq)
@@ -119,8 +120,8 @@ func runPush(args []string) error {
 
 // startReplication launches the drain loop for the `run` daemon. It returns the
 // replicator's goroutine done-channel so the caller waits for a clean stop.
-func startReplication(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, observer outbox.Observer, httpClient *http.Client) <-chan struct{} {
-	rep := newReplicator(idx, certStore, centralURL, agentID, observer, httpClient)
+func startReplication(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, observer outbox.Observer, httpClient *http.Client, onAuthError func()) <-chan struct{} {
+	rep := newReplicator(idx, certStore, centralURL, agentID, observer, httpClient, onAuthError)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

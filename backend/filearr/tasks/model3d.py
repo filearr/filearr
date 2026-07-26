@@ -44,7 +44,17 @@ _GEOMETRY_EXTS = {"stl", "obj", "ply", "off", "gltf", "glb", "3mf"}
 
 class Model3DError(RuntimeError):
     """A 3D model could not be parsed (too large, unreadable, unloadable).
-    Message is safe to store in metadata."""
+    Message is safe to store in metadata.
+
+    ``kind`` classifies the failure for the errors surface: ``corrupt``
+    (default), ``guard`` (size/geometry ceiling), ``error`` (I/O),
+    ``dependency`` (a trimesh lazy-import missing from the image — a
+    deployment bug, detected at the load site below).
+    """
+
+    def __init__(self, message: str, *, kind: str = "corrupt") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def _round(v: Any, ndigits: int = 4) -> float | None:
@@ -83,9 +93,11 @@ def extract_model3d(path: str, *, max_bytes: int) -> dict[str, Any]:
     try:
         size = os.path.getsize(path)
     except OSError as exc:
-        raise Model3DError(f"cannot stat model: {exc}") from exc
+        raise Model3DError(f"cannot stat model: {exc}", kind="error") from exc
     if size > max_bytes:
-        raise Model3DError(f"model too large ({size} > {max_bytes} bytes)")
+        raise Model3DError(
+            f"model too large ({size} > {max_bytes} bytes)", kind="guard"
+        )
 
     import trimesh
 
@@ -94,11 +106,15 @@ def extract_model3d(path: str, *, max_bytes: int) -> dict[str, Any]:
         # are exact. process=False: no repair/merge work on untrusted geometry.
         loaded = trimesh.load(path, process=False)
     except Exception as exc:  # trimesh raises a zoo of exception types
-        raise Model3DError(f"trimesh could not load model: {exc}") from exc
+        # A missing lazy-import (networkx/charset-normalizer absent from the
+        # image) is a DEPLOYMENT bug, not a bad file — classify it so the
+        # errors UI separates the two (live incident 2026-07-24).
+        kind = "dependency" if isinstance(exc, ImportError) else "corrupt"
+        raise Model3DError(f"trimesh could not load model: {exc}", kind=kind) from exc
 
     meshes = list(_iter_meshes(loaded))
     if not meshes:
-        raise Model3DError("no mesh geometry found in file")
+        raise Model3DError("no mesh geometry found in file", kind="guard")
 
     triangles = 0
     vertices = 0

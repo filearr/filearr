@@ -1,12 +1,25 @@
-"""Watch-mode filesystem watcher (T5).
+"""Watch-mode filesystem watcher (T5 + roadmap §14 incremental narrowing).
 
 A watcher observes a library's root with watchfiles (inotify on Linux) and, on
-any change, defers a *normal* full scan after a debounce window. We deliberately
-reuse the existing scan pipeline (walk -> diff -> tombstone -> extract) rather
-than building a separate incremental single-file path: the scan diff is already
-mtime+size cheap, move/sidecar detection only make sense with whole-library
-context, and one code path is far less risky than two. (Incremental single-file
-updates are noted as a roadmap item.)
+a settled burst of changes, defers a *normal* scan. We deliberately reuse the
+existing scan pipeline (walk -> diff -> tombstone -> extract) rather than
+building a separate incremental single-file path: the scan diff is already
+mtime+size cheap, move/sidecar detection only make sense with subtree context,
+and one code path is far less risky than two.
+
+Incremental narrowing (roadmap §14, shipped): instead of always scanning the
+whole watched tree, a small event batch is narrowed to a TARGETED recursive
+scan (the W9 machinery) of the nearest existing ancestor directory covering
+every event path. Same pipeline, same invariants — the scoped diff never
+tombstones outside the target — just a blast radius matching what actually
+changed, so one dropped file into a 1M-item library costs one directory walk,
+not a full rescan. Because it is a single scoped scan run (not per-file
+upserts), move detection still works for renames whose both sides fall inside
+the narrowed scope; a rename ACROSS the scope boundary degrades to
+tombstone+create there and is reconciled by the next full scan — which remain
+scheduled as the periodic backstop (deletes seen only by a lost inotify event,
+etc.). Large bursts (> ``watch_incremental_max_events``) or events resolving
+to the watch root fall back to the previous whole-tree behaviour.
 
 Design constraints (see CLAUDE.md):
   * inotify is unreliable over SMB/NFS/FUSE-remote, so watch mode is refused for
@@ -29,6 +42,7 @@ import os
 
 from watchfiles import awatch
 
+from filearr.config import get_settings
 from filearr.schedule import is_network_path
 
 logger = logging.getLogger("filearr.watch")
@@ -41,6 +55,40 @@ DEBOUNCE_S = 3.0
 RECONCILE_INTERVAL_S = 30.0
 
 
+def _narrow_scope(
+    watch_root: str, changes: set[tuple], max_events: int
+) -> str | None:
+    """Roadmap §14: reduce a small event batch to ONE scan scope — the nearest
+    existing ancestor directory (relative to ``watch_root``, "/"-separated)
+    covering every event path.
+
+    ``None`` means "cannot/should not narrow" (big burst, paths escaping the
+    root, resolution error) — the caller falls back to the whole-tree scan.
+    ``""`` means the covering directory IS the watch root (narrowing gained
+    nothing, semantically the same whole-tree scan).
+
+    Every event contributes its PARENT directory: a deleted file/subtree event
+    names a path that no longer exists, but a recursive scan of its parent both
+    tombstones it and picks up siblings the same burst touched. The ascent loop
+    then walks further up while the candidate itself is gone (the burst deleted
+    whole directories), so the scan target is always a real, walkable dir."""
+    if not changes or len(changes) > max_events:
+        return None
+    root = os.path.abspath(watch_root)
+    dirs = {os.path.dirname(os.path.abspath(p)) for _change, p in changes}
+    try:
+        lca = os.path.commonpath(list(dirs))
+        inside = os.path.commonpath([root, lca]) == root
+    except ValueError:  # mixed drives / malformed paths — never narrow on doubt
+        return None
+    if not inside:
+        return None
+    while lca != root and not os.path.isdir(lca):
+        lca = os.path.dirname(lca)
+    rel = os.path.relpath(lca, root)
+    return "" if rel == "." else rel.replace(os.sep, "/")
+
+
 async def _watch_library(
     library_id: str,
     root_path: str,
@@ -49,20 +97,30 @@ async def _watch_library(
     stop: asyncio.Event,
     debounce_s: float = DEBOUNCE_S,
 ) -> None:
-    """Watch ``root_path``; call ``trigger(library_id)`` (async) once per settled
-    burst of changes. Runs until ``stop`` is set (or awatch raises)."""
+    """Watch ``root_path``; call ``trigger(narrowed_rel)`` (async) once per
+    settled burst of changes, where ``narrowed_rel`` is the §14 incremental
+    scope relative to ``root_path`` (``None`` = scan the whole watched tree).
+    Runs until ``stop`` is set (or awatch raises)."""
     logger.info("watch: starting watcher for library %s at %s", library_id, root_path)
     try:
-        async for _changes in awatch(root_path, stop_event=stop, debounce=int(debounce_s * 1000)):
+        async for changes in awatch(root_path, stop_event=stop, debounce=int(debounce_s * 1000)):
             # awatch's `debounce` already collapses rapid events into one batch;
             # we still guard with an explicit settle sleep so an ongoing large
-            # copy doesn't fire mid-transfer. Drain any change that lands during
-            # the settle window is handled by the next awatch iteration.
+            # copy doesn't fire mid-transfer. Any change that lands during the
+            # settle window is handled by the next awatch iteration.
             await asyncio.sleep(debounce_s)
             if stop.is_set():
                 break
+            settings = get_settings()
+            narrowed = (
+                _narrow_scope(
+                    root_path, changes, settings.watch_incremental_max_events
+                )
+                if settings.watch_incremental
+                else None
+            )
             try:
-                await trigger(library_id)
+                await trigger(narrowed)
             except Exception:  # a scan-defer failure must not kill the watcher
                 logger.exception("watch: failed to trigger scan for %s", library_id)
     except Exception:
@@ -182,10 +240,20 @@ class WatchSupervisor:
         stop = asyncio.Event()
         trigger = self._trigger
 
-        async def _bound(_passed_key: str) -> None:
-            # The watcher passes its key; the actual scan target is the captured
-            # (library_id, rel_path). A None rel_path defers a full-library scan.
-            await trigger(library_id, rel_path)
+        async def _bound(narrowed: str | None) -> None:
+            # The watcher passes the §14 narrowed scope relative to ITS watched
+            # path; combine with this watcher's own scope (a scan_paths subtree
+            # or the library root) to get the library-relative scan target.
+            # None / a scope that collapses to the library root defers the
+            # legacy whole-tree scan for this watcher.
+            base = rel_path or ""
+            if narrowed is None:
+                combined = base
+            elif base and narrowed:
+                combined = f"{base}/{narrowed}"
+            else:
+                combined = base or narrowed
+            await trigger(library_id, combined or None)
 
         task = asyncio.create_task(
             _watch_library(key, path, _bound, stop=stop),

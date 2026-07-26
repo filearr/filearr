@@ -2,9 +2,11 @@
 
 Exercises the native `EventSourceResponse` path over an in-process ASGI
 transport (httpx streaming): progress events arrive, the stream closes on a
-terminal status, keepalive pings are emitted when idle, and Bearer-scope auth
-is enforced when enabled (header + `?api_key=` query param, since EventSource
-can't set headers).
+terminal status, keepalive pings are emitted when idle, LISTEN/NOTIFY pokes
+wake the stream without waiting for the fallback poll (roadmap §14), and auth
+is enforced when enabled — Bearer header or a single-use `?stream_token=`
+minted by `POST /scans/{id}/events-token`; the old `?api_key=` query param is
+GONE (a long-lived credential must never ride a URL into proxy logs).
 """
 
 import asyncio
@@ -26,6 +28,7 @@ from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import ApiKey, Library, ScanRun
+from filearr.pgnotify import notify_scan_progress
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -70,9 +73,9 @@ async def wired(pg_uri, monkeypatch):
     await engine.dispose()
 
 
-async def _mk_scan(maker, status="running", stats=None):
+async def _mk_scan(maker, status="running", stats=None, name="lib"):
     async with maker() as s:
-        lib = Library(name="lib", root_path="/data")
+        lib = Library(name=name, root_path="/data")
         s.add(lib)
         await s.flush()
         run = ScanRun(
@@ -142,7 +145,7 @@ async def _read_events(resp, *, want_done=True, timeout=15.0):
 async def test_progress_then_done(wired, monkeypatch):
     """Progress ticks as stats change, then a terminal `done` closes the stream."""
     monkeypatch.setattr(get_settings(), "auth_enabled", False)
-    monkeypatch.setattr(scans_mod, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 0.05)
     maker = wired["maker"]
     scan_id, _ = await _mk_scan(maker, status="running", stats={"seen": 10, "new": 10})
 
@@ -180,7 +183,7 @@ async def test_progress_then_done(wired, monkeypatch):
 async def test_terminal_immediately_closes(wired, monkeypatch):
     """A scan that is already terminal emits exactly one `done` and closes."""
     monkeypatch.setattr(get_settings(), "auth_enabled", False)
-    monkeypatch.setattr(scans_mod, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 0.05)
     maker = wired["maker"]
     scan_id, _ = await _mk_scan(maker, status="cancelled", stats={"seen": 3, "aborted": True})
 
@@ -195,7 +198,7 @@ async def test_terminal_immediately_closes(wired, monkeypatch):
 @pytest.mark.asyncio
 async def test_unknown_scan_errors(wired, monkeypatch):
     monkeypatch.setattr(get_settings(), "auth_enabled", False)
-    monkeypatch.setattr(scans_mod, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 0.05)
     import uuid
 
     async with _client(wired["app"]) as client:
@@ -209,7 +212,7 @@ async def test_heartbeat_emitted_when_idle(wired, monkeypatch):
     """When the scan is idle (no stat changes), the framework inserts keepalive
     `: ping` comments so proxies don't drop the stream."""
     monkeypatch.setattr(get_settings(), "auth_enabled", False)
-    monkeypatch.setattr(scans_mod, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 0.05)
     # Shrink the framework ping interval so the test is fast.
     import fastapi.routing as routing_mod
     import fastapi.sse as sse_mod
@@ -237,39 +240,99 @@ async def test_heartbeat_emitted_when_idle(wired, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_push_wakes_stream_without_fallback_poll(wired, monkeypatch):
+    """The LISTEN/NOTIFY path: with the fallback poll effectively disabled
+    (30 s), a stats update that fires `pg_notify` on its own transaction must
+    still reach the stream promptly — proving progress is push-driven, not a
+    lucky poll tick."""
+    monkeypatch.setattr(get_settings(), "auth_enabled", False)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 30.0)
+    maker = wired["maker"]
+    scan_id, _ = await _mk_scan(maker, status="running", stats={"seen": 1})
+
+    async def _advance():
+        # Let the stream subscribe + emit its first snapshot, then finish the
+        # scan the way the scan task does: stats write + pg_notify + commit.
+        await asyncio.sleep(0.4)
+        async with maker() as s:
+            run = await s.get(ScanRun, scan_id)
+            run.status = "finished"
+            run.stats = {"seen": 7, "new": 7}
+            run.finished_at = datetime.now(UTC)
+            await notify_scan_progress(s, scan_id)
+            await s.commit()
+
+    async with _client(wired["app"]) as client:
+        task = asyncio.create_task(_advance())
+        async with client.stream("GET", f"/api/v1/scans/{scan_id}/events") as resp:
+            # Well under the 30 s fallback: only the NOTIFY can wake us in time.
+            events, _ = await _read_events(resp, timeout=10.0)
+        await task
+
+    assert events[-1][0] == "done"
+    assert json.loads(events[-1][1])["seen"] == 7
+
+
+@pytest.mark.asyncio
 async def test_auth_enforced_when_enabled(wired, monkeypatch):
-    """With auth on: no creds -> 401; valid `?api_key=` -> 200 stream; header
-    Bearer also works. Query-param path exists because EventSource can't set
-    headers."""
+    """With auth on: no creds -> 401; header Bearer works; a minted
+    `?stream_token=` works ONCE (single-use) and only for its own scan; the
+    old `?api_key=` query param is gone (401)."""
     monkeypatch.setattr(get_settings(), "auth_enabled", True)
-    monkeypatch.setattr(scans_mod, "_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(scans_mod, "_FALLBACK_POLL_INTERVAL", 0.05)
     maker = wired["maker"]
     scan_id, _ = await _mk_scan(maker, status="finished", stats={"seen": 1})
+    other_id, _ = await _mk_scan(maker, status="finished", stats={"seen": 2}, name="lib2")
     key = await _mk_key(maker, scopes=("read",))
+    auth = {"Authorization": f"Bearer {key}"}
 
     async with _client(wired["app"]) as client:
         # 1) no creds -> 401
         r = await client.get(f"/api/v1/scans/{scan_id}/events")
         assert r.status_code == 401
 
-        # 2) query-param api_key -> ok
+        # 2) the OLD api_key query param no longer authenticates anything
+        r = await client.get(
+            f"/api/v1/scans/{scan_id}/events", params={"api_key": key}
+        )
+        assert r.status_code == 401
+
+        # 3) header Bearer -> ok (non-browser clients, unchanged)
         async with client.stream(
-            "GET", f"/api/v1/scans/{scan_id}/events", params={"api_key": key}
+            "GET", f"/api/v1/scans/{scan_id}/events", headers=auth
+        ) as resp:
+            assert resp.status_code == 200
+
+        # 4) minting requires auth; a minted token opens the stream
+        r = await client.post(f"/api/v1/scans/{scan_id}/events-token")
+        assert r.status_code == 401
+        r = await client.post(f"/api/v1/scans/{scan_id}/events-token", headers=auth)
+        assert r.status_code == 200
+        token = r.json()["token"]
+        assert r.json()["expires_in"] > 0
+        async with client.stream(
+            "GET", f"/api/v1/scans/{scan_id}/events", params={"stream_token": token}
         ) as resp:
             assert resp.status_code == 200
             events, _ = await _read_events(resp)
         assert events[-1][0] == "done"
 
-        # 3) header Bearer -> ok
-        async with client.stream(
-            "GET",
-            f"/api/v1/scans/{scan_id}/events",
-            headers={"Authorization": f"Bearer {key}"},
-        ) as resp:
-            assert resp.status_code == 200
-
-        # 4) wrong key -> 401
+        # 5) single-use: replaying the same token is a 401
         r = await client.get(
-            f"/api/v1/scans/{scan_id}/events", params={"api_key": "ck_bogus_nope"}
+            f"/api/v1/scans/{scan_id}/events", params={"stream_token": token}
         )
         assert r.status_code == 401
+
+        # 6) a token is scoped to ITS scan — it opens no other stream
+        r = await client.post(f"/api/v1/scans/{other_id}/events-token", headers=auth)
+        wrong = r.json()["token"]
+        r = await client.get(
+            f"/api/v1/scans/{scan_id}/events", params={"stream_token": wrong}
+        )
+        assert r.status_code == 401
+
+        # 7) minting for an unknown scan is a 404
+        import uuid
+
+        r = await client.post(f"/api/v1/scans/{uuid.uuid4()}/events-token", headers=auth)
+        assert r.status_code == 404

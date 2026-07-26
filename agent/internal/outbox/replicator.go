@@ -70,6 +70,12 @@ type Config struct {
 	// after an outage) so the run daemon can trigger a reconcile. Optional.
 	Observer Observer
 
+	// OnAuthError, if set, fires when central rejects the agent credential
+	// (401/403) — the daemon wires it to the cert-rebind trigger so a drifted
+	// fingerprint self-heals (fix 2026-07-24). Must not block; called from the
+	// drain loop on every rejected batch (the rebinder debounces).
+	OnAuthError func()
+
 	// Clock is injectable for age-trigger tests (nil => time.Now).
 	Clock func() time.Time
 }
@@ -90,6 +96,8 @@ type Replicator struct {
 	log      *slog.Logger
 	clock    func() time.Time
 	observer Observer
+
+	onAuthError func()
 }
 
 // NewReplicator wires a Replicator over ob.
@@ -108,6 +116,8 @@ func NewReplicator(ob *Outbox, cfg Config) *Replicator {
 		log:      cfg.Logger,
 		clock:    cfg.Clock,
 		observer: cfg.Observer,
+
+		onAuthError: cfg.OnAuthError,
 	}
 	if r.http == nil {
 		r.http = &http.Client{Timeout: defaultTimeout}
@@ -400,6 +410,9 @@ func (r *Replicator) statusError(status int, body []byte) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("central replication endpoint returned 404 — the replication feature appears disabled on this server (will retry): %s", detail)
 	case http.StatusUnauthorized, http.StatusForbidden:
+		if r.onAuthError != nil {
+			r.onAuthError()
+		}
 		return fmt.Errorf("central rejected the agent bearer token (%d) — check the bound cert fingerprint / FILEARR_AGENT_AUTH_FINGERPRINT: %s", status, detail)
 	case http.StatusRequestEntityTooLarge:
 		return fmt.Errorf("central rejected the batch as too large (413) — lower the drain byte cap: %s", detail)

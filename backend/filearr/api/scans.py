@@ -8,10 +8,12 @@ the stream), inserts `: ping` comment lines on timeout, and tears the generator
 down cleanly on client disconnect — no leaked tasks.
 
 Progress is published by the scan task into `ScanRun.stats` (batched commits
-every 250 files). This endpoint polls that row on a short interval and emits a
-`progress` event whenever the observed status/stats change, then a terminal
-`done` event and returns once the scan reaches
-finished/failed/cancelled/stopped.
+every 250 files), which also fires a `pg_notify` on the same transaction
+(`filearr.pgnotify`). This endpoint subscribes to that channel and re-reads
+the row on each poke, emitting a `progress` event whenever the observed
+status/stats change, then a terminal `done` event once the scan reaches
+finished/failed/cancelled/stopped. A slow fallback poll backstops the push
+path (a dropped listener connection degrades to polling, never to a stall).
 """
 
 import asyncio
@@ -19,18 +21,19 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit
+from filearr import audit, authx, streamtokens
 from filearr.config import get_settings
 from filearr.db import SessionLocal, get_session
 from filearr.models import ScanRun
+from filearr.pgnotify import notify_scan_progress, scan_hub
 from filearr.schemas import ScanOut
-from filearr.security import _verify_credentials, require_scope
+from filearr.security import _verify_credentials, require_scope, resolve_session_principal
 
 router = APIRouter()
 
@@ -40,10 +43,12 @@ router = APIRouter()
 # stream keeps ticking through the stop wrap-up until the run flips to stopped).
 _TERMINAL = ("finished", "failed", "cancelled", "stopped")
 
-# How often we re-read ScanRun.stats. This is a DB poll interval, NOT the SSE
-# keepalive interval (keepalives are inserted by the framework on top of the
-# generator's own output when it goes idle). Kept short so the UI ticks live.
-_POLL_INTERVAL = 1.0
+# Fallback re-read interval. Progress normally arrives as LISTEN/NOTIFY pokes
+# (zero-latency); this poll only exists so a lost listener connection or a
+# NOTIFY that raced the subscription degrades to slow polling instead of a
+# stalled stream. It is NOT the SSE keepalive (the framework inserts `: ping`
+# comments on idle output independently).
+_FALLBACK_POLL_INTERVAL = 5.0
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -67,6 +72,7 @@ async def cancel_scan(scan_id: uuid.UUID, session: AsyncSession = Depends(get_se
         raise HTTPException(409, f"Scan is '{run.status}', not running")
     run.status = "cancelled"
     run.finished_at = datetime.now(UTC)
+    await notify_scan_progress(session, run.id)
     await session.commit()
     return {"status": "cancelled"}
 
@@ -128,6 +134,7 @@ async def stop_scan(scan_id: uuid.UUID, session: AsyncSession = Depends(get_sess
         # Transient marker only: do NOT set finished_at — the run is still draining
         # its last batch + wrap-up. The scan task sets terminal 'stopped'.
         run.status = "stopping"
+        await notify_scan_progress(session, run.id)
         await session.commit()
         return {"status": "stopping"}
     # Orphaned run (no live worker): finalize directly so it never sticks.
@@ -139,6 +146,7 @@ async def stop_scan(scan_id: uuid.UUID, session: AsyncSession = Depends(get_sess
         "reconcile_note": "stop requested with no live scan worker; finalized "
         "as stopped by the stop endpoint (FIX-15)",
     }
+    await notify_scan_progress(session, run.id)
     await session.commit()
     return {"status": "stopped"}
 
@@ -200,6 +208,7 @@ async def force_clear_scan(
         "force_cleared": True,
         "reconcile_note": f"force-cleared from '{prev}' by operator (FIX-15)",
     }
+    await notify_scan_progress(session, run.id)
     await session.commit()
     await audit.emit(
         audit.SCAN_FORCE_CLEARED,
@@ -216,28 +225,69 @@ async def force_clear_scan(
 
 async def _require_events_scope(
     request: Request,
-    api_key: str | None = None,
+    response: Response,
+    scan_id: uuid.UUID,
+    stream_token: str | None = None,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Auth for the SSE stream.
 
-    `EventSource` cannot set request headers, so browsers can't send a Bearer
-    token on the stream. We therefore accept the API key either via the normal
-    `Authorization: Bearer` header (non-browser clients) OR via a `?api_key=`
-    query parameter — but ONLY on this read-only events endpoint. The key is
-    verified through the same constant-time hash lookup + scope check as every
-    other endpoint (`security._verify_credentials`); it is never logged or
-    echoed back. When auth is disabled (trusted-LAN dev) this is a no-op, matching
-    the rest of the API.
+    `EventSource` cannot set request headers, so a browser cannot present a
+    Bearer key on the stream. The old workaround accepted the REAL API key as
+    `?api_key=` — but query strings land in proxy/access logs, so a captured
+    log line was a captured credential. That path is gone (roadmap §14).
+    Accepted credentials, in order:
+
+      * `Authorization: Bearer` header — non-browser clients, unchanged.
+      * `?stream_token=` — a single-use, 60 s token scoped to exactly this
+        scan's stream, minted by `POST /scans/{id}/events-token` with normal
+        auth. Worthless in a log: consumed on first use, expired within a
+        minute, opens nothing else either way.
+      * the interactive session cookie (`EventSource` sends cookies) — a
+        logged-in console user needs no token at all.
+
+    No-op when auth is disabled (trusted-LAN dev), matching the rest of the API.
     """
     settings = get_settings()
     if not settings.auth_enabled:
         return
-    token = creds.credentials if creds is not None else api_key
-    if not token:
-        raise HTTPException(401, "Missing bearer token or api_key")
-    await _verify_credentials(token, "read", session, request)
+    if creds is not None:
+        await _verify_credentials(creds.credentials, "read", session, request)
+        return
+    if stream_token is not None:
+        if streamtokens.consume(stream_token, "scan-events", str(scan_id)):
+            return
+        raise HTTPException(401, "Invalid or expired stream token")
+    principal = await resolve_session_principal(request, response, session)
+    if principal is not None:
+        if "read" not in authx.scopes_for_role(principal.global_role):
+            raise HTTPException(403, "Scope 'read' required")
+        request.state.actor = f"principal:{principal.id}"
+        await session.commit()
+        return
+    raise HTTPException(401, "Missing bearer token or stream_token")
+
+
+@router.post("/{scan_id}/events-token", dependencies=[Depends(require_scope("read"))])
+async def mint_events_token(
+    scan_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+):
+    """Mint a single-use stream token for `GET /scans/{id}/events`.
+
+    Browsers authenticate this POST normally (Bearer key or session cookie) and
+    attach the returned token as `?stream_token=` on the EventSource URL —
+    replacing the old `?api_key=` param, which put a long-lived credential into
+    proxy logs. The token is scoped to this one scan's stream, single-use, and
+    expires in `expires_in` seconds; consumers mint a fresh one per (re)connect.
+    """
+    run = (
+        await session.execute(select(ScanRun.id).where(ScanRun.id == scan_id))
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(404, "Scan not found")
+    token = streamtokens.mint("scan-events", str(scan_id))
+    return {"token": token, "expires_in": int(streamtokens.TOKEN_TTL_SECONDS)}
 
 
 def _snapshot(run: ScanRun) -> dict:
@@ -281,46 +331,64 @@ async def scan_events(
         status or stats change.
       * `done`     — final `_snapshot` once the scan is terminal; stream closes.
       * `error`    — `{"detail": ...}` if the scan id is unknown.
+
+    Push-driven (roadmap §14): the scan task fires `pg_notify` on the same
+    transaction as every stats commit; this generator subscribes BEFORE its
+    first read (so a poke can never fall between snapshot and wait) and then
+    blocks on the in-process queue, re-reading the row per poke. The timeout
+    is only the degraded path — a lost listener connection turns this back
+    into a slow poll instead of a stalled stream.
     """
     last_serialized: str | None = None
-    while True:
-        # Short-lived session per poll so we never pin a pooled connection for
-        # the whole stream lifetime.
-        async with SessionLocal() as session:
-            run = (
-                await session.execute(select(ScanRun).where(ScanRun.id == scan_id))
-            ).scalar_one_or_none()
+    queue = scan_hub.subscribe(str(scan_id))
+    try:
+        while True:
+            # Short-lived session per read so we never pin a pooled connection
+            # for the whole stream lifetime (the wait happens off-session).
+            async with SessionLocal() as session:
+                run = (
+                    await session.execute(select(ScanRun).where(ScanRun.id == scan_id))
+                ).scalar_one_or_none()
 
-        if run is None:
-            yield ServerSentEvent(event="error", data={"detail": "scan not found"})
-            return
+            if run is None:
+                yield ServerSentEvent(event="error", data={"detail": "scan not found"})
+                return
 
-        snap = _snapshot(run)
-        # Change-detection uses ONLY the meaningful fields (status + persisted
-        # stats), NOT the derived `elapsed`/`rate` — those tick every poll and
-        # would otherwise emit a progress event each interval, starving the
-        # framework's idle keepalive. When the scan is genuinely idle the stream
-        # goes quiet and `: ping` comments keep the connection alive.
-        key = json.dumps({"status": run.status, "stats": run.stats}, sort_keys=True)
+            snap = _snapshot(run)
+            # Change-detection uses ONLY the meaningful fields (status + persisted
+            # stats), NOT the derived `elapsed`/`rate` — those tick every read and
+            # would otherwise emit a progress event per wake, starving the
+            # framework's idle keepalive. When the scan is genuinely idle the
+            # stream goes quiet and `: ping` comments keep the connection alive.
+            key = json.dumps({"status": run.status, "stats": run.stats}, sort_keys=True)
 
-        if run.status in _TERMINAL:
-            # T11: a FAILED scan emits a dedicated `error` event carrying the
-            # retained (sanitized) message from stats.error before the terminal
-            # `done`, so the UI can surface *why* it failed -- not just that it
-            # did. The error string was sanitized at store time (scan crash
-            # handler), so it is safe to forward verbatim here.
-            if run.status == "failed" and (snap.get("error")):
-                yield ServerSentEvent(
-                    event="error",
-                    data={"scan_id": str(run.id), "detail": snap["error"]},
-                )
-            # Always emit the terminal state (even if unchanged) so a client that
-            # connected late still gets a clean close.
-            yield ServerSentEvent(event="done", data=snap)
-            return
+            if run.status in _TERMINAL:
+                # T11: a FAILED scan emits a dedicated `error` event carrying the
+                # retained (sanitized) message from stats.error before the terminal
+                # `done`, so the UI can surface *why* it failed -- not just that it
+                # did. The error string was sanitized at store time (scan crash
+                # handler), so it is safe to forward verbatim here.
+                if run.status == "failed" and (snap.get("error")):
+                    yield ServerSentEvent(
+                        event="error",
+                        data={"scan_id": str(run.id), "detail": snap["error"]},
+                    )
+                # Always emit the terminal state (even if unchanged) so a client
+                # that connected late still gets a clean close.
+                yield ServerSentEvent(event="done", data=snap)
+                return
 
-        if key != last_serialized:
-            last_serialized = key
-            yield ServerSentEvent(event="progress", data=snap)
+            if key != last_serialized:
+                last_serialized = key
+                yield ServerSentEvent(event="progress", data=snap)
 
-        await asyncio.sleep(_POLL_INTERVAL)
+            try:
+                await asyncio.wait_for(queue.get(), timeout=_FALLBACK_POLL_INTERVAL)
+                # Coalesce any pokes that piled up while we were emitting — the
+                # next read sees the newest stats regardless.
+                while not queue.empty():
+                    queue.get_nowait()
+            except TimeoutError:
+                pass  # fallback poll tick
+    finally:
+        scan_hub.unsubscribe(str(scan_id), queue)

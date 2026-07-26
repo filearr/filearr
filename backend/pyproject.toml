@@ -33,6 +33,16 @@ dependencies = [
     "tinytag==2.2.1",
     "xxhash==3.8.1",
     "trimesh>=4.12.2,<5",
+    # trimesh lazy-imports these at load time and its bare install declares only
+    # numpy, so they MUST be explicit: networkx for any Scene-producing loader
+    # (GLTF/GLB/3MF scene-graph forest), charset-normalizer for text/ascii mesh
+    # decoding. Both were present in dev venvs only as dev-group transitives —
+    # the production image (uv pip install -r pyproject.toml, no dev group)
+    # lacked them and every scene/text model failed with ModuleNotFoundError
+    # (live extraction errors, 2026-07-24). NOT trimesh[easy]: that extra drags
+    # native shapely/lxml we don't need. Both pure-python, BSD.
+    "networkx>=3.4",
+    "charset-normalizer>=3.4",
     "numpy-stl==4.0.0",
     "pypdf==6.14.2",
     # P12-T5 PDF first-page thumbnails: pypdfium2 is the Apache-2.0 / BSD-3-Clause
