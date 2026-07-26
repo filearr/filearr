@@ -632,8 +632,11 @@ class ScanPath(Base):
     __tablename__ = "scan_paths"
     __table_args__ = (
         Index("ix_scan_paths_library_id", "library_id"),
-        Index(
-            "uq_scan_paths_library_rel_path", "library_id", "rel_path", unique=True
+        # Declared as a CONSTRAINT (not a unique Index) because that is what the
+        # migration (d5f9a3c1e8b0) created — alembic >=1.18 autogen distinguishes
+        # the two, and a model/DB mismatch fails the CI drift check.
+        UniqueConstraint(
+            "library_id", "rel_path", name="uq_scan_paths_library_rel_path"
         ),
     )
 
@@ -859,6 +862,11 @@ class SavedSearch(Base):
     __tablename__ = "saved_searches"
     __table_args__ = (
         Index("ix_saved_searches_owner", "owner_principal"),
+        # Mirrors migration e2f4a6c8b0d1 (per-owner name uniqueness) so the CI
+        # drift check sees models == migrations.
+        UniqueConstraint(
+            "owner_principal", "name", name="uq_saved_searches_owner_name"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1478,6 +1486,9 @@ class Agent(Base):
             unique=True,
             postgresql_where=text("cert_fingerprint IS NOT NULL"),
         ),
+        # Mirrors migration f5c8a2b4d6e0 (W6-D2 group-membership lookups) so the
+        # CI drift check sees models == migrations.
+        Index("ix_agents_config_group_id", "config_group_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

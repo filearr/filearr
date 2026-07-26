@@ -694,3 +694,15 @@ def psycopg3_uri(uri: str) -> str:
     URI; historically each module carried its own ``_psycopg3``. New tests import
     this one from conftest instead."""
     return uri.replace("postgresql://", "postgresql+psycopg://", 1)
+
+
+def swap_dbname(uri: str, dbname: str) -> str:
+    """Replace a Postgres URI's database path segment, preserving any query
+    string. Both provider shapes are handled: pgserver URIs carry the socket
+    host in the query (``?host=/tmp/...``) which must survive, while external
+    URIs (CI's ``postgresql://...@localhost:5432/dbname``) have no query at
+    all — the old inline ``rsplit("?", 1)`` in the bare-schema tests assumed
+    one and crashed on CI."""
+    head, sep, query = uri.partition("?")
+    head = head.rsplit("/", 1)[0] + "/" + dbname
+    return head + (sep + query if sep else "")

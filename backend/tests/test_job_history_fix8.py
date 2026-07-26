@@ -175,13 +175,9 @@ async def test_purge_bare_schema_returns_zero(pg_uri):
     with psycopg.connect(pg_uri, autocommit=True) as c:
         c.execute("DROP DATABASE IF EXISTS bare_fix8")
         c.execute("CREATE DATABASE bare_fix8")
-    # pgserver URIs carry the socket host in the query string (?host=/path), so
-    # only the dbname path segment may be swapped (mirrors test_jobs_dashboard).
-    if "/postgres?" in pg_uri:
-        bare_dsn = pg_uri.replace("/postgres?", "/bare_fix8?", 1)
-    else:
-        head, query = pg_uri.rsplit("?", 1)
-        bare_dsn = head.rsplit("/", 1)[0] + "/bare_fix8?" + query
+    from .conftest import swap_dbname
+
+    bare_dsn = swap_dbname(pg_uri, "bare_fix8")
 
     connector = PsycopgConnector(conninfo=bare_dsn)
     original = proc_app.connector

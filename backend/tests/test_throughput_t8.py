@@ -159,12 +159,11 @@ async def test_queue_snapshot_empty_when_schema_absent(pg_uri):
     with psycopg.connect(pg_uri, autocommit=True) as c:
         c.execute("DROP DATABASE IF EXISTS bare_t8")
         c.execute("CREATE DATABASE bare_t8")
-    bare = pg_uri.replace("postgresql://", "postgresql+psycopg://", 1)
-    if "/postgres?" in bare:
-        bare = bare.replace("/postgres?", "/bare_t8?")
-    else:
-        head, query = bare.rsplit("?", 1)
-        bare = head.rsplit("/", 1)[0] + "/bare_t8?" + query
+    from .conftest import swap_dbname
+
+    bare = swap_dbname(
+        pg_uri.replace("postgresql://", "postgresql+psycopg://", 1), "bare_t8"
+    )
     engine = create_async_engine(bare)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as session:

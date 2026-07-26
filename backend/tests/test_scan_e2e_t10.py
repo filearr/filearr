@@ -31,10 +31,14 @@ pytestmark = pytest.mark.asyncio
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# The enabled types the tree covers (excludes `other`, which is unreachable here).
+# The W8 file_category values the tree covers (excludes `other`, unreachable
+# here). Post-taxonomy vocabulary: m4b/wav roll up under `audio`, xlsx under
+# `document`, STL under `three-d-cad` — the pre-W8 names (audiobook/sample/
+# model3d/spreadsheet) are gone, and since the library GATES on these values a
+# stale name silently excludes files (the STL was dropped on CI, where this
+# ffmpeg-dependent test actually runs — it skips on ffmpeg-less dev boxes).
 ENABLED_TYPES = [
-    "video", "audio", "audiobook", "sample",
-    "image", "model3d", "document", "spreadsheet",
+    "video", "audio", "image", "three-d-cad", "document",
 ]
 
 

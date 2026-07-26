@@ -191,12 +191,11 @@ async def test_running_jobs_empty_when_schema_absent(pg_uri):
     with psycopg.connect(pg_uri, autocommit=True) as c:
         c.execute("DROP DATABASE IF EXISTS bare_uit10")
         c.execute("CREATE DATABASE bare_uit10")
-    bare = pg_uri.replace("postgresql://", "postgresql+psycopg://", 1)
-    if "/postgres?" in bare:
-        bare = bare.replace("/postgres?", "/bare_uit10?")
-    else:
-        head, query = bare.rsplit("?", 1)
-        bare = head.rsplit("/", 1)[0] + "/bare_uit10?" + query
+    from .conftest import swap_dbname
+
+    bare = swap_dbname(
+        pg_uri.replace("postgresql://", "postgresql+psycopg://", 1), "bare_uit10"
+    )
     engine = create_async_engine(bare)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as session:
@@ -393,23 +392,30 @@ async def test_cpu_load_utilization_clamped_0_100(monkeypatch):
 
 
 async def test_cpu_load_nulls_when_getloadavg_unavailable(monkeypatch):
-    """On a host without ``os.getloadavg`` (Windows containers, restricted envs)
-    every load field degrades to ``None`` and ``percent`` is ``None`` — the
-    indicator never crashes the poll. ``cores`` is still best-effort known."""
+    """On a host with neither ``os.getloadavg`` nor ``/proc/stat`` (Windows
+    containers, restricted envs) every load field degrades to ``None`` and
+    ``percent`` is ``None`` — the indicator never crashes the poll. ``cores``
+    is still best-effort known. Both sources are patched out: since the
+    utilization rework, ``percent`` comes from the /proc/stat busy-delta
+    independently of loadavg, so on a Linux runner it would be real (and
+    correct!) with only getloadavg gone."""
     import os
 
+    import filearr.jobs_stats as jobs_stats
     from filearr.jobs_stats import _cpu_load
 
     def _boom():
         raise OSError("getloadavg unavailable")
 
     monkeypatch.setattr(os, "getloadavg", _boom, raising=False)
+    monkeypatch.setattr(jobs_stats, "_read_proc_stat", lambda: None)
+    monkeypatch.setattr(jobs_stats, "_cpu_prev", None)
 
     cpu = _cpu_load()
     assert cpu["load1"] is None
     assert cpu["load5"] is None
     assert cpu["load15"] is None
-    assert cpu["percent"] is None  # unknown load -> no percent, never a crash
+    assert cpu["percent"] is None  # no sources -> no percent, never a crash
     assert set(cpu) == {"load1", "load5", "load15", "cores", "percent"}
 
 

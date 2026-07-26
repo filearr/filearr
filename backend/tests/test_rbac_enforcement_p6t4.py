@@ -190,10 +190,17 @@ async def test_sql_clause_matches_evaluate_over_random_grants(maker):
         await s.commit()
         lib_id = lib.id
         scoped = [(it.id, it.path_scope) for it in items]
+        # Match the branch to what the column ACTUALLY is — the same probe the
+        # production callers use. pgserver (no contrib) migrates path_scope as
+        # text, so the text fallback branch executes there; a contrib-enabled
+        # Postgres (CI's postgres:18 service) migrates it as native ltree, and
+        # forcing the text branch against an ltree column is a type error
+        # (starts_with(ltree, varchar) does not exist). Either way the property
+        # under test — SQL clause == rbac.evaluate — is exercised end-to-end.
+        use_ltree = await rbac_sql.path_scope_uses_ltree(s)
 
     scope_prefixes = ["a", "a/b", "a/b/c", "a/secret", "x", "y/z", ""]
     rnd = random.Random(20260713)
-    use_ltree = False  # sandbox column is text
     for _ in range(40):
         grants = []
         for _ in range(rnd.randint(0, 5)):
