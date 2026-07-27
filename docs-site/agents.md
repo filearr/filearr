@@ -123,8 +123,9 @@ locations work too; the longest matching prefix wins per file.
 **Local web UI**: the template maps port 8686 and sets
 `FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` (a loopback-only listener would be
 unreachable through a Docker port mapping). It stays read-only search and is
-**central-policy-gated** — enable *web UI* in the agent's config group on the
-central Agents page or it serves nothing. Self-update is off inside the
+**central-policy-gated** — enable *Local web UI* under **Local access
+policy** on the central Agents page (fleet-wide; per-agent/per-group
+overrides via `PUT /api/v1/agent-policies/<scope>`) or it serves nothing. Self-update is off inside the
 container (`FILEARR_AGENT_SELF_UPDATE=false` in the image): updating means
 pulling a new image, and the agent no longer logs the unpinned-key warning.
 

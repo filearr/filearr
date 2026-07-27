@@ -756,10 +756,15 @@ category gates) overlay `scan.json` per §9 exactly as on a host install.
   property; a non-1:1 mount works but then wants a `native_prefix` on the
   agent's library so share links resolve (the *arr remote-path-mapping
   pattern).
-- **No ports.** The agent is outbound-only (mTLS to central + step-ca). Its
-  local web UI binds loopback-only by design and refuses anything else, so it
-  is unreachable through Docker port mapping — the central console is the UI
-  for containerized agents.
+- **One optional port: 8686, the local web UI.** All *replication* traffic is
+  outbound-only (mTLS to central + step-ca). The local read-only search UI
+  binds loopback-only by default — unreachable through a Docker port
+  mapping — so the template sets `FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` and
+  maps 8686. Serving is still centrally gated: enable **Local web UI** under
+  the Agents page's *Local access policy* card (the P7-T4 policy channel —
+  NOT a config-group setting; per-agent/per-rollout-group overrides go via
+  `PUT /api/v1/agent-policies/<scope>` and win wholesale). Management stays
+  in the central console; the local UI is search only.
 - **Network `bridge`** when central runs elsewhere (set the full URL). If
   central's compose stack runs on the same box, use the shared custom network
   so `http://filearr:8000`-style names resolve.

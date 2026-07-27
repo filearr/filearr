@@ -38,7 +38,14 @@ console. Full runbook: `docs/ops/agents.md` §12.
 
 - Media is mounted read-only (`/data/media`) in both app and worker — identical
   mapping in both is required so paths in the catalog match.
-- Postgres and Meilisearch data belong in appdata (cache pool), not on the array.
+- Database-backed containers (postgres, meilisearch, the agent's SQLite) use
+  DIRECT pool paths (`/mnt/cache/appdata/...`), not `/mnt/user/appdata/...`:
+  the `/mnt/user` FUSE (shfs) layer has unreliable file locking/mmap, the
+  classic Unraid cause of `database is locked` stalls and index corruption.
+  Same share, same files — just the path that bypasses FUSE. (On 6.12+ a
+  cache-only "exclusive" appdata share makes `/mnt/user` equivalent; the
+  `/mnt/cache` default is simply correct everywhere.) The `filearr` app/worker
+  `/config` (thumbnails/caches) is lock-insensitive and stays on `/mnt/user`.
 - Port 5432/7700 mappings are intentionally unmapped by default; the stack talks
   over the `filearr` network internally.
 - Publishing to Community Applications later: submit via ca.unraid.net/submit

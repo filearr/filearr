@@ -2248,6 +2248,30 @@ export interface AgentPage {
 export const listAgents = (limit = 50, offset = 0) =>
   request<AgentPage>(`/agents?limit=${limit}&offset=${offset}`);
 
+/** One CURRENT agent-policy row (P5-T6/P7-T4 policy channel). Scopes:
+ *  `global` | `group:<rollout_group>` | `agent:<uuid>`; resolution is
+ *  most-specific-wins with NO key merging — the winning scope's whole
+ *  document applies. Writes are append-only versions. */
+export interface AgentPolicyRow {
+  id: string;
+  scope: string;
+  scope_type: string;
+  scope_id: string | null;
+  version: number;
+  policy: Record<string, unknown>;
+  actor: string | null;
+  created_at: string;
+}
+
+export const listAgentPolicies = () =>
+  request<AgentPolicyRow[]>("/agent-policies");
+
+export const putAgentPolicy = (scope: string, policy: Record<string, unknown>) =>
+  request<AgentPolicyRow>(`/agent-policies/${encodeURIComponent(scope)}`, {
+    method: "PUT",
+    body: JSON.stringify({ policy }),
+  });
+
 export const listEnrollmentTokens = () =>
   request<EnrollmentTokenOut[]>("/agents/enrollment-tokens");
 

@@ -5,6 +5,8 @@
     ApiError,
     getAgentSummary,
     listAgents,
+    listAgentPolicies,
+    putAgentPolicy,
     listEnrollmentTokens,
     mintEnrollmentToken,
     revokeAgent,
@@ -94,7 +96,7 @@
       }
       tokens = toks;
       groups = grps;
-      await refreshSummary();
+      await Promise.all([refreshSummary(), reloadPolicies()]);
     } catch (e) {
       error = errDetail(e);
     }
@@ -158,6 +160,47 @@
       groups = await listConfigGroups();
     } catch {
       /* keep last-known */
+    }
+  }
+
+  // --- Local access policy (P7-T4 policy channel, GLOBAL scope) --------------
+  // web_ui_enabled / local_access_enabled / auth_required are POLICY keys, not
+  // config-group settings — they ride the append-only agent-policies channel
+  // with most-specific-wins (agent > rollout-group > global) and NO key
+  // merging. This card edits the GLOBAL document (fleet-wide defaults);
+  // narrower scopes are API-only and override it wholesale.
+  let globalPolicy = $state<Record<string, unknown> | null>(null);
+  let policyBusy = $state(false);
+  let policyError = $state("");
+
+  const policyWebUI = $derived((globalPolicy?.web_ui_enabled ?? false) === true);
+  const policyLocalAccess = $derived((globalPolicy?.local_access_enabled ?? true) === true);
+  const policyAuthRequired = $derived((globalPolicy?.auth_required ?? true) === true);
+
+  async function reloadPolicies() {
+    try {
+      const rows = await listAgentPolicies();
+      globalPolicy = rows.find((r) => r.scope === "global")?.policy ?? {};
+    } catch {
+      globalPolicy = null; // card renders a load-failure note
+    }
+  }
+
+  async function setPolicyKey(key: string, value: boolean) {
+    if (policyBusy) return;
+    policyBusy = true;
+    policyError = "";
+    try {
+      // No key merging across scopes AND append-only versions: always write
+      // the full current global document with just this key changed.
+      const next = { ...(globalPolicy ?? {}), [key]: value };
+      const row = await putAgentPolicy("global", next);
+      globalPolicy = row.policy;
+    } catch (e) {
+      policyError = errDetail(e);
+      await reloadPolicies(); // resync to server truth
+    } finally {
+      policyBusy = false;
     }
   }
 
@@ -727,6 +770,66 @@
             {/each}
           </tbody>
         </table>
+      </div>
+    {/if}
+  </div>
+
+  <!-- Local access policy (fleet-wide, the P7-T4 policy channel) -->
+  <div class="mt-8 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+    <div class="flex items-center gap-3">
+      <h3 class="font-medium">Local access policy</h3>
+      <span class="text-xs text-slate-500">fleet-wide defaults (global scope)</span>
+    </div>
+    <p class="mt-1 text-xs text-slate-500">
+      Gates every agent's on-device query surfaces. Delivered over the signed
+      policy channel on the agents' next poll; the web UI fails closed when an
+      agent's cached policy goes stale. Per-agent / per-rollout-group overrides
+      exist via <code class="font-mono">PUT /api/v1/agent-policies/&lt;scope&gt;</code>
+      and take precedence <em>wholesale</em> (no key merging).
+    </p>
+    {#if globalPolicy === null}
+      <p class="mt-2 text-sm text-amber-600">Could not load the current policy — refresh to retry.</p>
+    {:else}
+      {#if policyError}<p class="mt-2 text-sm text-red-600">{policyError}</p>{/if}
+      <div class="mt-3 flex flex-col gap-2 text-sm">
+        <label class="flex items-start gap-2">
+          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
+            checked={policyWebUI}
+            onchange={(e) => setPolicyKey("web_ui_enabled", (e.currentTarget as HTMLInputElement).checked)} />
+          <span>
+            <span class="font-medium">Local web UI</span>
+            <span class="block text-xs text-slate-500">
+              Read-only browser search on each agent (port 8686; containers also
+              need the template's remote-access toggle). Default off — a
+              never-contacted agent serves nothing.
+            </span>
+          </span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
+            checked={policyAuthRequired}
+            onchange={(e) => setPolicyKey("auth_required", (e.currentTarget as HTMLInputElement).checked)} />
+          <span>
+            <span class="font-medium">Web UI requires auth token</span>
+            <span class="block text-xs text-slate-500">
+              The UI demands the agent's bootstrap token before serving. Turn
+              off only on a trusted LAN.
+            </span>
+          </span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
+            checked={policyLocalAccess}
+            onchange={(e) => setPolicyKey("local_access_enabled", (e.currentTarget as HTMLInputElement).checked)} />
+          <span>
+            <span class="font-medium">Local query API / CLI</span>
+            <span class="block text-xs text-slate-500">
+              The on-device <code class="font-mono">filearr query</code>
+              socket. Default on; an explicit off persists through offline
+              periods.
+            </span>
+          </span>
+        </label>
       </div>
     {/if}
   </div>
