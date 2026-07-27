@@ -155,6 +155,14 @@ binary; the data directory is pinned to `/config`.
     pulling the new image; the enrolled identity and local index in
     `/config` carry over.
 
+!!! tip "Poison files on network mounts"
+    A corrupt or locked file on a FUSE/SMB/NFS mount can block reads
+    forever, which used to freeze a scan at the same file every run. Hashing
+    is now bounded per file by `FILEARR_AGENT_HASH_TIMEOUT_SECONDS`
+    (default `300`, `0` disables): past the budget the file is cataloged
+    unhashed and a WARN in the agent log names the path so you can repair or
+    exclude it.
+
 ## Configuration groups (remote configuration)
 
 Agents can be assigned to **configuration groups** managed on the Agents

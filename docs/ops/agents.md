@@ -729,6 +729,7 @@ container log (no `log_dir` set); `FILEARR_AGENT_LOG_LEVEL` tunes verbosity.
 | `FILEARR_AGENT_WEBUI_ALLOW_REMOTE` | `false` (`true` in the Unraid template) | opt-in NON-loopback web-UI bind (default `0.0.0.0:8686` when set without an explicit addr) so a Docker port mapping can reach it. The central policy gate (`web_ui_enabled`) + auth gate + read-only surface still apply; the loopback Host allow-list (a loopback-only rebinding defence) is skipped |
 | `FILEARR_AGENT_SELF_UPDATE` | `false` in the image | `false` disables the self-update subsystem entirely (no boot check, no poll, no unpinned-key warning) — an immutable image updates by being pulled |
 | `FILEARR_AGENT_LOG_LEVEL` | `info` | error\|warn\|info\|verbose\|debug (also gates the per-batch scan progress lines) |
+| `FILEARR_AGENT_HASH_TIMEOUT_SECONDS` | `300` | Wall-clock budget per file for hashing. A corrupt/locked file on FUSE/SMB/NFS can block `read(2)` forever and freeze the whole walk at the same file every scan; past the budget the file is left unhashed and a WARN logs its path. `0` disables the bound |
 | `FILEARR_AGENT_CA_BUNDLE` | — | PEM of extra trusted server roots (private CA) |
 | `PUID` / `PGID` | `99` / `100` | uid/gid the agent runs as (Unraid nobody/users) |
 | `TZ` | `Etc/UTC` | log timestamps |

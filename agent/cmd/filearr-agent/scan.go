@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -388,11 +389,25 @@ func writeScanConfig(path string, sc scanConfig) error {
 	return os.WriteFile(path, append(buf, '\n'), 0o644)
 }
 
+// envHashTimeout bounds the wall clock spent hashing one file, in seconds
+// (default 300; 0 disables). A corrupt/locked file on a FUSE/network mount can
+// block read(2) forever and freeze the whole walk — the bound skips the file's
+// hashes and WARNs its path instead.
+const envHashTimeout = "FILEARR_AGENT_HASH_TIMEOUT_SECONDS"
+
 func hashPolicy(sc scanConfig) scan.HashPolicy {
+	p := scan.DefaultHashPolicy()
 	if sc.ContentCeiling > 0 {
-		return scan.HashPolicy{ComputeContent: true, FullMaxBytes: sc.ContentCeiling}
+		p.FullMaxBytes = sc.ContentCeiling
 	}
-	return scan.DefaultHashPolicy()
+	p.Timeout = 300 * time.Second
+	if v := os.Getenv(envHashTimeout); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			p.Timeout = time.Duration(n) * time.Second
+		}
+	}
+	p.Log = newLogger()
+	return p
 }
 
 func reportScan(root string, res scan.Result) {

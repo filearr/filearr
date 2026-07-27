@@ -3,7 +3,9 @@ package scan
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"time"
 
 	"github.com/zeebo/xxh3"
 )
@@ -19,6 +21,16 @@ const quickChunk = 65536
 type HashPolicy struct {
 	ComputeContent bool
 	FullMaxBytes   int64
+	// Timeout bounds the WALL CLOCK spent hashing ONE file (quick + content
+	// combined). 0 = unbounded (pre-2026-07-27 behavior). On network/FUSE
+	// mounts a corrupt or locked file can make read(2) block forever; without a
+	// bound that wedges the single-threaded walk at the same file every scan
+	// (observed live: Unraid shfs, scan frozen at seen=65000 across restarts).
+	// On expiry the file is left unhashed — identical to an open/read error —
+	// and a WARN names the path so the operator can find the poison file.
+	Timeout time.Duration
+	// Log receives the timeout WARN; nil falls back to slog.Default().
+	Log *slog.Logger
 }
 
 // DefaultFullMaxBytes mirrors central's global default
@@ -113,6 +125,44 @@ func FullHash(pathStr string) (string, error) {
 // quick hash is never trustworthy identity for it. A larger file keeps the T7
 // policy + ceiling gate.
 func hashFile(pathStr string, size int64, policy HashPolicy) (quick, content string) {
+	if policy.Timeout <= 0 {
+		return hashFileSync(pathStr, size, policy)
+	}
+	// Bounded: hash in a goroutine and give up at the deadline. A blocked
+	// read(2) cannot be cancelled, so on timeout the goroutine (and its fd) is
+	// deliberately abandoned — it either unblocks eventually and its buffered
+	// send is dropped with it, or it pins one fd until process exit. Bounded by
+	// the number of poison files per scan; the same tradeoff central's
+	// asyncio.to_thread extract timeout makes.
+	ch := make(chan [2]string, 1)
+	go func() {
+		q, c := hashSyncFn(pathStr, size, policy)
+		ch <- [2]string{q, c}
+	}()
+	timer := time.NewTimer(policy.Timeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r[0], r[1]
+	case <-timer.C:
+		log := policy.Log
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("hash timed out — file left unhashed (unreadable or hung on the underlying filesystem?)",
+			"path", pathStr, "size", size, "timeout", policy.Timeout.String())
+		return "", ""
+	}
+}
+
+// hashSyncFn indirects the hashing body so the timeout branch is testable
+// without a genuinely hung filesystem (a blocked read(2) can't be faked
+// portably). Production never reassigns it.
+var hashSyncFn = hashFileSync
+
+// hashFileSync is the unbounded hashing body (see hashFile for the QH-T2
+// contract it implements).
+func hashFileSync(pathStr string, size int64, policy HashPolicy) (quick, content string) {
 	q, err := QuickHash(pathStr, size)
 	if err != nil {
 		return "", ""
