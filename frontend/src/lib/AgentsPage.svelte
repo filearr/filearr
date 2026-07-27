@@ -37,6 +37,19 @@
   let groups = $state<ConfigGroupOut[]>([]);
   let summary = $state<AgentFleetSummary | null>(null);
 
+  // Server-side pagination for the registered-agents table: a large fleet can
+  // reach hundreds/thousands of agents, so the console only ever loads one
+  // window. The status header keeps its own one-query /agents/summary tallies.
+  const AGENTS_PAGE = 50;
+  let agentsTotal = $state(0);
+  let agentsOffset = $state(0);
+
+  async function agentsPage(delta: number) {
+    const next = agentsOffset + delta * AGENTS_PAGE;
+    agentsOffset = Math.max(0, Math.min(next, Math.max(0, agentsTotal - 1)));
+    await refresh();
+  }
+
   // Online window for the per-row dot. The AUTHORITATIVE connected/disconnected
   // split is the /agents/summary tally (server applies the configured threshold);
   // this dot mirrors the default 5-minute window for an at-a-glance row hint.
@@ -66,11 +79,21 @@
   async function refresh() {
     error = "";
     try {
-      [agents, tokens, groups] = await Promise.all([
-        listAgents(),
+      const [page, toks, grps] = await Promise.all([
+        listAgents(AGENTS_PAGE, agentsOffset),
         listEnrollmentTokens(),
         listConfigGroups(),
       ]);
+      agents = page.items;
+      agentsTotal = page.total;
+      // A shrink (revoke-purge on the last page) can strand the offset past
+      // the end — snap back and refetch the final page.
+      if (agentsOffset > 0 && agentsOffset >= page.total) {
+        agentsOffset = Math.max(0, (Math.ceil(page.total / AGENTS_PAGE) - 1) * AGENTS_PAGE);
+        agents = (await listAgents(AGENTS_PAGE, agentsOffset)).items;
+      }
+      tokens = toks;
+      groups = grps;
       await refreshSummary();
     } catch (e) {
       error = errDetail(e);
@@ -438,26 +461,30 @@
     <p class="mt-1 text-xs text-slate-400">{summary.total} agent(s) total.</p>
   {/if}
 
-  <!-- Agents table -->
-  <h3 class="mt-8 font-medium">Registered agents</h3>
-  {#if agents.length === 0}
-    <p class="py-2 text-slate-400">No agents registered.</p>
-  {:else}
-    <div class="mt-1 overflow-x-auto">
-      <table class="w-full min-w-[56rem] text-sm">
-        <thead class="text-left text-slate-500">
-          <tr class="border-b border-slate-200 dark:border-slate-800">
-            <th class="py-2 pr-3 font-medium">Name</th>
-            <th class="py-2 pr-3 font-medium">Hostname</th>
-            <th class="py-2 pr-3 font-medium">Platform</th>
-            <th class="py-2 pr-3 font-medium">Status</th>
-            <th class="py-2 pr-3 font-medium">Online</th>
-            <th class="py-2 pr-3 font-medium">Config group</th>
-            <th class="py-2 pr-3 font-medium">Version</th>
-            <th class="py-2 text-right font-medium">Actions</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+  <!-- Registered agents renders at the BOTTOM of the page (below enrollment +
+       config groups): in a big fleet it is the longest element, and it pages
+       server-side (AGENTS_PAGE per window) so thousands of agents never land
+       in one response. Defined as a snippet here, rendered at the end. -->
+  {#snippet registeredAgents()}
+    <h3 class="mt-8 font-medium">Registered agents</h3>
+    {#if agentsTotal === 0}
+      <p class="py-2 text-slate-400">No agents registered.</p>
+    {:else}
+      <div class="mt-1 overflow-x-auto">
+        <table class="w-full min-w-[56rem] text-sm">
+          <thead class="text-left text-slate-500">
+            <tr class="border-b border-slate-200 dark:border-slate-800">
+              <th class="py-2 pr-3 font-medium">Name</th>
+              <th class="py-2 pr-3 font-medium">Hostname</th>
+              <th class="py-2 pr-3 font-medium">Platform</th>
+              <th class="py-2 pr-3 font-medium">Status</th>
+              <th class="py-2 pr-3 font-medium">Online</th>
+              <th class="py-2 pr-3 font-medium">Config group</th>
+              <th class="py-2 pr-3 font-medium">Version</th>
+              <th class="py-2 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
           {#each agents as a (a.id)}
             <tr class="align-middle">
               <td class="py-2 pr-3 font-medium">{a.name}</td>
@@ -501,10 +528,24 @@
               </td>
             </tr>
           {/each}
-        </tbody>
-      </table>
-    </div>
-  {/if}
+          </tbody>
+        </table>
+      </div>
+      <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
+        <span>
+          {agentsOffset + 1}–{Math.min(agentsOffset + AGENTS_PAGE, agentsTotal)} of {agentsTotal}
+        </span>
+        <button
+          class="rounded border border-slate-300 px-2 py-0.5 disabled:opacity-40 dark:border-slate-700"
+          onclick={() => agentsPage(-1)}
+          disabled={agentsOffset === 0}>Prev</button>
+        <button
+          class="rounded border border-slate-300 px-2 py-0.5 disabled:opacity-40 dark:border-slate-700"
+          onclick={() => agentsPage(1)}
+          disabled={agentsOffset + AGENTS_PAGE >= agentsTotal}>Next</button>
+      </div>
+    {/if}
+  {/snippet}
 
   <!-- Enrollment & installer card -->
   <div class="mt-8 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
@@ -689,6 +730,8 @@
       </div>
     {/if}
   </div>
+
+  {@render registeredAgents()}
 </div>
 
 <!-- Config-group create/edit dialog -->

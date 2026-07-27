@@ -266,8 +266,8 @@ async def test_list_and_revoke_agent(client):
         )
     ).json()["agent_id"]
 
-    lst = (await c.get("/api/v1/agents")).json()
-    assert len(lst) == 1 and lst[0]["status"] == "pending"
+    page = (await c.get("/api/v1/agents")).json()
+    assert page["total"] == 1 and page["items"][0]["status"] == "pending"
 
     d = await c.delete(f"/api/v1/agents/{aid}")
     assert d.status_code == 200
@@ -366,7 +366,8 @@ async def test_purge_pending_agent_hard_deletes(client):
 
     d = await c.delete(f"/api/v1/agents/{aid}?purge=true")
     assert d.status_code == 200
-    assert (await c.get("/api/v1/agents")).json() == []
+    page = (await c.get("/api/v1/agents")).json()
+    assert page["items"] == [] and page["total"] == 0
     # gone means gone: a second purge is a 404, not idempotent-200 like revoke.
     assert (await c.delete(f"/api/v1/agents/{aid}?purge=true")).status_code == 404
 
@@ -487,3 +488,37 @@ async def test_admin_scope_required(db_maker, monkeypatch):
         )
         assert reg.status_code == 401  # unknown token, reached the handler
     app.dependency_overrides.clear()
+
+
+async def test_list_agents_paginates(client):
+    """GET /agents pages server-side (a fleet can reach thousands): total is
+    the full count, items is the requested window (newest first), limit is
+    capped at 200, offset never goes negative."""
+    c, _, _ = client
+    for i in range(5):
+        raw = (await c.post("/api/v1/agents/enrollment-tokens", json={})).json()[
+            "token"
+        ]
+        r = await c.post(
+            "/api/v1/agents/register",
+            json={"token": raw, "hostname": f"h{i}", "platform": "linux",
+                  "name": f"agent-{i}"},
+        )
+        assert r.status_code == 201, r.text
+
+    page = (await c.get("/api/v1/agents?limit=2&offset=0")).json()
+    assert page["total"] == 5
+    assert page["limit"] == 2 and page["offset"] == 0
+    assert [a["name"] for a in page["items"]] == ["agent-4", "agent-3"]
+
+    page2 = (await c.get("/api/v1/agents?limit=2&offset=2")).json()
+    assert [a["name"] for a in page2["items"]] == ["agent-2", "agent-1"]
+
+    tail = (await c.get("/api/v1/agents?limit=2&offset=4")).json()
+    assert [a["name"] for a in tail["items"]] == ["agent-0"]
+    assert tail["total"] == 5
+
+    # bounds: limit capped, negatives clamped
+    capped = (await c.get("/api/v1/agents?limit=99999&offset=-3")).json()
+    assert capped["limit"] == 200 and capped["offset"] == 0
+    assert len(capped["items"]) == 5

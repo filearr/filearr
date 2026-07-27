@@ -1,18 +1,18 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>filearr</Name>
-  <Repository>ghcr.io/CHANGEME/filearr:latest</Repository>
-  <Registry>https://ghcr.io/CHANGEME/filearr</Registry>
+  <Repository>ghcr.io/pwsh/filearr:latest</Repository>
+  <Registry>https://ghcr.io/pwsh/filearr</Registry>
   <Network>filearr</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
-  <Project>https://github.com/CHANGEME/filearr</Project>
+  <Support>https://github.com/pwsh/filearr/discussions</Support>
+  <Project>https://github.com/pwsh/filearr</Project>
   <Overview>Unified media catalog and typo-tolerant search over mixed libraries (video, music, audiobooks, samples, images, 3D models, documents, spreadsheets). Scans filesystems directly; Postgres is the source of truth, Meilisearch a rebuildable search projection. Public REST API for search and metadata updates.&#13;&#10;&#13;&#10;REQUIRES: the filearr-postgres and filearr-meilisearch containers (install first), and a user-defined Docker network named 'filearr' so containers resolve each other by name. Create it once in the Unraid terminal:  docker network create filearr&#13;&#10;&#13;&#10;After first start, initialise the database once from the container console:  python scripts/init_db.py</Overview>
   <Category>MediaApp:Other Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8484]/</WebUI>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/CHANGEME/filearr/main/frontend/public/icon.png</Icon>
+  <Icon>https://raw.githubusercontent.com/pwsh/filearr/main/frontend/public/icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <Requires>filearr-postgres, filearr-meilisearch, docker network 'filearr'</Requires>
   <Config Name="WebUI Port" Target="8000" Default="8484" Mode="tcp" Description="Web interface / API port" Type="Port" Display="always" Required="true" Mask="false">8484</Config>

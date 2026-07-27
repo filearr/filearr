@@ -199,6 +199,26 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
         medians = {r.library_id: (float(r.median), int(r.runs)) for r in rows}
     except Exception:  # noqa: BLE001 — the annotation must never break listing
         medians = {}
+    # Agent-owned annotation: central never scans these libraries, so instead
+    # of a (rightly) empty last_scan the console shows the owning agent's
+    # replication heartbeat + reconcile watermark. One IN-query, best-effort.
+    agent_rows: dict = {}
+    agent_ids = {
+        lib.source_agent_id for lib in libraries if lib.source_agent_id is not None
+    }
+    if agent_ids:
+        try:
+            from filearr.agentsync import agent_status
+            from filearr.models import Agent
+
+            agent_rows = {
+                a.id: a
+                for a in (
+                    await session.execute(select(Agent).where(Agent.id.in_(agent_ids)))
+                ).scalars()
+            }
+        except Exception:  # noqa: BLE001 — annotation only, never break listing
+            agent_rows = {}
 
     out: list[LibraryOut] = []
     for library in libraries:
@@ -231,7 +251,14 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
                 median_files_per_s=(medians.get(library.id) or (None, 0))[0],
                 throughput_runs=(medians.get(library.id) or (None, 0))[1],
             )
-        out.append(_library_out(library, last_scan))
+        lo = _library_out(library, last_scan)
+        agent = agent_rows.get(library.source_agent_id)
+        if agent is not None:
+            lo.agent_name = agent.name
+            lo.agent_status = agent_status(agent)
+            lo.agent_last_seen_at = agent.last_seen_at
+            lo.agent_last_reconcile_at = agent.last_reconcile_at
+        out.append(lo)
     return out
 
 

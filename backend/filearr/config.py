@@ -323,16 +323,26 @@ class Settings(BaseSettings):
     extract_backpressure_low_load: float = 0.60  # recovery threshold
     extract_backpressure_sample_seconds: float = 15.0
 
-    # --- FIX-8: procrastinate job-history retention ------------------------
-    # Terminal procrastinate rows (succeeded / failed / cancelled / aborted)
-    # older than this window are hard-deleted by the daily ``purge_job_history``
-    # maintenance task so the failed-jobs list (Admin + Jobs pages) and the
-    # succeeded-job backlog can never grow unbounded. todo/doing jobs are NEVER
-    # touched regardless of age. Override via FILEARR_JOB_HISTORY_RETENTION_DAYS.
-    # Note: because succeeded rows also power the Jobs page queue-card "done"
-    # counters + the extract-rate ETA, those become WINDOWED (last N days) once a
-    # purge has run — healthier, not a regression. Default 14d.
+    # --- FIX-8/FIX-17: procrastinate job-history retention ------------------
+    # Terminal procrastinate rows older than these windows are hard-deleted by
+    # the (now HOURLY) ``purge_job_history`` maintenance task. todo/doing jobs
+    # are NEVER touched regardless of age.
+    #
+    # FIX-17 split the windows by status. SUCCEEDED rows are pure history and
+    # utterly dominate the table — one full rescan of a 1M-item library mints
+    # millions of succeeded extract/thumbs/index rows within hours, and on
+    # 2026-07-26 the live box's 3.4M-row table drove procrastinate_fetch_job
+    # to ~56s per call: the worker starved at ~2 jobs/min and extraction
+    # appeared "stalled". They now age out on a SHORT hours window. FAILED /
+    # cancelled / aborted rows are forensic signal (the Admin failed-jobs
+    # list + §18 job_errors annex) and keep the long days window.
+    # Overrides: FILEARR_JOB_HISTORY_RETENTION_DAYS (failed etc.),
+    # FILEARR_JOB_HISTORY_SUCCEEDED_RETENTION_HOURS (succeeded).
+    # Note: succeeded rows power the Jobs page queue-card "done" counters +
+    # the extract-rate ETA, so those become WINDOWED (last N hours) — the ETA
+    # window (rate math) is far shorter than 48h, so it is unaffected.
     job_history_retention_days: int = 14
+    job_history_succeeded_retention_hours: int = 48
 
     # --- P4-T9: ItemVersion audit retention -------------------------------
     # Attributed extractor-sourced audit rows (source='scan'/'extract:<type>')

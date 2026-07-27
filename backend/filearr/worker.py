@@ -812,17 +812,25 @@ async def purge_security_events(timestamp: int) -> int:
     return result.rowcount or 0
 
 
-# --- FIX-8: procrastinate job-history retention -----------------------------
+# --- FIX-8/FIX-17: procrastinate job-history retention ----------------------
 # The failed-jobs list on the Admin + Jobs pages (and the succeeded-job backlog
 # that powers the queue-card "done" counters + the extract-rate ETA) grew
-# UNBOUNDED — procrastinate never purges terminal rows on its own. This daily
-# maintenance task hard-deletes terminal rows (succeeded / failed / cancelled /
-# aborted) whose most recent event is older than
-# FILEARR_JOB_HISTORY_RETENTION_DAYS, via the vetted JobManager.delete_old_jobs
-# query (age is measured from the latest procrastinate_events row — there is no
-# finished_at column on procrastinate_jobs). todo/doing jobs are NEVER touched
-# (they are not final states). Runs at 04:50, clear of the other 04:xx
-# maintenance jobs. Deleted counts are logged so an operator can see the trim.
+# UNBOUNDED — procrastinate never purges terminal rows on its own. This
+# maintenance task hard-deletes terminal rows via the vetted
+# JobManager.delete_old_jobs query (age is measured from the latest
+# procrastinate_events row — there is no finished_at column on
+# procrastinate_jobs). todo/doing jobs are NEVER touched (not final states).
+#
+# FIX-17 (live incident 2026-07-26): daily-at-04:50 with one 14-day window was
+# the wrong shape for succeeded rows. A full rescan of the 1M-item library
+# minted ~3.4M succeeded extract/thumbs/index rows in ~48h; at that mass
+# procrastinate_fetch_job ran ~56s per call, the concurrency-4 worker starved
+# at ~2 jobs/min, extraction "stalled" — and this purge sat wedged in the very
+# maintenance backlog it exists to prevent. Now: HOURLY at :50, and succeeded
+# rows age out on their own short window
+# (FILEARR_JOB_HISTORY_SUCCEEDED_RETENTION_HOURS, default 48) while failed/
+# cancelled/aborted keep the long forensic window
+# (FILEARR_JOB_HISTORY_RETENTION_DAYS). Deleted counts are logged per status.
 #
 # Count (grouped by final status) of the rows delete_old_jobs would remove, for
 # the log line. Mirrors procrastinate's delete_old_jobs predicate EXACTLY (latest
@@ -870,10 +878,29 @@ async def purge_job_history_now() -> dict:
         return {"deleted": 0, "by_status": {}}
 
     nb_hours = get_settings().job_history_retention_days * 24
-    rows = await connector.execute_query_all_async(_PURGE_COUNT_SQL, nb_hours=nb_hours)
-    by_status = {row["status"]: int(row["n"]) for row in rows}
+    succ_hours = get_settings().job_history_succeeded_retention_hours
+    # Two windows, two counts (the SQL groups by status; take succeeded from
+    # the short-window pass, everything else from the long one).
+    rows_long = await connector.execute_query_all_async(
+        _PURGE_COUNT_SQL, nb_hours=nb_hours
+    )
+    by_status = {
+        row["status"]: int(row["n"])
+        for row in rows_long
+        if row["status"] != "succeeded"
+    }
+    rows_succ = await connector.execute_query_all_async(
+        _PURGE_COUNT_SQL, nb_hours=succ_hours
+    )
+    for row in rows_succ:
+        if row["status"] == "succeeded":
+            by_status["succeeded"] = int(row["n"])
     deleted = sum(by_status.values())
 
+    # FIX-17: succeeded first on its SHORT window (delete_old_jobs removes
+    # ONLY succeeded rows unless include_* flags widen it)...
+    await manager.delete_old_jobs(succ_hours)
+    # ...then the long forensic window for failed/cancelled/aborted.
     await manager.delete_old_jobs(
         nb_hours,
         include_failed=True,
@@ -915,15 +942,16 @@ async def purge_job_history_now() -> dict:
     return {"deleted": deleted, "by_status": by_status}
 
 
-@proc_app.periodic(cron="50 4 * * *")
+@proc_app.periodic(cron="50 * * * *")  # FIX-17: hourly (was daily 04:50)
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.purge_job_history",
     queueing_lock="purge-job-history",  # FIX-8: no retry (periodic re-runs)
 )
 async def purge_job_history(timestamp: int) -> int:
-    """Maintenance tick: hard-delete terminal procrastinate rows past the
-    retention window (FIX-8). Returns the number of rows deleted."""
+    """Maintenance tick: hard-delete terminal procrastinate rows past their
+    retention windows (FIX-8/FIX-17: succeeded = short hours window, other
+    terminal states = long days window). Returns the number of rows deleted."""
     return (await purge_job_history_now())["deleted"]
 
 

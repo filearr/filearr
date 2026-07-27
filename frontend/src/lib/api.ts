@@ -322,6 +322,11 @@ export interface LastScan {
   throughput_runs?: number;
 }
 
+/** Agent-owned library annotation (GET /libraries): the owning agent's console
+ *  identity + freshness. Central never scans these libraries, so the honest
+ *  "last activity" is the agent's replication heartbeat + reconcile watermark.
+ *  All null on centrally-scanned libraries. Declared on Library below. */
+
 export interface Library {
   id: string;
   name: string;
@@ -358,6 +363,16 @@ export interface Library {
   // location has no UNC form). The UI renders whichever spelling the viewer's OS
   // wants; see lib/osFormat.ts.
   share_unc_effective: string | null;
+  /** P5-T4: non-null when this library's content is owned by a remote agent
+   *  (replicated in; central never scans it — scan controls are refused). */
+  source_agent_id: string | null;
+  /** Agent-owned annotation: owning agent's name/status + replication
+   *  heartbeat and reconcile watermark (the honest "last sync" — central
+   *  never scans these). All null for centrally-scanned libraries. */
+  agent_name: string | null;
+  agent_status: string | null;
+  agent_last_seen_at: string | null;
+  agent_last_reconcile_at: string | null;
 }
 
 export interface ScanRun {
@@ -2221,7 +2236,17 @@ export interface AgentOut {
   config_group_id: string | null;
 }
 
-export const listAgents = () => request<AgentOut[]>("/agents");
+/** Paginated registered-agents listing — a fleet can reach hundreds or
+ *  thousands of agents, so the console pages server-side (limit capped 200). */
+export interface AgentPage {
+  items: AgentOut[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export const listAgents = (limit = 50, offset = 0) =>
+  request<AgentPage>(`/agents?limit=${limit}&offset=${offset}`);
 
 export const listEnrollmentTokens = () =>
   request<EnrollmentTokenOut[]>("/agents/enrollment-tokens");

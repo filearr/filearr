@@ -37,6 +37,18 @@
   // P5-T1: the distributed-agent fleet panel is opt-in (FILEARR_AGENTS_ENABLED).
 
   let libraries = $state<Library[]>([]);
+  // Agent-owned libraries are REPLICATED in — central never scans them, so
+  // they get their own section (agent identity + replication freshness)
+  // instead of rendering in the scan table with controls that only 422 and a
+  // forever-empty "Last scan" column.
+  const centralLibraries = $derived(libraries.filter((l) => !l.source_agent_id));
+  const agentLibraries = $derived(libraries.filter((l) => !!l.source_agent_id));
+
+  function agentStatusClass(s: string | null): string {
+    if (s === "active") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
+    if (s === "revoked") return "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300";
+    return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
+  }
   let scans = $state<ScanRun[]>([]);
   let error = $state("");
   let busy = $state<Record<string, boolean>>({});
@@ -629,7 +641,7 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-        {#each libraries as lib (lib.id)}
+        {#each centralLibraries as lib (lib.id)}
           {@const scan = latestScan(lib.id)}
           {@const ec = errorCounts[lib.id] ?? 0}
           {@const running = scan?.status === "running"}
@@ -848,6 +860,96 @@
       </tbody>
     </table>
   </div>
+
+  {#if agentLibraries.length > 0}
+    <h2 class="mt-8 text-lg font-semibold">Agent libraries</h2>
+    <p class="mt-1 text-xs text-slate-500">
+      Replicated in by remote agents — central never scans these, so freshness is
+      the owning agent's replication heartbeat (last sync) and full-manifest
+      reconcile watermark, not a scan date. Manage the fleet on the
+      <a class="underline" href="#/agents">Agents</a> page.
+    </p>
+    <div class="mt-3 overflow-x-auto">
+      <table class="w-full min-w-[52rem] text-sm">
+        <thead>
+          <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
+            <th class="py-2 pr-3 font-medium">Name</th>
+            <th class="py-2 pr-3 font-medium">Agent</th>
+            <th class="py-2 pr-3 font-medium">Agent status</th>
+            <th class="py-2 pr-3 font-medium">Last sync</th>
+            <th class="py-2 pr-3 font-medium">Last reconcile</th>
+            <th class="py-2 pr-3 font-medium">Errors</th>
+            <th class="py-2 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+          {#each agentLibraries as lib (lib.id)}
+            {@const ec = errorCounts[lib.id] ?? 0}
+            <tr class="align-top">
+              <td class="py-2 pr-3 font-medium">
+                {lib.name}
+                {#if !lib.enabled}<span class="ml-1 rounded bg-slate-200 px-1 text-[10px] text-slate-500 dark:bg-slate-800">off</span>{/if}
+              </td>
+              <td class="py-2 pr-3">{lib.agent_name ?? "unknown"}</td>
+              <td class="py-2 pr-3">
+                <span class="rounded-full px-2 py-0.5 text-xs font-medium {agentStatusClass(lib.agent_status)}">
+                  {lib.agent_status ?? "unknown"}
+                </span>
+              </td>
+              <td class="py-2 pr-3 text-slate-500"
+                title={lib.agent_last_seen_at ? new Date(lib.agent_last_seen_at).toLocaleString() : "the agent has never replicated"}>
+                {lib.agent_last_seen_at ? relTime(lib.agent_last_seen_at) : "never"}
+              </td>
+              <td class="py-2 pr-3 text-slate-500"
+                title={lib.agent_last_reconcile_at ? new Date(lib.agent_last_reconcile_at).toLocaleString() : "no full-manifest reconcile yet"}>
+                {lib.agent_last_reconcile_at ? relTime(lib.agent_last_reconcile_at) : "never"}
+              </td>
+              <td class="whitespace-nowrap py-2 pr-3">
+                <button
+                  class="rounded-full px-2 py-0.5 text-xs font-medium {ec > 0 ? 'bg-red-500 text-white' : 'bg-slate-200 text-slate-500 dark:bg-slate-800'}"
+                  title={ec > 0 ? "Show failing items" : "No extraction errors"}
+                  onclick={() => toggleErrors(lib.id)}>
+                  {ec}
+                </button>
+              </td>
+              <td class="py-2 text-right">
+                <div class="flex justify-end gap-1">
+                  <button
+                    class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                    onclick={() => gotoBrowse(lib.id, "")}>Browse</button>
+                  <button
+                    class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                    onclick={() => (editing = lib)}>Edit</button>
+                  <button
+                    class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
+                    onclick={() => (deleting = lib)}>Delete</button>
+                </div>
+              </td>
+            </tr>
+            {#if expanded[lib.id]}
+              <tr>
+                <td colspan="7" class="bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
+                  {#if (failing[lib.id]?.length ?? 0) === 0}
+                    <span class="text-slate-500">No failing items.</span>
+                  {:else}
+                    <ul class="space-y-1">
+                      {#each failing[lib.id] as f (f.id)}
+                        <li class="flex items-baseline gap-2">
+                          <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600 dark:bg-slate-700 dark:text-slate-300">{f.kind}</span>
+                          <span class="font-mono text-slate-600 dark:text-slate-300">{f.rel_path}</span>
+                          <span class="text-red-500">— {f.error}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </td>
+              </tr>
+            {/if}
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
 
   <h2 class="mt-8 text-lg font-semibold">Add library</h2>
   <form class="mt-3 flex max-w-xl flex-col gap-3" onsubmit={addLibrary}>

@@ -173,8 +173,22 @@ services:
       POSTGRES_USER: filearr
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-filearr}
       POSTGRES_DB: filearr
-    # PG18 async I/O: 'worker' io_method is the default — no custom command needed.
+    # PG18 async I/O: 'worker' io_method is the default.
     # (A wrong/unknown -c parameter makes postgres exit fatally at boot.)
+    # FIX-17 memory tuning: the image default shared_buffers=128MB collapsed to
+    # a 56% cache-hit ratio on the live 1M-item catalog (procrastinate_fetch_job
+    # ran 56s; the worker starved at ~2 jobs/min and extraction stalled).
+    # Sized for the standard 8GB CT alongside Meilisearch + app + worker;
+    # effective_cache_size is planner ADVICE (no allocation), so it can be
+    # generous. Override via POSTGRES_SHARED_BUFFERS if the host is smaller.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - maintenance_work_mem=256MB
     volumes:
       - pgdata:/var/lib/postgresql   # PG18+ image convention: mount the PARENT, not .../data
     healthcheck:

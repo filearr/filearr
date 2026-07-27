@@ -6,9 +6,9 @@ Five Community Applications–format templates (`Container version="2"`):
 |---|---|---|
 | 1 | `filearr-postgres.xml` | postgres:18.4 (source of truth + job queue — back this up) |
 | 2 | `filearr-meilisearch.xml` | getmeili/meilisearch:v1.49.0 (disposable, rebuildable index) |
-| 3 | `filearr.xml` | ghcr.io/CHANGEME/filearr (web UI + API, port 8484) |
+| 3 | `filearr.xml` | ghcr.io/pwsh/filearr (web UI + API, port 8484) |
 | 4 | `filearr-worker.xml` | same image, Post Arguments run the Procrastinate worker |
-| — | `filearr-agent.xml` | ghcr.io/CHANGEME/filearr-agent (standalone inventory agent — standalone install, needs only a central URL + enrollment token) |
+| — | `filearr-agent.xml` | ghcr.io/pwsh/filearr-agent (standalone inventory agent — standalone install, needs only a central URL + enrollment token) |
 
 `filearr-agent` is independent of the stack above: install it when this Unraid
 box should *feed* a central Filearr running elsewhere (it inventories
@@ -42,8 +42,8 @@ console. Full runbook: `docs/ops/agents.md` §12.
 - Port 5432/7700 mappings are intentionally unmapped by default; the stack talks
   over the `filearr` network internally.
 - Publishing to Community Applications later: submit via ca.unraid.net/submit
-  (needs HTTPS PNG icon, support thread, overview — all present except the
-  final icon/repo URLs marked CHANGEME).
+  (needs HTTPS PNG icon, support thread, overview — all present; the templates
+  point at the real ghcr.io/pwsh images and github.com/pwsh/filearr URLs).
 - **TLS (OPS-T1):** these CA templates ship the app over plain HTTP on port 8484.
   For HTTPS, either (a) put the app behind Unraid's built-in reverse proxy /
   SWAG / Nginx-Proxy-Manager (recommended on Unraid — real cert, no per-client

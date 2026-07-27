@@ -331,3 +331,37 @@ async def test_clear_failed_endpoint_requires_admin(pg_uri, monkeypatch):
         app.dependency_overrides.clear()
         await engine.dispose()
         get_settings.cache_clear()
+
+
+async def test_purge_succeeded_short_window_fix17(proc_app_pg, monkeypatch):
+    """FIX-17: succeeded rows age out on their own SHORT hours window while
+    failed/cancelled/aborted keep the long forensic window. A succeeded row
+    older than the succeeded window but WELL inside the long retention is
+    deleted; a failed row of the same age survives (its error/traceback is
+    forensic signal). The 2026-07-26 stall was 3.4M succeeded rows minted in
+    48h that only a 14-day window would ever have touched."""
+    from filearr.config import get_settings
+    from filearr.worker import purge_job_history_now
+
+    monkeypatch.setattr(
+        get_settings(), "job_history_succeeded_retention_hours", 48
+    )
+    mid = 72  # older than 48h succeeded window, far inside RETENTION_HOURS
+
+    with _conn(proc_app_pg) as conn:
+        succ_mid = _insert_job(conn, status="succeeded")
+        fail_mid = _insert_job(conn, status="failed")
+        _insert_event(conn, succ_mid, hours_ago=mid)
+        _insert_event(conn, fail_mid, hours_ago=mid)
+
+        succ_fresh = _insert_job(conn, status="succeeded")
+        _insert_event(conn, succ_fresh, hours_ago=1)
+
+    result = await purge_job_history_now()
+
+    assert result["by_status"].get("succeeded") == 1
+    assert result["by_status"].get("failed") is None  # inside long window
+    with _conn(proc_app_pg) as conn:
+        remaining = _ids(conn)
+    assert succ_mid not in remaining
+    assert {fail_mid, succ_fresh} <= remaining

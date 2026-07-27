@@ -138,6 +138,16 @@ class LibraryOut(LibraryIn):
     # agent-owned library from a locally-scanned one (its scan controls are
     # rejected server-side). NULL for an ordinary central-scanned library.
     source_agent_id: uuid.UUID | None = None
+    # Agent-owned annotation (GET /libraries): the owning agent's console
+    # identity + freshness, so the Admin page can show a truthful "last sync"
+    # for replicated libraries — central never scans them, so `last_scan` is
+    # rightly empty and the agent's replication heartbeat (`last_seen_at`) /
+    # reconcile watermark are the honest equivalents. All null for central
+    # libraries (and on the single-library GET, which no console list uses).
+    agent_name: str | None = None
+    agent_status: str | None = None
+    agent_last_seen_at: datetime | None = None
+    agent_last_reconcile_at: datetime | None = None
     # FIX-10: most-recent scan pulled straight from scan_runs (survives redeploy).
     last_scan: LastScan | None = None
     # OPS-T7: the EFFECTIVE user-facing share prefix + where it came from.

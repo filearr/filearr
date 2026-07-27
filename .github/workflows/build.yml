@@ -55,6 +55,13 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
+          # `latest` only auto-applies on SEMVER tag pushes by default; our
+          # releases are branch pushes to main, which previously produced ONLY
+          # a `:main` tag — while the Unraid templates and docs say `:latest`.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -95,6 +102,11 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}-agent
+          # Same `latest` fix as the main image job above.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ./agent

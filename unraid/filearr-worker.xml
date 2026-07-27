@@ -1,17 +1,17 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>filearr-worker</Name>
-  <Repository>ghcr.io/CHANGEME/filearr:latest</Repository>
-  <Registry>https://ghcr.io/CHANGEME/filearr</Registry>
+  <Repository>ghcr.io/pwsh/filearr:latest</Repository>
+  <Registry>https://ghcr.io/pwsh/filearr</Registry>
   <Network>filearr</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
-  <Project>https://github.com/CHANGEME/filearr</Project>
+  <Support>https://github.com/pwsh/filearr/discussions</Support>
+  <Project>https://github.com/pwsh/filearr</Project>
   <Overview>Background worker for filearr: library scans, metadata extraction, hashing, search-index sync, recycle-bin purge. Same image as the main app, different command (set via Post Arguments). Requires the same 'filearr' Docker network and identical DB/Meilisearch settings as the filearr container. Scale concurrency with --concurrency N in Post Arguments.</Overview>
   <Category>MediaApp:Other Tools:Utilities</Category>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/CHANGEME/filearr/main/frontend/public/icon.png</Icon>
+  <Icon>https://raw.githubusercontent.com/pwsh/filearr/main/frontend/public/icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs>procrastinate --app=filearr.worker.proc_app worker --concurrency 4</PostArgs>
   <Requires>filearr, filearr-postgres, filearr-meilisearch, docker network 'filearr'</Requires>

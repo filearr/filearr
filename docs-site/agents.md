@@ -71,7 +71,7 @@ Logging is definable per install or per configuration group:
 ## Running the agent in Docker (Unraid)
 
 For NAS boxes — Unraid first among them — the agent also ships as a
-standalone container: `ghcr.io/<owner>/filearr-agent`. The image bundles the
+standalone container: `ghcr.io/pwsh/filearr-agent`. The image bundles the
 static agent binary, `ffmpeg` (for video poster thumbnails), and an
 entrypoint that enrolls on first start, then runs the replication daemon
 alongside interval rescans of your mounted shares.
@@ -109,7 +109,7 @@ pool); the agent runs as `PUID`/`PGID` 99/100 and only ever connects
 ```yaml
 services:
   filearr-agent:
-    image: ghcr.io/<owner>/filearr-agent:latest
+    image: ghcr.io/pwsh/filearr-agent:latest
     restart: unless-stopped
     environment:
       FILEARR_AGENT_CENTRAL_URL: https://filearr.example.com

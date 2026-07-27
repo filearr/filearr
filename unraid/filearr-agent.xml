@@ -1,17 +1,17 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>filearr-agent</Name>
-  <Repository>ghcr.io/CHANGEME/filearr-agent:latest</Repository>
-  <Registry>https://ghcr.io/CHANGEME/filearr-agent</Registry>
+  <Repository>ghcr.io/pwsh/filearr-agent:latest</Repository>
+  <Registry>https://ghcr.io/pwsh/filearr-agent</Registry>
   <Network>bridge</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
-  <Project>https://github.com/CHANGEME/filearr</Project>
+  <Support>https://github.com/pwsh/filearr/discussions</Support>
+  <Project>https://github.com/pwsh/filearr</Project>
   <Overview>Standalone Filearr inventory agent: walks your Unraid shares into a local offline-first catalog (SQLite) and replicates the inventory to your central Filearr server over mutual TLS. Central does the heavy metadata extraction after replication; the agent stays a lightweight, read-only walker.&#13;&#10;&#13;&#10;FIRST START: mint an enrollment token in the Filearr console (Agents -&gt; Mint enrollment token, single-use, short TTL) and paste it below together with your central URL. The agent enrolls once, stores its identity in appdata, and never needs the token again.&#13;&#10;&#13;&#10;The /mnt/user mount is 1:1 and read-only, so the paths central records match your real Unraid paths — no path mapping needed. Scans re-run on an interval (inotify is unreliable on /mnt/user's FUSE mount, so there is no watch mode here).&#13;&#10;&#13;&#10;If your central Filearr runs on this same Unraid box, switch Network to the 'filearr' custom network so the URL can be http://filearr:8000.</Overview>
   <Category>MediaApp:Other Tools:Utilities</Category>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/CHANGEME/filearr/main/frontend/public/icon.png</Icon>
+  <Icon>https://raw.githubusercontent.com/pwsh/filearr/main/frontend/public/icon.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <Requires>a running central Filearr server (any host) + one enrollment token minted from its console</Requires>
   <Config Name="Config" Target="/config" Default="/mnt/user/appdata/filearr-agent" Mode="rw" Description="Agent identity (key/cert), local SQLite index + replication outbox, scan config. Keep on the cache pool." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/filearr-agent</Config>

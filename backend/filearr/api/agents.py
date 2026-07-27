@@ -179,6 +179,17 @@ class AgentOut(BaseModel):
     capabilities: dict | None = None
 
 
+class AgentPage(BaseModel):
+    """Paginated registered-agents listing. A large environment can hold
+    hundreds/thousands of agents, so ``GET /agents`` pages server-side
+    (``total`` drives a real pager; ``items`` is the requested window)."""
+
+    items: list[AgentOut]
+    total: int
+    limit: int
+    offset: int
+
+
 def _ca_bootstrap(settings) -> CaBootstrap:
     """The public CA pinning/bootstrap material handed to an agent (never a
     secret — the root fingerprint is a pin, not a credential)."""
@@ -608,16 +619,38 @@ async def agent_fleet_summary(
 
 @router.get(
     "/agents",
-    response_model=list[AgentOut],
+    response_model=AgentPage,
     dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
 )
 async def list_agents(
+    limit: int = 50,
+    offset: int = 0,
     session: AsyncSession = Depends(get_session),
-) -> list[AgentOut]:
+) -> AgentPage:
+    """Registered agents, newest first, PAGINATED — a fleet can reach hundreds
+    or thousands of agents, so the console never loads the whole table.
+    ``limit`` is capped server-side; the fleet-status tallies stay on the
+    dedicated one-query ``/agents/summary``."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    total = (
+        await session.execute(select(func.count()).select_from(Agent))
+    ).scalar_one()
     rows = (
-        await session.execute(select(Agent).order_by(Agent.created_at.desc()))
-    ).scalars().all()
-    return [_agent_out(a) for a in rows]
+        (
+            await session.execute(
+                select(Agent)
+                .order_by(Agent.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return AgentPage(
+        items=[_agent_out(a) for a in rows], total=total, limit=limit, offset=offset
+    )
 
 
 @router.delete(
