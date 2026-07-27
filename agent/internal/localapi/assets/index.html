@@ -77,9 +77,19 @@
 
     <section id="panel-logs" hidden>
       <h2 class="panel-title">Recent logs</h2>
-      <p class="hint">The last <span id="log-count">0</span> lines this process
-        emitted at its configured log level (same content as the container /
-        file log). Auto-refreshes while this tab is open.</p>
+      <p class="hint">The last <span id="log-count">0</span> lines across every
+        agent process (daemon, scans, entrypoint) at the configured log level.
+        Auto-refreshes while this tab is open.
+        <label for="log-limit" class="log-limit-label">Lines back:</label>
+        <select id="log-limit">
+          <option value="100">100</option>
+          <option value="250">250</option>
+          <option value="500" selected>500</option>
+          <option value="1000">1,000</option>
+          <option value="2500">2,500</option>
+          <option value="5000">5,000</option>
+        </select>
+      </p>
       <div id="logs-error" class="error" hidden></div>
       <pre id="log-lines" class="loglines"></pre>
     </section>

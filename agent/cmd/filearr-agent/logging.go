@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -22,7 +23,34 @@ var (
 	activeLogger *slog.Logger
 	loadedConfig *sidecar.Config
 	logCloser    interface{ Close() error }
+	resolvedLogDir string
 )
+
+// envLogStderr forces the stderr echo alongside an active file sink even when
+// stderr is not a terminal. Set in the container image: its stderr is the
+// `docker logs` stream, which must keep carrying every line when the shared
+// log dir is enabled.
+const envLogStderr = "FILEARR_AGENT_LOG_STDERR"
+
+// activeLogDir returns the log dir resolved by setupRuntime ("" = stderr-only,
+// no file sink). The web UI uses it to serve the cross-process merged log.
+func activeLogDir() string {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	return resolvedLogDir
+}
+
+// logFileNameFor gives each COMMAND its own file under the log dir: lumberjack
+// rotation is not multi-process safe on a shared path, and a containerized
+// agent runs the daemon and scans as separate concurrent processes. The daemon
+// keeps the canonical agentlog.LogFileName; everything else is suffixed.
+func logFileNameFor(command string) string {
+	if command == "run" || command == "" {
+		return agentlog.LogFileName
+	}
+	base := strings.TrimSuffix(agentlog.LogFileName, ".log")
+	return base + "-" + command + ".log"
+}
 
 // activeSidecar returns the sidecar resolved by setupRuntime, or an empty config
 // when none has been loaded (direct-call tests, or a run with no sidecar).
@@ -81,10 +109,16 @@ func setupRuntime(command string, args []string) {
 		sc.LogDir,
 	)
 
-	logger, closer, lerr := agentlog.New(agentlog.Options{Level: level, LogDir: logDir, Stderr: true})
+	forceStderr, _ := strconv.ParseBool(os.Getenv(envLogStderr))
+	opts := agentlog.Options{
+		Level: level, LogDir: logDir, Stderr: true,
+		FileName: logFileNameFor(command), ForceStderr: forceStderr,
+	}
+	logger, closer, lerr := agentlog.New(opts)
 	if lerr != nil {
 		fmt.Fprintf(os.Stderr, "filearr-agent: file logging disabled: %v\n", lerr)
 		logger, closer, _ = agentlog.New(agentlog.Options{Level: level, Stderr: true})
+		logDir = ""
 	}
 
 	runtimeMu.Lock()
@@ -94,6 +128,7 @@ func setupRuntime(command string, args []string) {
 	activeLogger = logger
 	logCloser = closer
 	loadedConfig = sc
+	resolvedLogDir = logDir
 	runtimeMu.Unlock()
 
 	agentlog.Verbose(logger, "runtime configured",

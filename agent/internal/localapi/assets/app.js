@@ -256,6 +256,8 @@
   tabs.search.addEventListener("click", function () { showTab("search"); });
   tabs.status.addEventListener("click", function () { showTab("status"); });
   tabs.logs.addEventListener("click", function () { showTab("logs"); });
+  var logLimitSel = document.getElementById("log-limit");
+  if (logLimitSel) logLimitSel.addEventListener("change", loadLogs);
 
   function kvRow(dl, key, value) {
     var dt = document.createElement("dt");
@@ -332,7 +334,9 @@
 
   function loadLogs() {
     var errBox3 = document.getElementById("logs-error");
-    fetch("/api/logs", { credentials: "same-origin" })
+    var sel = document.getElementById("log-limit");
+    var limit = sel ? sel.value : "500";
+    fetch("/api/logs?limit=" + encodeURIComponent(limit), { credentials: "same-origin" })
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) {
         errBox3.hidden = true;

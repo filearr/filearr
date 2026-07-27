@@ -46,6 +46,12 @@ ENV FILEARR_AGENT_DATA_DIR=/config
 # warning, which is correct-but-alarming in a container). Override at runtime
 # if you truly pinned a key at build time.
 ENV FILEARR_AGENT_SELF_UPDATE=false
+# Shared log dir: every agent process (daemon, scans, entrypoint) writes its
+# own rotating file here, and the web UI Logs tab merges them — that is the
+# only way scan-process lines reach the browser (the in-process ring can't
+# cross processes). LOG_STDERR keeps `docker logs` carrying every line too.
+ENV FILEARR_AGENT_LOG_DIR=/config/logs
+ENV FILEARR_AGENT_LOG_STDERR=true
 VOLUME /config
 
 # The agent's only listener is a policy-gated LOOPBACK web UI (non-loopback

@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -74,13 +75,23 @@ type Options struct {
 	// Level is the resolved threshold (default slog.LevelInfo for the zero value).
 	Level slog.Level
 	// LogDir, when non-empty, enables the rotating file sink at
-	// <LogDir>/filearr-agent.log. The directory is created if missing.
+	// <LogDir>/<FileName>. The directory is created if missing.
 	LogDir string
+	// FileName overrides the file sink's name (default LogFileName). Concurrent
+	// agent PROCESSES (the run daemon + a scan invocation in a container) must
+	// each write their own file — lumberjack rotation is not multi-process safe
+	// on a shared path — so the dispatcher derives a per-command name and the
+	// web UI merges the files back together with TailFiles.
+	FileName string
 	// Stderr forces stderr output. When a file sink is active, stderr is added
 	// only if this is true AND stderr is a terminal (so a service run does not
 	// duplicate every line into a captured stderr). When no file sink is active,
 	// stderr is always used regardless of this flag.
 	Stderr bool
+	// ForceStderr keeps stderr output alongside a file sink even when stderr is
+	// NOT a terminal. A container needs this: its stderr IS the `docker logs`
+	// stream, which must not go dark just because a shared log dir is set.
+	ForceStderr bool
 }
 
 // New builds a *slog.Logger and an io.Closer for any file sink (nil-safe to
@@ -94,16 +105,21 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 		if err := os.MkdirAll(opts.LogDir, 0o755); err != nil {
 			return nil, nil, fmt.Errorf("create log dir %s: %w", opts.LogDir, err)
 		}
+		name := opts.FileName
+		if name == "" {
+			name = LogFileName
+		}
 		lj := &lumberjack.Logger{
-			Filename:   filepath.Join(opts.LogDir, LogFileName),
+			Filename:   filepath.Join(opts.LogDir, name),
 			MaxSize:    rotateMaxSizeMiB,
 			MaxBackups: rotateMaxBackups,
 			Compress:   rotateCompress,
 		}
 		writers = append(writers, lj)
 		closer = lj
-		// A tty attachment gets a live echo alongside the file.
-		if opts.Stderr && term.IsTerminal(int(os.Stderr.Fd())) {
+		// A tty attachment gets a live echo alongside the file; a container
+		// forces the echo so `docker logs` keeps carrying every line.
+		if opts.ForceStderr || (opts.Stderr && term.IsTerminal(int(os.Stderr.Fd()))) {
 			writers = append(writers, os.Stderr)
 		}
 	} else {
@@ -162,6 +178,113 @@ func Recent() []string {
 	ringMu.Lock()
 	defer ringMu.Unlock()
 	return append([]string(nil), ringLines...)
+}
+
+// Per-file read window for TailFiles: at least 256 KiB, scaled up for deep
+// requests (~512 bytes/line budget, generous for slog text), capped at 4 MiB
+// so a hostile ?limit can't make the UI read the whole rotation set into RAM.
+const (
+	tailReadMinBytes = 256 * 1024
+	tailReadMaxBytes = 4 * 1024 * 1024
+)
+
+// TailFiles merges the tails of every uncompressed *.log file under dir
+// (daemon + scan + any other agent process, including lumberjack's rotated
+// backups) into one timestamp-ordered view, returning at most limit lines,
+// oldest first. This is the cross-PROCESS log surface for the web UI: the
+// in-process ring only ever sees the daemon's own lines, but a containerized
+// agent runs scans as separate processes whose lines land only in their file.
+// Best-effort throughout — an unreadable dir or file yields what the rest
+// provides. Sorting keys off each line's leading timestamp (slog's `time=`
+// attr or a bare RFC3339 prefix, e.g. the container entrypoint); keyless lines
+// sort with their neighbors via stable sort.
+func TailFiles(dir string, limit int) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	readBytes := int64(limit) * 512
+	if readBytes < tailReadMinBytes {
+		readBytes = tailReadMinBytes
+	}
+	if readBytes > tailReadMaxBytes {
+		readBytes = tailReadMaxBytes
+	}
+	type keyed struct{ key, line string }
+	var all []keyed
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		lines := tailLines(filepath.Join(dir, e.Name()), limit, readBytes)
+		key := ""
+		for _, ln := range lines {
+			if k := lineTimeKey(ln); k != "" {
+				key = k // keyless continuation lines inherit the last timestamp
+			}
+			all = append(all, keyed{key: key, line: ln})
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].key < all[j].key })
+	if over := len(all) - limit; over > 0 {
+		all = all[over:]
+	}
+	out := make([]string, len(all))
+	for i, k := range all {
+		out[i] = k.line
+	}
+	return out
+}
+
+// tailLines returns up to limit trailing lines of one file, reading at most
+// maxBytes from its end (a partial first line after the seek is dropped).
+func tailLines(path string, limit int, maxBytes int64) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	off, partial := int64(0), false
+	if st.Size() > maxBytes {
+		off, partial = st.Size()-maxBytes, true
+	}
+	buf := make([]byte, st.Size()-off)
+	if _, err := f.ReadAt(buf, off); err != nil && err != io.EOF {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+	if partial && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	if over := len(lines) - limit; over > 0 {
+		lines = lines[over:]
+	}
+	return lines
+}
+
+// lineTimeKey extracts a lexicographically sortable timestamp from a log line:
+// slog text lines start `time=2026-...`; the container entrypoint's lines start
+// with a bare RFC3339 stamp. Anything else yields "".
+func lineTimeKey(line string) string {
+	if rest, ok := strings.CutPrefix(line, "time="); ok {
+		if i := strings.IndexByte(rest, ' '); i > 0 {
+			return rest[:i]
+		}
+		return rest
+	}
+	if len(line) >= 20 && line[4] == '-' && line[7] == '-' && line[10] == 'T' {
+		if i := strings.IndexByte(line, ' '); i > 0 {
+			return line[:i]
+		}
+	}
+	return ""
 }
 
 // replaceLevel renders LevelVerbose as "VERBOSE" (slog would otherwise print

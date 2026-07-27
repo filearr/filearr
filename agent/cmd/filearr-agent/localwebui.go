@@ -78,8 +78,20 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 				return outbox.New(idx.DB()).CountUnsent(ctx)
 			},
 		),
-		LogsFn:     agentlog.Recent,
-		Logger:     log,
+		// Full multi-process log when a log dir is active (the container
+		// default): the daemon's ring only sees its OWN lines, but scans run as
+		// separate processes whose output lands in their per-command file —
+		// TailFiles merges every file (daemon + scan + entrypoint) by
+		// timestamp. Stderr-only installs keep the ring fallback.
+		LogsFn: func(limit int) []string {
+			if dir := activeLogDir(); dir != "" {
+				if lines := agentlog.TailFiles(dir, limit); len(lines) > 0 {
+					return lines
+				}
+			}
+			return agentlog.Recent()
+		},
+		Logger: log,
 	}
 	// The web UI records history but is given only the write-side Recorder — it
 	// cannot read history back (that surface is the socket API only).

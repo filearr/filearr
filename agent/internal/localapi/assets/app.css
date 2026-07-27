@@ -184,3 +184,9 @@ tbody tr:hover { background: var(--row-hover); }
   border-radius: 0.5rem; max-height: 32rem; overflow: auto;
   font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; word-break: break-all;
 }
+.log-limit-label { margin-left: 0.75em; }
+#log-limit {
+  font: inherit; font-size: 0.85rem; padding: 0.1rem 0.3rem;
+  border: 1px solid var(--border, #cbd5e1); border-radius: 0.35rem;
+  background: inherit; color: inherit;
+}

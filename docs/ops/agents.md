@@ -730,6 +730,8 @@ container log (no `log_dir` set); `FILEARR_AGENT_LOG_LEVEL` tunes verbosity.
 | `FILEARR_AGENT_SELF_UPDATE` | `false` in the image | `false` disables the self-update subsystem entirely (no boot check, no poll, no unpinned-key warning) — an immutable image updates by being pulled |
 | `FILEARR_AGENT_LOG_LEVEL` | `info` | error\|warn\|info\|verbose\|debug (also gates the per-batch scan progress lines) |
 | `FILEARR_AGENT_HASH_TIMEOUT_SECONDS` | `300` | Wall-clock budget per file for hashing. A corrupt/locked file on FUSE/SMB/NFS can block `read(2)` forever and freeze the whole walk at the same file every scan; past the budget the file is left unhashed and a WARN logs its path. `0` disables the bound |
+| `FILEARR_AGENT_LOG_DIR` | `/config/logs` in the image | Per-process rotating log files (daemon / scan / entrypoint each write their own; 10 MiB x 5 rotation). The web UI Logs tab merges them into one timestamped view. Empty = stderr only (native installs' default) |
+| `FILEARR_AGENT_LOG_STDERR` | `true` in the image | Keep echoing to stderr alongside the file sink even off-tty, so `docker logs` still carries every line |
 | `FILEARR_AGENT_CA_BUNDLE` | — | PEM of extra trusted server roots (private CA) |
 | `PUID` / `PGID` | `99` / `100` | uid/gid the agent runs as (Unraid nobody/users) |
 | `TZ` | `Etc/UTC` | log timestamps |

@@ -102,9 +102,11 @@ type WebUIConfig struct {
 	// Status panel renders: identity, central URL, scan config, policy view —
 	// NEVER a secret (no tokens, no key material). nil hides the panel's data.
 	SettingsFn func(ctx context.Context) (map[string]any, error)
-	// LogsFn (optional) returns recent rendered log lines (oldest first) for
-	// the Logs panel — typically agentlog.Recent. nil hides the panel's data.
-	LogsFn func() []string
+	// LogsFn (optional) returns up to limit recent rendered log lines (oldest
+	// first) for the Logs panel — the merged cross-process file tail when a
+	// log dir is active, else the in-process ring (which caps its own depth
+	// regardless of limit). nil hides the panel's data.
+	LogsFn func(limit int) []string
 	// GateInterval overrides the policy re-check cadence (test seam).
 	GateInterval time.Duration
 	Logger       *slog.Logger
@@ -552,15 +554,29 @@ func (ws *WebUIServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// handleLogs serves the recent rendered log lines (oldest first) from the
-// in-process agentlog ring — the same lines the container log / file sink got,
-// post level-filtering.
+// Log-depth bounds for handleLogs's ?limit: the floor keeps the panel useful,
+// the ceiling bounds the per-request file reads and response size.
+const (
+	logsDefaultLimit = 500
+	logsMaxLimit     = 5000
+)
+
+// handleLogs serves recent rendered log lines (oldest first): the merged
+// cross-process file tail when a log dir is active, else the in-process ring.
+// ?limit=N (default 500, max 5000) selects how many lines back.
 func (ws *WebUIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
+	limit := atoiOr(r.URL.Query().Get("limit"), logsDefaultLimit)
+	if limit < 1 {
+		limit = logsDefaultLimit
+	}
+	if limit > logsMaxLimit {
+		limit = logsMaxLimit
+	}
 	lines := []string{}
 	if ws.cfg.LogsFn != nil {
-		lines = ws.cfg.LogsFn()
+		lines = ws.cfg.LogsFn(limit)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
+	writeJSON(w, http.StatusOK, map[string]any{"lines": lines, "limit": limit})
 }
 
 func atoiOr(s string, def int) int {

@@ -19,7 +19,28 @@ SCAN_ON_START="${FILEARR_AGENT_SCAN_ON_START:-true}"
 export FILEARR_AGENT_DATA_DIR="$DATA_DIR"
 export HOME="$DATA_DIR"
 
-log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [entrypoint] $*"; }
+# Entrypoint lines go to the container log AND (when a log dir is set) to a
+# file the web UI Logs tab can merge; the size guard caps the file at ~1 MiB
+# (no lumberjack out here — it only ever accumulates a few lines per scan).
+ENTRYPOINT_LOG=""
+if [ -n "${FILEARR_AGENT_LOG_DIR:-}" ]; then
+    ENTRYPOINT_LOG="$FILEARR_AGENT_LOG_DIR/filearr-agent-entrypoint.log"
+    # Own the log dir as PUID even when the /config chown below is skipped
+    # (existing install adding the dir): the agent processes run as PUID and
+    # must be able to create their files here.
+    mkdir -p "$FILEARR_AGENT_LOG_DIR"
+    chown "$PUID:$PGID" "$FILEARR_AGENT_LOG_DIR" 2>/dev/null || true
+fi
+log() {
+    line="$(date -u +%Y-%m-%dT%H:%M:%SZ) [entrypoint] $*"
+    echo "$line"
+    if [ -n "$ENTRYPOINT_LOG" ]; then
+        if [ -f "$ENTRYPOINT_LOG" ] && [ "$(wc -c < "$ENTRYPOINT_LOG")" -gt 1048576 ]; then
+            tail -c 524288 "$ENTRYPOINT_LOG" > "$ENTRYPOINT_LOG.tmp" && mv "$ENTRYPOINT_LOG.tmp" "$ENTRYPOINT_LOG"
+        fi
+        echo "$line" >> "$ENTRYPOINT_LOG" 2>/dev/null || true
+    fi
+}
 
 mkdir -p "$DATA_DIR"
 if [ "$(stat -c '%u:%g' "$DATA_DIR")" != "$PUID:$PGID" ]; then

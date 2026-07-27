@@ -155,6 +155,13 @@ binary; the data directory is pinned to `/config`.
     pulling the new image; the enrolled identity and local index in
     `/config` carry over.
 
+!!! note "Web UI logs are the full multi-process log"
+    The image sets `FILEARR_AGENT_LOG_DIR=/config/logs`: the daemon, every
+    scan invocation, and the entrypoint each write a rotating log file
+    there, and the web UI **Logs** tab merges them into one
+    timestamp-ordered view (selectable depth, up to 5,000 lines back, via
+    `/api/logs?limit=N`). `docker logs` continues to carry the same lines.
+
 !!! tip "Poison files on network mounts"
     A corrupt or locked file on a FUSE/SMB/NFS mount can block reads
     forever, which used to freeze a scan at the same file every run. Hashing
