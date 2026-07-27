@@ -10,6 +10,7 @@ import (
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/inventory"
+	"github.com/filearr/filearr/agent/internal/outbox"
 	"github.com/filearr/filearr/agent/internal/history"
 	"github.com/filearr/filearr/agent/internal/index"
 	"github.com/filearr/filearr/agent/internal/localapi"
@@ -71,7 +72,12 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 		// Status + Logs panels (user request 2026-07-27): a read-only
 		// settings/state snapshot and the agentlog ring. No secrets — the
 		// snapshot carries paths/config/policy, never tokens or key material.
-		SettingsFn: webSettingsSnapshot(dataDir, addr, allowRemote, policyFn),
+		SettingsFn: webSettingsSnapshot(
+			dataDir, addr, allowRemote, policyFn,
+			func(ctx context.Context) (int, error) {
+				return outbox.New(idx.DB()).CountUnsent(ctx)
+			},
+		),
 		LogsFn:     agentlog.Recent,
 		Logger:     log,
 	}
@@ -107,6 +113,7 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 // panel always shows current truth.
 func webSettingsSnapshot(
 	dataDir, addr string, allowRemote bool, policy func() localapi.PolicyView,
+	outboxPending func(ctx context.Context) (int, error),
 ) func(ctx context.Context) (map[string]any, error) {
 	readJSON := func(name string) map[string]any {
 		b, err := os.ReadFile(filepath.Join(dataDir, name))
@@ -143,6 +150,19 @@ func webSettingsSnapshot(
 		if sc := readJSON("scan.json"); sc != nil {
 			snap["scan"] = sc
 		}
+		// Activity (user request 2026-07-27: "current jobs"): the live/last
+		// scan crosses over from the scan PROCESS via scan-status.json; the
+		// replication backlog is the outbox's unsent count.
+		activity := map[string]any{}
+		if st := readJSON("scan-status.json"); st != nil {
+			activity["scan"] = st
+		}
+		if outboxPending != nil {
+			if n, err := outboxPending(ctx); err == nil {
+				activity["outbox_pending"] = n
+			}
+		}
+		snap["activity"] = activity
 		pv := policy()
 		snap["policy"] = map[string]any{
 			"web_ui_enabled":       pv.WebUIEnabled,

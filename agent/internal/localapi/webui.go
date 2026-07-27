@@ -278,18 +278,18 @@ func (ws *WebUIServer) Run(ctx context.Context) error {
 	}
 }
 
-// announce prints the access URL (with the bootstrap token when auth is required)
-// to the daemon log AND stdout — the operator copies it into a browser (§2.4).
+// announce logs the access URL (with the bootstrap token when auth is
+// required) — the operator copies it into a browser (§2.4). Log-only: the
+// former bare-stdout duplicate carried no timestamp, which mattered once
+// container logs became the primary way these lines are read.
 func (ws *WebUIServer) announce(addr string, auth webAuth) {
 	base := "http://" + addr + "/"
 	pv := ws.policy()
 	if pv.AuthRequired {
 		full := base + "?token=" + auth.token
 		ws.log.Info("local web UI listening (auth required) — open the tokenized URL below", "url", full)
-		fmt.Printf("filearr local web UI: open %s\n", full)
 	} else {
 		ws.log.Info("local web UI listening (no auth required)", "url", base)
-		fmt.Printf("filearr local web UI: open %s\n", base)
 	}
 }
 

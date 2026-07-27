@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
@@ -147,13 +148,23 @@ func runScan(args []string) error {
 		EnabledGroups:     sc.EnabledGroups,
 		Taxonomy:          taxCache.Current(),
 		Hash:              hashPolicy(sc),
-		// Per-batch progress honors the configured log level (container logs at
-		// warn/error stay quiet instead of ticking every 250 files).
+		// Per-batch progress honors the configured log level (container logs
+		// at warn/error stay quiet instead of ticking every 250 files) and
+		// rides slog so every line carries a timestamp (user report: the raw
+		// Printf lines had none). Progress also persists to scan-status.json
+		// so the daemon's web UI Activity panel — a SEPARATE process — can
+		// show the running scan.
 		Progress: func(p scan.Progress) {
+			writeScanStatus(cfg.DataDir, scanStatus{
+				Root: currentRoot(), Running: true,
+				Seen: p.Seen, New: p.New, Changed: p.Changed,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
 			if !newLogger().Enabled(context.Background(), slog.LevelInfo) {
 				return
 			}
-			fmt.Printf("  ... seen=%d new=%d changed=%d\n", p.Seen, p.New, p.Changed)
+			newLogger().Info("scan progress",
+				"seen", p.Seen, "new", p.New, "changed", p.Changed)
 		},
 		// P10-T11 best-effort share discovery: attach a network-open hint to each
 		// created/modified item when a local share covers its path. A single
@@ -163,14 +174,29 @@ func runScan(args []string) error {
 
 	scanAll := func() {
 		for _, root := range sc.Roots {
+			activeScanRoot.Store(root)
 			o := opts
 			o.Root = root
 			res, err := scan.Scan(ctx, store, o)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "scan %s: %v\n", root, err)
+				newLogger().Error("scan failed", "root", root, "err", err)
+				writeScanStatus(cfg.DataDir, scanStatus{
+					Root: root, Running: false, Status: "failed",
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				})
 				continue
 			}
 			reportScan(root, res)
+			status := "finished"
+			if res.Stopped {
+				status = "stopped"
+			}
+			writeScanStatus(cfg.DataDir, scanStatus{
+				Root: root, Running: false, Status: status,
+				Seen: res.Seen, New: res.New, Changed: res.Changed,
+				Missing:   res.Missing,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
 		}
 	}
 
@@ -370,15 +396,59 @@ func hashPolicy(sc scanConfig) scan.HashPolicy {
 }
 
 func reportScan(root string, res scan.Result) {
+	log := newLogger()
 	if res.ScopeMissing {
-		fmt.Printf("scan %s: scope missing, nothing written\n", root)
+		log.Info("scan finished: scope missing, nothing written", "root", root)
 		return
 	}
 	status := "finished"
 	if res.Stopped {
 		status = "stopped (graceful)"
 	}
-	fmt.Printf("scan %s: %s — seen=%d new=%d changed=%d missing=%d moved=%d ambiguous=%d sidecars=%d linked=%d\n",
-		root, status, res.Seen, res.New, res.Changed, res.Missing, res.Moved, res.MoveAmbiguous,
-		res.Sidecars.Sidecars, res.Sidecars.Linked)
+	// slog (not Printf) so the line carries a timestamp + level like the rest
+	// of the container/service log (user report: these lines had neither).
+	log.Info("scan "+status, "root", root,
+		"seen", res.Seen, "new", res.New, "changed", res.Changed,
+		"missing", res.Missing, "moved", res.Moved,
+		"ambiguous", res.MoveAmbiguous,
+		"sidecars", res.Sidecars.Sidecars, "linked", res.Sidecars.Linked)
+}
+
+// --- scan-status seam (web UI Activity panel) -------------------------------
+// The scan runs as its own PROCESS beside the `run` daemon (the container's
+// documented model), so live progress crosses to the daemon's web UI via a
+// tiny JSON file in the data dir. Best-effort by construction: a write
+// failure never affects the scan itself.
+
+type scanStatus struct {
+	Root      string `json:"root"`
+	Running   bool   `json:"running"`
+	Seen      int    `json:"seen"`
+	New       int    `json:"new"`
+	Changed   int    `json:"changed"`
+	Missing   int    `json:"missing,omitempty"`
+	Status    string `json:"status,omitempty"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// activeScanRoot carries the root the walk is currently in for the progress
+// callback (which scan.Progress does not include).
+var activeScanRoot atomic.Value
+
+func currentRoot() string {
+	if v, ok := activeScanRoot.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+func writeScanStatus(dataDir string, st scanStatus) {
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	tmp := filepath.Join(dataDir, "scan-status.json.tmp")
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		_ = os.Rename(tmp, filepath.Join(dataDir, "scan-status.json"))
+	}
 }

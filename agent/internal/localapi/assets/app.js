@@ -279,6 +279,24 @@
         errBox2.hidden = true;
         var dl = document.getElementById("status-list");
         dl.textContent = "";
+        kvSection(dl, "Activity");
+        var act = s.activity || {};
+        var scanSt = act.scan;
+        if (scanSt) {
+          var scanLine = (scanSt.running ? "RUNNING" : (scanSt.status || "idle")) +
+            " — " + (scanSt.root || "") +
+            "  seen=" + (scanSt.seen || 0) +
+            " new=" + (scanSt.new || 0) +
+            " changed=" + (scanSt.changed || 0) +
+            (scanSt.updated_at ? "  (as of " + fmtMtime(scanSt.updated_at) + ")" : "");
+          kvRow(dl, scanSt.running ? "Scan (running)" : "Last scan", scanLine);
+        } else {
+          kvRow(dl, "Last scan", "no scan recorded yet");
+        }
+        kvRow(dl, "Replication backlog",
+          act.outbox_pending === undefined ? "—"
+            : act.outbox_pending === 0 ? "0 (fully replicated)"
+            : act.outbox_pending + " change(s) waiting to reach central");
         kvSection(dl, "Identity");
         kvRow(dl, "Agent id", s.agent_id);
         kvRow(dl, "Version", s.agent_version);

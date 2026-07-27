@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/kardianos/service"
 
@@ -143,9 +142,12 @@ func (p *daemonProgram) Start(s service.Service) error {
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
 
-	fmt.Printf("filearr-agent %s running: agent_id=%s central=%s\n",
-		Version, id.State.AgentID, id.State.CentralURL)
-	fmt.Printf("renewal daemon + replication drain + reconcile supervisor + policy poller + local query API + local web UI started (cert valid until %s)\n", id.Leaf.NotAfter.Format("2006-01-02T15:04:05Z07:00"))
+	// slog (timestamped) — these used to be bare Printf lines, leaving the
+	// container log's most important banner without a timestamp or level.
+	p.log.Info("filearr-agent running",
+		"version", Version, "agent_id", id.State.AgentID,
+		"central", id.State.CentralURL,
+		"cert_valid_until", id.Leaf.NotAfter.Format("2006-01-02T15:04:05Z07:00"))
 
 	p.done = make(chan struct{})
 	go func() {
@@ -186,6 +188,6 @@ func (p *daemonProgram) Stop(s service.Service) error {
 	if p.runErr != nil {
 		return p.runErr
 	}
-	fmt.Fprintln(os.Stderr, "shutting down")
+	p.log.Info("shutting down")
 	return nil
 }

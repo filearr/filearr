@@ -19,7 +19,7 @@ SCAN_ON_START="${FILEARR_AGENT_SCAN_ON_START:-true}"
 export FILEARR_AGENT_DATA_DIR="$DATA_DIR"
 export HOME="$DATA_DIR"
 
-log() { echo "[entrypoint] $*"; }
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [entrypoint] $*"; }
 
 mkdir -p "$DATA_DIR"
 if [ "$(stat -c '%u:%g' "$DATA_DIR")" != "$PUID:$PGID" ]; then
