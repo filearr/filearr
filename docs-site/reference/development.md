@@ -28,7 +28,7 @@ docker-compose.yml, Dockerfile, unraid/, proxmox/, scripts/
 
 ## Dev commands
 
-Backend (Python 3.13 via [uv](https://docs.astral.sh/uv/)):
+Backend (Python 3.14 via [uv](https://docs.astral.sh/uv/)):
 
 ```bash
 cd backend && uv sync

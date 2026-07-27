@@ -7,8 +7,9 @@ COPY frontend/ .
 RUN npm run build
 
 # ---- backend runtime ----
-# python:3.13-slim: conservative choice until all C-extension deps ship cp314 wheels
-FROM python:3.13-slim AS runtime
+# python:3.14.6-slim: every pinned C-extension dep ships cp314 wheels
+# (verified against PyPI 2026-07-27); patch-pinned like the rest of the stack.
+FROM python:3.14.6-slim AS runtime
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # libmagic + libmediainfo for python-magic / pymediainfo; ffmpeg provides ffprobe.

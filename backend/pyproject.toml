@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Unified self-hosted media catalog and search"
 license = "AGPL-3.0-or-later"
 license-files = ["../LICENSE"]
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     # Web — FastAPI >=0.135 for native SSE (fastapi.sse), pinned current stable
     "fastapi==0.139.0",
@@ -115,7 +115,7 @@ dev = [
     "pytest-asyncio>=0.25",
     # test harness: ffmpeg/ffprobe binaries + an OPTIONAL embedded Postgres.
     # pgserver is a LOCAL fallback only (Python <=3.12: it ships no cp313 wheel);
-    # CI and py3.13 point FILEARR_TEST_DATABASE_URL at a real postgres:18 service.
+    # CI and py3.14 point FILEARR_TEST_DATABASE_URL at a real postgres:18 service.
     "pgserver>=0.1.4; python_version < '3.13'",
     "static-ffmpeg>=2.7",
 ]

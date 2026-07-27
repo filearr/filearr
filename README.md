@@ -45,7 +45,7 @@ configuration reference are in the **[documentation site](https://pwsh.github.io
 
 | Layer | Component |
 |---|---|
-| API | Python 3.13 · FastAPI 0.139 (native SSE) · uvicorn |
+| API | Python 3.14 · FastAPI 0.139 (native SSE) · uvicorn |
 | DB | PostgreSQL 18.4 — native `uuidv7()` PKs, async I/O |
 | Jobs | Procrastinate 3.9 (Postgres-native queue — no Redis) |
 | Search | Meilisearch v1.49.0 (pin ≥ 1.48.2 for tenant-token CVEs) |
