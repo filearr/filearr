@@ -91,7 +91,7 @@ type Store struct {
 // discipline.
 func Open(path string) (*Store, error) {
 	dsn := "file:" + filepath.ToSlash(path) +
-		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)"
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open history db: %w", err)
