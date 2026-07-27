@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/enroll"
@@ -14,6 +15,25 @@ import (
 // Updater env fallbacks (a background daemon concern, no operator flags plumbed
 // for the poll loop — mirrors the command poller).
 const envUpdatePollInterval = "FILEARR_AGENT_UPDATE_POLL_INTERVAL" // Go duration (default 6h)
+
+// envSelfUpdate turns the whole self-update subsystem off ("false"/"0"). The
+// container image sets this: an image is immutable by design (update = pull a
+// new image), and an unpinned build's fail-closed refusal is CORRECT there —
+// but its every-boot WARN reads like a fault. Off means no boot check, no
+// poll loop, and one quiet INFO instead. Default (unset/true): historic
+// behaviour, including the deliberate loud warn on unpinned binaries.
+const envSelfUpdate = "FILEARR_AGENT_SELF_UPDATE"
+
+// selfUpdateDisabled reports an explicit opt-out (unparseable values keep the
+// default-on posture — never silently disable updates on a typo).
+func selfUpdateDisabled() bool {
+	v := os.Getenv(envSelfUpdate)
+	if v == "" {
+		return false
+	}
+	on, err := strconv.ParseBool(v)
+	return err == nil && !on
+}
 
 // newUpdater builds the self-updater for the given agent, reusing the shared
 // bearer-auth provider (interim cert-fingerprint scheme) and the shared
@@ -51,8 +71,15 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 // It returns a done-channel so the daemon waits for a clean stop, mirroring
 // startCommandPoller / startReplication.
 func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) <-chan struct{} {
-	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient, serviceManaged)
 	log := newLogger()
+	if selfUpdateDisabled() {
+		log.Info("agent self-update disabled by configuration (container image? update by pulling a new image)",
+			"env", envSelfUpdate)
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient, serviceManaged)
 
 	// Boot check before any loop: on an exhausted trial this restores + re-execs
 	// the previous binary and never returns. On a live trial it returns

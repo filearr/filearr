@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/filearr/filearr/agent/internal/agentlog"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/index"
 	"github.com/filearr/filearr/agent/internal/query"
@@ -22,6 +24,33 @@ import (
 // (\\host\share, smb://host/...). Empty falls back to os.Hostname() — set it when
 // clients reach this machine by a different name (a DNS alias, a NAS identity).
 const envShareHost = "FILEARR_AGENT_SHARE_HOST"
+
+// envShareMap (Docker/NAS agents) statically maps scan roots to the network
+// locations they are shared at: comma-separated ``localpath=location`` pairs,
+// where location is smb://host/share[/sub], \\host\share[\sub], or
+// nfs://host/export. Inside a container, share DISCOVERY sees nothing (no
+// smb.conf; the NAS exports the paths under ITS name, not the container's), so
+// this is how a containerized agent still attaches share hints central can
+// render as network-open links. Longest local prefix wins per file; entries
+// override a discovered export of the same path.
+const envShareMap = "FILEARR_AGENT_SHARE_MAP"
+
+// newShareResolver builds the scan's share resolver: OS discovery plus any
+// static FILEARR_AGENT_SHARE_MAP entries. Malformed map entries are skipped
+// with a warning (hints are best-effort; a bad pair must not fail a scan).
+func newShareResolver() *shares.Resolver {
+	r := shares.New(os.Getenv(envShareHost))
+	if spec := os.Getenv(envShareMap); spec != "" {
+		applied, bad := r.SetStaticMap(spec)
+		logger := newLogger()
+		agentlog.Verbose(logger, "share map configured", "entries", applied)
+		for _, b := range bad {
+			logger.Warn("share map: skipping malformed entry", "entry", b,
+				"want", "localpath=smb://host/share (or \\\\host\\share, nfs://host/export)")
+		}
+	}
+	return r
+}
 
 // scanConfigName is the persistent scan configuration under the data dir. It
 // records the roots, effective presets, and the content-hash ceiling so a
@@ -118,13 +147,18 @@ func runScan(args []string) error {
 		EnabledGroups:     sc.EnabledGroups,
 		Taxonomy:          taxCache.Current(),
 		Hash:              hashPolicy(sc),
+		// Per-batch progress honors the configured log level (container logs at
+		// warn/error stay quiet instead of ticking every 250 files).
 		Progress: func(p scan.Progress) {
+			if !newLogger().Enabled(context.Background(), slog.LevelInfo) {
+				return
+			}
 			fmt.Printf("  ... seen=%d new=%d changed=%d\n", p.Seen, p.New, p.Changed)
 		},
 		// P10-T11 best-effort share discovery: attach a network-open hint to each
 		// created/modified item when a local share covers its path. A single
 		// resolver (5-min TTL cache) is shared across all roots.
-		Shares: shares.New(os.Getenv(envShareHost)),
+		Shares: newShareResolver(),
 	}
 
 	scanAll := func() {

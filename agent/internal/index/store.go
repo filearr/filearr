@@ -105,7 +105,7 @@ func Open(path string) (*Store, error) {
 // connection avoids modernc/sqlite writer contention for this single-process
 // embedded store.
 func openDB(path string) (*sql.DB, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

@@ -99,10 +99,34 @@ A Community Applications template ships in the repo
 The template mounts `/mnt/user` **read-only and 1:1** (container path equals
 host path), so the paths central records are your real Unraid paths — no
 remote-path-mapping needed. If you narrow the mount to one share, keep it 1:1
-(`/mnt/user/media` → `/mnt/user/media`) to preserve that property. Agent
-state persists in `/mnt/user/appdata/filearr-agent` (keep it on the cache
-pool); the agent runs as `PUID`/`PGID` 99/100 and only ever connects
-*outbound* over mutual TLS — the container exposes no ports.
+(`/mnt/user/media` → `/mnt/user/media`) to preserve that property. The agent
+runs as `PUID`/`PGID` 99/100.
+
+!!! warning "Keep agent state OFF the FUSE layer"
+    Agent state (`/config`) holds a SQLite index + replication outbox. Point
+    it at a **cache-pool path** (`/mnt/cache/appdata/filearr-agent`, the
+    template default) or an exclusive share — SQLite accessed through
+    `/mnt/user`'s shfs/FUSE layer produces `database is locked` stalls.
+
+**Share Map** (recommended): the container cannot discover your SMB exports
+(there's no `smb.conf` inside it, and its hostname isn't your NAS's), so tell
+it how each root is shared — one `localpath=location` pair per root:
+
+```text
+FILEARR_AGENT_SHARE_MAP=/mnt/user/media=smb://TOWER/media,/mnt/user/documents=smb://TOWER/documents
+```
+
+Central then renders clickable network-open links (`smb://` or `\\TOWER\…`,
+per the viewer's OS) for every file this agent replicates. UNC and `nfs://`
+locations work too; the longest matching prefix wins per file.
+
+**Local web UI**: the template maps port 8686 and sets
+`FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` (a loopback-only listener would be
+unreachable through a Docker port mapping). It stays read-only search and is
+**central-policy-gated** — enable *web UI* in the agent's config group on the
+central Agents page or it serves nothing. Self-update is off inside the
+container (`FILEARR_AGENT_SELF_UPDATE=false` in the image): updating means
+pulling a new image, and the agent no longer logs the unpinned-key warning.
 
 ### Any other container host
 
@@ -125,12 +149,10 @@ All `FILEARR_AGENT_*` environment variables pass straight through to the
 binary; the data directory is pinned to `/config`.
 
 !!! warning "Container updates replace self-update"
-    The container image is built **without** a release-signing key, so the
-    signed self-update channel is fail-closed inside it (by design — the
-    filesystem is meant to be immutable). Update by pulling the new image;
-    the enrolled identity and local index in `/config` carry over. The local
-    web UI binds loopback-only and is not reachable through port mapping —
-    use the central console.
+    The image ships with `FILEARR_AGENT_SELF_UPDATE=false`: the signed
+    self-update channel is off (an image is immutable by design). Update by
+    pulling the new image; the enrolled identity and local index in
+    `/config` carry over.
 
 ## Configuration groups (remote configuration)
 

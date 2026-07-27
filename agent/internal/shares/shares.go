@@ -60,11 +60,17 @@ type Hint struct {
 }
 
 // export is one discovered network export: a local absolute path made reachable
-// under a share name (SMB) or as an NFS export.
+// under a share name (SMB) or as an NFS export. Statically-configured entries
+// (SetStaticMap) may additionally carry their own host (a container's random
+// hostname is never the NAS the shares live on) and sub-path segments between
+// the share name and the file remainder (a root mapped INTO a share, e.g.
+// /mnt/user/media/tv -> smb://tower/media/tv).
 type export struct {
-	name string // SMB share name; "" for NFS
-	path string // local absolute path exported
-	kind string // "smb" | "nfs"
+	name string   // SMB share name; "" for NFS
+	path string   // local absolute path exported
+	kind string   // "smb" | "nfs"
+	host string   // static entries only: overrides the resolver host
+	sub  []string // static entries only: URL segments between share name and rel
 }
 
 // Resolver enumerates the host's network shares (cached) and maps a local
@@ -75,6 +81,7 @@ type Resolver struct {
 	caseFold bool // fold path case (Windows) when matching exports
 	now      func() time.Time
 	enum     func() []export // injectable in tests; defaults to enumerateOS
+	static   []export        // SetStaticMap entries; win over enumeration
 
 	mu       sync.Mutex
 	cached   []export
@@ -104,16 +111,103 @@ func New(host string) *Resolver {
 	return r
 }
 
+// SetStaticMap installs operator-configured share locations from a spec of
+// comma-separated ``localpath=location`` pairs, e.g.
+//
+//	/mnt/user/media=smb://tower/media,/mnt/user/docs=\\tower\documents
+//
+// This exists for environments where enumeration can see nothing — the Docker
+// agent chief among them: inside the container there is no smb.conf, and the
+// NAS's shares are exported by the HOST, under the host's name, not the
+// container's. A location may be an ``smb://host/share[/sub]`` URL, a
+// ``\\host\share[\sub]`` UNC, or an ``nfs://host/export[/sub]`` URL; the
+// local path maps to it prefix-wise (longest match wins, exactly like
+// discovered exports). Static entries carry their own host and take
+// precedence over an enumerated export of the same local path. Returns how
+// many entries were applied plus the malformed ones (skipped, never fatal —
+// hints stay best-effort, R1).
+func (r *Resolver) SetStaticMap(spec string) (applied int, bad []string) {
+	var entries []export
+	for _, pair := range strings.Split(spec, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		local, loc, ok := strings.Cut(pair, "=")
+		e, parsed := parseStaticLocation(strings.TrimSpace(local), strings.TrimSpace(loc))
+		if !ok || !parsed {
+			bad = append(bad, pair)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	r.mu.Lock()
+	r.static = entries
+	r.loaded = false // rebuild the merged cache on next use
+	r.mu.Unlock()
+	return len(entries), bad
+}
+
+// parseStaticLocation builds the export for one static mapping. Returns
+// ok=false for anything it cannot understand (empty parts, unknown scheme,
+// missing host/share).
+func parseStaticLocation(local, loc string) (export, bool) {
+	if local == "" || loc == "" {
+		return export{}, false
+	}
+	var kind, host string
+	var segs []string
+	switch {
+	case strings.HasPrefix(loc, "smb://"):
+		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, "smb://"), false))
+	case strings.HasPrefix(loc, `\\`):
+		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, `\\`), false))
+	case strings.HasPrefix(loc, "nfs://"):
+		kind, segs = "nfs", splitSegs(normPath(strings.TrimPrefix(loc, "nfs://"), false))
+	default:
+		return export{}, false
+	}
+	if len(segs) < 2 { // need at least host + share/export root
+		return export{}, false
+	}
+	host = segs[0]
+	e := export{path: local, kind: kind, host: host}
+	if kind == "smb" {
+		e.name = segs[1]
+		e.sub = segs[2:]
+	} else {
+		e.sub = segs[1:] // NFS: the remote export path
+	}
+	return e, true
+}
+
 // exports returns the cached export set, (re)enumerating when the TTL has lapsed.
 // Enumeration never errors (R1): a failure yields an empty set that is cached for
 // the TTL like any other, so a locked-down host does not re-shell every call.
+// Static entries come first and suppress an enumerated export of the same local
+// path (an operator's explicit mapping outranks a discovered guess — and must
+// not TIE with it into ambiguity).
 func (r *Resolver) exports() []export {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.loaded && r.now().Sub(r.loadedAt) < r.ttl {
 		return r.cached
 	}
-	r.cached = r.enum()
+	enumerated := r.enum()
+	merged := append([]export{}, r.static...)
+	for _, e := range enumerated {
+		conflict := false
+		for _, s := range r.static {
+			if normPath(s.path, r.caseFold) == normPath(e.path, r.caseFold) {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			merged = append(merged, e)
+		}
+	}
+	r.cached = merged
 	r.loadedAt = r.now()
 	r.loaded = true
 	return r.cached
@@ -163,24 +257,35 @@ func (r *Resolver) Hint(absPath string) *Hint {
 // forward slash for URL); nothing is percent-encoded (a display/open path, not an
 // href), mirroring the central _join_share discipline.
 func (r *Resolver) build(e export, rel []string) *Hint {
+	host := r.host
+	if e.host != "" {
+		host = e.host // static mapping: the NAS's name, not this process's
+	}
 	switch e.kind {
 	case "nfs":
-		// NFS has no UNC form; the URL is nfs://host/<export-path>/<rel>.
-		segs := append([]string{r.host}, splitSegs(normPath(e.path, false))...)
+		// NFS has no UNC form. A discovered export's remote path IS its local
+		// path (/etc/exports semantics); a static mapping carries the remote
+		// path explicitly in e.sub.
+		remote := e.sub
+		if e.host == "" {
+			remote = splitSegs(normPath(e.path, false))
+		}
+		segs := append([]string{host}, remote...)
 		segs = append(segs, rel...)
 		return &Hint{
 			ShareURL: "nfs://" + strings.Join(segs, "/"),
-			Host:     r.host,
+			Host:     host,
 			Source:   "agent",
 		}
 	default: // "smb"
-		urlSegs := append([]string{r.host, e.name}, rel...)
-		uncSegs := append([]string{e.name}, rel...)
+		mid := append([]string{e.name}, e.sub...)
+		urlSegs := append(append([]string{host}, mid...), rel...)
+		uncSegs := append(mid, rel...)
 		return &Hint{
 			ShareURL:  "smb://" + strings.Join(urlSegs, "/"),
-			UNC:       `\\` + r.host + `\` + strings.Join(uncSegs, `\`),
+			UNC:       `\\` + host + `\` + strings.Join(uncSegs, `\`),
 			ShareName: e.name,
-			Host:      r.host,
+			Host:      host,
 			Source:    "agent",
 		}
 	}
@@ -213,5 +318,5 @@ func covers(base, target string) bool {
 }
 
 func sameExport(a, b export) bool {
-	return a.name == b.name && a.path == b.path && a.kind == b.kind
+	return a.name == b.name && a.path == b.path && a.kind == b.kind && a.host == b.host
 }

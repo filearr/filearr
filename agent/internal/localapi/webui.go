@@ -74,8 +74,18 @@ func init() {
 
 // WebUIConfig wires a WebUIServer.
 type WebUIConfig struct {
-	// Addr is the loopback bind address (host:port). Must be a loopback literal.
+	// Addr is the loopback bind address (host:port). Must be a loopback literal
+	// unless AllowRemote is set.
 	Addr string
+	// AllowRemote (containerized/NAS agents, FILEARR_AGENT_WEBUI_ALLOW_REMOTE)
+	// permits a NON-loopback bind and skips the loopback Host allow-list — a
+	// Docker port mapping cannot reach a loopback-bound listener, so exposing
+	// the UI from a container requires binding wide. EXPLICIT opt-in only; the
+	// default posture (loopback bind + Host allow-list DNS-rebinding defence)
+	// is unchanged. Everything else still applies remotely: the central
+	// policy gate (web_ui_enabled AND fresh), the auth gate when policy
+	// requires it, the GET/HEAD-only backstop, and the read-only surface.
+	AllowRemote bool
 	// Searcher is the read-only query engine (shared shape with the socket server).
 	Searcher Searcher
 	// Count reports the local index item count for the status probe.
@@ -189,7 +199,16 @@ func randHex(n int) (string, error) {
 // when that flips off (central disable OR policy stale past grace — R4). Returns
 // ctx.Err() on shutdown.
 func (ws *WebUIServer) Run(ctx context.Context) error {
-	if err := validateLoopbackAddr(ws.cfg.Addr); err != nil {
+	if ws.cfg.AllowRemote {
+		if _, _, err := net.SplitHostPort(ws.cfg.Addr); err != nil {
+			ws.log.Error("local web UI disabled: invalid bind address; refusing", "addr", ws.cfg.Addr, "err", err)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		ws.log.Warn("local web UI: REMOTE ACCESS ENABLED (explicit opt-in) — "+
+			"binding beyond loopback; central policy + auth gates still apply",
+			"addr", ws.cfg.Addr)
+	} else if err := validateLoopbackAddr(ws.cfg.Addr); err != nil {
 		ws.log.Error("local web UI disabled: invalid (non-loopback) bind address; refusing", "addr", ws.cfg.Addr, "err", err)
 		// Wait for shutdown rather than busy-spinning on an unfixable config.
 		<-ctx.Done()
@@ -285,7 +304,12 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	chain := ws.authGate(auth, mux)
 	chain = cop.Handler(chain)
 	chain = methodBackstop(chain)
-	chain = hostAllowList(chain)
+	if !ws.cfg.AllowRemote {
+		// The loopback Host allow-list is a DNS-rebinding defence and only
+		// coherent for a loopback bind; AllowRemote necessarily accepts the
+		// host names/IPs remote clients dial (CSRF + auth gates remain).
+		chain = hostAllowList(chain)
+	}
 	return chain
 }
 

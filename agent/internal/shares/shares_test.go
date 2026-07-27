@@ -151,3 +151,107 @@ func TestLiveEnumerateOptIn(t *testing.T) {
 	got := enumerateOS()
 	t.Logf("live enumeration returned %d export(s): %+v", len(got), got)
 }
+
+// --- FILEARR_AGENT_SHARE_MAP static mappings (Docker/NAS agents) ------------
+
+func staticResolver(t *testing.T, spec string) (*Resolver, []string) {
+	t.Helper()
+	r := New("containerhost")
+	r.enum = func() []export { return nil }
+	_, bad := r.SetStaticMap(spec)
+	return r, bad
+}
+
+func TestStaticMapSMBURL(t *testing.T) {
+	r, bad := staticResolver(t, "/mnt/user/media=smb://tower/media")
+	if len(bad) != 0 {
+		t.Fatalf("bad entries: %v", bad)
+	}
+	h := r.Hint("/mnt/user/media/Movies/Alien (1979)/alien.mkv")
+	if h == nil {
+		t.Fatal("expected hint")
+	}
+	if h.ShareURL != "smb://tower/media/Movies/Alien (1979)/alien.mkv" {
+		t.Fatalf("url: %s", h.ShareURL)
+	}
+	if h.UNC != `\\tower\media\Movies\Alien (1979)\alien.mkv` {
+		t.Fatalf("unc: %s", h.UNC)
+	}
+	if h.Host != "tower" || h.ShareName != "media" {
+		t.Fatalf("host/share: %s/%s", h.Host, h.ShareName)
+	}
+}
+
+func TestStaticMapUNCAndSubpath(t *testing.T) {
+	r, bad := staticResolver(t,
+		`/mnt/user/tv=\\tower\media\tv, /mnt/user/docs=smb://tower/documents`)
+	if len(bad) != 0 {
+		t.Fatalf("bad entries: %v", bad)
+	}
+	h := r.Hint("/mnt/user/tv/Show/s01e01.mkv")
+	if h == nil || h.ShareURL != "smb://tower/media/tv/Show/s01e01.mkv" {
+		t.Fatalf("hint: %+v", h)
+	}
+	if h.UNC != `\\tower\media\tv\Show\s01e01.mkv` {
+		t.Fatalf("unc: %s", h.UNC)
+	}
+	if d := r.Hint("/mnt/user/docs/a.pdf"); d == nil || d.ShareURL != "smb://tower/documents/a.pdf" {
+		t.Fatalf("second mapping: %+v", d)
+	}
+}
+
+func TestStaticMapNFS(t *testing.T) {
+	r, bad := staticResolver(t, "/mnt/user/iso=nfs://tower/mnt/user/iso")
+	if len(bad) != 0 {
+		t.Fatalf("bad entries: %v", bad)
+	}
+	h := r.Hint("/mnt/user/iso/x.iso")
+	if h == nil || h.ShareURL != "nfs://tower/mnt/user/iso/x.iso" {
+		t.Fatalf("hint: %+v", h)
+	}
+	if h.UNC != "" {
+		t.Fatalf("nfs must have no UNC: %s", h.UNC)
+	}
+}
+
+func TestStaticMapLongestPrefixAndMiss(t *testing.T) {
+	r, _ := staticResolver(t,
+		"/mnt/user=smb://tower/user,/mnt/user/media=smb://tower/media")
+	if h := r.Hint("/mnt/user/media/a.mkv"); h == nil || h.ShareURL != "smb://tower/media/a.mkv" {
+		t.Fatalf("longest prefix must win: %+v", h)
+	}
+	if h := r.Hint("/mnt/user/docs/a.pdf"); h == nil || h.ShareURL != "smb://tower/user/docs/a.pdf" {
+		t.Fatalf("fallback to shorter prefix: %+v", h)
+	}
+	if h := r.Hint("/opt/elsewhere/x"); h != nil {
+		t.Fatalf("uncovered path must yield nil, got %+v", h)
+	}
+}
+
+func TestStaticMapMalformedEntriesSkipped(t *testing.T) {
+	r, bad := staticResolver(t,
+		"/mnt/user/media=smb://tower/media,garbage,/x=ftp://nope/share,/y=smb://hostonly")
+	if len(bad) != 3 {
+		t.Fatalf("expected 3 bad entries, got %v", bad)
+	}
+	if h := r.Hint("/mnt/user/media/a.mkv"); h == nil {
+		t.Fatal("valid entry must still apply")
+	}
+}
+
+func TestStaticMapOverridesDiscoveredExport(t *testing.T) {
+	r := New("containerhost")
+	r.enum = func() []export {
+		return []export{{name: "stale", path: "/mnt/user/media", kind: "smb"}}
+	}
+	if _, bad := r.SetStaticMap("/mnt/user/media=smb://tower/media"); len(bad) != 0 {
+		t.Fatalf("bad: %v", bad)
+	}
+	h := r.Hint("/mnt/user/media/a.mkv")
+	if h == nil {
+		t.Fatal("static+discovered same path must not tie into ambiguity")
+	}
+	if h.Host != "tower" || h.ShareName != "media" {
+		t.Fatalf("static must win over discovered: %+v", h)
+	}
+}

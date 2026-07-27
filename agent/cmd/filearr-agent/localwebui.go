@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strconv"
 
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/history"
@@ -14,6 +16,14 @@ import (
 // envWebUIAddr overrides the local web UI loopback bind address (host:port). The
 // -web-addr flag wins when both are set.
 const envWebUIAddr = "FILEARR_AGENT_WEBUI_ADDR"
+
+// envWebUIAllowRemote (containerized/NAS agents) opts the web UI into a
+// NON-loopback bind: a Docker port mapping cannot reach a loopback listener,
+// so a container exposing the UI needs this. With it set (and no explicit
+// addr) the bind defaults to 0.0.0.0:8686. The central policy gate
+// (web_ui_enabled) and the auth gate still apply — this only widens the
+// LISTENER, deliberately and loudly (a startup WARN names the exposure).
+const envWebUIAllowRemote = "FILEARR_AGENT_WEBUI_ALLOW_REMOTE"
 
 // startWebUI launches the P7-T5 local web UI for the `run` daemon: a read-only
 // browser search surface on a loopback TCP listener (127.0.0.1), SEPARATE from the
@@ -37,18 +47,24 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 		return done
 	}
 
+	allowRemote, _ := strconv.ParseBool(os.Getenv(envWebUIAllowRemote))
 	addr := webAddr
 	if addr == "" {
-		addr = localapi.DefaultWebAddr
+		if allowRemote {
+			addr = "0.0.0.0:8686" // container opt-in: reachable via port mapping
+		} else {
+			addr = localapi.DefaultWebAddr
+		}
 	}
 	cache := agentcfg.NewETagCache(dataDir)
 
 	wcfg := localapi.WebUIConfig{
-		Addr:     addr,
-		Searcher: searcher,
-		Count:    func(ctx context.Context) (int, error) { return countActiveItems(ctx, idx) },
-		Policy:   func() localapi.PolicyView { return loadPolicyView(cache) },
-		Logger:   log,
+		Addr:        addr,
+		AllowRemote: allowRemote,
+		Searcher:    searcher,
+		Count:       func(ctx context.Context) (int, error) { return countActiveItems(ctx, idx) },
+		Policy:      func() localapi.PolicyView { return loadPolicyView(cache) },
+		Logger:      log,
 	}
 	// The web UI records history but is given only the write-side Recorder — it
 	// cannot read history back (that surface is the socket API only).

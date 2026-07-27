@@ -129,31 +129,38 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 	seen := map[string]bool{}
 	var newItems []*index.Item
 
-	var tx *sql.Tx
-	commit := func() error {
-		if tx == nil {
+	// SQLITE_BUSY fix (live Unraid incident 2026-07-27): the batch write
+	// transaction used to be OPENED FIRST and held while every entry in the
+	// batch was hashed. On a local disk that window is milliseconds; over a
+	// FUSE mount (Unraid /mnt/user shfs) hashing a batch of new media takes
+	// minutes — and the `run` daemon's replicator, sharing the same SQLite
+	// file from its own process, hit its busy timeout and backed off 32s at a
+	// time. Now every per-entry DECISION (classify, diff against the
+	// preloaded map, hash, share-hint resolution — all the slow I/O) runs
+	// with NO transaction, accumulating apply-closures; the batch boundary
+	// opens one short transaction that only executes buffered INSERT/UPDATE/
+	// outbox writes. The write lock is now held for pure-DB work only.
+	var pending []applyFn
+	flush := func() error {
+		if len(pending) == 0 {
 			return nil
 		}
-		err := tx.Commit()
-		tx = nil
-		return err
-	}
-	ensureTx := func() error {
-		if tx != nil {
-			return nil
-		}
-		t, err := store.Begin(ctx)
+		tx, err := store.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		tx = t
+		for _, apply := range pending {
+			if err := apply(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		pending = pending[:0]
 		return nil
 	}
-	defer func() {
-		if tx != nil {
-			_ = tx.Rollback()
-		}
-	}()
 
 	stopRequested := false
 	walkErr := Walk(root, scope, spec, func(e WalkEntry) error {
@@ -166,14 +173,12 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 			return nil // file_category/file_group excluded for this library
 		}
 		seen[e.Rel] = true
-		if err := ensureTx(); err != nil {
-			return err
-		}
-		if err := diffEntry(ctx, tx, root, rootID, existing, e, category, group, sidecar, policy, &res, &newItems, opts.Shares); err != nil {
-			return err
+		apply := diffEntry(root, rootID, existing, e, category, group, sidecar, policy, &res, &newItems, opts.Shares)
+		if apply != nil {
+			pending = append(pending, apply)
 		}
 		if len(seen)%flushEvery == 0 {
-			if err := commit(); err != nil {
+			if err := flush(); err != nil {
 				return err
 			}
 			if opts.Progress != nil {
@@ -189,7 +194,7 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 		return nil
 	})
 	// Persist the final partial batch before interpreting the walk outcome.
-	if cErr := commit(); cErr != nil {
+	if cErr := flush(); cErr != nil {
 		return Result{}, cErr
 	}
 	switch {
@@ -219,24 +224,32 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 	return res, nil
 }
 
+// applyFn is one buffered batch write: everything slow (hashing, share-hint
+// resolution, classification) already happened tx-free at decision time; the
+// closure only executes the prepared INSERT/UPDATE + outbox emit.
+type applyFn func(context.Context, *sql.Tx) error
+
 // diffEntry classifies one walked file against the in-memory existing map and
-// applies the new/changed/unchanged transition to tx. Mirrors the per-file body
-// of scan._scan_body. Local deviation (documented): an unchanged, healthy row
-// (active + already hashed) is a NO-OP — the agent does not rewrite last_seen on
-// every steady-state file, since that would churn local_seq_no and flood the
-// P5-T4 replication delta; the in-memory `seen` set (not last_seen) drives
-// tombstoning here.
+// returns the batch write to apply (nil = steady-state no-op). All decisions,
+// hashing, and share-hint resolution happen HERE, with no transaction open
+// (see the flush() note in Scan — holding the write lock across FUSE hashing
+// starved the daemon's replicator into SQLITE_BUSY backoffs). Mirrors the
+// per-file body of scan._scan_body. Local deviation (documented): an
+// unchanged, healthy row (active + already hashed) is a NO-OP — the agent
+// does not rewrite last_seen on every steady-state file, since that would
+// churn local_seq_no and flood the P5-T4 replication delta; the in-memory
+// `seen` set (not last_seen) drives tombstoning here.
 func diffEntry(
-	ctx context.Context, tx *sql.Tx, libraryRef, rootID string, existing map[string]*index.Item,
+	libraryRef, rootID string, existing map[string]*index.Item,
 	e WalkEntry, category, group string, sidecar bool, policy HashPolicy,
 	res *Result, newItems *[]*index.Item, sh ShareResolver,
-) error {
+) applyFn {
 	now := time.Now().UTC()
 	item := existing[e.Rel]
 	if item == nil {
 		id, err := index.NewID()
 		if err != nil {
-			return err
+			return func(context.Context, *sql.Tx) error { return err }
 		}
 		it := &index.Item{
 			ID:           id,
@@ -256,20 +269,20 @@ func diffEntry(
 		if !sidecar {
 			it.QuickHash, it.ContentHash = hashFile(e.Path, e.Size, policy)
 		}
-		if err := index.InsertItem(ctx, tx, it); err != nil {
-			return err
-		}
-		// A brand-new file → created (central collapses created/modified to an
-		// upsert). Sidecars are emitted too: they are plain items on the wire.
-		if err := emit(ctx, tx, libraryRef, outbox.OpCreated, it, "", shareHint(sh, e.Path)); err != nil {
-			return err
-		}
+		hint := shareHint(sh, e.Path)
 		existing[e.Rel] = it
 		res.New++
 		if !sidecar {
 			*newItems = append(*newItems, it)
 		}
-		return nil
+		return func(ctx context.Context, tx *sql.Tx) error {
+			if err := index.InsertItem(ctx, tx, it); err != nil {
+				return err
+			}
+			// A brand-new file → created (central collapses created/modified to
+			// an upsert). Sidecars are emitted too: plain items on the wire.
+			return emit(ctx, tx, libraryRef, outbox.OpCreated, it, "", hint)
+		}
 	}
 	if item.Size != e.Size || item.MtimeNs != e.MtimeNs {
 		item.Size = e.Size
@@ -281,14 +294,14 @@ func diffEntry(
 		if !sidecar {
 			item.QuickHash, item.ContentHash = hashFile(e.Path, e.Size, policy)
 		}
-		if err := index.UpdateItem(ctx, tx, item); err != nil {
-			return err
-		}
-		if err := emit(ctx, tx, libraryRef, outbox.OpModified, item, "", shareHint(sh, e.Path)); err != nil {
-			return err
-		}
+		hint := shareHint(sh, e.Path)
 		res.Changed++
-		return nil
+		return func(ctx context.Context, tx *sql.Tx) error {
+			if err := index.UpdateItem(ctx, tx, item); err != nil {
+				return err
+			}
+			return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint)
+		}
 	}
 	// Unchanged: self-heal only. A missing row reappearing goes back to active; a
 	// committed-but-never-hashed row is hashed now (null-quick_hash self-heal).
@@ -301,18 +314,19 @@ func diffEntry(
 		item.QuickHash, item.ContentHash = hashFile(e.Path, e.Size, policy)
 		needHeal = true
 	}
-	if needHeal {
-		item.LastSeen = now
+	if !needHeal {
+		return nil // truly unchanged healthy row: no write, no emit
+	}
+	item.LastSeen = now
+	hint := shareHint(sh, e.Path)
+	return func(ctx context.Context, tx *sql.Tx) error {
 		if err := index.UpdateItem(ctx, tx, item); err != nil {
 			return err
 		}
-		// Self-heal (missing→active, or a late hash fill) is a real change central
-		// must see → modified. A truly unchanged healthy row emits nothing.
-		if err := emit(ctx, tx, libraryRef, outbox.OpModified, item, "", shareHint(sh, e.Path)); err != nil {
-			return err
-		}
+		// Self-heal (missing→active, or a late hash fill) is a real change
+		// central must see → modified. A healthy row emits nothing (above).
+		return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint)
 	}
-	return nil
 }
 
 // detectAndTombstone runs move detection (before tombstoning) then tombstones

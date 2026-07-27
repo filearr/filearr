@@ -41,6 +41,11 @@ RUN chmod +x /entrypoint.sh
 # Everything the agent persists (identity key/cert, SQLite index + outbox,
 # scan.json, caches) lives under one dir — bind it to appdata.
 ENV FILEARR_AGENT_DATA_DIR=/config
+# The image is immutable: updating = pulling a new image, so the in-binary
+# self-update subsystem is switched OFF here (also silences the unpinned-key
+# warning, which is correct-but-alarming in a container). Override at runtime
+# if you truly pinned a key at build time.
+ENV FILEARR_AGENT_SELF_UPDATE=false
 VOLUME /config
 
 # The agent's only listener is a policy-gated LOOPBACK web UI (non-loopback
