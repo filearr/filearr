@@ -578,7 +578,11 @@ async def test_purge_with_delete_libraries_cascades(client, monkeypatch):
         assert (
             await s.execute(select(Library).where(Library.name == "cascade-lib"))
         ).scalar_one_or_none() is None
-        assert (await s.execute(select(Item))).scalars().all() == []
+        # Scope to THIS test's item: the pg_uri database is shared across test
+        # modules on CI, so a bare select(Item) can see other files' rows.
+        assert (
+            await s.execute(select(Item).where(Item.id == uuid.UUID(item_id)))
+        ).scalar_one_or_none() is None
     assert pruned == [item_id]  # projection pruned by explicit id
     # gone means gone
     assert (await c.get("/api/v1/agents")).json()["total"] == 0
