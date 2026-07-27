@@ -216,12 +216,37 @@
   // Hard delete: 409 while the agent still owns libraries/items — that message
   // surfaces verbatim (preserve the 409-owns-data messaging).
   async function purgeAgent(id: string, name: string) {
-    if (!confirm(`DELETE agent "${name}" permanently? Only possible while it owns no libraries/items; use Revoke for data-owning agents.`)) return;
+    if (!confirm(`DELETE agent "${name}" permanently?`)) return;
     try {
       await deleteAgent(id);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      const detail = errDetail(e);
+      // The agent owns libraries/items: offer the one-action cascade instead
+      // of sending the operator off to delete each library by hand first.
+      if (e instanceof ApiError && e.status === 409 && detail.includes("replicated data")) {
+        if (
+          confirm(
+            `Agent "${name}" still owns replicated data:
+${detail}
+
+` +
+              "Delete the agent AND all of its libraries (including their " +
+              "items and scan history)? This cannot be undone.",
+          )
+        ) {
+          try {
+            await deleteAgent(id, true);
+            await refresh();
+            return;
+          } catch (e2) {
+            error = errDetail(e2);
+            return;
+          }
+        }
+        return;
+      }
+      error = detail;
     }
   }
 
@@ -326,6 +351,10 @@
     inventoryEnabled: boolean;
     collectorsText: string;
     selections: SelRow[];
+    // tri-state local-surface gates: "" = inherit, "on" | "off" explicit
+    webUI: string;
+    localAccess: string;
+    authRequired: string;
   };
   let dialog = $state<GroupForm | null>(null);
   let dialogError = $state("");
@@ -346,6 +375,9 @@
       inventoryEnabled: false,
       collectorsText: "",
       selections: [],
+      webUI: "",
+      localAccess: "",
+      authRequired: "",
     };
   }
 
@@ -367,8 +399,13 @@
         excludeText: (sel.exclude_regex ?? []).join("\n"),
         enabled: sel.enabled ?? true,
       })),
+      webUI: toTri(s.web_ui_enabled),
+      localAccess: toTri(s.local_access_enabled),
+      authRequired: toTri(s.auth_required),
     };
   }
+
+  const toTri = (v: boolean | null | undefined): string => (v === true ? "on" : v === false ? "off" : "");
 
   const splitLines = (t: string): string[] =>
     t.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -380,6 +417,9 @@
   function buildSettings(f: GroupForm): GroupSettings {
     const settings: GroupSettings = {};
     if (f.logLevel) settings.log_level = f.logLevel as GroupSettings["log_level"];
+    if (f.webUI) settings.web_ui_enabled = f.webUI === "on";
+    if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
+    if (f.authRequired) settings.auth_required = f.authRequired === "on";
     if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
     if (f.inventoryEnabled || f.collectorsText.trim()) {
       settings.inventory = {
@@ -871,6 +911,42 @@
           <label class="text-xs text-slate-500">Scan schedule (cron)
             <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700" placeholder="0 3 * * *" bind:value={dialog.cron} />
           </label>
+        </div>
+
+        <!-- Local access (per-group overrides of the fleet-wide policy card) -->
+        <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+          <span class="text-xs font-medium text-slate-500">Local access (per-group)</span>
+          <p class="mt-0.5 text-xs text-slate-400">
+            Inherit = the fleet-wide Local access policy applies. These override
+            the global policy for this group's members; an explicit per-agent /
+            rollout-group policy row (API) still outranks them.
+          </p>
+          <div class="mt-2 flex flex-wrap gap-4">
+            <label class="text-xs text-slate-500">
+              Web UI
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.webUI}>
+                <option value="">Inherit</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="text-xs text-slate-500">
+              Web UI auth token
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.authRequired}>
+                <option value="">Inherit</option>
+                <option value="on">Required</option>
+                <option value="off">Not required</option>
+              </select>
+            </label>
+            <label class="text-xs text-slate-500">
+              Local query API / CLI
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.localAccess}>
+                <option value="">Inherit</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+          </div>
         </div>
 
         <!-- Inventory -->

@@ -1024,7 +1024,21 @@ export interface ScanThroughput {
   window_days: number;
 }
 
+/** One agent actively replicating (seen within the last 10 minutes). By
+ *  design replication is NOT a queue job — each agent streams its outbox to
+ *  the apply API in its own independent seq-ordered lane — so the Jobs page
+ *  surfaces this dedicated activity block instead. */
+export interface AgentReplicationActivity {
+  id: string;
+  name: string;
+  last_seen_at: string;
+  seq_no: number;
+  last_reconcile_at: string | null;
+}
+
 export interface JobsSummary {
+  /** Agents replicating within the last 10 minutes (empty when feature off). */
+  agent_replication: AgentReplicationActivity[];
   queues: Record<string, Record<string, number>>;
   extract: ExtractSummary;
   running: RunningJob[];
@@ -2307,8 +2321,14 @@ export const revokeAgent = (id: string) =>
 
 /** HARD delete an agent row — the cleanup path for failed enrollments and
  *  data-free decommissions. 409 while any library/item references the agent. */
-export const deleteAgent = (id: string) =>
-  request<AgentOut>(`/agents/${id}?purge=true`, { method: "DELETE" });
+/** Hard-delete an agent. `deleteLibraries` also removes every library it
+ *  owns (items/scan history cascade; Meili pruned) in the same action —
+ *  otherwise the delete is refused (409) while the agent owns data. */
+export const deleteAgent = (id: string, deleteLibraries = false) =>
+  request<AgentOut>(
+    `/agents/${id}?purge=true${deleteLibraries ? "&delete_libraries=true" : ""}`,
+    { method: "DELETE" },
+  );
 
 // --------------------------------------------------------------------------- //
 // P10-T1 — agent_commands (on-demand command primitive). Admin/read surface:   //
@@ -2482,6 +2502,12 @@ export interface GroupSettings {
   scan_selections?: ScanSelection[] | null;
   inventory?: InventoryConfig | null;
   scan_schedule_cron?: string | null;
+  /** Per-group local-surface gates. Absent/null = inherit (global policy,
+   *  else agent default). Delivery lifts these over the GLOBAL policy —
+   *  an explicit per-agent/rollout-group policy row still wins. */
+  web_ui_enabled?: boolean | null;
+  local_access_enabled?: boolean | null;
+  auth_required?: boolean | null;
 }
 
 export interface ConfigGroupOut {

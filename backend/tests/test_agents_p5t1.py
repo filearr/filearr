@@ -522,3 +522,63 @@ async def test_list_agents_paginates(client):
     capped = (await c.get("/api/v1/agents?limit=99999&offset=-3")).json()
     assert capped["limit"] == 200 and capped["offset"] == 0
     assert len(capped["items"]) == 5
+
+
+async def test_purge_with_delete_libraries_cascades(client, monkeypatch):
+    """?purge=true&delete_libraries=true removes the agent's libraries (items
+    cascade; Meili pruned by explicit id) and then the agent — one action
+    instead of per-library typed-name deletes first (user request)."""
+    from datetime import UTC, datetime
+
+    from filearr.api import agents as agents_api
+    from filearr.models import Item, Library
+
+    pruned: list[str] = []
+
+    async def _capture_docs(ids):
+        pruned.extend(ids)
+
+    monkeypatch.setattr(agents_api, "delete_docs", _capture_docs)
+
+    c, maker, _ = client
+    raw = (await c.post("/api/v1/agents/enrollment-tokens", json={})).json()["token"]
+    aid = (
+        await c.post(
+            "/api/v1/agents/register",
+            json={"token": raw, "hostname": "h", "platform": "linux"},
+        )
+    ).json()["agent_id"]
+    async with maker() as s:
+        lib = Library(
+            name="cascade-lib",
+            root_path="/agent/root",
+            source_agent_id=uuid.UUID(aid),
+            agent_library_ref="/agent/root",
+        )
+        s.add(lib)
+        await s.flush()
+        item = Item(
+            library_id=lib.id, path="/agent/root/a.mkv", rel_path="a.mkv",
+            filename="a.mkv", size=1, mtime=datetime.now(UTC),
+            source_agent_id=uuid.UUID(aid),
+        )
+        s.add(item)
+        await s.commit()
+        item_id = str(item.id)
+
+    # Without the flag: still the 409 guard.
+    assert (await c.delete(f"/api/v1/agents/{aid}?purge=true")).status_code == 409
+
+    d = await c.delete(f"/api/v1/agents/{aid}?purge=true&delete_libraries=true")
+    assert d.status_code == 200, d.text
+
+    async with maker() as s:
+        from sqlalchemy import select
+
+        assert (
+            await s.execute(select(Library).where(Library.name == "cascade-lib"))
+        ).scalar_one_or_none() is None
+        assert (await s.execute(select(Item))).scalars().all() == []
+    assert pruned == [item_id]  # projection pruned by explicit id
+    # gone means gone
+    assert (await c.get("/api/v1/agents")).json()["total"] == 0

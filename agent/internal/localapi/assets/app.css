@@ -165,3 +165,22 @@ tbody tr:hover { background: var(--row-hover); }
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+/* --- tabs + status/logs panels ------------------------------------------- */
+.tabs { display: inline-flex; gap: 0.25rem; margin-left: 1rem; }
+.tab {
+  border: 1px solid var(--border, #cbd5e1); background: transparent;
+  border-radius: 0.5rem; padding: 0.25rem 0.75rem; font: inherit;
+  cursor: pointer; color: inherit;
+}
+.tab.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+.panel-title { margin: 0.5rem 0 0.25rem; font-size: 1.05rem; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin-top: 0.75rem; }
+.kv dt { font-weight: 600; white-space: nowrap; }
+.kv dd { margin: 0; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+.kv .kv-section { grid-column: 1 / -1; margin-top: 0.6rem; font-weight: 700; border-bottom: 1px solid var(--border, #cbd5e1); padding-bottom: 0.15rem; }
+.loglines {
+  margin-top: 0.5rem; padding: 0.6rem; border: 1px solid var(--border, #cbd5e1);
+  border-radius: 0.5rem; max-height: 32rem; overflow: auto;
+  font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; word-break: break-all;
+}

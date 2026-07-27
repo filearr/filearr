@@ -411,7 +411,51 @@ async def jobs_summary(session: AsyncSession) -> dict:
         "queue": thumbs_queue,
     }
 
+    # Agent replication activity (user report 2026-07-27: "inventory is
+    # populating from unraid but nothing shows as an active job"). By DESIGN
+    # replication is not a queue job — each agent streams its outbox to the
+    # apply API in its own independent, seq-ordered lane (concurrent across
+    # agents, never blocking each other or the worker queues) — so the Jobs
+    # page was blind to it. Surface agents seen within the last 10 minutes
+    # with their replication watermark. Best-effort: feature off / table
+    # absent / any error → empty list.
+    agent_replication: list[dict] = []
+    if settings.agents_enabled:
+        try:
+            from filearr.models import Agent
+
+            cutoff = datetime.now(UTC) - timedelta(minutes=10)
+            rows = (
+                await session.execute(
+                    select(Agent)
+                    .where(
+                        Agent.revoked_at.is_(None),
+                        Agent.last_seen_at.is_not(None),
+                        Agent.last_seen_at >= cutoff,
+                    )
+                    .order_by(Agent.last_seen_at.desc())
+                    .limit(10)
+                )
+            ).scalars().all()
+            agent_replication = [
+                {
+                    "id": str(a.id),
+                    "name": a.name,
+                    "last_seen_at": a.last_seen_at.isoformat(),
+                    "seq_no": int(a.last_contiguous_seq_no or 0),
+                    "last_reconcile_at": (
+                        a.last_reconcile_at.isoformat()
+                        if a.last_reconcile_at
+                        else None
+                    ),
+                }
+                for a in rows
+            ]
+        except Exception:  # noqa: BLE001 — additive tile, never break the poll
+            agent_replication = []
+
     return {
+        "agent_replication": agent_replication,
         "queues": queues["queues"],
         "extract": queues["extract"],
         "running": running,

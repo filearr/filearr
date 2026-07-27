@@ -226,4 +226,109 @@
   });
 
   loadStatus();
+
+  // --- tabs: Search | Status | Logs (all read-only GETs) --------------------
+  var panels = {
+    search: document.getElementById("panel-search"),
+    status: document.getElementById("panel-status"),
+    logs: document.getElementById("panel-logs")
+  };
+  var tabs = {
+    search: document.getElementById("tab-search"),
+    status: document.getElementById("tab-status"),
+    logs: document.getElementById("tab-logs")
+  };
+  var logsTimer = null;
+
+  function showTab(name) {
+    Object.keys(panels).forEach(function (k) {
+      panels[k].hidden = k !== name;
+      tabs[k].classList.toggle("active", k === name);
+      tabs[k].setAttribute("aria-selected", k === name ? "true" : "false");
+    });
+    if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
+    if (name === "status") loadStatusPanel();
+    if (name === "logs") {
+      loadLogs();
+      logsTimer = setInterval(loadLogs, 5000);
+    }
+  }
+  tabs.search.addEventListener("click", function () { showTab("search"); });
+  tabs.status.addEventListener("click", function () { showTab("status"); });
+  tabs.logs.addEventListener("click", function () { showTab("logs"); });
+
+  function kvRow(dl, key, value) {
+    var dt = document.createElement("dt");
+    dt.textContent = key;
+    var dd = document.createElement("dd");
+    dd.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+  function kvSection(dl, title) {
+    var div = document.createElement("div");
+    div.className = "kv-section";
+    div.textContent = title;
+    dl.appendChild(div);
+  }
+
+  function loadStatusPanel() {
+    var errBox2 = document.getElementById("status-error");
+    fetch("/api/settings", { credentials: "same-origin" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (s) {
+        errBox2.hidden = true;
+        var dl = document.getElementById("status-list");
+        dl.textContent = "";
+        kvSection(dl, "Identity");
+        kvRow(dl, "Agent id", s.agent_id);
+        kvRow(dl, "Version", s.agent_version);
+        kvRow(dl, "Central", s.central_url);
+        kvRow(dl, "Rollout group", s.rollout_group);
+        kvRow(dl, "Data dir", s.data_dir);
+        kvSection(dl, "Scanning");
+        var sc = s.scan || {};
+        kvRow(dl, "Roots", (sc.roots || []).join(", ") || s.scan_roots_env);
+        kvRow(dl, "Presets", (sc.presets || []).join(", "));
+        kvRow(dl, "Exclude globs", (sc.exclude_globs || []).join(", "));
+        kvRow(dl, "Categories", (sc.enabled_categories || []).join(", "));
+        kvRow(dl, "Share map", s.share_map);
+        kvRow(dl, "ffmpeg available", s.ffmpeg ? "yes" : "no (video thumbs skipped)");
+        kvSection(dl, "Policy (from central)");
+        var pv = s.policy || {};
+        kvRow(dl, "Web UI enabled", pv.web_ui_enabled ? "yes" : "no");
+        kvRow(dl, "Auth required", pv.auth_required ? "yes" : "no");
+        kvRow(dl, "Local query API", pv.local_access_enabled ? "yes" : "no");
+        kvRow(dl, "Policy version", pv.version);
+        kvRow(dl, "Policy stale", pv.stale ? "YES (past offline grace)" : "no");
+        kvRow(dl, "Path scope", (pv.path_scope || []).join(" OR ") || "unrestricted");
+        kvSection(dl, "This process");
+        kvRow(dl, "Web bind", s.web_addr + (s.web_remote ? " (remote access enabled)" : " (loopback only)"));
+        kvRow(dl, "Self-update", s.self_update ? "enabled" : "off (image pulls are the update path)");
+        kvRow(dl, "Log level", s.log_level || "info");
+      })
+      .catch(function (e) {
+        errBox2.hidden = false;
+        errBox2.textContent = "Could not load settings: " + e.message;
+      });
+  }
+
+  function loadLogs() {
+    var errBox3 = document.getElementById("logs-error");
+    fetch("/api/logs", { credentials: "same-origin" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) {
+        errBox3.hidden = true;
+        var lines = d.lines || [];
+        document.getElementById("log-count").textContent = String(lines.length);
+        var pre = document.getElementById("log-lines");
+        var stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+        pre.textContent = lines.join("\n");
+        if (stick) pre.scrollTop = pre.scrollHeight;
+      })
+      .catch(function (e) {
+        errBox3.hidden = false;
+        errBox3.textContent = "Could not load logs: " + e.message;
+      });
+  }
 })();
+

@@ -199,3 +199,11 @@ def test_raised_dependency_error_defaults():
     s = Settings()
     assert s.doc_decompressed_max == 1_073_741_824
     assert s.model3d_max_bytes == 536_870_912
+
+# --------------------------------------------------------------------------- #
+# Extract wall-clock budget (live incident 2026-07-27)                        #
+# --------------------------------------------------------------------------- #
+def test_extract_timeout_setting_default():
+    from filearr.config import get_settings
+
+    assert get_settings().extract_timeout_seconds == 300

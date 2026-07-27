@@ -23,9 +23,14 @@ console. Full runbook: `docs/ops/agents.md` §12.
 
        docker network create filearr
 
-2. Manual template install (until published to CA): copy the four XML files to
+2. Manual template install (until published to CA): copy the XML files to
    `/boot/config/plugins/dockerMan/templates-user/` on your Unraid server, then
    add each via Docker tab → Add Container → pick the template.
+   **IMPORTANT — delete the copied XMLs after each container is created.** On
+   Apply, Unraid saves its own `my-<name>.xml` alongside; if the pristine file
+   stays, both claim the same template name and the container's Edit page
+   loads the pristine DEFAULTS instead of your saved settings (and re-applying
+   then overwrites the saved copy with defaults). One name, one file.
 
 3. Set the same `POSTGRES_PASSWORD` / DSNs and the same `MEILI_MASTER_KEY`
    across containers (templates default to matching values; passwords are masked

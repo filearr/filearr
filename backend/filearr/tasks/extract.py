@@ -3,6 +3,7 @@ user_metadata is never touched here). Hashing: xxh3 quick-hash ALWAYS; the full
 content_hash only when the library's resolved hash policy (T7) permits it and the
 file is at/below the (per-library or global) size ceiling."""
 
+import asyncio
 import logging
 import random
 import re
@@ -729,12 +730,41 @@ async def _extract_item_impl(
         meta: dict[str, Any] = {}
         if extractor is not None:
             try:
-                meta = extractor(item.path)
+                # Live incident 2026-07-27: extractors used to run SYNCHRONOUSLY
+                # on the worker's event loop — a pathological ~1MB PDF spun
+                # pypdf forever, freezing the loop (heartbeat died, every slot
+                # stalled), the process was killed, and the retry re-poisoned
+                # the restarted worker. Parsers now run OFF-loop with a
+                # wall-clock budget: a hang records a `guard` error and the
+                # item is DONE (never re-queued by the null-quick_hash
+                # self-heal — its hashes committed). A timed-out THREAD cannot
+                # be killed and is abandoned (it may spin until the worker
+                # recycles), but the loop, the heartbeat, and the other slots
+                # stay alive — bounded damage instead of a wedged worker.
+                meta = await asyncio.wait_for(
+                    asyncio.to_thread(extractor, item.path),
+                    timeout=settings.extract_timeout_seconds,
+                )
                 # Extractors that swallow their own failure (video/audiobook/
                 # model3d/document) report it via a ``_extract_error`` key in the
                 # returned dict rather than raising -- treat that as a failure too.
                 if "_extract_error" in meta:
                     extract_failed = True
+            except TimeoutError:
+                meta = {
+                    "_extract_error": (
+                        f"extraction timed out after "
+                        f"{settings.extract_timeout_seconds}s (parser hung; "
+                        "thread abandoned — tune FILEARR_EXTRACT_TIMEOUT_SECONDS)"
+                    ),
+                    "_extract_error_kind": "guard",
+                }
+                extract_failed = True
+                log.warning(
+                    "extract timeout: %s (%ss budget)",
+                    item.rel_path,
+                    settings.extract_timeout_seconds,
+                )
             except Exception as exc:  # extraction must never kill the scan
                 # T11: error strings are untrusted (filenames/parser output) --
                 # sanitize + length-cap before persisting into JSONB.
@@ -753,7 +783,17 @@ async def _extract_item_impl(
         if item.file_category == "image":
             from filearr.tasks.exif_run import exif_metadata
 
-            meta.update(exif_metadata(item.path, settings=settings))
+            try:
+                meta.update(
+                    await asyncio.wait_for(
+                        asyncio.to_thread(exif_metadata, item.path, settings=settings),
+                        timeout=settings.extract_timeout_seconds,
+                    )
+                )
+            except TimeoutError:
+                meta["_exif_error"] = (
+                    f"exif pass timed out after {settings.extract_timeout_seconds}s"
+                )
 
         # P3-T6 OCR pass (per-library opt-in, R4). Runs ONLY when the owning
         # library opted in, so the default (global OFF) pays zero OCR cost. The
@@ -763,16 +803,29 @@ async def _extract_item_impl(
         if library is not None and library.ocr_enabled:
             from filearr.tasks.ocr_run import ocr_metadata
 
-            meta.update(
-                ocr_metadata(
-                    item.path,
-                    file_category=item.file_category,
-                    meta=meta,
-                    prior_meta=item.metadata_,
-                    source_hash=item.content_hash or item.quick_hash,
-                    settings=settings,
+            try:
+                meta.update(
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            ocr_metadata,
+                            item.path,
+                            file_category=item.file_category,
+                            meta=meta,
+                            prior_meta=item.metadata_,
+                            source_hash=item.content_hash or item.quick_hash,
+                            settings=settings,
+                        ),
+                        timeout=settings.extract_timeout_seconds,
+                    )
                 )
-            )
+            except TimeoutError:
+                # OCR is supplementary: a hung Tesseract run is dropped (no
+                # cached ocr_text) without failing the whole extract.
+                log.warning(
+                    "ocr timeout: %s (%ss budget)",
+                    item.rel_path,
+                    settings.extract_timeout_seconds,
+                )
         # P3-T13: archive member listing, keyed off EXTENSION (independent of the
         # media_type bucket -- zip/tar land in ``other``, cbz in ``document``). It
         # is a SEPARATE pass with the same guard-first, hostile-input discipline:
@@ -783,15 +836,19 @@ async def _extract_item_impl(
         archive_ok = False
         if is_archive(item.path):
             try:
-                arc = list_archive_members(
-                    item.path,
-                    max_members=settings.archive_max_members,
-                    max_stored=settings.archive_members_stored,
-                    index_chars=settings.archive_members_index_chars,
-                    scan_max_bytes=settings.archive_scan_max_bytes,
-                    decompressed_max=settings.doc_decompressed_max,
-                    ratio_limit=settings.doc_decompression_ratio,
-                    ratio_min_bytes=settings.doc_decompression_ratio_min_bytes,
+                arc = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        list_archive_members,
+                        item.path,
+                        max_members=settings.archive_max_members,
+                        max_stored=settings.archive_members_stored,
+                        index_chars=settings.archive_members_index_chars,
+                        scan_max_bytes=settings.archive_scan_max_bytes,
+                        decompressed_max=settings.doc_decompressed_max,
+                        ratio_limit=settings.doc_decompression_ratio,
+                        ratio_min_bytes=settings.doc_decompression_ratio_min_bytes,
+                    ),
+                    timeout=settings.extract_timeout_seconds,
                 )
                 meta.update(arc)
                 # An archive IS supported once listed: drop a document extractor's
@@ -799,6 +856,13 @@ async def _extract_item_impl(
                 # stops looking unhandled.
                 meta.pop("unsupported", None)
                 archive_ok = True
+            except TimeoutError:
+                meta["_extract_error"] = (
+                    f"archive listing timed out after "
+                    f"{settings.extract_timeout_seconds}s"
+                )
+                meta["_extract_error_kind"] = "guard"
+                extract_failed = True
             except ArchiveError as exc:
                 meta["_extract_error"] = str(exc)
                 meta["_extract_error_kind"] = exc.kind

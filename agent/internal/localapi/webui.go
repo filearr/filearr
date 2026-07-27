@@ -98,6 +98,13 @@ type WebUIConfig struct {
 	// Policy returns a live snapshot of the cached-policy gate (WebUIEnabled is the
 	// EFFECTIVE capability: intent AND fresh). nil defaults to all-off (fail closed).
 	Policy func() PolicyView
+	// SettingsFn (optional) returns the read-only settings/status snapshot the
+	// Status panel renders: identity, central URL, scan config, policy view —
+	// NEVER a secret (no tokens, no key material). nil hides the panel's data.
+	SettingsFn func(ctx context.Context) (map[string]any, error)
+	// LogsFn (optional) returns recent rendered log lines (oldest first) for
+	// the Logs panel — typically agentlog.Recent. nil hides the panel's data.
+	LogsFn func() []string
 	// GateInterval overrides the policy re-check cadence (test seam).
 	GateInterval time.Duration
 	Logger       *slog.Logger
@@ -298,6 +305,8 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/query", http.HandlerFunc(ws.handleQuery))
 	mux.Handle("GET /api/status", http.HandlerFunc(ws.handleStatus))
+	mux.Handle("GET /api/settings", http.HandlerFunc(ws.handleSettings))
+	mux.Handle("GET /api/logs", http.HandlerFunc(ws.handleLogs))
 	mux.Handle("GET /", ws.staticHandler())
 
 	cop := http.NewCrossOriginProtection()
@@ -522,6 +531,36 @@ func (ws *WebUIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// handleSettings serves the read-only settings/status snapshot for the Status
+// panel (identity, central URL, scan config, effective policy — assembled by
+// the daemon's SettingsFn; NEVER key material or tokens).
+func (ws *WebUIServer) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if ws.cfg.SettingsFn == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false})
+		return
+	}
+	snap, err := ws.cfg.SettingsFn(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, errorBody{
+			Error: "settings snapshot unavailable", Code: "settings_error",
+		})
+		return
+	}
+	snap["available"] = true
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleLogs serves the recent rendered log lines (oldest first) from the
+// in-process agentlog ring — the same lines the container log / file sink got,
+// post level-filtering.
+func (ws *WebUIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
+	lines := []string{}
+	if ws.cfg.LogsFn != nil {
+		lines = ws.cfg.LogsFn()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
 }
 
 func atoiOr(s string, def int) int {

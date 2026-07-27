@@ -132,7 +132,7 @@ async def get_agent_policy(
         if agent.config_group_id is not None
         else None
     )
-    pol = agent_config.merge_group_into_policy(pol, group)
+    pol = agent_config.merge_group_into_policy(pol, group, policy_scope=scope)
     group_tag = agent_config.group_etag_tag(group)
 
     # W8-E: surface the central File Extension Similarity Taxonomy version so a

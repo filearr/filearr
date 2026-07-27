@@ -10,8 +10,8 @@
   <Project>https://github.com/pwsh/filearr</Project>
   <Overview>Background worker for filearr: library scans, metadata extraction, hashing, search-index sync, recycle-bin purge. Same image as the main app, different command (set via Post Arguments). Requires the same 'filearr' Docker network and identical DB/Meilisearch settings as the filearr container. Scale concurrency with --concurrency N in Post Arguments.</Overview>
   <Category>MediaApp:Other Tools:Utilities</Category>
-  <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/pwsh/filearr/main/frontend/public/icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-worker.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/pwsh/filearr/main/frontend/public/icon-512.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <PostArgs>procrastinate --app=filearr.worker.proc_app worker --concurrency 4</PostArgs>
   <Requires>filearr, filearr-postgres, filearr-meilisearch, docker network 'filearr'</Requires>

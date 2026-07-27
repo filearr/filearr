@@ -317,6 +317,15 @@ class Settings(BaseSettings):
     # extraction. Pressure is sampled at most once per sample_seconds; the
     # ceiling recovers only below the low water mark (hysteresis, no thrash).
     # No-op on hosts without loadavg (Windows dev) and when disabled.
+    # --- Extract wall-clock budget (live incident 2026-07-27) --------------
+    # Per-pass ceiling for the off-loop parser threads (property extractor,
+    # EXIF, OCR, archive listing). A hung parser (a pathological ~1MB PDF spun
+    # pypdf indefinitely, freezing the worker loop before parsers moved
+    # off-loop) records a `guard` extraction error at the deadline and the
+    # item completes — the stuck THREAD is abandoned (unkillable) but the
+    # worker keeps breathing. Size ceilings bound bytes; this bounds TIME.
+    extract_timeout_seconds: int = 300
+
     extract_backpressure: bool = True
     extract_backpressure_min_concurrency: int = 1
     extract_backpressure_high_load: float = 0.85  # load1/cores ceiling trip

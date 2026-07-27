@@ -174,3 +174,42 @@ async def test_corrupt_document_records_error_without_raising(db, corrupt_pdf):
     await extract_item(item_id)  # must not raise
     item = await _fetch(db, item_id)
     assert item.metadata_["_extract_error"]
+
+
+async def test_hung_extractor_times_out_and_records_guard_error(
+    db, tmp_path, monkeypatch
+):
+    """Live incident 2026-07-27: a pathological file spun its parser forever,
+    freezing the worker loop. Extractors now run off-loop under a wall-clock
+    budget: a hang records a `guard` extraction error at the deadline and the
+    item COMPLETES (hashes committed -> never re-queued by the self-heal)."""
+    import time
+
+    import filearr.taxonomy as taxonomy
+    from filearr.config import get_settings
+    from filearr.tasks.extract import extract_item
+
+    def _spin(path):
+        time.sleep(5)  # far past the shrunken budget below
+        return {}
+
+    async def _kind(session, category):
+        return "model3d"
+
+    monkeypatch.setattr(taxonomy, "category_extractor", _kind)
+    import filearr.tasks.extract as extract_mod
+
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "model3d", _spin)
+    monkeypatch.setattr(get_settings(), "extract_timeout_seconds", 1)
+
+    hang_file = tmp_path / "hang-fixture.stl"
+    hang_file.write_bytes(b"solid x")  # extractor is stubbed; bytes irrelevant
+    item_id = await _make_item(db, "model3d", str(hang_file))
+    started = time.monotonic()
+    await extract_item(item_id)  # must NOT hang and must NOT raise
+    assert time.monotonic() - started < 4
+
+    item = await _fetch(db, item_id)
+    assert "timed out" in item.metadata_["_extract_error"]
+    assert item.metadata_["_extract_error_kind"] == "guard"
+    assert item.quick_hash is not None  # committed -> self-heal won't re-queue

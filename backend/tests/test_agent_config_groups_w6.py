@@ -508,3 +508,78 @@ async def test_register_unknown_config_group_warns_not_blocks(client):
     async with maker() as s:
         a = await s.get(Agent, uuid.UUID(reg.json()["agent_id"]))
         assert a.config_group_id is None  # fell back to defaults
+
+
+# --------------------------------------------------------------------------- #
+# Per-group local-surface lift (user request 2026-07-27)                      #
+# --------------------------------------------------------------------------- #
+def test_group_local_surface_lifts_over_global_policy():
+    """A config group's web_ui/local_access/auth_required override the GLOBAL
+    policy doc (that is the point of a per-group switch), landing on the
+    TOP-LEVEL keys the agent's P7-T4 gate reads."""
+    from types import SimpleNamespace
+
+    from filearr.agent_config import merge_group_into_policy
+
+    group = SimpleNamespace(
+        settings={"web_ui_enabled": False, "auth_required": True}
+    )
+    merged = merge_group_into_policy(
+        {"web_ui_enabled": True, "auth_required": False, "presets": ["p"]},
+        group,
+        policy_scope="global",
+    )
+    assert merged["web_ui_enabled"] is False  # group turns OFF what global turned on
+    assert merged["auth_required"] is True
+    assert merged["presets"] == ["p"]  # untouched keys survive
+    assert merged["group"]["web_ui_enabled"] is False  # group section still rides
+
+
+def test_group_local_surface_yields_to_narrow_policy_scope():
+    """An explicit agent:/group: (rollout) policy row keeps its say — the
+    config-group lift only outranks the GLOBAL document."""
+    from types import SimpleNamespace
+
+    from filearr.agent_config import merge_group_into_policy
+
+    group = SimpleNamespace(settings={"web_ui_enabled": False})
+    merged = merge_group_into_policy(
+        {"web_ui_enabled": True},
+        group,
+        policy_scope="agent:0000",
+    )
+    assert merged["web_ui_enabled"] is True  # narrow policy wins
+    # ...but a key the narrow policy does NOT set still lifts from the group.
+    group2 = SimpleNamespace(settings={"auth_required": False})
+    merged2 = merge_group_into_policy(
+        {"web_ui_enabled": True}, group2, policy_scope="agent:0000"
+    )
+    assert merged2["auth_required"] is False
+
+
+def test_group_local_surface_none_means_inherit():
+    """Unset (None/absent) group keys change nothing — inherit global/defaults."""
+    from types import SimpleNamespace
+
+    from filearr.agent_config import merge_group_into_policy
+
+    group = SimpleNamespace(settings={"log_level": "debug"})
+    merged = merge_group_into_policy(
+        {"web_ui_enabled": True}, group, policy_scope="global"
+    )
+    assert merged["web_ui_enabled"] is True
+    assert "auth_required" not in merged
+
+
+def test_group_settings_validate_local_surface_keys():
+    """The typed settings schema admits the three gates (and still rejects
+    unknown keys)."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from filearr.agent_config import GroupSettings
+
+    s = GroupSettings(web_ui_enabled=True, local_access_enabled=False, auth_required=True)
+    assert s.web_ui_enabled is True and s.local_access_enabled is False
+    with _pytest.raises(ValidationError):
+        GroupSettings(webui_enabled=True)  # typo stays a hard 422

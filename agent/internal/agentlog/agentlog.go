@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/term"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -116,12 +117,51 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 	} else {
 		w = io.MultiWriter(writers...)
 	}
+	// Tee every rendered line into the in-process ring so the local web UI's
+	// Logs panel can show recent activity without touching the file sink (a
+	// container sets no log dir — its lines only ever went to stderr).
+	w = ringWriter{inner: w}
 
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level:       opts.Level,
 		ReplaceAttr: replaceLevel,
 	})
 	return slog.New(handler), closer, nil
+}
+
+// --- recent-logs ring (web UI /api/logs) ------------------------------------
+// A tiny, process-global bounded buffer of the most recent RENDERED log lines
+// (post level-filtering, so it mirrors exactly what the operator's configured
+// level emits). Read-only consumers get a copy; writers never block on it.
+
+// RingSize bounds the retained line count (~500 lines ≈ a few minutes of
+// info-level activity; enough to see "why is it doing that" from a browser).
+const RingSize = 500
+
+var (
+	ringMu    sync.Mutex
+	ringLines []string
+)
+
+type ringWriter struct{ inner io.Writer }
+
+func (rw ringWriter) Write(p []byte) (int, error) {
+	if lines := strings.Split(strings.TrimRight(string(p), "\n"), "\n"); len(lines) > 0 {
+		ringMu.Lock()
+		ringLines = append(ringLines, lines...)
+		if over := len(ringLines) - RingSize; over > 0 {
+			ringLines = append(ringLines[:0:0], ringLines[over:]...)
+		}
+		ringMu.Unlock()
+	}
+	return rw.inner.Write(p)
+}
+
+// Recent returns a copy of the retained lines, oldest first.
+func Recent() []string {
+	ringMu.Lock()
+	defer ringMu.Unlock()
+	return append([]string(nil), ringLines...)
 }
 
 // replaceLevel renders LevelVerbose as "VERBOSE" (slog would otherwise print

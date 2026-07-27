@@ -281,6 +281,14 @@ class GroupSettings(BaseModel):
     scan_selections: list[ScanSelection] | None = None
     inventory: InventoryConfig | None = None
     scan_schedule_cron: str | None = None
+    # Local-surface gates per CONFIG GROUP (user request 2026-07-27). None =
+    # inherit (global policy, else agent default). Delivery lifts these to the
+    # TOP-LEVEL policy keys the agent's P7-T4 gate already reads — see
+    # merge_group_into_policy for the precedence — so agent binaries need no
+    # change.
+    web_ui_enabled: bool | None = None
+    local_access_enabled: bool | None = None
+    auth_required: bool | None = None
 
     @field_validator("scan_selections")
     @classmethod
@@ -358,7 +366,9 @@ def group_etag_tag(group: Any | None) -> str | None:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
-def merge_group_into_policy(policy: dict, group: Any | None) -> dict:
+def merge_group_into_policy(
+    policy: dict, group: Any | None, *, policy_scope: str = ""
+) -> dict:
     """Merge the agent's config group ``settings`` into the effective policy doc
     under a new top-level ``group`` section (W6-D2).
 
@@ -372,10 +382,34 @@ def merge_group_into_policy(policy: dict, group: Any | None) -> dict:
       operator authored it explicitly), that explicit key WINS — the group
       settings are NOT injected (additive, non-clobbering).
 
+    LOCAL-SURFACE LIFT (user request 2026-07-27): the group's
+    ``web_ui_enabled`` / ``local_access_enabled`` / ``auth_required`` are
+    additionally lifted to the TOP-LEVEL keys the agent's P7-T4 gate reads —
+    a config group can gate its members' web UI without any agent change. The
+    lift honors this precedence per key:
+
+      explicit agent:/group: (rollout) policy doc  >  config-group settings
+      >  the GLOBAL policy doc  >  agent defaults
+
+    i.e. when the winning policy scope is ``global`` (or none), a set
+    config-group key OVERRIDES it — that is the whole point of a per-group
+    switch "outside of the global configuration". A narrower explicit policy
+    row still wins wholesale (unchanged wire contract).
+
     Backward compat: current agent binaries that ignore ``group`` are unaffected
-    (the key is purely additive)."""
+    (the key is purely additive); the lifted keys are ones they already parse."""
     if group is None:
         return policy
     if "group" in policy:
         return policy
-    return {**policy, "group": group.settings or {}}
+    settings = group.settings or {}
+    merged = {**policy, "group": settings}
+    narrow_scope = policy_scope.startswith(("agent:", "group:"))
+    for key in ("web_ui_enabled", "local_access_enabled", "auth_required"):
+        value = settings.get(key)
+        if value is None:
+            continue
+        if narrow_scope and key in policy:
+            continue  # an explicit narrower policy row keeps its say
+        merged[key] = value
+    return merged

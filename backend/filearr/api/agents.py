@@ -41,7 +41,8 @@ from filearr import agentsync, audit
 from filearr.agentsync import EnrollmentError
 from filearr.config import get_settings
 from filearr.db import get_session
-from filearr.models import Agent, EnrollmentToken, Item, Library
+from filearr.models import Agent, EnrollmentToken, Item, Library, ScanRun
+from filearr.search import delete_docs
 from filearr.security import require_scope
 
 router = APIRouter()
@@ -662,6 +663,7 @@ async def revoke_agent(
     agent_id: uuid.UUID,
     request: Request,
     purge: bool = False,
+    delete_libraries: bool = False,
     session: AsyncSession = Depends(get_session),
 ) -> AgentOut:
     """Application-layer kill switch (research §1.4): stamp ``revoked_at`` so the
@@ -680,6 +682,56 @@ async def revoke_agent(
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
     if purge:
+        # ?delete_libraries=true (user request 2026-07-27): decommissioning an
+        # agent used to demand deleting each of its libraries by hand (each
+        # with a typed-name confirmation) before the purge would proceed. This
+        # flag removes the agent's libraries in the same action — same
+        # semantics as the library DELETE endpoint (FK cascade removes items/
+        # scan_runs/scan_paths/item_versions; the Meili projection is pruned
+        # by explicit id AFTER the commit), same running-scan refusal. Only
+        # meaningful with purge (a revoke keeps data by definition).
+        deleted_libraries = 0
+        removed_item_ids: list[str] = []
+        if delete_libraries:
+            libs = (
+                await session.execute(
+                    select(Library).where(Library.source_agent_id == agent_id)
+                )
+            ).scalars().all()
+            if libs:
+                running = (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(ScanRun)
+                        .where(
+                            ScanRun.library_id.in_([lib.id for lib in libs]),
+                            ScanRun.status.in_(("running", "stopping")),
+                        )
+                    )
+                ).scalar_one()
+                if running:
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        "a scan is running for one of this agent's libraries; "
+                        "wait for it to finish first",
+                    )
+                lib_ids = [lib.id for lib in libs]
+                removed_item_ids.extend(
+                    str(i)
+                    for i in (
+                        await session.execute(
+                            select(Item.id).where(Item.library_id.in_(lib_ids))
+                        )
+                    ).scalars()
+                )
+                # Core DELETE (not session.delete): the ORM would try to NULL
+                # the children's FKs; the DB's ON DELETE CASCADE is the
+                # authority here, exactly like the library DELETE endpoint.
+                await session.execute(
+                    delete(Library).where(Library.id.in_(lib_ids))
+                )
+                deleted_libraries = len(libs)
+                await session.flush()
         lib_count = (
             await session.execute(
                 select(func.count()).select_from(Library).where(
@@ -700,12 +752,17 @@ async def revoke_agent(
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"agent owns replicated data ({lib_count} library(ies), "
-                f"{item_count} item(s)) — revoke it instead, or delete its "
+                f"{item_count} item(s)) — revoke it instead, delete with "
+                f"delete_libraries=true to remove them in one action, or "
                 "libraries first",
             )
         snapshot = _agent_out(agent)
         await session.delete(agent)
         await session.commit()
+        # Meili prune AFTER the commit (same discipline as the library DELETE:
+        # a failed commit must never remove still-live docs), explicit ids only.
+        for start in range(0, len(removed_item_ids), 10_000):
+            await delete_docs(removed_item_ids[start : start + 10_000])
         await audit.emit(
             audit.AGENT_DELETED,
             request=request,
@@ -714,6 +771,8 @@ async def revoke_agent(
                 "agent_id": str(agent_id),
                 "hostname": agent.hostname,
                 "status": snapshot.status,
+                "deleted_libraries": deleted_libraries,
+                "deleted_items": len(removed_item_ids),
             },
         )
         return snapshot

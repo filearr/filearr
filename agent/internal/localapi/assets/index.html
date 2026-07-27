@@ -9,7 +9,12 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>Filearr <span class="sub">local search</span></h1>
+    <h1>Filearr <span class="sub">local agent</span></h1>
+    <nav class="tabs" role="tablist">
+      <button id="tab-search" class="tab active" role="tab" aria-selected="true">Search</button>
+      <button id="tab-status" class="tab" role="tab" aria-selected="false">Status</button>
+      <button id="tab-logs" class="tab" role="tab" aria-selected="false">Logs</button>
+    </nav>
     <span id="index-status" class="status" aria-live="polite"></span>
   </header>
 
@@ -23,6 +28,7 @@
   </div>
 
   <main>
+    <section id="panel-search">
     <form id="search-form" autocomplete="off">
       <input
         id="q"
@@ -58,6 +64,25 @@
     </table>
 
     <p id="empty" class="empty" hidden>No results.</p>
+    </section>
+
+    <section id="panel-status" hidden>
+      <h2 class="panel-title">Agent status &amp; settings</h2>
+      <p class="hint">Read-only snapshot of this agent's identity, configuration,
+        and the central policy it is currently applying. Changes are made in the
+        central console (or the container's environment), never here.</p>
+      <div id="status-error" class="error" hidden></div>
+      <dl id="status-list" class="kv"></dl>
+    </section>
+
+    <section id="panel-logs" hidden>
+      <h2 class="panel-title">Recent logs</h2>
+      <p class="hint">The last <span id="log-count">0</span> lines this process
+        emitted at its configured log level (same content as the container /
+        file log). Auto-refreshes while this tab is open.</p>
+      <div id="logs-error" class="error" hidden></div>
+      <pre id="log-lines" class="loglines"></pre>
+    </section>
   </main>
 
   <footer class="footer">

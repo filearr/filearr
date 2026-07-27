@@ -10,7 +10,7 @@
   <Project>https://www.postgresql.org/</Project>
   <Overview>PostgreSQL 18 for filearr — source of truth for the catalog AND the job queue (Procrastinate). Pinned to 18.4 (fixes 11 CVEs vs 18.0). Uses PG18's native uuidv7() and async I/O (io_method=worker, set via Post Arguments).&#13;&#10;&#13;&#10;Install this container FIRST. Requires the user-defined Docker network 'filearr':  docker network create filearr&#13;&#10;&#13;&#10;Back up with pg_dump; the Meilisearch index is disposable but this database is not.</Overview>
   <Category>Other:</Category>
-  <TemplateURL/>
+  <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-postgres.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/docker-library/docs/master/postgres/logo.png</Icon>
   <ExtraParams>--restart=unless-stopped --health-cmd="pg_isready -U filearr" --health-interval=10s</ExtraParams>
   <PostArgs>postgres -c io_method=worker</PostArgs>

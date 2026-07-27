@@ -247,10 +247,12 @@ async def test_jobs_summary_composition(proc_connector, monkeypatch):
     await engine.dispose()
 
     assert set(summary) == {
-        "queues", "extract", "running", "failed_recent", "meili", "scans_running",
-        "stalled", "priorities", "staged_pipeline", "disk", "resources", "thumbs",
-        "scan_throughput", "upcoming",
+        "agent_replication", "queues", "extract", "running", "failed_recent",
+        "meili", "scans_running", "stalled", "priorities", "staged_pipeline",
+        "disk", "resources", "thumbs", "scan_throughput", "upcoming",
     }
+    # Feature off in this harness -> the replication activity list is empty.
+    assert summary["agent_replication"] == []
     # The running scan carries started_at so the dashboard can derive files/min
     # between polls (the SSE endpoint is not the only source of a rate).
     assert summary["scans_running"][0]["started_at"] is not None

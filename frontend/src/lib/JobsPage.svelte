@@ -113,6 +113,17 @@
   let prevNet = $state<{ rx: number; tx: number; t: number } | null>(null);
   let netRate = $state<{ rx: number; tx: number } | null>(null);
 
+  // Compact relative time for the agent-replication tile.
+  function relTime(iso: string): string {
+    const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    if (secs < 60) return `${secs}s ago`;
+    const m = Math.round(secs / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.round(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.round(h / 24)}d ago`;
+  }
+
   // FIX-11 — human GB for the low-space banner.
   function fmtGB(bytes: number): string {
     return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -893,6 +904,37 @@
         </span>
       {/if}
     </div>
+  {/if}
+
+  <!-- Agent replication (not queue jobs: independent per-agent apply lanes) -->
+  {#if summary && summary.agent_replication?.length > 0}
+    <h3 class="mt-6 text-base font-semibold">Agent replication</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Inventory streaming in from remote agents. Replication is not a queue
+      job — each agent applies its own seq-ordered batches through the API,
+      independently and without blocking other agents or the worker queues —
+      so it appears here rather than under running jobs.
+    </p>
+    <table class="mt-2 w-full text-sm">
+      <thead>
+        <tr class="text-left text-slate-500">
+          <th class="py-2 pr-3">Agent</th>
+          <th class="py-2 pr-3 text-right" title="The agent's contiguous replication watermark — the highest change sequence central has durably applied.">Applied seq</th>
+          <th class="py-2 pr-3">Last batch</th>
+          <th class="py-2 pr-3">Last reconcile</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+        {#each summary.agent_replication as a (a.id)}
+          <tr>
+            <td class="py-2 pr-3 font-medium">{a.name}</td>
+            <td class="py-2 pr-3 text-right tabular-nums text-slate-500">{a.seq_no.toLocaleString()}</td>
+            <td class="py-2 pr-3 text-slate-500" title={new Date(a.last_seen_at).toLocaleString()}>{relTime(a.last_seen_at)}</td>
+            <td class="py-2 pr-3 text-slate-500">{a.last_reconcile_at ? relTime(a.last_reconcile_at) : "never"}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   {/if}
 
   <!-- Running scans -->
