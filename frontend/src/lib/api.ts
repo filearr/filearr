@@ -2599,3 +2599,64 @@ export const issueInstallerConfig = (body: InstallerConfigIn) =>
     method: "POST",
     body: JSON.stringify(body),
   });
+
+// --------------------------------------------------------------------------- //
+// LLM keys (M1, docs/research/llm-rag-integration.md §5)                       //
+// --------------------------------------------------------------------------- //
+
+export interface LlmRoleInfo {
+  name: string;
+  description: string;
+  tools: string[];
+  content_access: boolean;
+  reveal_paths: boolean;
+}
+
+export interface LlmKey {
+  id: string;
+  name: string;
+  prefix: string;
+  role: string;
+  role_description: string | null;
+  path_scope: string | null;
+  libraries: string[] | null;
+  content_access: boolean;
+  reveal_paths: boolean;
+  rate_limit: number;
+  expires_at: string | null;
+  last_used_at: string | null;
+  created_at: string | null;
+  /** present ONLY in the mint response — shown once. */
+  key?: string;
+}
+
+export interface MintLlmKeyRequest {
+  name: string;
+  role: string;
+  path_scope?: string | null;
+  libraries?: string[] | null;
+  content_access?: boolean | null;
+  reveal_paths?: boolean | null;
+  rate_limit?: number | null;
+  expires_days?: number | null;
+}
+
+export function listLlmRoles(): Promise<{ roles: LlmRoleInfo[] }> {
+  return request("/llm-keys/roles");
+}
+
+export function listLlmKeys(): Promise<{ keys: LlmKey[] }> {
+  return request("/llm-keys");
+}
+
+export function mintLlmKey(body: MintLlmKeyRequest): Promise<LlmKey> {
+  return request("/llm-keys", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function revokeLlmKey(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/llm-keys/${id}`, {
+    method: "DELETE",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}

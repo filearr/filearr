@@ -38,6 +38,12 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
     app.include_router(v1_router, prefix="/api/v1")
+    # LLM tool facade: its OWN sub-app so /api/llm/v1/openapi.json is a trimmed
+    # spec containing only the role-gated tools (OpenWebUI/mcpo import it
+    # directly). See docs/research/llm-rag-integration.md.
+    from filearr.api.llm import llm_app
+
+    app.mount("/api/llm/v1", llm_app)
     # Built SPA is copied to /app/static in the Docker image
     try:
         app.mount("/", StaticFiles(directory="static", html=True), name="spa")

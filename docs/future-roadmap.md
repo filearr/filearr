@@ -624,7 +624,7 @@ scoped enough to ship independently.
   capabilities advertisement so central's fleet console can show which agents
   lack it.
 
-## 21. LLM / RAG integration (designed 2026-07-28, not scheduled)
+## 21. LLM / RAG integration (M1 SHIPPED 2026-07-28; M2/M3 open)
 
 Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool
 backend and analyze retrieved content RAG-style. Full design in

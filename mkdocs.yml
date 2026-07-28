@@ -80,6 +80,7 @@ nav:
       - Proxmox LXC: deployment/proxmox.md
       - Upgrades & migrations: deployment/upgrades.md
   - Distributed agents: agents.md
+  - LLM integration: llm.md
   - Security: security.md
   - Data collected & how: data-collection.md
   - Operations & recovery: operations.md

@@ -682,6 +682,20 @@ class ApiKey(Base):
         DateTime(timezone=True), server_default=text("now()")
     )
 
+    # --- LLM-grade key attributes (M1, migration f2c8b5a9d417) --------------
+    # NULL llm_role = an ordinary key (facade refuses it). The boolean/int
+    # fields are per-key OVERRIDES: NULL inherits the role's default
+    # (filearr.llm.LLM_ROLES) — enforcement lives server-side in the facade
+    # handlers, never in the prompt.
+    llm_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    path_scope: Mapped[str | None] = mapped_column(LtreeCompat(), nullable=True)
+    libraries: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    content_access: Mapped[bool | None] = mapped_column(nullable=True)
+    reveal_paths: Mapped[bool | None] = mapped_column(nullable=True)
+    rate_limit: Mapped[int | None] = mapped_column(nullable=True)
+
 
 # --------------------------------------------------------------------------- #
 # Phase 8 — Alerting (P8-T1 schema). Four tables + a fan-out junction. The     #

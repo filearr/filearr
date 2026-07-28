@@ -1,6 +1,8 @@
 # LLM / RAG integration — design brief
 
-Status: DESIGN (not scheduled). Written 2026-07-28.
+Status: M1 SHIPPED 2026-07-28 (facade + keys + handshake + docs; MCP
+adapter deferred to a follow-up). M2 (doc_chunks passage retrieval) and
+M3 (curator writes) open. Written 2026-07-28.
 
 Goal: let an LLM answer questions like *"where are my 4K copies of X, and
 which one is on the NAS?"*, *"what did we scan last week that looks like

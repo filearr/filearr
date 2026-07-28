@@ -22,6 +22,7 @@
   import UsersPanel from "./UsersPanel.svelte";
   import SessionsPanel from "./SessionsPanel.svelte";
   import AuditPanel from "./AuditPanel.svelte";
+  import LlmKeysPanel from "./LlmKeysPanel.svelte";
   import { gotoBrowse } from "./routes";
   import type { AuthPrincipal } from "./api";
 
@@ -1022,6 +1023,8 @@
   <CustomFieldsPanel {libraries} />
 
   <RbacPanel />
+
+  <LlmKeysPanel />
 
   {#if isAdmin}
     <UsersPanel />
