@@ -623,3 +623,16 @@ scoped enough to ship independently.
   and states what will not work; surface the same probe in the agent's
   capabilities advertisement so central's fleet console can show which agents
   lack it.
+
+## 21. LLM / RAG integration (designed 2026-07-28, not scheduled)
+
+Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool
+backend and analyze retrieved content RAG-style. Full design in
+`docs/research/llm-rag-integration.md`: one 8-tool facade (`/api/llm/v1`)
+exposed as OpenAPI tool server + MCP + OpenAI function specs; LLM-grade
+API keys (role, path/library scope, content flag, rate limit) on the
+existing Bearer/RBAC substrate; a server-rendered capability handshake and
+system prompt so the model always knows the system and its assigned role;
+two RAG tiers (metadata-RAG over existing search/extract now; doc_chunks +
+Meili vector chunk index later). Phases M1 (read tools) / M2 (content
+chunks) / M3 (curator writes).
