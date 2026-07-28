@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Filearr — local search</title>
+  <title>Filearr — local agent</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -12,6 +12,8 @@
     <h1>Filearr <span class="sub">local agent</span></h1>
     <nav class="tabs" role="tablist">
       <button id="tab-search" class="tab active" role="tab" aria-selected="true">Search</button>
+      <button id="tab-filters" class="tab" role="tab" aria-selected="false">Filters</button>
+      <button id="tab-reports" class="tab" role="tab" aria-selected="false">Reports</button>
       <button id="tab-status" class="tab" role="tab" aria-selected="false">Status</button>
       <button id="tab-logs" class="tab" role="tab" aria-selected="false">Logs</button>
     </nav>
@@ -39,6 +41,19 @@
         spellcheck="false"
         autofocus>
     </form>
+    <div id="chips" class="chips" aria-label="Category filters"></div>
+    <div class="toolbar">
+      <label for="sort" class="toolbar-label">Sort:</label>
+      <select id="sort">
+        <option value="" selected>Relevance</option>
+        <option value="name">Name A–Z</option>
+        <option value="size">Largest</option>
+        <option value="newest">Newest</option>
+      </select>
+      <span class="toolbar-spacer"></span>
+      <button type="button" id="export-csv" class="btn" disabled>Export CSV</button>
+      <button type="button" id="export-json" class="btn" disabled>Export JSON</button>
+    </div>
     <p class="hint">
       Local search is <strong>trigram / substring</strong> based and is
       <strong>not</strong> typo-tolerant the way central search is. A zero-result
@@ -53,10 +68,10 @@
     <table id="results" hidden>
       <thead>
         <tr>
+          <th class="col-kind">Kind</th>
           <th class="col-path">Path</th>
           <th class="col-size">Size</th>
           <th class="col-mod">Modified</th>
-          <th class="col-kind">Kind</th>
           <th class="col-copy"></th>
         </tr>
       </thead>
@@ -66,12 +81,79 @@
     <p id="empty" class="empty" hidden>No results.</p>
     </section>
 
+    <section id="panel-filters" hidden>
+      <h2 class="panel-title">Filter builder</h2>
+      <p class="hint">Compose typed conditions into the query grammar. Conditions
+        are combined with AND (OR groups aren't in the grammar). The compiled
+        filter runs against this agent's local index; the same string works in
+        the central console's search and filter builder.</p>
+      <div class="fb-grid">
+        <div class="fb-left">
+          <div id="fb-rows"></div>
+          <button type="button" id="fb-add" class="btn">+ Add condition</button>
+          <div class="fb-compiled-wrap">
+            <div class="fb-compiled-head">
+              <span>Compiled filter</span>
+              <button type="button" id="fb-copy" class="copy-btn">Copy</button>
+            </div>
+            <pre id="fb-compiled" class="fb-compiled"></pre>
+          </div>
+          <div class="fb-actions">
+            <button type="button" id="fb-open-search" class="btn btn-accent">Open in Search</button>
+            <button type="button" id="fb-reset" class="btn">Reset</button>
+          </div>
+        </div>
+        <div class="fb-right">
+          <h3 class="fb-live-title">Live results <span id="fb-count" class="fb-count"></span></h3>
+          <div id="fb-error" class="error" hidden></div>
+          <table id="fb-table" hidden>
+            <thead>
+              <tr><th class="col-kind">Kind</th><th class="col-path">Name</th><th class="col-size">Size</th></tr>
+            </thead>
+            <tbody id="fb-body"></tbody>
+          </table>
+          <p id="fb-empty" class="empty" hidden>No matches.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-reports" hidden>
+      <h2 class="panel-title">Reports</h2>
+      <div class="toolbar">
+        <label for="rpt-select" class="toolbar-label">Report:</label>
+        <select id="rpt-select"></select>
+        <span class="toolbar-spacer"></span>
+        <button type="button" id="rpt-prev" class="btn" disabled>&larr; Previous</button>
+        <span id="rpt-page" class="toolbar-label"></span>
+        <button type="button" id="rpt-next" class="btn" disabled>Next &rarr;</button>
+        <button type="button" id="rpt-csv" class="btn">Download CSV</button>
+      </div>
+      <p id="rpt-desc" class="hint"></p>
+      <div id="rpt-error" class="error" hidden></div>
+      <div class="table-scroll"><table id="rpt-table" class="data-table" hidden>
+        <thead id="rpt-head"></thead>
+        <tbody id="rpt-body"></tbody>
+      </table></div>
+      <p id="rpt-empty" class="empty" hidden>No rows.</p>
+    </section>
+
     <section id="panel-status" hidden>
       <h2 class="panel-title">Agent status &amp; settings</h2>
       <p class="hint">Read-only snapshot of this agent's identity, configuration,
         and the central policy it is currently applying. Changes are made in the
         central console (or the container's environment), never here.</p>
       <div id="status-error" class="error" hidden></div>
+      <div id="roots-wrap" hidden>
+        <h3 class="subhead">Scan roots</h3>
+        <div class="table-scroll"><table id="roots-table" class="data-table">
+          <thead><tr>
+            <th>Root</th><th class="num">Items</th><th class="num">Size</th>
+            <th>Last scan</th><th>Status</th><th class="num">Seen</th>
+            <th class="num">New</th><th class="num">Changed</th><th class="num">Duration</th>
+          </tr></thead>
+          <tbody id="roots-body"></tbody>
+        </table></div>
+      </div>
       <dl id="status-list" class="kv"></dl>
     </section>
 
@@ -79,8 +161,9 @@
       <h2 class="panel-title">Recent logs</h2>
       <p class="hint">The last <span id="log-count">0</span> lines across every
         agent process (daemon, scans, entrypoint) at the configured log level.
-        Auto-refreshes while this tab is open.
-        <label for="log-limit" class="log-limit-label">Lines back:</label>
+        Auto-refreshes while this tab is open.</p>
+      <div class="toolbar">
+        <label for="log-limit" class="toolbar-label">Lines back:</label>
         <select id="log-limit">
           <option value="100">100</option>
           <option value="250">250</option>
@@ -89,9 +172,17 @@
           <option value="2500">2,500</option>
           <option value="5000">5,000</option>
         </select>
-      </p>
+        <label class="toolbar-label"><input type="checkbox" id="log-raw"> Raw</label>
+        <span class="toolbar-spacer"></span>
+        <button type="button" id="log-export" class="btn">Export .log</button>
+        <button type="button" id="log-export-csv" class="btn">Export CSV</button>
+      </div>
       <div id="logs-error" class="error" hidden></div>
-      <pre id="log-lines" class="loglines"></pre>
+      <div class="table-scroll loglines-wrap"><table id="log-table" class="data-table log-table">
+        <thead><tr><th>Time</th><th>Level</th><th>Message</th><th>Details</th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table></div>
+      <pre id="log-lines" class="loglines" hidden></pre>
     </section>
   </main>
 

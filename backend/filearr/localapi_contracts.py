@@ -61,6 +61,8 @@ class ResultRow(_Wire):
     size: int
     mtime: str  # ISO-8601 UTC
     kind: str | None = None  # taxonomy file_category classification, if known
+    group: str | None = None  # taxonomy file_group, if known (additive 2026-07-27)
+    root: str | None = None  # scan-root absolute path (web UI enrichment only)
     quick_hash: str | None = None
     content_hash: str | None = None
     fuzzy_matched: bool = False  # matched via the edit-distance re-rank, not exact

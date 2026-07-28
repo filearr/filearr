@@ -165,6 +165,7 @@ func runScan(args []string) error {
 				return
 			}
 			newLogger().Info("scan progress",
+				"root", currentRoot(),
 				"seen", p.Seen, "new", p.New, "changed", p.Changed)
 		},
 		// P10-T11 best-effort share discovery: attach a network-open hint to each
@@ -176,14 +177,25 @@ func runScan(args []string) error {
 	scanAll := func() {
 		for _, root := range sc.Roots {
 			activeScanRoot.Store(root)
+			started := time.Now().UTC()
+			newLogger().Info("scan starting", "root", root)
+			updateScanRoots(cfg.DataDir, root, rootScanStat{
+				Status: "running", StartedAt: started.Format(time.RFC3339),
+			})
 			o := opts
 			o.Root = root
 			res, err := scan.Scan(ctx, store, o)
+			finished := time.Now().UTC()
 			if err != nil {
 				newLogger().Error("scan failed", "root", root, "err", err)
 				writeScanStatus(cfg.DataDir, scanStatus{
 					Root: root, Running: false, Status: "failed",
-					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+					UpdatedAt: finished.Format(time.RFC3339),
+				})
+				updateScanRoots(cfg.DataDir, root, rootScanStat{
+					Status: "failed", StartedAt: started.Format(time.RFC3339),
+					FinishedAt:      finished.Format(time.RFC3339),
+					DurationSeconds: int64(finished.Sub(started).Seconds()),
 				})
 				continue
 			}
@@ -196,7 +208,14 @@ func runScan(args []string) error {
 				Root: root, Running: false, Status: status,
 				Seen: res.Seen, New: res.New, Changed: res.Changed,
 				Missing:   res.Missing,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				UpdatedAt: finished.Format(time.RFC3339),
+			})
+			updateScanRoots(cfg.DataDir, root, rootScanStat{
+				Status: status, Seen: res.Seen, New: res.New,
+				Changed: res.Changed, Missing: res.Missing,
+				StartedAt:       started.Format(time.RFC3339),
+				FinishedAt:      finished.Format(time.RFC3339),
+				DurationSeconds: int64(finished.Sub(started).Seconds()),
 			})
 		}
 	}
@@ -465,5 +484,41 @@ func writeScanStatus(dataDir string, st scanStatus) {
 	tmp := filepath.Join(dataDir, "scan-status.json.tmp")
 	if os.WriteFile(tmp, b, 0o644) == nil {
 		_ = os.Rename(tmp, filepath.Join(dataDir, "scan-status.json"))
+	}
+}
+
+// rootScanStat is one root's LAST scan outcome, persisted per root in
+// scan-roots.json so the daemon's web UI Status panel (a separate process) can
+// show when each root was last scanned and what that scan saw — scan-status.json
+// only ever holds the single active/most-recent scan.
+type rootScanStat struct {
+	Status          string `json:"status"` // running | finished | stopped | failed
+	Seen            int    `json:"seen"`
+	New             int    `json:"new"`
+	Changed         int    `json:"changed"`
+	Missing         int    `json:"missing,omitempty"`
+	StartedAt       string `json:"started_at,omitempty"`
+	FinishedAt      string `json:"finished_at,omitempty"`
+	DurationSeconds int64  `json:"duration_seconds,omitempty"`
+}
+
+const scanRootsFile = "scan-roots.json"
+
+// updateScanRoots read-modify-writes one root's entry in scan-roots.json
+// (atomic tmp+rename; only the scan process writes it, the daemon only reads).
+func updateScanRoots(dataDir, root string, st rootScanStat) {
+	path := filepath.Join(dataDir, scanRootsFile)
+	m := map[string]rootScanStat{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	m[root] = st
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		_ = os.Rename(tmp, path)
 	}
 }

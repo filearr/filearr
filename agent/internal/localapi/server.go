@@ -423,6 +423,8 @@ func toResultRow(res query.Result) ResultRow {
 		Size:         it.Size,
 		Mtime:        time.Unix(0, it.MtimeNs).UTC().Format(time.RFC3339),
 		Kind:         strPtr(it.FileCategory),
+		Group:        strPtr(it.FileGroup),
+		RootID:       it.RootID,
 		QuickHash:    strPtr(it.QuickHash),
 		ContentHash:  strPtr(it.ContentHash),
 		FuzzyMatched: res.FuzzyMatched,

@@ -38,10 +38,15 @@ type ResultRow struct {
 	Size         int64    `json:"size"`
 	Mtime        string   `json:"mtime"` // ISO-8601 UTC
 	Kind         *string  `json:"kind"`
+	Group        *string  `json:"group,omitempty"`
 	QuickHash    *string  `json:"quick_hash"`
 	ContentHash  *string  `json:"content_hash"`
 	FuzzyMatched bool     `json:"fuzzy_matched"`
 	Score        *float64 `json:"score"`
+	// RootID never crosses the wire; the web UI handler resolves it to Root
+	// (the scan-root's absolute path) so the browser can render/copy full paths.
+	RootID string  `json:"-"`
+	Root   *string `json:"root,omitempty"`
 }
 
 // ScopeInfo is the R3 restricted-view affordance. In P7-T2 no path scope exists

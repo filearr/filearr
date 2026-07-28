@@ -155,6 +155,15 @@ binary; the data directory is pinned to `/config`.
     pulling the new image; the enrolled identity and local index in
     `/config` carry over.
 
+!!! note "The agent web UI is a small console"
+    Five read-only tabs: **Search** (category chips, sorting, CSV/JSON
+    export), **Filters** (a filter builder over the same query grammar as
+    the central console, with live preview), **Reports** (categories,
+    unmapped extensions, largest files, duplicates, future-dated files —
+    with CSV download), **Status** (agent version and a per-root table of
+    items/size/last-scan statistics), and **Logs** (columnar
+    time/level/message/details view with export).
+
 !!! note "Web UI logs are the full multi-process log"
     The image sets `FILEARR_AGENT_LOG_DIR=/config/logs`: the daemon, every
     scan invocation, and the entrypoint each write a rotating log file

@@ -107,6 +107,13 @@ type WebUIConfig struct {
 	// log dir is active, else the in-process ring (which caps its own depth
 	// regardless of limit). nil hides the panel's data.
 	LogsFn func(limit int) []string
+	// ReportsFn (optional) runs one canned local report (see reports.go); a
+	// nil page result means unknown report id. nil hides the Reports tab data.
+	ReportsFn func(ctx context.Context, id string, limit, offset int) (*ReportPage, error)
+	// RootPaths (optional) maps root_id -> scan-root absolute path so query
+	// results can carry full paths for display/copy. Re-read per request
+	// (a handful of rows).
+	RootPaths func(ctx context.Context) (map[string]string, error)
 	// GateInterval overrides the policy re-check cadence (test seam).
 	GateInterval time.Duration
 	Logger       *slog.Logger
@@ -309,6 +316,8 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	mux.Handle("GET /api/status", http.HandlerFunc(ws.handleStatus))
 	mux.Handle("GET /api/settings", http.HandlerFunc(ws.handleSettings))
 	mux.Handle("GET /api/logs", http.HandlerFunc(ws.handleLogs))
+	mux.Handle("GET /api/reports", http.HandlerFunc(ws.handleReportList))
+	mux.Handle("GET /api/reports/{id}", http.HandlerFunc(ws.handleReport))
 	mux.Handle("GET /", ws.staticHandler())
 
 	cop := http.NewCrossOriginProtection()
@@ -499,6 +508,18 @@ func (ws *WebUIServer) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, ws.log, err)
 		return
 	}
+	// Resolve root ids to scan-root paths so the browser can show/copy full
+	// paths (console-parity search rows). Best-effort: a lookup failure just
+	// leaves Root unset.
+	if ws.cfg.RootPaths != nil {
+		if roots, rerr := ws.cfg.RootPaths(r.Context()); rerr == nil {
+			for i := range resp.Rows {
+				if p, ok := roots[resp.Rows[i].RootID]; ok {
+					resp.Rows[i].Root = &p
+				}
+			}
+		}
+	}
 	// Record the successful query into the LOCAL-ONLY frecency store (P7-T6), same
 	// as the socket path. Best-effort; a recording failure never fails the query.
 	recordHistory(r.Context(), ws.cfg.Recorder, q.Get("q"), ws.log)
@@ -577,6 +598,57 @@ func (ws *WebUIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		lines = ws.cfg.LogsFn(limit)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lines": lines, "limit": limit})
+}
+
+// reportMaxLimit bounds one report page/export fetch.
+const reportMaxLimit = 10000
+
+// handleReportList serves the canned-report registry.
+func (ws *WebUIServer) handleReportList(w http.ResponseWriter, r *http.Request) {
+	if !ws.policy().WebUIEnabled {
+		writeError(w, http.StatusServiceUnavailable, errorBody{Error: "web UI disabled by policy", Code: "web_ui_disabled"})
+		return
+	}
+	if ws.cfg.ReportsFn == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"reports": []ReportSpec{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": ReportSpecs()})
+}
+
+// handleReport serves one page of a canned local report
+// (?limit= default 100, max 10000; &offset=).
+func (ws *WebUIServer) handleReport(w http.ResponseWriter, r *http.Request) {
+	if !ws.policy().WebUIEnabled {
+		writeError(w, http.StatusServiceUnavailable, errorBody{Error: "web UI disabled by policy", Code: "web_ui_disabled"})
+		return
+	}
+	if ws.cfg.ReportsFn == nil {
+		writeError(w, http.StatusNotFound, errorBody{Error: "reports unavailable", Code: "not_found"})
+		return
+	}
+	limit := atoiOr(r.URL.Query().Get("limit"), 100)
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > reportMaxLimit {
+		limit = reportMaxLimit
+	}
+	offset := atoiOr(r.URL.Query().Get("offset"), 0)
+	if offset < 0 {
+		offset = 0
+	}
+	page, err := ws.cfg.ReportsFn(r.Context(), r.PathValue("id"), limit, offset)
+	if err != nil {
+		ws.log.Error("report query failed", "id", r.PathValue("id"), "err", err)
+		writeError(w, http.StatusInternalServerError, errorBody{Error: "report failed", Code: "report_error"})
+		return
+	}
+	if page == nil {
+		writeError(w, http.StatusNotFound, errorBody{Error: "unknown report", Code: "not_found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 func atoiOr(s string, def int) int {

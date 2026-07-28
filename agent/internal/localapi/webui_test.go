@@ -289,7 +289,7 @@ func TestWebUIIndexServed(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("index content-type = %q, want text/html", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "local search") {
+	if !strings.Contains(rec.Body.String(), "local agent") {
 		t.Errorf("index body missing expected content")
 	}
 }

@@ -190,3 +190,114 @@ tbody tr:hover { background: var(--row-hover); }
   border: 1px solid var(--border, #cbd5e1); border-radius: 0.35rem;
   background: inherit; color: inherit;
 }
+
+/* ---- 2026-07-27 console-parity additions -------------------------------- */
+
+.chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.6rem 0 0.2rem; }
+.chip {
+  font: inherit; font-size: 0.82rem; padding: 0.15rem 0.7rem;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--fg); cursor: pointer;
+}
+.chip:hover { background: var(--row-hover); }
+.chip.active { background: var(--accent); border-color: transparent; color: #fff; }
+.chip-count { font-size: 0.72rem; opacity: 0.7; margin-left: 0.15rem; }
+
+.toolbar {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+.toolbar-label { color: var(--muted); font-size: 0.85rem; }
+.toolbar-spacer { flex: 1; }
+.toolbar select {
+  font: inherit; font-size: 0.85rem; padding: 0.15rem 0.4rem;
+  border: 1px solid var(--border); border-radius: 0.4rem;
+  background: var(--bg); color: var(--fg);
+}
+.btn {
+  font: inherit; font-size: 0.82rem; padding: 0.25rem 0.7rem;
+  border: 1px solid var(--border); border-radius: 0.4rem;
+  background: transparent; color: var(--fg); cursor: pointer;
+}
+.btn:hover:not(:disabled) { background: var(--row-hover); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn-accent { background: var(--accent); border-color: transparent; color: #fff; }
+.btn-accent:hover:not(:disabled) { background: var(--accent); opacity: 0.9; }
+
+.badge {
+  display: inline-block; padding: 0.05rem 0.5rem; border-radius: 0.35rem;
+  background: var(--code-bg); font-size: 0.75rem; white-space: nowrap;
+}
+.badge-finished { background: #1a7f3722; color: #1a7f37; }
+.badge-running { background: var(--banner-info-bg); color: var(--banner-info-fg); }
+.badge-failed { background: var(--error-bg); color: var(--error-fg); }
+.badge-stopped { background: var(--banner-warn-bg); color: var(--banner-warn-fg); }
+
+.subhead { font-size: 1rem; margin: 1rem 0 0.4rem; }
+.table-scroll { overflow-x: auto; }
+.data-table {
+  width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  border: 1px solid var(--border); border-radius: 0.5rem;
+}
+.data-table th, .data-table td {
+  padding: 0.35rem 0.6rem; text-align: left;
+  border-top: 1px solid var(--border);
+}
+.data-table thead th {
+  border-top: none; background: var(--code-bg);
+  font-weight: 600; white-space: nowrap;
+}
+.data-table tbody tr:hover { background: var(--row-hover); }
+.data-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.data-table .path-cell {
+  font-family: ui-monospace, monospace; font-size: 0.8rem;
+  word-break: break-all;
+}
+
+/* filter builder */
+.fb-grid { display: grid; gap: 1.2rem; grid-template-columns: 1fr; }
+@media (min-width: 900px) { .fb-grid { grid-template-columns: 1fr 1fr; } }
+.fb-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+  border: 1px solid var(--border); border-radius: 0.5rem;
+  padding: 0.45rem; margin-bottom: 0.5rem;
+}
+.fb-row select, .fb-row input {
+  font: inherit; font-size: 0.83rem; padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border); border-radius: 0.4rem;
+  background: var(--bg); color: var(--fg);
+}
+.fb-row .fb-value { flex: 1; min-width: 7rem; }
+.fb-row .fb-key { width: 7rem; }
+.fb-to { color: var(--muted); font-size: 0.8rem; }
+.fb-del { padding: 0.15rem 0.45rem; }
+.fb-compiled-wrap { margin-top: 0.8rem; }
+.fb-compiled-head {
+  display: flex; justify-content: space-between; align-items: center;
+  color: var(--muted); font-size: 0.82rem; margin-bottom: 0.25rem;
+}
+.fb-compiled {
+  margin: 0; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
+  border-radius: 0.5rem; background: var(--code-bg);
+  font-size: 0.82rem; white-space: pre-wrap; word-break: break-all;
+}
+.fb-actions { display: flex; gap: 0.5rem; margin-top: 0.7rem; }
+.fb-live-title { font-size: 0.95rem; margin: 0 0 0.5rem; }
+.fb-count { color: var(--muted); font-weight: 400; font-size: 0.82rem; margin-left: 0.4rem; }
+#fb-table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+#fb-table th, #fb-table td { padding: 0.3rem 0.5rem; border-top: 1px solid var(--border); text-align: left; }
+#fb-table thead th { border-top: none; background: var(--code-bg); }
+
+/* logs table */
+.loglines-wrap { max-height: 32rem; overflow: auto; border: 1px solid var(--border); border-radius: 0.5rem; }
+.log-table { border: none; }
+.log-table .log-time { white-space: nowrap; color: var(--muted); font-size: 0.78rem; }
+.log-table .log-level { font-weight: 600; font-size: 0.75rem; white-space: nowrap; }
+.log-table .level-warn { color: var(--banner-warn-fg); }
+.log-table .level-error { color: var(--error-fg); }
+.log-table .level-debug, .log-table .level-verbose { color: var(--muted); }
+.log-table .log-msg { font-size: 0.82rem; }
+.log-table .log-details {
+  font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--muted);
+  max-width: 26rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

@@ -767,7 +767,15 @@ category gates) overlay `scan.json` per §9 exactly as on a host install.
   the Agents page's *Local access policy* card (the P7-T4 policy channel —
   NOT a config-group setting; per-agent/per-rollout-group overrides go via
   `PUT /api/v1/agent-policies/<scope>` and win wholesale). Management stays
-  in the central console; the local UI is search only.
+  in the central console; the local UI is READ-ONLY. Five tabs (2026-07-27):
+  **Search** (category chips, sort, CSV/JSON export of results, full-path
+  copy), **Filters** (condition-row builder compiling to the shared query
+  grammar, live preview, open-in-search), **Reports** (local canned reports —
+  categories, unmapped extensions, largest files, duplicates, future-dated —
+  paged, CSV download), **Status** (agent version, per-root table: items,
+  bytes, last scan time/duration/outcome, seen/new/changed), and **Logs**
+  (merged multi-process view parsed into time/level/message/details columns,
+  selectable depth, .log/CSV export).
 - **Network `bridge`** when central runs elsewhere (set the full URL). If
   central's compose stack runs on the same box, use the shared custom network
   so `http://filearr:8000`-style names resolve.

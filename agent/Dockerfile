@@ -24,8 +24,13 @@ RUN go mod download
 COPY . .
 ARG VERSION=0.0.0-docker
 ARG UPDATE_PUBLIC_KEY=""
-RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X main.Version=${VERSION} -X github.com/filearr/filearr/agent/internal/update.PublicKeyBase64=${UPDATE_PUBLIC_KEY}" \
+# CI passes VERSION=<ref>@<full-sha>; shorten the sha to 7 chars and stamp the
+# UTC build date so the web UI Status screen shows a traceable version
+# (e.g. "main@1a2b3c4 (2026-07-27)") instead of a bare branch name.
+RUN V="${VERSION}"; case "$V" in *@*) V="${V%@*}@$(echo "${V#*@}" | cut -c1-7)";; esac; \
+    V="$V ($(date -u +%Y-%m-%d))"; \
+    CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X \"main.Version=${V}\" -X github.com/filearr/filearr/agent/internal/update.PublicKeyBase64=${UPDATE_PUBLIC_KEY}" \
     -o /out/filearr-agent ./cmd/filearr-agent
 
 FROM alpine:3.22
