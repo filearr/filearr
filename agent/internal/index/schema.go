@@ -102,6 +102,31 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS ix_outbox_unsent ON outbox(seq_no) WHERE sent_at IS NULL;
 
+-- 2026-07-28 local-report indexes (web UI Reports tab). Full-table aggregates
+-- over a million-row items table take ~10s+ per query in pure-Go SQLite (live
+-- report: the Reports tab "returned no data" — it was timing out); these
+-- narrow partial indexes make the report GROUP BYs stream index-only instead.
+-- Applied idempotently at open: an existing large DB pays a one-time build.
+CREATE INDEX IF NOT EXISTS idx_items_rpt_category ON items(file_category, size)
+    WHERE status='active';
+-- Interactive kind:-only queries (search category chips with an empty text
+-- box): the searcher's filter-only path is WHERE file_category=? ORDER BY
+-- rel_path LIMIT n, which without this index sorts EVERY match (or walks the
+-- whole table for a rare category) before the LIMIT can stop it. This
+-- composite provides both the equality and the order, so the query streams
+-- and stops at the limit. NOT partial: the searcher WHERE carries no status
+-- predicate, so a partial index would never be chosen.
+CREATE INDEX IF NOT EXISTS idx_items_kind_path ON items(file_category, rel_path);
+CREATE INDEX IF NOT EXISTS idx_items_rpt_size ON items(size)
+    WHERE status='active' AND is_sidecar=0;
+CREATE INDEX IF NOT EXISTS idx_items_rpt_chash ON items(content_hash, size)
+    WHERE status='active' AND is_sidecar=0 AND size>0
+      AND content_hash IS NOT NULL AND content_hash!='';
+CREATE INDEX IF NOT EXISTS idx_items_rpt_qhash ON items(quick_hash, size)
+    WHERE status='active' AND is_sidecar=0 AND size>0
+      AND (content_hash IS NULL OR content_hash='')
+      AND quick_hash IS NOT NULL AND quick_hash!='';
+
 -- P5-T5 durable store flags. A key/value scratch table that SURVIVES a process
 -- restart (unlike Store.Rebuilt, an in-memory field). Open writes
 -- rebuilt_pending=1 whenever it fresh-creates OR corruption-rebuilds the

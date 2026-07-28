@@ -255,6 +255,7 @@
     }
     var ctrl = new AbortController();
     inflight = ctrl;
+    meta.textContent = "Searching…";
     var url = "api/query?q=" + encodeURIComponent(q) + "&limit=" + LIMIT;
     fetch(url, { method: "GET", credentials: "same-origin", signal: ctrl.signal, headers: { "Accept": "application/json" } })
       .then(function (resp) {
@@ -662,11 +663,16 @@
     eb.hidden = true;
     var spec = specFor(rptState.id);
     document.getElementById("rpt-desc").textContent = spec ? spec.description : "";
+    document.getElementById("rpt-page").textContent =
+      "Computing… first load on a large index can take a while; later pages are instant.";
     fetch("api/reports/" + encodeURIComponent(rptState.id) +
       "?limit=" + rptState.limit + "&offset=" + rptState.offset, { credentials: "same-origin" })
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(renderReport)
-      .catch(function (e) { rptError("Report failed: " + e.message); });
+      .catch(function (e) {
+        document.getElementById("rpt-page").textContent = "";
+        rptError("Report failed: " + e.message);
+      });
   }
 
   function renderReport(page) {
@@ -721,8 +727,10 @@
 
     var lo = rptState.offset + 1;
     var hi = rptState.offset + page.rows.length;
-    document.getElementById("rpt-page").textContent =
-      page.total === 0 ? "0 rows" : lo + "–" + hi + " of " + Number(page.total).toLocaleString();
+    var label = page.total === 0 ? "0 rows" : lo + "–" + hi + " of " + Number(page.total).toLocaleString();
+    if (page.capped) label += "+ (capped)";
+    if (page.computed_at) label += " · as of " + fmtMtime(page.computed_at);
+    document.getElementById("rpt-page").textContent = label;
     document.getElementById("rpt-prev").disabled = rptState.offset <= 0;
     document.getElementById("rpt-next").disabled = hi >= page.total;
   }
@@ -850,6 +858,7 @@
     }
     var ctrl = new AbortController();
     fbInflight = ctrl;
+    count.textContent = "searching…";
     fetch("api/query?q=" + encodeURIComponent(dsl) + "&limit=50",
       { credentials: "same-origin", signal: ctrl.signal })
       .then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); })

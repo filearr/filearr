@@ -58,11 +58,19 @@ func TestReportsRegistryAndPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 5 || len(page.Rows) != 1 {
-		t.Fatalf("largest: total=%d rows=%d, want 5/1", page.Total, len(page.Rows))
+	if page.Total != 5 || len(page.Rows) != 1 || page.Capped {
+		t.Fatalf("largest: total=%d rows=%d capped=%v, want 5/1/false", page.Total, len(page.Rows), page.Capped)
+	}
+	if page.ComputedAt == "" {
+		t.Fatal("largest: missing computed_at")
 	}
 	if p, _ := page.Rows[0][0].(string); p != "/data/media/a/big.mkv" {
 		t.Fatalf("largest path = %v", page.Rows[0][0])
+	}
+	// second page from the cache
+	page, err = run(ctx, "largest_files", 2, 1)
+	if err != nil || len(page.Rows) != 2 {
+		t.Fatalf("largest page 2: rows=%d err=%v", len(page.Rows), err)
 	}
 
 	page, err = run(ctx, "duplicate_files", 100, 0)
@@ -71,6 +79,12 @@ func TestReportsRegistryAndPages(t *testing.T) {
 	}
 	if page.Total != 1 || len(page.Rows) != 1 {
 		t.Fatalf("duplicates: total=%d, want exactly the cd content-hash pair", page.Total)
+	}
+	if tier, _ := page.Rows[0][0].(string); tier != "content" {
+		t.Fatalf("duplicates tier = %v, want content", page.Rows[0][0])
+	}
+	if sp, _ := page.Rows[0][3].(string); sp == "" {
+		t.Fatalf("duplicates sample_path empty")
 	}
 
 	page, err = run(ctx, "future_dated", 100, 0)
