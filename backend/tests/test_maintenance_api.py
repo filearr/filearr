@@ -196,3 +196,26 @@ async def test_tick_fires_due_tasks_once(db):
         }
     assert rows["purge_item_versions"].last_cron_fired_at == tick
     assert rows["reconcile_meili"].last_cron_fired_at == tick2
+
+
+async def test_pre_migration_window_is_graceful(db):
+    """Deploy-window race (live 2026-07-29): the new worker's minutely tick ran
+    before alembic created ``maintenance_schedules`` and hard-failed into the
+    failed-jobs surface. Both the tick and the status projection must degrade
+    to a no-op / defaults-only view while the table is absent."""
+    from sqlalchemy import text as sqltext
+
+    async with db() as s:
+        await s.execute(sqltext("DROP TABLE maintenance_schedules"))
+        await s.commit()
+
+    async def boom(spec, occ):  # must never be reached
+        raise AssertionError("deferred despite missing table")
+
+    tick = datetime(2026, 7, 29, 4, 0, tzinfo=UTC)
+    assert await maintenance.run_maintenance_tick(tick, defer=boom) == []
+
+    async with db() as s:
+        rows = await maintenance.maintenance_status(s)
+    assert {r["key"] for r in rows} == set(maintenance.MAINT_TASKS)
+    assert all(not r["overridden"] for r in rows)

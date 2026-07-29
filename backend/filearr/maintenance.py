@@ -37,6 +37,17 @@ class AlreadyQueued(Exception):
     already queued/executing (surfaces as HTTP 409)."""
 
 
+async def _table_exists(session: AsyncSession) -> bool:
+    """True once the ``maintenance_schedules`` migration has applied. The
+    minutely tick (and the status API) must degrade gracefully in the deploy
+    window where the new worker boots BEFORE alembic runs — a periodic task
+    hard-failing there pollutes the failed-jobs surface for a race that
+    self-heals one migration later (live 2026-07-29)."""
+    return (
+        await session.execute(text("SELECT to_regclass('maintenance_schedules')"))
+    ).scalar() is not None
+
+
 @dataclass(frozen=True)
 class MaintTaskSpec:
     key: str            # short API/UI key, e.g. "purge_recycle_bin"
@@ -380,6 +391,8 @@ async def run_maintenance_tick(tick: datetime, *, defer=_defer_spec) -> list[str
     cap = get_settings().scan_schedule_max_catchup_minutes
     fired: list[str] = []
     async with SessionLocal() as session:
+        if not await _table_exists(session):
+            return fired  # pre-migration deploy window: skip, self-heals
         rows = {
             r.task_key: r
             for r in (await session.execute(select(MaintenanceSchedule))).scalars()
@@ -454,10 +467,12 @@ async def maintenance_status(session: AsyncSession) -> list[dict]:
     from filearr import schedule
 
     now = datetime.now(UTC)
-    rows = {
-        r.task_key: r
-        for r in (await session.execute(select(MaintenanceSchedule))).scalars()
-    }
+    rows: dict[str, MaintenanceSchedule] = {}
+    if await _table_exists(session):
+        rows = {
+            r.task_key: r
+            for r in (await session.execute(select(MaintenanceSchedule))).scalars()
+        }
     last = await _last_runs(session, [s.task_name for s in _SPECS])
     out: list[dict] = []
     for spec in _SPECS:
