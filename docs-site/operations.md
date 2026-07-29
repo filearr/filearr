@@ -125,6 +125,43 @@ It is stuck if there is **no** `scan_library` job for that library still in
 **Tunable.** `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` (default 600). Verify via
 `GET /api/v1/system/jobs/reap` → `scan_runs_reconciled > 0`.
 
+## Console unresponsive, host CPU pegged {#console-unresponsive-high-cpu}
+
+**Symptom.** The web console stops loading (often right as a redeploy starts,
+during the "quiesce jobs" step), the host/CT shows sustained high CPU, and
+some ports answer while others don't. Full runbook:
+[`docs/ops/troubleshooting.md`](https://github.com/pwsh/filearr/blob/main/docs/ops/troubleshooting.md).
+
+**Triage from any machine.** `ping` the host, then `curl -m 5` each service
+port and read `%{time_connect}`:
+
+- port **connects but never responds** → the process is alive but starved
+  (CPU or swap-thrash); the kernel accepted the connection for it.
+- port **doesn't even connect** → that listener is *gone*: the process
+  crashed or was OOM-killed.
+- reverse proxy dead + app half-alive is the classic OOM-pressure signature —
+  confirm with `journalctl -k | grep -i oom` **on the host** (inside an
+  unprivileged container you cannot see the kernel log).
+
+**Usual cause at ≥1M items.** Stopping a scan flushes deferred documents to
+Meilisearch; the resulting indexing task spikes CPU and RAM. In a small VM/CT
+(e.g. 4 GiB) that spike swap-thrashes the box or gets a neighbor OOM-killed,
+and the single-worker API — itself near-idle — stops responding because it's
+starved, not broken. `docker stats --no-stream` tells you hog vs victim.
+
+**Recovery ladder** (each rung is safe: scans mark themselves `failed` after a
+crash, Postgres is crash-safe, the search index is a disposable projection):
+wait out a finite indexing/build task → `docker compose restart caddy app` →
+restart the hog (`meilisearch`; run `rebuild_index` if search looks partial)
+→ full `down`/`up -d` → reboot the VM/CT → rerun the deploy script
+(idempotent).
+
+**Prevention.** Size memory to the catalog (8 GiB+ at ≥1M items), add a
+`mem_limit` to the `meilisearch` service so an indexing spike degrades search
+instead of killing the box, and expect a busy minute at the start of every
+redeploy — the quiesce step deliberately triggers the wrap-up flush *before*
+containers are replaced.
+
 ## A library indexes fewer files than the OS reports {#library-file-count-mismatch}
 
 **Symptom.** The folder's Windows *Properties* (or `find | wc -l`) reports far
