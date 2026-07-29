@@ -204,6 +204,12 @@ services:
     environment:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
       MEILI_NO_ANALYTICS: "true"
+      # Bound the indexing spike. Unset, Meili budgets ~2/3 of ALL visible RAM
+      # for an indexing task; at ≥1M docs one scan wrap-up flush ballooned RSS
+      # past 6 GiB and swap-thrashed a 12 GiB host into a load-90 / 93%-sys
+      # meltdown (2026-07-29 incident — docs/ops/troubleshooting.md). 2 GiB
+      # keeps worst-case indexing latency acceptable while the box stays alive.
+      MEILI_MAX_INDEXING_MEMORY: ${MEILI_MAX_INDEXING_MEMORY:-2 GiB}
     volumes:
       # P9-T11 (confirmed 2026-07-09): Meili's LMDB store lives on a LOCAL
       # Docker named volume (default `local` driver -> the host Docker

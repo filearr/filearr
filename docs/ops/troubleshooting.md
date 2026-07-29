@@ -19,11 +19,11 @@ curl -s -m 5 -o /dev/null \
 Interpretation matrix:
 
 | Observation | Meaning |
-|---|---|
+| --- | --- |
 | ping fails | CT is down or host networking broken → check the Proxmox host first (`pct status`, host load). |
 | ping OK, port **connects** (`time_connect` ~0.001s) but no HTTP response | The listener exists (kernel/docker-proxy accepted the SYN) but the process behind it is wedged or CPU/memory-starved. Classic starvation signature. |
-| ping OK, port does **not** connect (`time_connect` = 0, timeout) | The listener is *gone* — that service's process crashed or was OOM-killed. |
-| 443 dead but 8484 half-alive (accepts, no response) | Caddy was killed (OOM killer preferentially shoots it — large-RSS neighbors like Meilisearch cause the pressure, but the killer's victim choice varies) while the app is starved but alive. Strong OOM-pressure signal. |
+| ping OK, port does **not** connect (`time_connect` = 0, timeout) | Either the listener is *gone* (process crashed/OOM-killed) **or** the process is alive but so starved its accept queue overflowed — the kernel then drops new SYNs even though the listener exists. Confirmed live 2026-07-29: Caddy never died; it was drowning. Distinguish after recovery via `docker compose ps` uptimes (no restart = it never crashed). |
+| 443 dead but 8484 half-alive (accepts, no response) | Severe resource starvation — one listener's backlog overflowed while the other still queues. Strong memory-pressure signal either way; §2 tells you whether it was an OOM kill or pure thrash. |
 
 ## 2. On the Proxmox host
 
@@ -44,9 +44,15 @@ dmesg -T | grep -iE 'oom|killed process' | tail -20
 ```
 
 An `oom-kill` line naming a CT process (caddy, meilisearch, python, postgres)
-confirms memory exhaustion. Load average far above core count with high `%sy`
-or `kswapd` near the top of `top` means swap-thrash — same disease, slower
-death.
+confirms memory exhaustion. **An empty result does NOT rule memory out**: the
+worse and more common form is reclaim-thrash *without* any kill — the
+2026-07-29 incident showed load 90 on a small CT, **93% `sy`** (kernel time =
+direct reclaim), free memory in the tens of MiB, swap 100% used, and not one
+OOM line. Read the `top` header, not just the process list: `%sy` dominating
+`%us` plus `available` near zero *is* the diagnosis. Recovery is often
+spontaneous once the memory hog's task finishes — re-check `free -h` a few
+minutes apart before restarting anything; if `available` is climbing, the box
+is already healing.
 
 If `pct exec` itself hangs (CT too starved to fork), skip to the recovery
 ladder: `pct reboot <vmid>` is safe (see §5).
@@ -136,14 +142,20 @@ Meilisearch index is a disposable projection (`rebuild_index`).
 
 ## 6. Prevention
 
+- **Bound Meilisearch's indexing memory** — the single highest-leverage knob.
+  Unset, Meili budgets ~2/3 of all RAM it can see for an indexing task; at
+  ≥1M documents one scan wrap-up flush drove RSS past 6 GiB and thrashed a
+  12 GiB container (2026-07-29). The compose file now defaults
+  `MEILI_MAX_INDEXING_MEMORY` to `2 GiB` (override via `.env`); indexing gets
+  slower at the ceiling instead of eating the box.
 - **Size the CT for the catalog.** 4 GiB is comfortable to roughly the
-  low-hundreds-of-thousands of items; at ≥1M items give the CT 8 GiB+ and
-  2 GiB swap (`pct set <vmid> --memory 8192 --swap 2048`, then restart the
-  CT). Meilisearch's working set grows with the index and it spikes hard
-  during indexing.
-- **Cap the noisy neighbor** so an indexing spike degrades search instead of
-  killing the box: add a `mem_limit` to the `meilisearch` service in the
-  compose file sized to leave ≥1.5 GiB for Postgres+app+worker+Caddy.
+  low-hundreds-of-thousands of items; at ≥1M items give the CT 8 GiB+ and —
+  at least as important — **more than the 512 MiB default swap**
+  (`pct set <vmid> --memory 8192 --swap 2048`, then restart the CT). A full
+  tiny swap is what converts a memory spike into a kernel reclaim storm.
+- **Cap the noisy neighbor** if spikes persist: a `mem_limit` on the
+  `meilisearch` service sized to leave ≥1.5 GiB for Postgres+app+worker+Caddy
+  turns future overruns into a contained OOM-restart of one container.
 - **Deploy off-peak or after scans finish** — the quiesce step exists so the
   wrap-up flush happens *before* containers are replaced; on a big catalog
   that flush is the load spike, so expect a busy minute right at the start

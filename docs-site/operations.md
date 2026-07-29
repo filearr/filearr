@@ -139,15 +139,20 @@ port and read `%{time_connect}`:
   (CPU or swap-thrash); the kernel accepted the connection for it.
 - port **doesn't even connect** → that listener is *gone*: the process
   crashed or was OOM-killed.
-- reverse proxy dead + app half-alive is the classic OOM-pressure signature —
-  confirm with `journalctl -k | grep -i oom` **on the host** (inside an
-  unprivileged container you cannot see the kernel log).
+- reverse proxy dead + app half-alive is the classic memory-pressure
+  signature. Check `journalctl -k | grep -i oom` **on the host** (inside an
+  unprivileged container you cannot see the kernel log) — but an empty result
+  does **not** rule memory out: pure reclaim-thrash (`top` header showing
+  `%sy` ≫ `%us`, available memory near zero, swap full) melts the box without
+  a single kill line, and a drowning listener drops SYNs without ever dying.
 
 **Usual cause at ≥1M items.** Stopping a scan flushes deferred documents to
-Meilisearch; the resulting indexing task spikes CPU and RAM. In a small VM/CT
-(e.g. 4 GiB) that spike swap-thrashes the box or gets a neighbor OOM-killed,
-and the single-worker API — itself near-idle — stops responding because it's
-starved, not broken. `docker stats --no-stream` tells you hog vs victim.
+Meilisearch; unbounded, Meili budgets ~2/3 of all visible RAM for that
+indexing task and its RSS can blow past 6 GiB. The spike swap-thrashes the
+box, and the single-worker API — itself near-idle — stops responding because
+it's starved, not broken. `docker stats --no-stream` tells you hog vs victim,
+and recovery is often spontaneous when the indexing task finishes (watch
+`free -h` — climbing `available` means it's already healing).
 
 **Recovery ladder** (each rung is safe: scans mark themselves `failed` after a
 crash, Postgres is crash-safe, the search index is a disposable projection):
@@ -156,9 +161,11 @@ restart the hog (`meilisearch`; run `rebuild_index` if search looks partial)
 → full `down`/`up -d` → reboot the VM/CT → rerun the deploy script
 (idempotent).
 
-**Prevention.** Size memory to the catalog (8 GiB+ at ≥1M items), add a
-`mem_limit` to the `meilisearch` service so an indexing spike degrades search
-instead of killing the box, and expect a busy minute at the start of every
+**Prevention.** The compose file defaults `MEILI_MAX_INDEXING_MEMORY` to
+`2 GiB` (override in `.env`) so indexing slows at a ceiling instead of eating
+the host. Beyond that: size memory to the catalog (8 GiB+ at ≥1M items),
+give the container real swap headroom (the 512 MiB LXC default converts
+spikes into reclaim storms), and expect a busy minute at the start of every
 redeploy — the quiesce step deliberately triggers the wrap-up flush *before*
 containers are replaced.
 
