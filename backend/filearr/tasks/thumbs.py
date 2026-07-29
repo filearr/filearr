@@ -320,7 +320,8 @@ async def thumb_item(item_id: str, tier: int = th.TIER_GRID) -> None:
 
 # --- orphan GC (mandatory; research §4) ------------------------------------- #
 
-@proc_app.periodic(cron="30 3 * * *")
+# Scheduled by maintenance_tick (registry default "30 3 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(queue="maintenance", name="filearr.tasks.thumbs.gc_thumbnails")
 async def gc_thumbnails(timestamp: int) -> dict:
     """Daily orphan GC (periodic entrypoint). Delegates to :func:`run_thumbnail_gc`

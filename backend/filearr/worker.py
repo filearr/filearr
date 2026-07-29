@@ -650,7 +650,8 @@ async def defer_embed_missing() -> int | None:
     return job
 
 
-@proc_app.periodic(cron="0 4 * * *")
+# Scheduled by maintenance_tick (registry default "0 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 # FIX-8: periodic maintenance tasks carry NO retry -- a transient failure is
 # simply re-run on the next tick, and self-retry here was one source of the
 # runaway attempts (50/51) the reaper then compounded.
@@ -707,7 +708,8 @@ async def purge_recycle_bin(timestamp: int) -> int:
 # the recycle-bin purge shape (periodic maintenance task). Never touches
 # Meilisearch (audit rows are not projected). FIX-8: no retry -- a transient DB
 # fault is simply retried on the next daily tick.
-@proc_app.periodic(cron="15 4 * * *")
+# Scheduled by maintenance_tick (registry default "15 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance", name="filearr.worker.purge_item_versions"  # FIX-8: no retry
 )
@@ -740,7 +742,8 @@ async def purge_item_versions(timestamp: int) -> int:
 # regardless of age -- we never silently drop an undelivered alert. Runs at 04:45,
 # clear of the 04:00/04:15/04:30 maintenance jobs. FIX-8: no retry -- a transient
 # DB fault is retried on the next daily tick; alert_events are never projected.
-@proc_app.periodic(cron="45 4 * * *")
+# Scheduled by maintenance_tick (registry default "45 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance", name="filearr.worker.purge_alert_events"  # FIX-8: no retry
 )
@@ -777,7 +780,8 @@ async def purge_alert_events(timestamp: int) -> int:
 # FILEARR_SECURITY_AUDIT_RETENTION_DAYS. Runs at 04:20, clear of the other
 # maintenance jobs. FIX-8: no retry — a transient DB fault is retried next daily
 # tick; security_events are append-only and never projected.
-@proc_app.periodic(cron="20 4 * * *")
+# Scheduled by maintenance_tick (registry default "20 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance", name="filearr.worker.purge_security_events"  # no retry
 )
@@ -942,7 +946,8 @@ async def purge_job_history_now() -> dict:
     return {"deleted": deleted, "by_status": by_status}
 
 
-@proc_app.periodic(cron="50 * * * *")  # FIX-17: hourly (was daily 04:50)
+# Scheduled by maintenance_tick (registry default "50 * * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.purge_job_history",
@@ -1019,7 +1024,8 @@ async def rehash_small_files_now() -> dict:
     return {"requeued": len(ids)}
 
 
-@proc_app.periodic(cron="55 4 * * *")
+# Scheduled by maintenance_tick (registry default "55 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.rehash_small_files",
@@ -1032,7 +1038,8 @@ async def rehash_small_files(timestamp: int) -> int:
     return (await rehash_small_files_now())["requeued"]
 
 
-@proc_app.periodic(cron="30 4 * * *")
+# Scheduled by maintenance_tick (registry default "30 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(queue="maintenance", name="filearr.worker.nightly_reconcile")  # FIX-8: no retry
 async def nightly_reconcile(timestamp: int) -> None:
     """Safety net: re-sync the whole search index from Postgres (projection is disposable)."""
@@ -1049,7 +1056,8 @@ async def nightly_reconcile(timestamp: int) -> None:
 # one sweep is ever queued: procrastinate's periodic deferrer catches the
 # AlreadyEnqueued collision and skips (so a long sweep is never piled onto).
 # FIX-8: no retry -- a lost/failed sweep is simply re-run next hour regardless.
-@proc_app.periodic(cron="7 * * * *")
+# Scheduled by maintenance_tick (registry default "7 * * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.reconcile_meili",
@@ -1070,7 +1078,8 @@ async def reconcile_meili(timestamp: int) -> dict:
 # reaped mid-build. Runs at minute 47 to stay clear of the scan tick, the 04:xx
 # purge/rebuild window, and the :07 reconcile sweep. queueing_lock collapses any
 # duplicate enqueue. FIX-8: no retry -- the hourly tick re-runs on any fault.
-@proc_app.periodic(cron="47 * * * *")
+# Scheduled by maintenance_tick (registry default "47 * * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.reap_shadow_indexes",
@@ -1228,7 +1237,8 @@ async def schedule_report_exports(timestamp: int) -> int:
     return len(await evaluate_report_schedules(tick))
 
 
-@proc_app.periodic(cron="40 4 * * *")
+# Scheduled by maintenance_tick (registry default "40 4 * * *" in
+# filearr.maintenance; operator-overridable from the Jobs page).
 @proc_app.task(
     queue="maintenance",
     name="filearr.worker.purge_report_exports",
@@ -1271,6 +1281,29 @@ async def schedule_scans(timestamp: int) -> int:
     tick = datetime.fromtimestamp(timestamp, tz=UTC)
     deferred = await _defer_due_scans(tick)
     return len(deferred)
+
+
+# --- Jobs-page maintenance schedules ----------------------------------------
+# The editable maintenance tasks (nightly purges, reconcilers, thumbnail GC —
+# see filearr.maintenance.TICK_SCHEDULED) lost their static @periodic
+# decorators so their schedules can be overridden at runtime from the Jobs
+# page. This single static tick evaluates each task's EFFECTIVE cron
+# (maintenance_schedules override, else the registry default) with the same
+# once-per-occurrence due_occurrence consumption contract as schedule_scans.
+# Infrastructure ticks/monitors keep their own static decorators above.
+@proc_app.periodic(cron="* * * * *")
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.maintenance_tick",
+    queueing_lock="maintenance-tick",  # no retry (minutely re-runs)
+)
+async def maintenance_tick(timestamp: int) -> int:
+    """Defer every editable maintenance task due this minute (override-aware).
+    Returns the number of tasks deferred."""
+    from filearr.maintenance import run_maintenance_tick
+
+    tick = datetime.fromtimestamp(timestamp, tz=UTC)
+    return len(await run_maintenance_tick(tick))
 
 
 # --- T5: watch-mode supervisor entrypoint ----------------------------------

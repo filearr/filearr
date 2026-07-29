@@ -2114,3 +2114,29 @@ class AgentShareMap(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
+
+
+# --------------------------------------------------------------------------- #
+# Maintenance schedules (Jobs page): operator overrides for the editable       #
+# registry tasks in ``filearr.maintenance``. Row-per-task, created lazily on   #
+# first override or tick consumption; NO row means "registry default cron,     #
+# enabled". ``cron`` NULL keeps the registry default; ``last_cron_fired_at``   #
+# is the once-per-occurrence consumption stamp (same contract as              #
+# ``Library.last_cron_fired_at`` — stamped+committed BEFORE the enqueue).      #
+# --------------------------------------------------------------------------- #
+
+
+class MaintenanceSchedule(Base):
+    """Runtime schedule override for one maintenance-registry task."""
+
+    __tablename__ = "maintenance_schedules"
+
+    task_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    cron: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    last_cron_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )

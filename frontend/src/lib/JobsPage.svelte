@@ -1,13 +1,18 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import {
+    ApiError,
     clearFailedJobs,
     failedJobs,
     jobsSummary,
+    listMaintenance,
     reapStalledJobs,
+    runMaintenance,
     setJobPriority,
+    updateMaintenance,
     type FailedJob,
     type JobsSummary,
+    type MaintenanceTask,
     type ReapResult,
     type ScanRunning,
   } from "./api";
@@ -143,6 +148,105 @@
     return `${v.toFixed(i === 0 || v >= 100 ? 0 : 1)} ${units[i]}`;
   }
 
+  // Maintenance panel — the registry of periodic housekeeping tasks with
+  // schedule overrides + run-now (rides refresh() on a slower 30s throttle:
+  // schedules change rarely and the list is a heavier join than the summary).
+  const MAINT_POLL_MS = 30_000;
+  let maint = $state<MaintenanceTask[]>([]);
+  let maintFetched = 0;
+  let maintBusy = $state<Record<string, boolean>>({});
+  let maintMsg = $state<Record<string, string>>({});
+  let editKey = $state<string | null>(null);
+  let editCron = $state("");
+
+  const MAINT_CATS: [MaintenanceTask["category"], string][] = [
+    ["cleanup", "Cleanup"],
+    ["integrity", "Data & search integrity"],
+    ["monitors", "Monitors"],
+    ["system", "System ticks"],
+    ["ondemand", "On-demand"],
+  ];
+
+  async function refreshMaint(force = false) {
+    if (!force && Date.now() - maintFetched < MAINT_POLL_MS) return;
+    try {
+      maint = (await listMaintenance()).tasks;
+      maintFetched = Date.now();
+    } catch {
+      // best-effort panel; the summary error banner covers hard API loss
+    }
+  }
+
+  function apiDetail(e: unknown): string {
+    if (e instanceof ApiError) {
+      try {
+        return JSON.parse(e.body).detail ?? e.body;
+      } catch {
+        return e.body;
+      }
+    }
+    return String(e);
+  }
+
+  function flashMaint(key: string, msg: string) {
+    maintMsg[key] = msg;
+    setTimeout(() => {
+      if (maintMsg[key] === msg) maintMsg[key] = "";
+    }, 6000);
+  }
+
+  async function maintRun(t: MaintenanceTask) {
+    maintBusy[t.key] = true;
+    try {
+      const r = await runMaintenance(t.key);
+      flashMaint(t.key, r.job_id != null ? `queued (job ${r.job_id})` : "queued");
+      await refreshMaint(true);
+    } catch (e) {
+      flashMaint(t.key, apiDetail(e));
+    } finally {
+      maintBusy[t.key] = false;
+    }
+  }
+
+  function maintEditToggle(t: MaintenanceTask) {
+    if (editKey === t.key) {
+      editKey = null;
+      return;
+    }
+    editKey = t.key;
+    editCron = t.cron ?? "";
+  }
+
+  async function maintSave(
+    t: MaintenanceTask,
+    body: { cron?: string | null; enabled?: boolean },
+  ) {
+    maintBusy[t.key] = true;
+    try {
+      const updated = await updateMaintenance(t.key, body);
+      maint = maint.map((x) => (x.key === t.key ? updated : x));
+      if ("cron" in body) editKey = null;
+      flashMaint(t.key, "saved — applies within a minute");
+    } catch (e) {
+      flashMaint(t.key, apiDetail(e));
+    } finally {
+      maintBusy[t.key] = false;
+    }
+  }
+
+  function lastRunLabel(s: string): string {
+    return (
+      { succeeded: "ok", failed: "failed", doing: "running", todo: "queued" }[s] ?? s
+    );
+  }
+
+  function lastRunClass(s: string): string {
+    if (s === "succeeded") return "bg-emerald-500 text-white";
+    if (s === "failed") return "bg-red-500 text-white";
+    if (s === "doing") return "bg-sky-500 text-white";
+    return "bg-slate-400 text-white";
+  }
+
   let pollTimer: ReturnType<typeof setInterval>;
   let tickTimer: ReturnType<typeof setInterval>;
 
@@ -158,6 +262,7 @@
       recordRate("thumbs", s.thumbs?.queue?.succeeded ?? 0);
       computeIoNet(s);
       await refreshFailures();
+      await refreshMaint();
     } catch (e) {
       error = String(e);
     } finally {
@@ -904,6 +1009,135 @@
         </span>
       {/if}
     </div>
+  {/if}
+
+  <!-- Scheduled maintenance: the worker's housekeeping registry. Hover a task
+       name for what it does; editable rows accept a cron override / disable
+       (applied by the next scheduler tick, no restart); Run now defers the
+       task immediately. -->
+  {#if maint.length > 0}
+    <h3 class="mt-6 text-base font-semibold">Scheduled maintenance</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Housekeeping the worker runs on a schedule. Hover a task for what it does.
+      Cleanup and integrity schedules are editable (cron, five fields, UTC) and
+      apply within a minute — no restart. Monitors and system ticks are fixed by
+      design.
+    </p>
+    <table class="mt-2 w-full text-sm">
+      <thead>
+        <tr class="text-left text-slate-500">
+          <th class="py-2 pr-3">Task</th>
+          <th class="py-2 pr-3">Schedule</th>
+          <th class="py-2 pr-3">Next run</th>
+          <th class="py-2 pr-3">Last run</th>
+          <th class="py-2 pr-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+        {#each MAINT_CATS as [cat, catLabel] (cat)}
+          {@const rows = maint.filter((t) => t.category === cat)}
+          {#if rows.length > 0}
+            <tr>
+              <td colspan="5" class="pb-1 pt-3 text-[10px] font-medium uppercase tracking-wide text-slate-400">{catLabel}</td>
+            </tr>
+            {#each rows as t (t.key)}
+              <tr class={t.enabled ? "" : "opacity-60"}>
+                <td class="py-2 pr-3">
+                  <span class="cursor-help font-medium underline decoration-dotted decoration-slate-400 underline-offset-2" title={t.description}>{t.title}</span>
+                  {#if maintMsg[t.key]}
+                    <span class="ml-2 text-[10px] text-slate-500">{maintMsg[t.key]}</span>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3">
+                  {#if t.cron}
+                    <code class="rounded bg-slate-100 px-1.5 py-0.5 text-xs tabular-nums dark:bg-slate-800">{t.cron}</code>
+                    {#if t.overridden}
+                      <span class="ml-1 rounded-full bg-sky-500 px-1.5 py-0.5 text-[10px] font-medium text-white" title="Custom schedule — the registry default is {t.default_cron}">custom</span>
+                    {:else if !t.editable}
+                      <span class="ml-1 text-[10px] text-slate-400" title="This cadence is part of the task's semantics and cannot be changed.">fixed</span>
+                    {/if}
+                    {#if !t.enabled}
+                      <span class="ml-1 rounded-full bg-slate-400 px-1.5 py-0.5 text-[10px] font-medium text-white">disabled</span>
+                    {/if}
+                  {:else}
+                    <span class="text-xs text-slate-400">on demand</span>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500">
+                  {#if t.next_run_at && t.enabled}
+                    <span title={new Date(t.next_run_at).toLocaleString()}>{hhmm(t.next_run_at)} · {relFuture(t.next_run_at)}</span>
+                  {:else if !t.enabled}
+                    —
+                  {:else}
+                    <span class="text-slate-400">—</span>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3 text-slate-500">
+                  {#if t.last_run}
+                    <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {lastRunClass(t.last_run.status)}">{lastRunLabel(t.last_run.status)}</span>
+                    {#if t.last_run.at}
+                      <span class="ml-1 tabular-nums" title={new Date(t.last_run.at).toLocaleString()}>{relTime(t.last_run.at)}</span>
+                    {/if}
+                  {:else}
+                    <span class="text-xs text-slate-400" title="No run within the job-history retention window (succeeded runs are kept ~48h).">no recent run</span>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3 text-right">
+                  {#if t.runnable}
+                    <button
+                      class="rounded-lg border border-slate-300 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                      onclick={() => maintRun(t)}
+                      disabled={maintBusy[t.key]}
+                      title="Queue this task to run immediately (admin).">
+                      {maintBusy[t.key] ? "…" : "Run now"}</button>
+                  {/if}
+                  {#if t.editable}
+                    <button
+                      class="ml-1 rounded-lg border border-slate-300 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                      onclick={() => maintEditToggle(t)}
+                      disabled={maintBusy[t.key]}
+                      title="Change this task's cron schedule or disable it.">
+                      {editKey === t.key ? "Close" : "Edit"}</button>
+                  {/if}
+                </td>
+              </tr>
+              {#if editKey === t.key}
+                <tr>
+                  <td colspan="5" class="bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <label class="text-xs text-slate-500" for={`maint-cron-${t.key}`}>cron (UTC)</label>
+                      <input
+                        id={`maint-cron-${t.key}`}
+                        class="w-40 rounded border border-slate-300 px-2 py-0.5 font-mono text-xs dark:border-slate-700 dark:bg-slate-900"
+                        bind:value={editCron}
+                        placeholder={t.default_cron ?? ""} />
+                      <button
+                        class="rounded-lg border border-slate-300 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                        onclick={() => maintSave(t, { cron: editCron.trim() || null })}
+                        disabled={maintBusy[t.key]}>Save</button>
+                      {#if t.overridden}
+                        <button
+                          class="rounded-lg border border-slate-300 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                          onclick={() => maintSave(t, { cron: null })}
+                          disabled={maintBusy[t.key]}
+                          title="Drop the override and return to the default schedule ({t.default_cron}).">Reset to default</button>
+                      {/if}
+                      <button
+                        class="rounded-lg border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-50 {t.enabled ? 'border-amber-400 text-amber-600 dark:text-amber-400' : 'border-emerald-400 text-emerald-600 dark:text-emerald-400'}"
+                        onclick={() => maintSave(t, { enabled: !t.enabled })}
+                        disabled={maintBusy[t.key]}
+                        title={t.enabled ? "Stop scheduling this task (it can still be run manually)." : "Resume the schedule."}>
+                        {t.enabled ? "Disable schedule" : "Enable schedule"}</button>
+                      <span class="text-[10px] text-slate-400">five fields: min hour day month weekday — e.g. “0 4 * * *” = daily 04:00 UTC</span>
+                    </div>
+                  </td>
+                </tr>
+              {/if}
+            {/each}
+          {/if}
+        {/each}
+      </tbody>
+    </table>
   {/if}
 
   <!-- Agent replication (not queue jobs: independent per-agent apply lanes) -->

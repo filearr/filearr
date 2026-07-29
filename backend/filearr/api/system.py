@@ -372,6 +372,89 @@ async def reap_stalled_jobs_endpoint() -> dict:
         return await reap_stalled_jobs_now()
 
 
+# --- Jobs-page maintenance schedules (registry: filearr.maintenance) --------
+
+
+@router.get(
+    "/system/maintenance",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def maintenance_view(session: AsyncSession = Depends(get_session)) -> dict:
+    """Every registered maintenance task with its description (tooltip), the
+    EFFECTIVE schedule (operator override else registry default), next
+    occurrence, and last-run status from job history. Registry order."""
+    from filearr.maintenance import maintenance_status
+
+    return {"tasks": await maintenance_status(session)}
+
+
+class MaintenancePatch(BaseModel):
+    """Body for PATCH /system/maintenance/{key}. ``cron`` present-and-null
+    resets to the registry default; absent leaves the schedule untouched."""
+
+    cron: str | None = None
+    enabled: bool | None = None
+
+
+@router.patch(
+    "/system/maintenance/{key}",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def maintenance_update(
+    key: str, body: MaintenancePatch, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Override an editable maintenance task's cron and/or enable/disable it
+    (admin). 404 unknown key; 409 for fixed-cadence infrastructure tasks; 422
+    invalid cron. Takes effect on the next scheduler tick (≤1 minute) — no
+    worker restart. Returns the task's refreshed status row."""
+    from fastapi import HTTPException
+
+    from filearr.maintenance import MAINT_TASKS, maintenance_status, set_schedule
+    from filearr.schedule import InvalidCronError, validate_cron
+
+    spec = MAINT_TASKS.get(key)
+    if spec is None:
+        raise HTTPException(404, detail=f"unknown maintenance task: {key}")
+    if not spec.editable:
+        raise HTTPException(409, detail=f"{key} has a fixed schedule (infrastructure task)")
+    set_cron = "cron" in body.model_fields_set
+    if set_cron and body.cron is not None:
+        try:
+            validate_cron(body.cron)
+        except InvalidCronError as exc:
+            raise HTTPException(422, detail=str(exc)) from exc
+    await set_schedule(
+        session, key, cron=body.cron, set_cron=set_cron, enabled=body.enabled
+    )
+    rows = await maintenance_status(session)
+    return next(r for r in rows if r["key"] == key)
+
+
+@router.post(
+    "/system/maintenance/{key}/run",
+    status_code=202,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def maintenance_run(key: str) -> dict:
+    """Trigger one maintenance task immediately (admin). 404 unknown key; 409
+    when a run is already queued/executing (queueing lock) or the task is a
+    non-triggerable minutely tick. Returns the deferred ``job_id``."""
+    from fastapi import HTTPException
+
+    from filearr.maintenance import MAINT_TASKS, AlreadyQueued, run_now
+
+    spec = MAINT_TASKS.get(key)
+    if spec is None:
+        raise HTTPException(404, detail=f"unknown maintenance task: {key}")
+    if not spec.runnable:
+        raise HTTPException(409, detail=f"{key} runs every minute on its own — nothing to trigger")
+    try:
+        job_id = await run_now(key)
+    except AlreadyQueued as exc:
+        raise HTTPException(409, detail=f"a run is already queued: {exc}") from exc
+    return {"job_id": job_id}
+
+
 class ClearFailedJobs(BaseModel):
     """Body for POST /system/jobs/clear-failed (FIX-8). Optional ``queue`` scopes
     the delete to one Procrastinate queue; omitted clears failed rows in every

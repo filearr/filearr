@@ -1127,6 +1127,50 @@ export const runningJobs = () => request<RunningJob[]>("/system/jobs/running");
 export const reapStalledJobs = () =>
   request<ReapResult>("/system/jobs/reap", { method: "POST" });
 
+/** One maintenance-registry task with its effective schedule + last-run
+ *  status (Jobs page maintenance panel). `cron` is the EFFECTIVE schedule
+ *  (override else default); `overridden` marks a custom cron; `editable`
+ *  gates the schedule editor; `runnable` gates the Run-now action (minutely
+ *  infrastructure ticks are shown but not triggerable). */
+export type MaintenanceTask = {
+  key: string;
+  title: string;
+  description: string;
+  category: "cleanup" | "integrity" | "monitors" | "system" | "ondemand";
+  queue: string;
+  cron: string | null;
+  default_cron: string | null;
+  overridden: boolean;
+  enabled: boolean;
+  editable: boolean;
+  runnable: boolean;
+  next_run_at: string | null;
+  last_run: { job_id: number; status: string; at: string | null } | null;
+};
+
+/** Every registered maintenance task (read scope), registry order. */
+export const listMaintenance = () =>
+  request<{ tasks: MaintenanceTask[] }>("/system/maintenance");
+
+/** Trigger one maintenance task now (admin). 409 = already queued / not
+ *  triggerable; the caller should surface `ApiError.body` as the message. */
+export const runMaintenance = (key: string) =>
+  request<{ job_id: number | null }>(`/system/maintenance/${key}/run`, {
+    method: "POST",
+  });
+
+/** Override an editable task's schedule and/or toggle it (admin). Pass
+ *  `cron: null` to reset to the registry default; omit `cron` to leave the
+ *  schedule untouched. Applied by the next scheduler tick (≤1 min). */
+export const updateMaintenance = (
+  key: string,
+  body: { cron?: string | null; enabled?: boolean },
+) =>
+  request<MaintenanceTask>(`/system/maintenance/${key}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
 /** Re-prioritise a queue's PENDING (todo) jobs (UI-T14, admin scope). `priority`
  *  is clamped server-side to -100..100; higher runs sooner. Running jobs are
  *  unaffected. Returns the affected row count. */

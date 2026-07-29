@@ -37,6 +37,31 @@ If you are already inside the container (or on a single-host Unraid/Compose
 deploy), drop the `pct exec <your-vmid> --` prefix and run the `docker compose …`
 part from `/opt/filearr`.
 
+## Maintenance schedules (Jobs page) {#maintenance-schedules}
+
+The **Scheduled maintenance** panel on the Jobs page lists every housekeeping
+task the worker runs — retention purges, search-index reconcilers, thumbnail
+GC, monitors — with a tooltip describing what each does, its schedule, next
+occurrence, and last-run status (from job history: succeeded runs are visible
+for ~48 h, failures for days).
+
+- **Run now** (admin) queues any purge/reconciler/monitor or the on-demand
+  jobs (full search-index rebuild, semantic-embedding backfill) immediately.
+  A 409 means a run is already queued or executing — the queueing lock
+  prevents pile-ups.
+- **Edit** (admin) overrides a cleanup/integrity task's cron (five fields,
+  evaluated in UTC) or disables its schedule entirely. Changes are picked up
+  by the next scheduler tick — **within one minute, no restart**. "Reset to
+  default" drops the override.
+- Monitors and the minutely system ticks are **fixed by design**: the reaper
+  and health monitors are the crash-safety net, and the scheduler ticks are
+  the cron engine's own clock. They're shown read-only for visibility.
+
+Overrides live in the `maintenance_schedules` table (row per task; no row =
+default schedule, enabled). The API surface is
+`GET/PATCH /api/v1/system/maintenance[/{task}]` and
+`POST /api/v1/system/maintenance/{task}/run`.
+
 ## Scan-scheduling storms / stalled jobs / the reaper
 
 **Symptom.** A library's scheduled scan fires every scheduler tick instead of on
