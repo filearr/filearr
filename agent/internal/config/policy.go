@@ -41,6 +41,22 @@ type Policy struct {
 	ReconcileIntervalSeconds *int     `json:"reconcile_interval_seconds"`
 	PollIntervalSeconds      *int     `json:"poll_interval_seconds"`
 
+	// In-daemon scan scheduler (2026-08-03): a lone `filearr-agent run`
+	// service self-schedules scans from policy — no external cron/Task
+	// Scheduler required (a Windows re-install losing its scheduled task
+	// silently froze a fleet member's catalog). Cron wins over interval when
+	// both are set. All absent = scheduler off (containers keep their
+	// entrypoint loop; nothing double-scans).
+	ScanCron            *string `json:"scan_cron"`
+	ScanIntervalSeconds *int    `json:"scan_interval_seconds"`
+	ScanOnStart         *bool   `json:"scan_on_start"`
+
+	// Config-group settings central merges under "group" (P10 config groups).
+	// scan_schedule_cron was defined + validated centrally from the start but
+	// never consumed agent-side until the in-daemon scheduler; the documented
+	// precedence holds: an operator-authored top-level policy key wins.
+	Group *GroupSettings `json:"group"`
+
 	// P7-T4 local query surface keys. Absent (nil) → the never-contacted default
 	// baked into the accessors below (CLI on, web UI off, auth required, read-only).
 	LocalAccessEnabled  *bool    `json:"local_access_enabled"`
@@ -225,6 +241,13 @@ func (p Policy) OverlayScan(s ScanSettings) ScanSettings {
 // PolicyDoc is the on-disk persisted policy record (<DataDir>/policy.json). It
 // carries the caching metadata plus the policy body as a RAW message so unknown
 // keys survive a persist→reload→re-serialize cycle byte-for-byte.
+// GroupSettings is the (partial) config-group settings view the agent honors
+// from the policy's "group" section. Only the keys the agent consumes are
+// declared; the rest of the group document passes through unparsed.
+type GroupSettings struct {
+	ScanScheduleCron *string `json:"scan_schedule_cron"`
+}
+
 type PolicyDoc struct {
 	ETag           string    `json:"etag"`
 	Scope          string    `json:"scope"`

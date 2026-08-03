@@ -566,3 +566,18 @@ async def test_agent_taxonomy_feature_gated(client, monkeypatch):
     assert (
         await c.get(f"/api/v1/agents/{agent_id}/taxonomy", headers=_auth(fp))
     ).status_code == 404
+
+
+def test_validate_policy_scan_scheduler_keys():
+    """In-daemon scan scheduler keys (2026-08-03): valid combinations pass,
+    a bad cron / sub-5-minute interval are rejected."""
+    validate_policy(
+        {"scan_cron": "0 3 * * *", "scan_interval_seconds": 21600, "scan_on_start": True}
+    )
+    validate_policy({"scan_interval_seconds": 300})
+    with pytest.raises(PolicyValidationError):
+        validate_policy({"scan_cron": "not a cron"})
+    with pytest.raises(PolicyValidationError):
+        validate_policy({"scan_cron": "* * * *"})  # 4 fields
+    with pytest.raises(PolicyValidationError):
+        validate_policy({"scan_interval_seconds": 299})

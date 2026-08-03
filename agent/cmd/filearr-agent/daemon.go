@@ -141,6 +141,11 @@ func (p *daemonProgram) Start(s service.Service) error {
 	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError)
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
+	// Policy-driven scan scheduling (2026-08-03): the daemon runs scans itself
+	// so a service-only install needs no external cron/Task Scheduler. Off
+	// until policy (scan_cron/scan_interval_seconds/scan_on_start) or the
+	// FILEARR_AGENT_SCAN_CRON/_EVERY/_ON_BOOT envs arm it.
+	schedDone := startScanScheduler(ctx, p.cfg, p.log)
 
 	// slog (timestamped) — these used to be bare Printf lines, leaving the
 	// container log's most important banner without a timestamp or level.
@@ -169,6 +174,7 @@ func (p *daemonProgram) Start(s service.Service) error {
 		<-cmdDone
 		<-thumbDone
 		<-updDone
+		<-schedDone
 		if err != nil && !errors.Is(err, context.Canceled) {
 			p.runErr = err
 		}

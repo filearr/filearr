@@ -304,6 +304,19 @@ operator is the sole policy author). Policy is **advisory-by-asymmetry**: centra
 can *disable* a local capability and the agent honors it on next poll, but
 central cannot reach into the agent to read local-only data.
 
+### Scan scheduling from policy (service installs)
+
+A service-managed `filearr-agent run` schedules its own scans — no external
+Task Scheduler or cron entry to lose across reinstalls. Set `scan_cron`
+(5-field cron, agent-local time), `scan_interval_seconds` (≥300; cron wins if
+both are set), and/or `scan_on_start` (one scan ~30 s after start) in the
+agent's policy, or `scan_schedule_cron` in a config group. All absent =
+scheduler off. Scans run as a child process of the daemon (identical to a
+hand-run `filearr-agent scan`, crash-isolated), never overlap, and a policy
+edit takes effect on the next poll without a restart. Container deployments
+keep using the entrypoint's `FILEARR_AGENT_SCAN_INTERVAL` loop instead —
+don't enable both.
+
 ## Local query CLI, local web UI, and the frecency privacy note
 
 The agent exposes a **local, offline** query surface so search works even when

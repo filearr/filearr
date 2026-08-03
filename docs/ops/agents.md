@@ -826,3 +826,46 @@ on exit code 20 (the service-managed swap handshake).
 - **P10-T3/T4/T6/T13**: the consumers of `agent_commands` — the verify flow,
   the tus staging upload, the central download + SSE, and the RBAC transfer
   API. P10-T1 (this section) builds only the queue + its central surface.
+
+## 13. In-daemon scan scheduling (service installs)
+
+A lone `filearr-agent run` service is self-sufficient: the daemon runs scans
+itself, so a native (Windows service / systemd) install needs **no external
+Task Scheduler / cron job**. Motivation (live incident 2026-08-02): a Windows
+agent's external scheduled-scan task did not survive a re-enroll — the daemon
+heartbeated for nine days while its catalog silently froze at the old data.
+
+The scheduler is **off until configured**. Knobs, per-key precedence
+*policy > config-group > env*:
+
+| Source | Key | Meaning |
+|---|---|---|
+| per-agent/global policy (§6) | `scan_cron` | 5-field cron, agent-local time |
+| policy | `scan_interval_seconds` | fixed cadence (≥300); `scan_cron` wins when both set |
+| policy | `scan_on_start` | one scan ~30 s after daemon start |
+| config-group settings (§9) | `scan_schedule_cron` | same as `scan_cron`; a top-level policy key overrides it |
+| env | `FILEARR_AGENT_SCAN_CRON` / `FILEARR_AGENT_SCAN_EVERY` / `FILEARR_AGENT_SCAN_ON_BOOT` | local fallbacks for installs that don't author policy (`_EVERY` is a Go duration, e.g. `6h`) |
+
+Example — schedule every enrolled agent nightly at 03:00 plus a catch-up scan
+whenever the service (re)starts:
+
+```bash
+curl -s -X PUT http://<ct-ip>:8484/api/v1/agents/policies/global \
+  -H 'content-type: application/json' \
+  -d '{"policy": {"scan_cron": "0 3 * * *", "scan_on_start": true}}'
+```
+
+Semantics and safety:
+
+- Scans run as a **child process** of the daemon (`filearr-agent scan` with
+  the daemon's resolved `-data`/`-config`/`-log-dir`), so behavior, config
+  precedence, and the per-command log file are identical to a hand-run scan,
+  and a scan crash never takes the daemon down.
+- The schedule re-resolves every tick from the cached policy: a policy edit
+  applies within ~a minute of the next poll — no service restart.
+- One scan at a time: a fire that lands while the previous scan is still
+  running is skipped (logged), never queued or overlapped.
+- **Containers are unaffected by default**: the Docker entrypoint keeps its
+  own `FILEARR_AGENT_SCAN_INTERVAL` loop and the in-daemon scheduler stays
+  off unless policy/env arms it — do not enable both, or you'll double-scan.
+  The env names deliberately differ from the container's shell-loop vars.

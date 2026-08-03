@@ -138,6 +138,18 @@ class PolicyModel(BaseModel):
     path_scope: list[str] | None = None
     offline_grace_seconds: int | None = Field(default=None, ge=0)
 
+    # --- In-daemon scan scheduler (2026-08-03) ------------------------------
+    # A lone `filearr-agent run` service self-schedules scans from these keys
+    # (no external cron/Task Scheduler — a Windows re-install losing its
+    # scheduled task silently froze a fleet member's catalog for nine days).
+    # ``scan_cron`` (5-field, agent-local time) wins over
+    # ``scan_interval_seconds`` when both are set; ``scan_on_start`` fires one
+    # scan ~30s after daemon start. All absent = scheduler off (containers
+    # keep their entrypoint loop; nothing double-scans).
+    scan_cron: str | None = None
+    scan_interval_seconds: int | None = Field(default=None, ge=300)
+    scan_on_start: bool | None = None
+
     # --- P10-T4 agent staging-upload rate cap ------------------------------
     # ``upload_rate_bytes_per_sec`` (int >= 0) — the per-agent token-bucket
     # ceiling the Go agent applies to a ``stage_upload`` (research §2.4). 0 or
@@ -145,6 +157,18 @@ class PolicyModel(BaseModel):
     # mid-upload policy change takes effect on the NEXT upload (documented). This
     # is additive — the P7-T4 keys and their tests are untouched.
     upload_rate_bytes_per_sec: int | None = Field(default=None, ge=0)
+
+    @field_validator("scan_cron")
+    @classmethod
+    def _valid_scan_cron(cls, v: str | None) -> str | None:
+        if v is not None:
+            from filearr.schedule import InvalidCronError, validate_cron
+
+            try:
+                validate_cron(v)
+            except InvalidCronError as exc:
+                raise ValueError(f"invalid scan_cron: {exc}") from exc
+        return v
 
     @field_validator("presets")
     @classmethod
