@@ -15,9 +15,12 @@ alert rules through the existing P8 ops-alert machinery:
      the agent IS alive (``last_seen_at`` within the offline threshold) but its
      newest replication watermark (max of the ledger's ``applied_at`` and
      ``last_reconcile_at``) is older than
-     ``FILEARR_AGENT_REPLICATION_STALL_ALERT_SECONDS`` (default 6h). A fresh
-     enrollee (zero ledger rows AND ``last_reconcile_at`` NULL) is guarded out —
-     it has never replicated, so it cannot have *stalled*.
+     ``FILEARR_AGENT_REPLICATION_STALL_ALERT_SECONDS`` (default 6h). An agent
+     that has NEVER replicated is measured from its enrollment (``created_at``)
+     instead: a fresh enrollee gets the normal window to deliver its first
+     batch, then "never started" alerts exactly like "stopped" (a re-enrolled
+     agent that silently never resumed was invisible under the old
+     guard-out-forever rule — live 2026-08-02).
 
 Stall is only evaluated for a live agent: an offline agent's replication is
 obviously quiet, and offline is already the (softer) signal — we never double-
@@ -180,15 +183,21 @@ async def run_agent_monitor(
                 )
             ).scalar_one_or_none()
 
-            # Fresh-enrollee guard: never replicated AND never reconciled => it
-            # cannot have "stalled". Clear any stale state and skip.
-            if newest_applied is None and agent.last_reconcile_at is None:
-                st[("stall", aid)] = False
-                continue
-
+            # Never-replicated agent: its ENROLLMENT time is the baseline
+            # watermark. A fresh enrollee gets the normal stall window to
+            # deliver its first batch; past that, "never started" alerts
+            # exactly like "stopped". (The old unconditional fresh-enrollee
+            # guard exempted such agents FOREVER — live gap 2026-08-02: a
+            # re-enrolled agent heartbeated at seq 0 for nine days, frozen
+            # catalog, zero alerts.)
             candidates = [
                 t for t in (newest_applied, agent.last_reconcile_at) if t is not None
             ]
+            if not candidates:
+                if agent.created_at is None:
+                    st[("stall", aid)] = False
+                    continue
+                candidates = [agent.created_at]
             watermark = max(candidates)
             stalled = (now - watermark) >= stall_after
             prev_stalled = st.get(("stall", aid), False)

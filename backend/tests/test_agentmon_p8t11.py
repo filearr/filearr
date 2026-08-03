@@ -214,13 +214,38 @@ async def test_stall_fires_for_alive_but_silent(maker):
 
 
 async def test_stall_not_for_fresh_enrollee(maker):
-    # Alive, but zero ledger rows AND last_reconcile_at NULL: never replicated,
-    # cannot have stalled.
+    # Alive, zero ledger rows, last_reconcile_at NULL, enrolled JUST NOW
+    # (created_at defaults to now()): inside the stall window measured from
+    # enrollment — no alert. The window, not the zero-ledger state, is what
+    # protects a fresh enrollee.
     await _seed_and_enable(maker)
     await _mk_agent(maker, last_seen_at=NOW - timedelta(hours=1))
     res = await agentmon.run_agent_monitor(maker, now=NOW, state={})
     assert res["stalled"] == 0
     assert await _events(maker, event_type=ops.AGENT_STALL_EVENT) == []
+
+
+async def test_stall_for_never_started_replication(maker):
+    # Live gap 2026-08-02: a re-enrolled agent heartbeated for days at seq 0 —
+    # zero ledger rows forever — and the old fresh-enrollee guard exempted it
+    # from the stall alert indefinitely while its catalog sat frozen. A live
+    # agent whose enrollment is older than the stall window with NO replication
+    # and NO reconcile must alert ("never started" == "stopped").
+    await _seed_and_enable(maker)
+    agent = await _mk_agent(maker, last_seen_at=NOW - timedelta(hours=1))
+    async with maker() as s:
+        from sqlalchemy import update as _update
+
+        await s.execute(
+            _update(Agent)
+            .where(Agent.id == agent.id)
+            .values(created_at=NOW - timedelta(days=9))
+        )
+        await s.commit()
+    res = await agentmon.run_agent_monitor(maker, now=NOW, state={})
+    assert res["stalled"] == 1
+    evs = await _events(maker, event_type=ops.AGENT_STALL_EVENT)
+    assert len(evs) == 1 and evs[0].payload["stall_status"] == "stalled"
 
 
 async def test_stall_not_when_reconcile_recent(maker):
