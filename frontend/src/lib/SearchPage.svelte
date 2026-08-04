@@ -245,8 +245,13 @@
     );
   }
 
-  // Reflect the current params into the location hash (#/search?...).
+  // Reflect the current params into the location hash (#/search?...). Guarded
+  // to SEARCH routes only: a late async continuation (or a hashchange handled
+  // while unmount is pending) must never clobber a navigation to another tab —
+  // writing "#/search" over "#/jobs" is exactly the snap-back bug this fixes
+  // (live 2026-08-04).
   function reflectHash() {
+    if (location.hash && !location.hash.startsWith("#/search")) return;
     const h = encodeSearchHash(currentParams());
     if (h === location.hash) return;
     lastWrittenHash = h;
@@ -291,6 +296,11 @@
   }
 
   function onHashChange() {
+    // Only search-route hashes are ours. On a back/forward to another tab this
+    // listener still fires once before the unmount flush; treating "#/jobs" as
+    // empty params re-ran a search and wrote "#/search" back — reverting the
+    // user's navigation.
+    if (!location.hash.startsWith("#/search")) return;
     if (location.hash === lastWrittenHash) return; // our own write — ignore
     applyParams(parseSearchHash(location.hash));
   }
@@ -693,6 +703,13 @@
 
   // ---- lifecycle ----------------------------------------------------------
   onMount(async () => {
+    // Listener registration MUST precede the awaits below. It used to sit
+    // after them, so switching tabs during the fetch window destroyed the
+    // component before registration — onDestroy's removeEventListener was a
+    // no-op and the continuation then LEAKED a listener on a dead component,
+    // which re-wrote "#/search" over every later navigation until a hard
+    // refresh (live 2026-08-04: tabs "snapped back" intermittently).
+    window.addEventListener("hashchange", onHashChange);
     try {
       const list = await listLibraries();
       libs = new Map(list.map((l) => [l.id, l]));
@@ -735,13 +752,17 @@
     }
     // Deep-link entry: restore state from #/search?... then query. A BARE visit
     // stays empty (roadmap §20) — no match-all preload; results render only
-    // once a search actually starts.
+    // once a search actually starts. Skipped entirely if the user has already
+    // navigated away while the fetches above were in flight (destroyed) or the
+    // hash is no longer a search route.
+    if (destroyed || !location.hash.startsWith("#/search")) return;
     const initial = parseSearchHash(location.hash);
     if (Object.keys(initial).length) applyParams(initial);
-    window.addEventListener("hashchange", onHashChange);
   });
 
+  let destroyed = false;
   onDestroy(() => {
+    destroyed = true;
     controller?.abort();
     tagController?.abort();
     clearTimeout(debounce);
