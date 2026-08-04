@@ -83,28 +83,46 @@ func (p *daemonProgram) Start(s service.Service) error {
 	store := enroll.NewCertStore(p.cfg.DataDir)
 	id, err := store.Load()
 	if err != nil {
-		return fmt.Errorf("no enrolled identity in %s (run `filearr-agent enroll` first): %w", p.cfg.DataDir, err)
+		err = fmt.Errorf("no enrolled identity in %s (run `filearr-agent enroll` first): %w", p.cfg.DataDir, err)
+		p.mirrorToSystemLog(s, err)
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.done = make(chan struct{})
-	go p.run(ctx, store, id)
+	go p.run(ctx, s, store, id)
 	return nil
+}
+
+// mirrorToSystemLog writes a fatal service error into the OS service log
+// (Windows Event Log / syslog). A service has no terminal, and it may die
+// before (or without) a file sink — without this mirror, a start failure
+// surfaced only as the SCM's opaque "Incorrect function" event 7024 with no
+// message anywhere (live 2026-08-04).
+func (p *daemonProgram) mirrorToSystemLog(s service.Service, err error) {
+	if s == nil {
+		return
+	}
+	if sl, lerr := s.SystemLogger(nil); lerr == nil && sl != nil {
+		_ = sl.Errorf("filearr-agent: %v", err)
+	}
 }
 
 // failStart reports a fatal post-Start init failure. Before the async-init
 // refactor this error returned from Start() and exited the process; the
-// contract is preserved: log + nonzero exit (under a service manager that
-// surfaces as a failed service and triggers any recovery policy).
-func (p *daemonProgram) failStart(err error) {
+// contract is preserved: log (file + OS service log) + nonzero exit (under a
+// service manager that surfaces as a failed service and triggers any
+// recovery policy).
+func (p *daemonProgram) failStart(s service.Service, err error) {
 	p.log.Error("daemon failed to start", "err", err)
+	p.mirrorToSystemLog(s, err)
 	os.Exit(1)
 }
 
 // run performs the heavy initialization and hosts every daemon loop until the
 // context is cancelled; its return closes p.done (what Stop waits on).
-func (p *daemonProgram) run(ctx context.Context, store *enroll.CertStore, id *enroll.Identity) {
+func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enroll.CertStore, id *enroll.Identity) {
 	defer close(p.done)
 
 	// The local index is opened even absent a prior scan (an empty outbox simply
@@ -113,7 +131,7 @@ func (p *daemonProgram) run(ctx context.Context, store *enroll.CertStore, id *en
 	p.log.Info("opening local index (an upgrade's first start may build indexes; this can take minutes)")
 	idx, err := openIndex(p.cfg.DataDir)
 	if err != nil {
-		p.failStart(err)
+		p.failStart(s, err)
 		return
 	}
 	defer func() { _ = idx.Close() }()
@@ -133,7 +151,7 @@ func (p *daemonProgram) run(ctx context.Context, store *enroll.CertStore, id *en
 
 	httpClient, err := newHTTPClient(store, id.State.CentralURL)
 	if err != nil {
-		p.failStart(err)
+		p.failStart(s, err)
 		return
 	}
 

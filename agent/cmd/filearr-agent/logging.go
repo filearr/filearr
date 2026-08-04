@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/kardianos/service"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	"github.com/filearr/filearr/agent/internal/sidecar"
@@ -108,6 +111,16 @@ func setupRuntime(command string, args []string) {
 		flagOrEnv(args, "log-dir", envLogDir),
 		sc.LogDir,
 	)
+	// A service has no stderr: `run` under a service manager with no log dir
+	// configured would log into the void — exactly how a failing Windows
+	// service start produced "no logs at all" (live 2026-08-04). Default the
+	// file sink to <data-dir>/logs there; explicit flag/env/sidecar wins.
+	if logDir == "" && command == "run" && !service.Interactive() {
+		logDir = filepath.Join(
+			firstNonEmpty(flagOrEnv(args, "data", envDataDir), sc.DataDir, defaultDataDir()),
+			"logs",
+		)
+	}
 
 	forceStderr, _ := strconv.ParseBool(os.Getenv(envLogStderr))
 	opts := agentlog.Options{
