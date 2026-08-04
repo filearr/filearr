@@ -59,6 +59,14 @@ upgrades in place; `filearr-agent uninstall` removes the service and binary
 (`--purge` also removes data/logs/config); `filearr-agent service
 status|start|stop|restart` manages it day to day.
 
+Service start reports **running immediately** and finishes initialization in
+the background — necessary because the first start after an upgrade may
+rebuild local database indexes over the whole catalog, which can take minutes
+on a large index, longer than the Windows SCM's 30-second start budget. The
+agent log carries an "opening local index" line while that runs; a fatal
+init failure (bad data dir, unreadable index) logs and exits nonzero so the
+service manager's restart/recovery policy applies.
+
 The enrollment token in the sidecar is **one-shot**: after a successful
 enroll the file is rewritten with the token removed and a consumption
 timestamp in its place. Every other field stays user-editable; explicit CLI

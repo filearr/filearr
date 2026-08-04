@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/kardianos/service"
 
@@ -34,12 +35,16 @@ func runDaemon(args []string) error {
 		return err
 	}
 
-	// Fail fast BEFORE constructing the service so a misconfigured/unenrolled host
-	// reports the same clear error whether launched interactively or by a service
-	// manager (rather than a service manager reporting an opaque start failure).
-	store := enroll.NewCertStore(cfg.DataDir)
-	if _, err := store.Load(); err != nil {
-		return fmt.Errorf("no enrolled identity in %s (run `filearr-agent enroll` first): %w", cfg.DataDir, err)
+	// Fail fast BEFORE constructing the service so a misconfigured/unenrolled
+	// host reports a clear error — but ONLY interactively. Under a service
+	// manager every millisecond before svc.Run() delays connecting to the
+	// Windows SCM dispatcher (30 s budget, event 7009 on overrun); Start()
+	// performs the same load and returns the same error there.
+	if service.Interactive() {
+		store := enroll.NewCertStore(cfg.DataDir)
+		if _, err := store.Load(); err != nil {
+			return fmt.Errorf("no enrolled identity in %s (run `filearr-agent enroll` first): %w", cfg.DataDir, err)
+		}
 	}
 
 	prog := &daemonProgram{cfg: cfg, socket: *socket, webAddr: *webAddr, log: newLogger()}
@@ -66,9 +71,14 @@ type daemonProgram struct {
 	runErr error
 }
 
-// Start loads the identity, opens the local stores, and launches all daemon
-// loops under one cancellable context. It must not block: the renewer's blocking
-// Run + the wait-for-unwind live in a goroutine whose completion closes p.done.
+// Start loads the identity and returns IMMEDIATELY; everything heavier —
+// including opening the local index — runs in the p.run goroutine. Under the
+// Windows SCM a service has ~30 s to leave START_PENDING, and openIndex can
+// legitimately take minutes: the idempotent schema apply builds the report/
+// search indexes over the whole items table on the first start after an
+// upgrade (live 2026-08-04: a Windows service start died on exactly that
+// with SCM timeout 7009). Only the cheap identity load stays synchronous so
+// an unenrolled host still fails the start with a clear error.
 func (p *daemonProgram) Start(s service.Service) error {
 	store := enroll.NewCertStore(p.cfg.DataDir)
 	id, err := store.Load()
@@ -78,14 +88,35 @@ func (p *daemonProgram) Start(s service.Service) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+	p.done = make(chan struct{})
+	go p.run(ctx, store, id)
+	return nil
+}
+
+// failStart reports a fatal post-Start init failure. Before the async-init
+// refactor this error returned from Start() and exited the process; the
+// contract is preserved: log + nonzero exit (under a service manager that
+// surfaces as a failed service and triggers any recovery policy).
+func (p *daemonProgram) failStart(err error) {
+	p.log.Error("daemon failed to start", "err", err)
+	os.Exit(1)
+}
+
+// run performs the heavy initialization and hosts every daemon loop until the
+// context is cancelled; its return closes p.done (what Stop waits on).
+func (p *daemonProgram) run(ctx context.Context, store *enroll.CertStore, id *enroll.Identity) {
+	defer close(p.done)
 
 	// The local index is opened even absent a prior scan (an empty outbox simply
-	// drains to nothing).
+	// drains to nothing). First start after an upgrade may apply schema/index
+	// DDL over millions of rows — log so a long pause is diagnosable.
+	p.log.Info("opening local index (an upgrade's first start may build indexes; this can take minutes)")
 	idx, err := openIndex(p.cfg.DataDir)
 	if err != nil {
-		cancel()
-		return err
+		p.failStart(err)
+		return
 	}
+	defer func() { _ = idx.Close() }()
 
 	// The P7-T6 local query frecency store is a SEPARATE database from the index
 	// (search history stays local, research §6). A failure is non-fatal.
@@ -94,15 +125,16 @@ func (p *daemonProgram) Start(s service.Service) error {
 		p.log.Error("local query history disabled: cannot open history store", "err", herr)
 		hist = nil
 	}
-
-	httpClient, err := newHTTPClient(store, id.State.CentralURL)
-	if err != nil {
-		cancel()
-		_ = idx.Close()
+	defer func() {
 		if hist != nil {
 			_ = hist.Close()
 		}
-		return err
+	}()
+
+	httpClient, err := newHTTPClient(store, id.State.CentralURL)
+	if err != nil {
+		p.failStart(err)
+		return
 	}
 
 	// service.Interactive() is false only under an OS service manager. That is the
@@ -154,32 +186,21 @@ func (p *daemonProgram) Start(s service.Service) error {
 		"central", id.State.CentralURL,
 		"cert_valid_until", id.Leaf.NotAfter.Format("2006-01-02T15:04:05Z07:00"))
 
-	p.done = make(chan struct{})
-	go func() {
-		defer close(p.done)
-		defer func() {
-			_ = idx.Close()
-			if hist != nil {
-				_ = hist.Close()
-			}
-		}()
-		// Run blocks until ctx is cancelled (Stop / interrupt) and returns
-		// ctx.Err(); let every sibling loop unwind cleanly before returning.
-		err := renewer.Run(ctx)
-		<-replDone
-		<-supDone
-		<-pollDone
-		<-localDone
-		<-webDone
-		<-cmdDone
-		<-thumbDone
-		<-updDone
-		<-schedDone
-		if err != nil && !errors.Is(err, context.Canceled) {
-			p.runErr = err
-		}
-	}()
-	return nil
+	// Run blocks until ctx is cancelled (Stop / interrupt) and returns
+	// ctx.Err(); let every sibling loop unwind cleanly before returning.
+	err = renewer.Run(ctx)
+	<-replDone
+	<-supDone
+	<-pollDone
+	<-localDone
+	<-webDone
+	<-cmdDone
+	<-thumbDone
+	<-updDone
+	<-schedDone
+	if err != nil && !errors.Is(err, context.Canceled) {
+		p.runErr = err
+	}
 }
 
 // Stop cancels the daemon context and waits for a clean unwind. kardianos calls
