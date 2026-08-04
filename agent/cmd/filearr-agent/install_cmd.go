@@ -93,6 +93,11 @@ func runInstall(args []string) error {
 		Enrolled:  func() bool { _, e := enroll.NewCertStore(dataDir).LoadState(); return e == nil },
 		Enroll:    enrollFn,
 		HasToken:  cfg.Token != "",
+		// Promote a manual (per-user) enrollment into the system layout when
+		// the target data dir has none: without this, "ran it by hand first,
+		// then installed the service" registers a service over an empty data
+		// dir that dies on start (live 2026-08-04).
+		AdoptFrom: defaultDataDir(),
 		Log:       newLogger(),
 	}
 	if err := inst.Install(); err != nil {
@@ -101,6 +106,9 @@ func runInstall(args []string) error {
 	fmt.Printf("filearr-agent installed as service %q and started\n", install.ServiceName)
 	fmt.Printf("  binary : %s\n", eff.BinPath)
 	fmt.Printf("  data   : %s\n", eff.DataDir)
+	if inst.Adopted {
+		fmt.Printf("  adopted: existing enrollment + local index moved in from %s\n", defaultDataDir())
+	}
 	fmt.Printf("  logs   : %s\n", eff.LogDir)
 	fmt.Printf("  config : %s\n", eff.ConfigPath)
 	// Roadmap §20: optional-dependency check, WARN not fail — image/audio/STL

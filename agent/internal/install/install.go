@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 // ErrNeedAdmin is returned when install/uninstall is attempted without the
@@ -65,8 +67,23 @@ type Installer struct {
 	Enroll   func() error
 	HasToken bool
 
+	// AdoptFrom is a candidate data dir holding an EXISTING enrollment (the
+	// invoking user's per-user default dir). When the target data dir has no
+	// identity and no token is available, install copies that enrollment —
+	// identity, index, outbox, scan config — into the system layout so a host
+	// promoted from "ran it manually" to "service install" keeps working.
+	// Empty disables adoption.
+	AdoptFrom string
+	// Adopted is set by Install when an adoption actually happened (caller
+	// reporting).
+	Adopted bool
+
 	Log *slog.Logger
 }
+
+// verifySleep is the poll delay used by verifyRunning — a package var so the
+// unit tests run instantly.
+var verifySleep = time.Sleep
 
 func (in *Installer) log() *slog.Logger {
 	if in.Log != nil {
@@ -133,6 +150,28 @@ func (in *Installer) Install() error {
 		_ = in.Service.Uninstall()
 	}
 
+	// (c0) adopt an existing per-user enrollment. A host that first ran the
+	// agent manually (identity under the invoking user's config dir) and is
+	// then promoted to a service install would otherwise register a service
+	// pointing at an EMPTY system data dir — it dies on start with "no
+	// enrolled identity" while install reports success (live 2026-08-04, a
+	// Windows agent). Copies everything except logs/ (identity, local index,
+	// outbox, scan config) so replication sequence continuity is preserved;
+	// never overwrites existing target files.
+	if in.AdoptFrom != "" && (in.Enrolled == nil || !in.Enrolled()) {
+		adopted, aerr := AdoptData(in.AdoptFrom, in.Layout.DataDir)
+		if aerr != nil {
+			return fmt.Errorf(
+				"adopt existing enrollment from %s: %w (stop any manually-running filearr-agent and re-run install)",
+				in.AdoptFrom, aerr)
+		}
+		if adopted {
+			in.Adopted = true
+			in.log().Info("adopted existing enrollment",
+				"from", in.AdoptFrom, "to", in.Layout.DataDir)
+		}
+	}
+
 	// (c) non-interactive enroll when a token is present and we are not enrolled,
 	// BEFORE the service starts so it comes up already-enrolled.
 	if in.HasToken && in.Enroll != nil {
@@ -154,8 +193,94 @@ func (in *Installer) Install() error {
 	if err := in.Service.Start(); err != nil {
 		return fmt.Errorf("start service: %w", err)
 	}
+	// (f) verify the service actually STAYS up. "Started" from the service
+	// manager only means the start was dispatched; a service that dies in its
+	// first seconds (classic: empty data dir, locked index) otherwise yields a
+	// success banner over a dead service (live 2026-08-04).
+	if err := in.verifyRunning(); err != nil {
+		return err
+	}
 	in.log().Info("service installed and started")
 	return nil
+}
+
+// verifyRunning polls the service state briefly after Start and fails with an
+// actionable message when it exits instead of running.
+func (in *Installer) verifyRunning() error {
+	running := 0
+	for i := 0; i < 12; i++ {
+		st, err := in.Service.Status()
+		switch {
+		case err == nil && st == StatusRunning:
+			running++
+			if running >= 3 {
+				return nil // stable across ~1.5s of polls
+			}
+		case err == nil && st == StatusStopped:
+			return fmt.Errorf(
+				"service exited immediately after start — check the OS event log and %s; "+
+					"if there is no enrolled identity in %s, enroll first "+
+					"(`filearr-agent enroll -token <token> -data %q`) and re-run install",
+				in.Layout.LogDir, in.Layout.DataDir, in.Layout.DataDir)
+		default:
+			running = 0
+		}
+		verifySleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf(
+		"service did not reach a stable running state — check the OS event log and %s",
+		in.Layout.LogDir)
+}
+
+// AdoptData copies an existing agent data dir (identity + index + outbox +
+// scan config; logs excluded) into dst. No-op (false, nil) when src equals
+// dst, src has no enrollment (no state.json), or dst already has one.
+// Existing destination files are never overwritten.
+func AdoptData(src, dst string) (bool, error) {
+	if src == "" || dst == "" || filepath.Clean(src) == filepath.Clean(dst) {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(src, "state.json")); err != nil {
+		return false, nil // nothing to adopt
+	}
+	if _, err := os.Stat(filepath.Join(dst, "state.json")); err == nil {
+		return false, nil // target already enrolled; never clobber
+	}
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		if rel == "." {
+			return nil
+		}
+		// Logs stay per-location; everything else moves.
+		if d.IsDir() && d.Name() == "logs" && filepath.Dir(rel) == "." {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if _, serr := os.Stat(target); serr == nil {
+			return nil // never overwrite
+		}
+		buf, cerr := os.ReadFile(path)
+		if cerr != nil {
+			return fmt.Errorf("read %s: %w", path, cerr)
+		}
+		if werr := os.WriteFile(target, buf, 0o600); werr != nil {
+			return fmt.Errorf("write %s: %w", target, werr)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Uninstall stops + deregisters the service and removes the installed binary.

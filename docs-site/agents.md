@@ -59,6 +59,15 @@ upgrades in place; `filearr-agent uninstall` removes the service and binary
 (`--purge` also removes data/logs/config); `filearr-agent service
 status|start|stop|restart` manages it day to day.
 
+If the host previously ran the agent **manually** (identity under the user's
+config dir, e.g. `%AppData%\Roaming\filearr-agent`), `install` **adopts** that
+enrollment: the identity, local index, outbox, and scan config are copied into
+the system data dir so the service continues seamlessly — no re-enroll, no
+rescan, replication sequence preserved (the per-user copy is left untouched).
+Install also **verifies the service actually stays running** and fails with
+guidance if it exits immediately, instead of printing a success banner over a
+dead service.
+
 Service start reports **running immediately** and finishes initialization in
 the background — necessary because the first start after an upgrade may
 rebuild local database indexes over the whole catalog, which can take minutes
