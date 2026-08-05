@@ -119,6 +119,7 @@ EXAMPLES:
 		},
 		Commands: []*cli.Command{
 			legacyCommand("enroll", "Register with central, obtain a client cert from step-ca, and bind it", runEnroll),
+			legacyCommand("reissue", "Replace an EXPIRED certificate via an operator-minted recovery OTT (same agent identity — no re-enroll)", runReissue),
 			legacyCommand("run", "Load the cert store and run the renewal + replication + policy + local-query daemon", runDaemon),
 			legacyCommand("scan", "Walk one or more roots into the local SQLite/FTS5 index [--watch]", runScan),
 			legacyCommand("push", "Drain the replication outbox to central once (until empty or error)", runPush),

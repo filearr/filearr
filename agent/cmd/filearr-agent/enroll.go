@@ -70,3 +70,37 @@ func runEnroll(args []string) error {
 	fmt.Printf("data_dir=%s\n", cfg.DataDir)
 	return nil
 }
+
+// runReissue consumes an operator-minted recovery OTT (central Admin → Agents,
+// or POST /api/v1/agents/{id}/ca-ott) to replace an EXPIRED leaf certificate
+// without re-enrolling — same agent id, same replication watermark. The running
+// daemon picks the new cert up on its next renewal check and rebind trigger;
+// a service restart makes it immediate.
+func runReissue(args []string) error {
+	fs := newFlagSet("reissue")
+	cfg := bindCommonFlags(fs)
+	ott := fs.String("ott", os.Getenv("FILEARR_AGENT_CA_OTT"), "recovery OTT minted by central for THIS agent (admin: Agents → re-issue, or POST /agents/{id}/ca-ott)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *ott == "" {
+		return fmt.Errorf("a recovery OTT is required (-ott or FILEARR_AGENT_CA_OTT); mint one in central: POST /api/v1/agents/<agent-id>/ca-ott (admin)")
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+	r := &enroll.Reissuer{
+		Store:  enroll.NewCertStore(cfg.DataDir),
+		OTT:    *ott,
+		Logger: newLogger(),
+	}
+	id, err := r.Reissue(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("certificate reissued for agent %s\n", id.State.AgentID)
+	fmt.Printf("  valid until : %s\n", id.Leaf.NotAfter.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Printf("  fingerprint : %s\n", enroll.CertFingerprint(id.Leaf))
+	fmt.Println("  the running daemon picks this up automatically; `filearr-agent service restart` makes it immediate")
+	return nil
+}

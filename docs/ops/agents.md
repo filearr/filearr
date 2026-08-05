@@ -320,7 +320,26 @@ endpoint (7.3) to hand a fresh OTT to already-registered agents. Central emits
 `POST /api/v1/agents/{id}/ca-ott` (admin scope) mints a **fresh** OTT for an
 existing **pending or active** agent — the operator-driven recovery path for an
 agent long offline past its cert TTL, or one that registered before the JWK was
-plumbed. A **revoked** agent is refused (409); an unknown id is 404; if the
+plumbed.
+
+The agent-side half is **`filearr-agent reissue -ott <ott>`** (2026-08-05): it
+uses the OTT to obtain a fresh leaf from step-ca while keeping the on-disk
+identity (agent id, central URL, CA pin) verbatim — no re-enroll, no new agent
+row, replication watermark preserved — then re-binds the new fingerprint with
+central. The OTT is short-lived (`FILEARR_CA_OTT_TTL_SECONDS`, default 300 s),
+so mint it immediately before running reissue:
+
+```bash
+# on any admin box:
+curl -s -X POST http://<ct-ip>:8484/api/v1/agents/<agent-id>/ca-ott
+# on the agent host, within the TTL:
+filearr-agent reissue -ott <the minted ott>
+```
+
+The running daemon picks the new certificate up on its next renewal check and
+rebind trigger; `filearr-agent service restart` makes it immediate. An OTT
+minted for a DIFFERENT agent is refused (SAN check) and leaves the on-disk
+identity untouched. A **revoked** agent is refused (409); an unknown id is 404; if the
 provisioner JWK is unconfigured the endpoint returns 503 (its only job is to
 mint). Audited by `jti`.
 

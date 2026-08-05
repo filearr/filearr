@@ -224,3 +224,75 @@ func containsStr(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestReissueKeepsIdentity: the §7.3 recovery path. An enrolled agent gets a
+// FRESH leaf from an operator-minted OTT — same agent id, same state, new
+// key+cert — without re-enrolling (live 2026-08-05: an expired leaf could not
+// renew and the client had no recovery flow short of a full re-enroll).
+func TestReissueKeepsIdentity(t *testing.T) {
+	ca := newTestCA(t, defaultCAParams())
+	mc := newMockCentral(t, ca)
+	tok := "fae_" + randToken()
+	mc.addToken(tok)
+
+	dir := t.TempDir()
+	store := NewCertStore(dir)
+	e := &Enroller{
+		Central: NewCentralClient(mc.URL()), Store: store,
+		Token: tok, Hostname: "test-host", Platform: "linux", Name: "test",
+	}
+	res, err := e.Enroll(context.Background())
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	before, _ := store.Load()
+
+	ott := ca.mintOTTForID(res.AgentID)
+	r := &Reissuer{Store: store, OTT: ott}
+	id, err := r.Reissue(context.Background())
+	if err != nil {
+		t.Fatalf("reissue: %v", err)
+	}
+	if CertFingerprint(id.Leaf) == CertFingerprint(before.Leaf) {
+		t.Fatal("reissue must mint a NEW leaf")
+	}
+	if !containsStr(id.Leaf.DNSNames, res.AgentID) {
+		t.Fatalf("reissued SANs %v missing agent id %s", id.Leaf.DNSNames, res.AgentID)
+	}
+	if id.State != before.State {
+		t.Fatalf("state must be preserved verbatim: %+v != %+v", id.State, before.State)
+	}
+	if len(id.Roots) == 0 || !id.Roots[0].Equal(ca.Root) {
+		t.Fatal("reissue must persist the CA roots")
+	}
+}
+
+// TestReissueRefusesForeignOTT: an OTT minted for a DIFFERENT agent must be
+// refused and the on-disk identity left untouched.
+func TestReissueRefusesForeignOTT(t *testing.T) {
+	ca := newTestCA(t, defaultCAParams())
+	mc := newMockCentral(t, ca)
+	tok := "fae_" + randToken()
+	mc.addToken(tok)
+
+	dir := t.TempDir()
+	store := NewCertStore(dir)
+	e := &Enroller{
+		Central: NewCentralClient(mc.URL()), Store: store,
+		Token: tok, Hostname: "test-host", Platform: "linux", Name: "test",
+	}
+	if _, err := e.Enroll(context.Background()); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	before, _ := store.Load()
+
+	r := &Reissuer{Store: store, OTT: ca.mintOTTForID("019f0000-0000-7000-8000-000000000000")}
+	if _, err := r.Reissue(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "different agent") {
+		t.Fatalf("want foreign-OTT refusal, got %v", err)
+	}
+	after, _ := store.Load()
+	if CertFingerprint(after.Leaf) != CertFingerprint(before.Leaf) {
+		t.Fatal("foreign OTT must not touch the on-disk identity")
+	}
+}

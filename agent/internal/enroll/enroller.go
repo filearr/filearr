@@ -65,8 +65,9 @@ type Result struct {
 // step CONSUMED the single-use enrollment token and this client keeps no pending
 // state, so the honest recovery is: fix the JWK server-side, mint a NEW token,
 // re-run enroll (and revoke the orphaned pending agent row). The §7.3 ca-ott
-// re-issue endpoint exists for operators, but this client has no resume flow to
-// consume a re-issued OTT — do not promise one here.
+// re-issue endpoint + `filearr-agent reissue` recover an already-ENROLLED
+// agent (expired leaf); they cannot resume a failed FIRST enroll — no
+// state.json exists yet for reissue to preserve.
 var ErrCAOTTUnavailable = errors.New(
 	"central registered the agent but returned a null ca_ott — its CA provisioner JWK " +
 		"(FILEARR_CA_PROVISIONER_JWK) is unset or malformed (see docs/ops/agents.md §7.2; " +
