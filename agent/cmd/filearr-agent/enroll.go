@@ -3,10 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	"github.com/filearr/filearr/agent/internal/enroll"
+	"github.com/filearr/filearr/agent/internal/install"
 )
 
 // runEnroll performs the one-shot register -> CSR/sign -> persist -> bind
@@ -88,6 +91,22 @@ func runReissue(args []string) error {
 	}
 	if *ott == "" {
 		return fmt.Errorf("a recovery OTT is required (-ott or FILEARR_AGENT_CA_OTT); mint one in central: POST /api/v1/agents/<agent-id>/ca-ott (admin)")
+	}
+	// Self-locate the SERVICE install's identity when nothing points elsewhere
+	// and the per-user default holds none. Reissue is operator-driven recovery;
+	// twice in one live incident (2026-08-05) the -data flag was the tripwire —
+	// once rotating the wrong (superseded per-user) identity, once finding
+	// nothing at all after that copy was retired.
+	if set := flagsSet(fs); !set["data"] && os.Getenv(envDataDir) == "" && activeSidecar().DataDir == "" {
+		if _, err := os.Stat(filepath.Join(cfg.DataDir, "state.json")); err != nil {
+			if layout, lerr := install.ResolveLayout(runtime.GOOS, os.Getenv); lerr == nil {
+				if _, serr := os.Stat(filepath.Join(layout.DataDir, "state.json")); serr == nil {
+					fmt.Printf("no identity in %s — using the service install's data dir %s\n",
+						cfg.DataDir, layout.DataDir)
+					cfg.DataDir = layout.DataDir
+				}
+			}
+		}
 	}
 	if err := adoptionGuard(cfg.DataDir); err != nil {
 		return err
