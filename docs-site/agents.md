@@ -411,6 +411,16 @@ central grid has a preview for agent-hosted items without retrieving the whole
 file. ffmpeg is optional on the agent for video poster frames; without it, image
 thumbnails still work.
 
+**ffmpeg + service installs**: a Windows service runs with the SYSTEM
+environment and never sees a *user* PATH — where most ffmpeg installers
+(winget included) put themselves — so "ffmpeg works in my terminal" routinely
+doesn't hold inside the service process. Point the agent at the binary
+explicitly with `"ffmpeg_path": "C:\\path\\to\\ffmpeg.exe"` in the sidecar
+config (`filearr-agent.json`, read on every service start), or set
+`FILEARR_AGENT_FFMPEG_PATH` as a **system** environment variable. Env wins
+over sidecar; both win over the PATH lookup. Restart the service after
+either change.
+
 ## Killing an agent: revoke vs delete
 
 - **Revoke** (Admin → Agents → revoke, or `DELETE /api/v1/agents/{id}`) is an

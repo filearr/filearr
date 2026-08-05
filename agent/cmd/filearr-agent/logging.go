@@ -134,6 +134,14 @@ func setupRuntime(command string, args []string) {
 		logDir = ""
 	}
 
+	// Bridge sidecar ffmpeg_path into the env override when the env is unset:
+	// one choke point makes every consumer (thumbnailer, capability adverts)
+	// service-proof — a Windows service never sees a user PATH, so a config-
+	// file path is the reliable way to point a service at ffmpeg.
+	if os.Getenv(envFFmpegPath) == "" && sc.FFmpegPath != "" {
+		_ = os.Setenv(envFFmpegPath, sc.FFmpegPath)
+	}
+
 	runtimeMu.Lock()
 	if logCloser != nil {
 		_ = logCloser.Close()

@@ -41,6 +41,7 @@ const (
 	keyDataDir         = "data_dir"
 	keyLogLevel        = "log_level"
 	keyLogDir          = "log_dir"
+	keyFFmpegPath      = "ffmpeg_path"
 )
 
 // Config is the parsed sidecar. All fields are optional; a zero Config is the
@@ -56,6 +57,12 @@ type Config struct {
 	DataDir                   string
 	LogLevel                  string
 	LogDir                    string
+	// FFmpegPath is an explicit ffmpeg binary path. Load-bearing for SERVICE
+	// installs: a Windows service runs with the SYSTEM environment and never
+	// sees a user PATH (where most ffmpeg installers land), so "ffmpeg is on
+	// the PATH" is routinely untrue inside the service process (live
+	// 2026-08-05). Precedence: FILEARR_AGENT_FFMPEG_PATH env > this > PATH.
+	FFmpegPath                string
 
 	// Path is the file this config was loaded from, or "" if none was found.
 	Path string
@@ -183,6 +190,7 @@ func LoadFile(path string) (*Config, error) {
 	c.DataDir = get(keyDataDir)
 	c.LogLevel = get(keyLogLevel)
 	c.LogDir = get(keyLogDir)
+	c.FFmpegPath = get(keyFFmpegPath)
 	return c, nil
 }
 
