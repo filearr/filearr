@@ -300,14 +300,18 @@ async def test_timeline_invalid_future_bucket(api):
     future = datetime.now(UTC) + timedelta(days=10)
     await _mk_item(maker, lib, "future.bin", mtime=future)
 
+    t0 = datetime.now(UTC)  # BEFORE the request: a true lower bound
     r = await client.get("/api/v1/stats/timeline?bucket=month")
     body = r.json()
     assert body["invalid_count"] == 1
     # the future item is excluded from the histogram bars
     total_in_bars = sum(b["count"] for b in body["buckets"])
     assert total_in_bars == 1
-    # invalid_mtime_gte is strictly beyond the 48h window
-    assert body["invalid_mtime_gte"] > int((datetime.now(UTC) + timedelta(hours=48)).timestamp())
+    # invalid_mtime_gte sits at/just beyond the 48h window. Compare >= against
+    # a bound captured BEFORE the request: the server stamps its own now, and
+    # int() truncation makes exact-second equality legitimate (CI flake
+    # 2026-08-05: `assert X > X` when both clocks hit the same second).
+    assert body["invalid_mtime_gte"] >= int((t0 + timedelta(hours=48)).timestamp())
 
 
 async def test_timeline_bad_bucket_rejected(api):
