@@ -130,24 +130,29 @@ func (in *Installer) Install() error {
 	}
 	in.vlog("install layout created", "install_dir", in.Layout.InstallDir, "data_dir", in.Layout.DataDir, "log_dir", in.Layout.LogDir)
 
-	// (b) place the binary unless the source already IS the target (re-running
+	// (b) idempotency + the Windows exe lock: an existing service must be
+	// STOPPED — and its process fully exited — BEFORE the binary copy. Windows
+	// holds a mandatory lock on a running service's executable, so the old
+	// order (copy first, stop later) made every in-place upgrade with the
+	// service running fail at the copy with "being used by another process"
+	// (live 2026-08-05).
+	if st, err := in.Service.Status(); err == nil && st != StatusNotInstalled {
+		in.vlog("existing service found; stopping + deregistering for in-place upgrade", "status", st)
+		_ = in.Service.Stop()
+		in.waitStopped()
+		_ = in.Service.Uninstall()
+	}
+
+	// (c) place the binary unless the source already IS the target (re-running
 	// `install` from the installed path).
 	same, _ := in.FS.SameFile(in.SourceExe, in.Layout.BinPath)
 	if same {
 		in.vlog("binary already in place; skipping copy", "path", in.Layout.BinPath)
 	} else {
 		if err := in.FS.CopyFile(in.SourceExe, in.Layout.BinPath, 0o755); err != nil {
-			return fmt.Errorf("copy binary to %s: %w", in.Layout.BinPath, err)
+			return fmt.Errorf("copy binary to %s: %w (if the service is still stopping, wait a moment and re-run)", in.Layout.BinPath, err)
 		}
 		in.vlog("binary copied", "from", in.SourceExe, "to", in.Layout.BinPath)
-	}
-
-	// (e) idempotency: if a service is already registered, stop + deregister so
-	// the (re)Install applies the current config cleanly.
-	if st, err := in.Service.Status(); err == nil && st != StatusNotInstalled {
-		in.vlog("existing service found; stopping + deregistering for in-place upgrade", "status", st)
-		_ = in.Service.Stop()
-		_ = in.Service.Uninstall()
 	}
 
 	// (c0) adopt an existing per-user enrollment. A host that first ran the
@@ -202,6 +207,20 @@ func (in *Installer) Install() error {
 	}
 	in.log().Info("service installed and started")
 	return nil
+}
+
+// waitStopped polls briefly after Stop until the service reports stopped (or
+// gone): Stop() returning only means the stop was REQUESTED — the process may
+// still be exiting and holding its exe lock. Best-effort: on timeout the copy
+// simply fails with its own actionable error.
+func (in *Installer) waitStopped() {
+	for i := 0; i < 20; i++ {
+		st, err := in.Service.Status()
+		if err != nil || st == StatusStopped || st == StatusNotInstalled {
+			return
+		}
+		verifySleep(500 * time.Millisecond)
+	}
 }
 
 // verifyRunning polls the service state briefly after Start and fails with an

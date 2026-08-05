@@ -37,7 +37,13 @@ func (m *mockController) Start() error {
 	}
 	return m.startErr
 }
-func (m *mockController) Stop() error      { m.record("stop"); return nil }
+func (m *mockController) Stop() error {
+	m.record("stop")
+	// A real stop leaves the service observable as Stopped (what waitStopped
+	// polls for before the binary copy).
+	m.status = StatusStopped
+	return nil
+}
 func (m *mockController) Restart() error   { m.record("restart"); return nil }
 func (m *mockController) Status() (Status, error) {
 	m.record("status")
@@ -108,7 +114,7 @@ func TestInstallIdempotentUpgradeStopsFirst(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 	// Existing service: stop + uninstall before re-install + start.
-	assertCalls(t, ctrl.calls, []string{"status", "stop", "uninstall", "install", "start", "status", "status", "status"})
+	assertCalls(t, ctrl.calls, []string{"status", "stop", "status", "uninstall", "install", "start", "status", "status", "status"})
 }
 
 func TestInstallSkipsCopyWhenSameFile(t *testing.T) {
