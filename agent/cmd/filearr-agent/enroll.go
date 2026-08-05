@@ -19,6 +19,9 @@ func runEnroll(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := adoptionGuard(cfg.DataDir); err != nil {
+		return err
+	}
 	if err := cfg.requireCentralURL(); err != nil {
 		return err
 	}
@@ -85,6 +88,9 @@ func runReissue(args []string) error {
 	}
 	if *ott == "" {
 		return fmt.Errorf("a recovery OTT is required (-ott or FILEARR_AGENT_CA_OTT); mint one in central: POST /api/v1/agents/<agent-id>/ca-ott (admin)")
+	}
+	if err := adoptionGuard(cfg.DataDir); err != nil {
+		return err
 	}
 
 	ctx, cancel := signalContext()

@@ -366,3 +366,21 @@ func TestInstallFailsWhenServiceDiesAfterStart(t *testing.T) {
 		t.Fatalf("error must explain + name the data dir, got: %v", err)
 	}
 }
+
+func TestAdoptDataStampsSourceMarker(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{"state.json": `{"agent_id":"a"}`})
+	if adopted, err := AdoptData(src, dst); err != nil || !adopted {
+		t.Fatalf("adopt: %v %v", adopted, err)
+	}
+	if got := AdoptedTo(src); got != dst {
+		t.Fatalf("AdoptedTo(src) = %q, want %q", got, dst)
+	}
+	// The marker never travels with the copy, and the target is not marked.
+	if _, err := os.Stat(filepath.Join(dst, AdoptedMarkerName)); err == nil {
+		t.Fatal("marker must not be copied/created at the target")
+	}
+	if got := AdoptedTo(dst); got != "" {
+		t.Fatalf("AdoptedTo(dst) = %q, want empty", got)
+	}
+}

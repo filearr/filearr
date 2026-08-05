@@ -107,6 +107,10 @@ func runScan(args []string) error {
 		return err
 	}
 
+	if err := adoptionGuard(cfg.DataDir); err != nil {
+		return err
+	}
+
 	sc, err := loadOrInitScanConfig(cfg.DataDir, roots)
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package install
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -251,10 +252,35 @@ func (in *Installer) verifyRunning() error {
 		in.Layout.LogDir)
 }
 
+// AdoptedMarkerName is written into the SOURCE dir after a successful
+// adoption. Commands refuse to operate on a superseded copy: running reissue/
+// enroll/scan against it silently diverges identity or index state from the
+// service's live copy (live 2026-08-05: a reissue against the old per-user
+// dir re-bound central to a fingerprint the service doesn't hold, locking the
+// agent out with 401s).
+const AdoptedMarkerName = "ADOPTED.json"
+
+// AdoptedTo reports where dataDir's contents were adopted to ("" when the dir
+// carries no adoption marker).
+func AdoptedTo(dataDir string) string {
+	b, err := os.ReadFile(filepath.Join(dataDir, AdoptedMarkerName))
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		To string `json:"to"`
+	}
+	if json.Unmarshal(b, &m) != nil || m.To == "" {
+		return "superseded (marker unreadable)"
+	}
+	return m.To
+}
+
 // AdoptData copies an existing agent data dir (identity + index + outbox +
 // scan config; logs excluded) into dst. No-op (false, nil) when src equals
 // dst, src has no enrollment (no state.json), or dst already has one.
-// Existing destination files are never overwritten.
+// Existing destination files are never overwritten. On success the source is
+// stamped with AdoptedMarkerName so later commands refuse the stale copy.
 func AdoptData(src, dst string) (bool, error) {
 	if src == "" || dst == "" || filepath.Clean(src) == filepath.Clean(dst) {
 		return false, nil
@@ -273,7 +299,7 @@ func AdoptData(src, dst string) (bool, error) {
 		if rerr != nil {
 			return rerr
 		}
-		if rel == "." {
+		if rel == "." || rel == AdoptedMarkerName {
 			return nil
 		}
 		// Logs stay per-location; everything else moves.
@@ -298,6 +324,13 @@ func AdoptData(src, dst string) (bool, error) {
 	})
 	if err != nil {
 		return false, err
+	}
+	marker, _ := json.Marshal(map[string]string{
+		"to": dst, "at": time.Now().UTC().Format(time.RFC3339),
+	})
+	if werr := os.WriteFile(filepath.Join(src, AdoptedMarkerName), marker, 0o600); werr != nil {
+		// Non-fatal: the adoption itself succeeded; the guard is best-effort.
+		_ = werr
 	}
 	return true, nil
 }

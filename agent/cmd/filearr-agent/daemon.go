@@ -35,6 +35,10 @@ func runDaemon(args []string) error {
 		return err
 	}
 
+	if err := adoptionGuard(cfg.DataDir); err != nil {
+		return err
+	}
+
 	// Fail fast BEFORE constructing the service so a misconfigured/unenrolled
 	// host reports a clear error — but ONLY interactively. Under a service
 	// manager every millisecond before svc.Run() delays connecting to the

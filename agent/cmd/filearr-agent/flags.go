@@ -2,8 +2,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
+	"github.com/filearr/filearr/agent/internal/install"
 	"github.com/filearr/filearr/agent/internal/sidecar"
 )
 
@@ -35,4 +37,20 @@ func bindCommonFlags(fs *flag.FlagSet) *config {
 	fs.StringVar(&cfg.LogLevel, "log-level", envOr(envLogLevel, firstNonEmpty(sc.LogLevel, "info")), "log verbosity: error|warn|info|verbose|debug")
 	fs.StringVar(&cfg.LogDir, "log-dir", envOr(envLogDir, sc.LogDir), "directory for the rotating filearr-agent.log (also echoes to stderr on a tty)")
 	return cfg
+}
+
+// adoptionGuard refuses to operate on a data dir that a service install has
+// ADOPTED into the system layout. The superseded per-user copy still holds a
+// complete identity; running reissue/enroll/scan/run against it silently
+// diverges credentials or index state from the service's live copy (live
+// 2026-08-05: a reissue aimed at the old per-user dir re-bound central to a
+// fingerprint the running service doesn't hold — every bearer call 401'd).
+func adoptionGuard(dataDir string) error {
+	if to := install.AdoptedTo(dataDir); to != "" {
+		return fmt.Errorf(
+			"data dir %s was adopted into the service install at %s — re-run with `-data %q`, "+
+				"or delete %s from the old dir to operate on it anyway",
+			dataDir, to, to, install.AdoptedMarkerName)
+	}
+	return nil
 }
