@@ -105,6 +105,9 @@ AGENT_SHARE_MAP_DELETED = "agent_share_map_deleted"
 # promotes canary->general (records version + stage only, never the artifacts).
 AGENT_RELEASE_UPLOADED = "agent_release_uploaded"
 AGENT_RELEASE_PROMOTED = "agent_release_promoted"
+# 2026-08-05: an operator queues a self_update command for one agent from the
+# console (records agent_id + target/current versions only).
+AGENT_UPDATE_TRIGGERED = "agent_update_triggered"
 # FIX-15 operator repair action: force-clearing a stuck ScanRun terminal.
 SCAN_FORCE_CLEARED = "scan_force_cleared"
 # W9 targeted (file / directory, optionally recursive) rescan trigger. Records the

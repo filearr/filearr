@@ -50,7 +50,11 @@ from filearr.worker import defer_agent_associate, defer_index_sync
 
 router = APIRouter()
 
-CommandKind = Literal["stat_check", "rehash_check", "stage_upload", "inventory"]
+CommandKind = Literal["stat_check", "rehash_check", "stage_upload", "inventory", "self_update"]
+
+# Kinds that target the AGENT itself rather than one of its items: item_id is
+# absent for these (nullable since the self_update migration).
+_AGENT_SCOPED_KINDS = {"self_update"}
 
 
 # --------------------------------------------------------------------------- #
@@ -58,7 +62,9 @@ CommandKind = Literal["stat_check", "rehash_check", "stage_upload", "inventory"]
 # --------------------------------------------------------------------------- #
 class CommandEnqueueIn(BaseModel):
     kind: CommandKind
-    item_id: uuid.UUID
+    # Required for item-scoped kinds; must be ABSENT for agent-scoped kinds
+    # (self_update) — validated in the endpoint.
+    item_id: uuid.UUID | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     # Optional per-command TTL override (seconds); clamped server-side.
     ttl_seconds: int | None = Field(default=None, ge=60)
@@ -68,7 +74,7 @@ class CommandOut(BaseModel):
     id: uuid.UUID
     agent_id: uuid.UUID
     kind: str
-    item_id: uuid.UUID
+    item_id: uuid.UUID | None
     payload: dict[str, Any]
     status: str
     attempts: int
@@ -270,11 +276,17 @@ async def enqueue_command(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
     if agent.revoked_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "agent revoked")
-    item = (
-        await session.execute(select(Item).where(Item.id == body.item_id))
-    ).scalar_one_or_none()
-    if item is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such item")
+    if body.kind in _AGENT_SCOPED_KINDS:
+        if body.item_id is not None:
+            raise HTTPException(422, f"{body.kind} is agent-scoped; item_id must be absent")
+    else:
+        if body.item_id is None:
+            raise HTTPException(422, f"{body.kind} requires item_id")
+        item = (
+            await session.execute(select(Item).where(Item.id == body.item_id))
+        ).scalar_one_or_none()
+        if item is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such item")
 
     ttl = body.ttl_seconds or settings.agent_command_ttl_seconds
     ttl = max(60, min(ttl, settings.agent_command_ttl_max_seconds))
@@ -300,7 +312,7 @@ async def enqueue_command(
             "command_id": str(cmd.id),
             "agent_id": str(agent_id),
             "kind": body.kind,
-            "item_id": str(body.item_id),
+            "item_id": str(body.item_id) if body.item_id else None,
             "ttl_seconds": ttl,
         },
     )

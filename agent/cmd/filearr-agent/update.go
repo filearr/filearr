@@ -64,20 +64,25 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 	})
 }
 
+// updateTriggerFn is update.(*Updater).TriggerNow's shape (also declared
+// structurally in commands.Config) — the seam the command poller uses to run
+// an operator-triggered self_update immediately.
+type updateTriggerFn = func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
+
 // startUpdater launches the P5-T7 self-updater for the `run` daemon. It FIRST
 // runs the crash-loop boot check synchronously (which may restore the previous
 // binary and re-exec+exit on a failed update), then launches the health window
 // (if a swapped-in update is on trial this boot) and the long-interval poll loop.
-// It returns a done-channel so the daemon waits for a clean stop, mirroring
-// startCommandPoller / startReplication.
-func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) <-chan struct{} {
+// It returns the TriggerNow seam for the command poller (nil when self-update
+// is disabled) and a done-channel so the daemon waits for a clean stop.
+func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) (updateTriggerFn, <-chan struct{}) {
 	log := newLogger()
 	if selfUpdateDisabled() {
 		log.Info("agent self-update disabled by configuration (container image? update by pulling a new image)",
 			"env", envSelfUpdate)
 		done := make(chan struct{})
 		close(done)
-		return done
+		return nil, done
 	}
 	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient, serviceManaged)
 
@@ -101,7 +106,7 @@ func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertSto
 			log.Error("update poll loop exited", "err", err)
 		}
 	}()
-	return done
+	return upd.TriggerNow, done
 }
 
 // runUpdate implements the one-shot `filearr-agent update [--check]`: check for a

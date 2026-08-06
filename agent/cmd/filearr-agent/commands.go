@@ -31,7 +31,7 @@ const (
 // stat_check / rehash_check against local disk, reusing the shared bearer-auth +
 // mTLS HTTP client. It returns a done-channel so the daemon waits for a clean
 // stop, mirroring startReplication / startPoller.
-func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func()) <-chan struct{} {
+func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func(), updTrigger updateTriggerFn) <-chan struct{} {
 	poller := commands.NewPoller(commands.Config{
 		BaseURL:      centralURL,
 		AgentID:      agentID,
@@ -49,6 +49,10 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),
 		Logger:       newLogger(),
 		OnAuthError:  onAuthError,
+		// Console "update now" button → self_update command → one immediate
+		// check-and-apply. Nil when self-update is disabled (the handler then
+		// completes ok=false with an explanatory result).
+		TriggerUpdate: updTrigger,
 	})
 	done := make(chan struct{})
 	go func() {

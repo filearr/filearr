@@ -2292,6 +2292,14 @@ export interface AgentOut {
   created_at: string;
   // W6-D4: current config-group assignment (null = built-in defaults).
   config_group_id: string | null;
+  // W6-D3: capability advertisement persisted from the agent's command poll.
+  capabilities: Record<string, unknown> | null;
+  // 2026-08-05 update surfacing (list endpoint only): the version this agent
+  // would be offered, whether that makes an update available, and whether a
+  // self_update command is already in flight. Drives the badge + button.
+  update_available: boolean;
+  update_target: string | null;
+  update_pending: boolean;
 }
 
 /** Paginated registered-agents listing — a fleet can reach hundreds or
@@ -2362,6 +2370,17 @@ export async function revokeEnrollmentToken(tokenHash: string, force = false): P
 /** Revoke = application-layer denylist (row retained, history kept). */
 export const revokeAgent = (id: string) =>
   request<AgentOut>(`/agents/${id}`, { method: "DELETE" });
+
+/** Queue a self_update command for one agent — applied at its next command
+ *  check-in (default 60s poll). 409 when already up to date or one is queued. */
+export interface SelfUpdateOut {
+  command_id: string;
+  agent_id: string;
+  target: string;
+  expires_at: string;
+}
+export const triggerAgentUpdate = (id: string) =>
+  request<SelfUpdateOut>(`/agents/${id}/self-update`, { method: "POST" });
 
 /** HARD delete an agent row — the cleanup path for failed enrollments and
  *  data-free decommissions. 409 while any library/item references the agent. */

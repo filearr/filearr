@@ -178,6 +178,14 @@ class AgentOut(BaseModel):
     # ({inventory_collectors, inventory_version}; NULL until the agent's first
     # post-W6 poll). The console offers only collectors an agent supports.
     capabilities: dict | None = None
+    # 2026-08-05 update surfacing (populated by the LIST endpoint only —
+    # mutation endpoints return the defaults): the version this agent would be
+    # offered (signed release or the central-baked dist version), whether that
+    # makes an update available, and whether a self_update command is already
+    # in flight. Drives the console's badge + per-agent update button.
+    update_available: bool = False
+    update_target: str | None = None
+    update_pending: bool = False
 
 
 class AgentPage(BaseModel):
@@ -649,9 +657,42 @@ async def list_agents(
         .scalars()
         .all()
     )
-    return AgentPage(
-        items=[_agent_out(a) for a in rows], total=total, limit=limit, offset=offset
+    # Update surfacing (2026-08-05): one shared "what would this agent be
+    # offered" resolution per row (releases are read once inside; the page is
+    # <=200 rows) + one grouped query for in-flight self_update commands.
+    # Deferred import: agent_updates imports require_agents_enabled from here.
+    from filearr.api.agent_updates import resolve_update_target
+    from filearr.models import AgentCommand, AgentRelease
+
+    settings = get_settings()
+    releases = list(
+        (
+            await session.execute(
+                select(AgentRelease).order_by(AgentRelease.created_at.desc())
+            )
+        ).scalars()
     )
+    pending_ids = {
+        row
+        for row in (
+            await session.execute(
+                select(AgentCommand.agent_id).where(
+                    AgentCommand.kind == "self_update",
+                    AgentCommand.status.in_(("pending", "picked_up")),
+                )
+            )
+        ).scalars()
+    }
+    items: list[AgentOut] = []
+    for a in rows:
+        out = _agent_out(a)
+        if a.revoked_at is None:
+            target = await resolve_update_target(session, settings, a, releases)
+            out.update_target = target
+            out.update_available = target is not None
+            out.update_pending = a.id in pending_ids
+        items.append(out)
+    return AgentPage(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.delete(

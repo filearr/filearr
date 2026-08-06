@@ -335,3 +335,110 @@ func TestConfirmHealthyClearsStateAndDeletesOld(t *testing.T) {
 		t.Fatalf("confirm did not report running version: %q", fc.lastCur)
 	}
 }
+
+func TestUnpinnedBuildAcceptsUnsignedManifest(t *testing.T) {
+	// No pinned key + no signature (the dist-fallback channel): the check must
+	// SUCCEED — trust root is the authenticated channel + sha256.
+	art := []byte("DIST-BINARY")
+	m := Manifest{
+		Version:   "main-1a2b3c4",
+		CreatedAt: "2026-08-05T12:00:00Z",
+		Artifacts: []Artifact{{Platform: "linux", Arch: "amd64", SHA256: sha256Hex(art), Size: int64(len(art)), URL: "filearr-agent-linux-amd64"}},
+	}
+	fc := &fakeCentral{t: t, manifest: m, artifact: art, artifactN: "filearr-agent-linux-amd64"}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+
+	u := buildUpdater(t, srv, nil, t.TempDir(), "", "main-0000000", "linux", "amd64", nil)
+	got, a, ok, err := u.CheckForUpdate(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("unpinned build must accept the unsigned manifest: ok=%v err=%v", ok, err)
+	}
+	if got.Version != "main-1a2b3c4" || a.URL != "filearr-agent-linux-amd64" {
+		t.Fatalf("wrong offer: %+v %+v", got, a)
+	}
+}
+
+func TestPinnedBuildStillRefusesUnsigned(t *testing.T) {
+	pub, _ := testKeypair(t)
+	art := []byte("x")
+	m := Manifest{
+		Version:   "9.9.9",
+		CreatedAt: "2026-08-05T12:00:00Z",
+		Artifacts: []Artifact{{Platform: "linux", Arch: "amd64", SHA256: sha256Hex(art), Size: 1, URL: "a"}},
+	}
+	fc := &fakeCentral{t: t, manifest: m, artifact: art, artifactN: "a"}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+
+	u := buildUpdater(t, srv, pub, t.TempDir(), "", "1.0.0", "linux", "amd64", nil)
+	_, _, ok, err := u.CheckForUpdate(context.Background())
+	if err == nil || ok {
+		t.Fatalf("pinned build must refuse an unsigned manifest: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestKeyPinnedAdvertisedOnPoll(t *testing.T) {
+	pub, _ := testKeypair(t)
+	var gotPinned []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPinned = append(gotPinned, r.URL.Query().Get("key_pinned"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	up := buildUpdater(t, srv, pub, t.TempDir(), "", "1.0.0", "linux", "amd64", nil)
+	_, _, _, _ = up.CheckForUpdate(context.Background())
+	un := buildUpdater(t, srv, nil, t.TempDir(), "", "1.0.0", "linux", "amd64", nil)
+	_, _, _, _ = un.CheckForUpdate(context.Background())
+	if len(gotPinned) != 2 || gotPinned[0] != "true" || gotPinned[1] != "false" {
+		t.Fatalf("key_pinned advertisement wrong: %v", gotPinned)
+	}
+}
+
+func TestTriggerNowAppliesWithBeforeApplyOrdering(t *testing.T) {
+	// End to end against the fake central with a real (temp) exe swap; the
+	// beforeApply callback must fire BEFORE the swap replaces the binary.
+	pub, priv := testKeypair(t)
+	art := []byte("NEW-BINARY-BYTES-TRIGGER")
+	fc := &fakeCentral{t: t, manifest: signedManifest(t, priv, "2.0.0", "agent-linux-amd64", art, "linux", "amd64"), artifact: art, artifactN: "agent-linux-amd64"}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "agent-bin")
+	if err := os.WriteFile(exe, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	u := buildUpdater(t, srv, pub, dir, exe, "1.0.0", "linux", "amd64",
+		func(string, []string) error { order = append(order, "reexec"); return nil })
+	version, applying, err := u.TriggerNow(context.Background(), func(v string) {
+		order = append(order, "beforeApply:"+v)
+		if b, _ := os.ReadFile(exe); string(b) != "OLD" {
+			t.Fatal("beforeApply ran AFTER the swap")
+		}
+	})
+	if err != nil || !applying || version != "2.0.0" {
+		t.Fatalf("trigger: version=%q applying=%v err=%v", version, applying, err)
+	}
+	if len(order) != 2 || order[0] != "beforeApply:2.0.0" || order[1] != "reexec" {
+		t.Fatalf("wrong ordering: %v", order)
+	}
+	if b, _ := os.ReadFile(exe); string(b) != string(art) {
+		t.Fatal("binary was not swapped")
+	}
+}
+
+func TestTriggerNowUpToDate(t *testing.T) {
+	fc := &fakeCentral{t: t} // Version=="" -> 204
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+	u := buildUpdater(t, srv, nil, t.TempDir(), "", "1.0.0", "linux", "amd64", nil)
+	version, applying, err := u.TriggerNow(context.Background(), func(string) {
+		t.Fatal("beforeApply must not fire when up to date")
+	})
+	if err != nil || applying || version != "" {
+		t.Fatalf("expected clean up-to-date: %q %v %v", version, applying, err)
+	}
+}

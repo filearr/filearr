@@ -410,6 +410,34 @@ rather than swapping.
 See [Security → Signed agent updates](security.md#signed-agent-updates) for the
 key-handling contract.
 
+## Tracking the central version (auto-update)
+
+Central also compares every agent's reported version against its **own
+published version** — the agent binaries baked into the central Docker image
+(the same ones the install scripts serve). When they differ and no signed
+release applies, the agent's periodic update poll is offered a manifest built
+from those baked binaries, so **deploying a new central image is all it takes
+for the fleet to follow it**:
+
+- **Unsigned by design, split by trust:** builds installed via the central
+  install scripts carry no signing-key pin — for them the authenticated TLS
+  channel + sha256 is the trust root (exactly what their original install
+  used), and they accept this channel (with a logged warning). A key-pinned
+  build refuses unsigned bits and tells central so; it updates only through
+  the signed-release flow above.
+- **`auto_update` policy (staged rollout):** the offer is gated server-side by
+  the agent-policy key `auto_update` (absent = on). Set it `false` globally
+  and enable it per rollout-group or per-agent to stage a rollout — or leave
+  it on and stage with canary releases. Remember policy scopes replace, they
+  don't merge.
+- **Console badge + button:** the Agents page shows **"update available"**
+  next to any agent whose version differs from what central would offer, with
+  an **update** action that queues the update for the agent's next check-in
+  (~1 minute). While queued the badge reads **"update queued"**; agents that
+  are current show neither. A manual trigger works even when `auto_update` is
+  off — the click is the authorization. The same boot-counter health window +
+  automatic rollback applies to every channel.
+
 ## Transfers / retrieve flow
 
 Central can ask an agent to do one thing on demand through an **agent commands**

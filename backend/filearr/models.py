@@ -1829,7 +1829,7 @@ class AgentCommand(Base):
     __tablename__ = "agent_commands"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('stat_check','rehash_check','stage_upload','inventory')",
+            "kind IN ('stat_check','rehash_check','stage_upload','inventory','self_update')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(
@@ -1859,9 +1859,13 @@ class AgentCommand(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE")
     )
-    kind: Mapped[str] = mapped_column(Text)  # stat_check | rehash_check | stage_upload
-    item_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("items.id", ondelete="CASCADE")
+    # stat_check | rehash_check | stage_upload | inventory | self_update
+    kind: Mapped[str] = mapped_column(Text)
+    # Nullable since self_update (2026-08-05): a fleet-management command targets
+    # the AGENT, not an item — the item-verify/retrieve kinds still require one
+    # (enforced at the API layer).
+    item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("items.id", ondelete="CASCADE"), nullable=True
     )
     payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))

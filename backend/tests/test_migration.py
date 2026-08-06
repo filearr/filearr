@@ -16,7 +16,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "b3e9a1c7d520"
+HEAD = "e7a4c2d9b168"
 # W8-B media_type CUTOVER: drops items.media_type + the enum, renames
 # libraries.enabled_types -> enabled_categories (+ adds enabled_groups), and
 # metadata_profiles.media_type -> file_category.

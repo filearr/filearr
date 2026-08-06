@@ -10,6 +10,7 @@
     listEnrollmentTokens,
     mintEnrollmentToken,
     revokeAgent,
+    triggerAgentUpdate,
     deleteAgent,
     revokeEnrollmentToken,
     listConfigGroups,
@@ -201,6 +202,24 @@
       await reloadPolicies(); // resync to server truth
     } finally {
       policyBusy = false;
+    }
+  }
+
+  // Per-agent "update at next check-in": queue a self_update command. The
+  // button only renders when the list said update_available && !update_pending,
+  // but a 409 can still race (someone else clicked / agent just updated) — the
+  // refresh resyncs either way.
+  let updating: Record<string, boolean> = $state({});
+  async function updateAgentNow(id: string, name: string) {
+    updating[id] = true;
+    try {
+      await triggerAgentUpdate(id);
+      await refresh();
+    } catch (e) {
+      error = `update ${name}: ${errDetail(e)}`;
+      await refresh();
+    } finally {
+      updating[id] = false;
     }
   }
 
@@ -599,10 +618,29 @@ ${detail}
                   {/each}
                 </select>
               </td>
-              <td class="py-2 pr-3 text-slate-500">{a.agent_version ?? "—"}</td>
+              <td class="py-2 pr-3 text-slate-500">
+                <span class="font-mono text-xs">{a.agent_version ?? "—"}</span>
+                {#if a.update_pending}
+                  <span
+                    class="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                    title={`Updating to ${a.update_target ?? "the current central version"} at its next check-in`}
+                    >update queued</span>
+                {:else if a.update_available}
+                  <span
+                    class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title={`Central offers ${a.update_target}`}>update available</span>
+                {/if}
+              </td>
               <td class="py-2 text-right whitespace-nowrap">
                 {#if a.status !== "revoked"}
-                  <button class="text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
+                  {#if a.update_available && !a.update_pending}
+                    <button
+                      class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
+                      disabled={updating[a.id]}
+                      title={`Queue an update to ${a.update_target} — applied at the agent's next check-in (~1 min)`}
+                      onclick={() => updateAgentNow(a.id, a.name)}>update</button>
+                  {/if}
+                  <button class="ml-3 text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
                 {/if}
                 <button
                   class="ml-3 text-red-600"

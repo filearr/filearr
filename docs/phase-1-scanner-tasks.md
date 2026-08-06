@@ -54,13 +54,22 @@ no hash, so their old rows tombstone and the association pass re-links the fresh
 rows to the surviving parent id. Deferred items (network hashing cost, cross-
 library moves, in-place content swap) recorded in future-roadmap.md section 13.
 
-### T3 — Sidecar association
+### T3 — Sidecar association  [DONE 2026-07-07; agent parity 2026-08-05]
 Detect `.nfo`, `poster.jpg`, `-thumb.jpg`, `*_JRSidecar.xml` etc.; link to parent
 media item (`sidecar_of` FK or metadata ref) and exclude from default search
 (filterable, not gone). Parse Kodi NFO into extracted metadata when present.
 JRiver sidecar XML = future metadata source (JRiver has no ecosystem API).
 *Accept:* Arcane episode search no longer surfaces its nfo/thumb as separate
 top-level "other" hits; NFO title/plot lands in item metadata.
+**Done:** `filearr/sidecar.py` (pure path-shape classifier: nfo/jriver/artwork/
+xmp/thm, dir-level + per-stem) + `tasks/associate.py` (idempotent link pass at
+scan end, NFO fold-in via `filearr/nfo.py`), migration `a1c3f7e9b204`, Meili
+`is_sidecar` projection + default `is_sidecar = false` filter
+(`include_sidecars`/`sidecar_of` opt back in). 2026-08-05 extensions:
+agent-replicated libraries get a debounced link-only pass (replication never
+sets `sidecar_of`; central cannot read agent files, so no NFO parse) + a daily
+maintenance sweep; timeline excludes sidecars; `photo.jpg.xmp` double-extension
+stems match the exact sibling.
 
 ### T4 — SSE live progress + admin polish
 Switch `/scans/{id}/events` to native `fastapi.sse.EventSourceResponse`; Admin page

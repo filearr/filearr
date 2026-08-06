@@ -21,9 +21,12 @@ RUN go mod download
 COPY agent/ .
 ARG VERSION=0.0.0-dev
 ARG UPDATE_PUBLIC_KEY=
+# The stamp must be a URL-safe token (main-1a2b3c4, v1.4.0-1a2b3c4): the dist
+# bake doubles as a VIRTUAL update release, so its version rides in artifact-
+# download URL paths and must pass central's _SAFE_VERSION check — no spaces.
 RUN set -eu; \
     V="${VERSION%%@*}"; SHA="${VERSION#*@}"; \
-    if [ "$SHA" != "$VERSION" ]; then V="$V ($(echo "$SHA" | cut -c1-7))"; fi; \
+    if [ "$SHA" != "$VERSION" ]; then V="$V-$(echo "$SHA" | cut -c1-7)"; fi; \
     mkdir -p /out; \
     for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
       GOOS="${target%/*}"; GOARCH="${target#*/}"; ext=""; \

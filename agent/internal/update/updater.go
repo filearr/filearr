@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -131,6 +132,10 @@ func New(cfg Config) *Updater {
 			agentID: cfg.AgentID,
 			authFn:  cfg.AuthFn,
 			http:    cfg.HTTP,
+			// Tell central whether this build can verify signatures: a pinned
+			// build must never be offered the unsigned dist-fallback channel
+			// (it would refuse it anyway — this avoids the noisy refusal loop).
+			keyPinned: len(cfg.PublicKey) == ed25519.PublicKeySize,
 		},
 		log:   cfg.Logger,
 		clock: cfg.Clock,
@@ -164,16 +169,53 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*Manifest, *Artifact, boo
 		return nil, nil, false, nil // central says up to date (204)
 	}
 	if err := Verify(*m, u.cfg.PublicKey); err != nil {
-		return nil, nil, false, fmt.Errorf("refusing update %s: %w", m.Version, err)
+		if errors.Is(err, ErrNoPinnedKey) {
+			// This build pins no release key, so signature verification is
+			// impossible BY CONSTRUCTION — the trust root is the authenticated
+			// TLS channel to the enrolled central plus the manifest sha256: the
+			// exact trust the original agent-dist install script carried. A
+			// pinned build never reaches here (it fails closed above) and tells
+			// central so (key_pinned=true) to not even be offered unsigned bits.
+			u.log.Warn("accepting update manifest WITHOUT signature verification (no pinned release key in this build)",
+				"version", m.Version, "signed", m.Signature != "")
+		} else {
+			return nil, nil, false, fmt.Errorf("refusing update %s: %w", m.Version, err)
+		}
 	}
-	if !IsNewer(m.Version, u.cfg.CurrentVersion) {
-		return m, nil, false, nil // signed, but not actually newer
+	if !ShouldApply(m.Version, u.cfg.CurrentVersion) {
+		return m, nil, false, nil // verified, but not an upgrade for us
 	}
 	a, found := m.FindArtifact(u.cfg.Platform, u.cfg.Arch)
 	if !found {
 		return m, nil, false, fmt.Errorf("update %s has no artifact for %s/%s", m.Version, u.cfg.Platform, u.cfg.Arch)
 	}
 	return m, &a, true, nil
+}
+
+// TriggerNow runs ONE immediate check-and-apply cycle on behalf of an
+// operator-triggered self_update command (console button). beforeApply — if
+// non-nil — is invoked once the manifest and artifact have passed every check
+// but BEFORE the download+swap: the caller must post its command result there,
+// because a successful apply exits the process and never returns. Returns
+// (version, applying, err); applying=false with a nil err means up to date.
+func (u *Updater) TriggerNow(ctx context.Context, beforeApply func(version string)) (string, bool, error) {
+	m, a, ok, err := u.CheckForUpdate(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		if m != nil {
+			return m.Version, false, nil
+		}
+		return "", false, nil
+	}
+	if beforeApply != nil {
+		beforeApply(m.Version)
+	}
+	if err := u.ApplyUpdate(ctx, m, a); err != nil {
+		return m.Version, true, err
+	}
+	return m.Version, true, nil // only reachable with a stubbed exit (tests)
 }
 
 // ApplyUpdate downloads + sha256-verifies the artifact, writes the boot-counter

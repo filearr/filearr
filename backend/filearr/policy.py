@@ -158,6 +158,17 @@ class PolicyModel(BaseModel):
     # is additive — the P7-T4 keys and their tests are untouched.
     upload_rate_bytes_per_sec: int | None = Field(default=None, ge=0)
 
+    # --- agent self-update gate (2026-08-05) -------------------------------
+    # ``auto_update`` — whether central OFFERS updates on this agent's periodic
+    # update-manifest poll. Enforced SERVER-side (the poll answers 204 when
+    # disabled), so it gates every agent build uniformly. Absent = TRUE
+    # (preserves the historic always-offer behaviour). Staged rollout: set the
+    # global policy false and enable per rollout-group/agent scope — remember
+    # policy resolution is most-specific-wins with NO key merging, so a
+    # narrower doc must carry every key it needs. An operator-triggered
+    # self_update command bypasses this gate (the click IS the authorization).
+    auto_update: bool | None = None
+
     @field_validator("scan_cron")
     @classmethod
     def _valid_scan_cron(cls, v: str | None) -> str | None:

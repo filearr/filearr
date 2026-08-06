@@ -71,6 +71,14 @@ type Config struct {
 	// (401/403) — wired to the cert-rebind trigger so a drifted fingerprint
 	// self-heals (fix 2026-07-24). Must not block; the rebinder debounces.
 	OnAuthError func()
+
+	// TriggerUpdate runs one immediate self-update check-and-apply on behalf of
+	// a self_update command (update.Updater.TriggerNow's exact signature —
+	// declared structurally to keep this package update-free). beforeApply is
+	// where the handler posts its command result: a successful apply exits the
+	// process. Nil => the kind completes ok=false ("unavailable"), so an agent
+	// with self-update disabled degrades cleanly.
+	TriggerUpdate func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
 }
 
 // Poller drains central's per-agent command queue and executes each command.
@@ -86,10 +94,11 @@ type Poller struct {
 	maxCmds      int
 	interval     time.Duration
 	leaseSecs    int
-	log          *slog.Logger
-	clock        func() time.Time
-	rnd          *rand.Rand
-	onAuthError  func()
+	log           *slog.Logger
+	clock         func() time.Time
+	rnd           *rand.Rand
+	onAuthError   func()
+	updateTrigger func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
 }
 
 // NewPoller wires a Poller, applying defaults.
@@ -110,6 +119,7 @@ func NewPoller(cfg Config) *Poller {
 		clock:        cfg.Clock,
 		rnd:          cfg.Rand,
 		onAuthError:  cfg.OnAuthError,
+		updateTrigger: cfg.TriggerUpdate,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -205,6 +215,8 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processStageUpload(ctx, cmd)
 	case KindInventory:
 		p.processInventory(ctx, cmd)
+	case KindSelfUpdate:
+		p.processSelfUpdate(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}

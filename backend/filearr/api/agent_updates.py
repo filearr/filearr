@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +42,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit
+from filearr import policy as policy_mod
+from filearr.api import agent_dist
 from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
 from filearr.config import Settings, get_settings
 from filearr.db import get_session
-from filearr.models import Agent, AgentRelease
+from filearr.models import Agent, AgentCommand, AgentRelease
 from filearr.security import require_scope
 
 router = APIRouter()
@@ -407,6 +409,119 @@ def _covers(rel: AgentRelease, agent: Agent, canary_group: str) -> bool:
     return rel.stage == "canary" and agent.rollout_group == canary_group
 
 
+# A "clean" release-tag version whose ordering CompareVersions understands
+# (v1.2.3 / 1.2.3-rc1). Anything else — branch@sha builds like "main-1a2b3c4" —
+# has NO defined ordering: for those, "differs from current" is the only
+# meaningful update signal (string equality means "the exact current build").
+_CLEAN_VERSION = re.compile(r"^[vV]?\d+(\.\d+)*([-+].*)?$")
+
+
+def _should_offer(candidate: str, current: str) -> bool:
+    """Mirror of the Go ``update.ShouldApply``: semver ordering when both sides
+    are clean release tags, plain inequality otherwise."""
+    if not current:
+        return True
+    if _CLEAN_VERSION.match(candidate) and _CLEAN_VERSION.match(current):
+        return _version_newer(candidate, current)
+    return candidate != current
+
+
+def _dist_manifest_for(settings: Settings, current: str) -> dict[str, Any] | None:
+    """UNSIGNED update manifest derived from the central-baked agent-dist
+    binaries (the "published central console version"). Returns None when there
+    is no dist bake, the version is not a safe URL token, or it does not differ
+    from ``current``. Served through the SAME per-release artifact download path
+    (the dist bake acts as a virtual release), so the Go client's
+    filename-only URL resolution is untouched."""
+    root = agent_dist._dist_root(settings)
+    arts = agent_dist._artifacts(root)
+    version = agent_dist._version(root)
+    if not arts or version == "unknown" or not _SAFE_VERSION.match(version):
+        return None
+    if not _should_offer(version, current):
+        return None
+    goos_to_platform = {"windows": "windows", "linux": "linux", "darwin": "macos"}
+    entries: list[dict[str, Any]] = []
+    for p in arts:
+        goos, goarch = agent_dist._platform_of(p.name)
+        platform = goos_to_platform.get(goos)
+        if platform is None:
+            continue
+        entries.append(
+            {
+                "platform": platform,
+                "arch": goarch,
+                "sha256": agent_dist._sha256(p),
+                "size": p.stat().st_size,
+                "url": p.name,
+            }
+        )
+    if not entries:
+        return None
+    try:
+        created = datetime.fromtimestamp((root / "VERSION").stat().st_mtime, tz=UTC)
+    except OSError:
+        created = datetime.now(UTC)
+    return {
+        "version": version,
+        "created_at": created.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "artifacts": entries,
+        # No signature: only unpinned agent builds accept this channel (their
+        # trust root is the authenticated TLS channel + sha256, same as their
+        # original install via the agent-dist install scripts). A key-pinned
+        # build refuses unsigned manifests (fail-closed) and signals
+        # key_pinned=true on its poll so central does not even offer this.
+    }
+
+
+async def _pending_self_update(session: AsyncSession, agent_id: uuid.UUID) -> bool:
+    row = (
+        await session.execute(
+            select(AgentCommand.id)
+            .where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "self_update",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
+async def resolve_update_target(
+    session: AsyncSession,
+    settings: Settings,
+    agent: Agent,
+    releases: list[AgentRelease] | None = None,
+) -> str | None:
+    """The version this agent WOULD be offered (newest covering ready signed
+    release, else the differing agent-dist bake), or None when up to date.
+    Shared by the console fields (update_available/update_target) and the
+    self-update trigger endpoint — one definition of "update available".
+    ``releases`` lets a paging caller preload the (small) release list once."""
+    current = agent.agent_version or ""
+    if releases is None:
+        releases = list(
+            (
+                await session.execute(
+                    select(AgentRelease).order_by(AgentRelease.created_at.desc())
+                )
+            ).scalars()
+        )
+    for rel in releases:
+        if not _covers(rel, agent, settings.agent_canary_group):
+            continue
+        if current and not _version_newer(rel.version, current):
+            break  # newest covering release is not newer -> signed channel done
+        if _release_ready(settings, rel):
+            return rel.version
+    dist = _dist_manifest_for(settings, current)
+    if dist is not None:
+        return str(dist["version"])
+    return None
+
+
 @router.get(
     "/agents/{agent_id}/update-manifest",
     dependencies=[Depends(require_agents_enabled)],
@@ -415,17 +530,27 @@ async def get_update_manifest(
     agent_id: uuid.UUID,
     request: Request,
     current: str = "",
+    key_pinned: bool = False,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Return the newest covering release strictly newer than the agent's reported
     ``current`` version, as the stored signed manifest (the agent verifies the
-    signature). 204 when up to date / nothing covers this agent / the newest
-    covering release's artifacts are not all present.
+    signature) — falling back to an UNSIGNED manifest derived from the
+    central-baked agent-dist binaries when no signed release applies but the
+    published central version differs (skipped when the agent reports
+    ``key_pinned=true``: a pinned build would refuse unsigned bits anyway).
+    204 when up to date / nothing covers this agent / updates are gated off.
+
+    Gate (2026-08-05): an update is OFFERED only when the agent's effective
+    policy allows ``auto_update`` (absent = true) OR an operator-triggered
+    ``self_update`` command is in flight for this agent (the click IS the
+    authorization). The gate sits server-side so every agent build honors it.
 
     Reporting ``current`` here is ALSO the §6.3 confirmed-version signal: the
     agent's running version is recorded on ``agents.agent_version`` (+ a
     ``last_seen_at`` refresh) on every poll — a running, polling agent has by
-    definition booted that version."""
+    definition booted that version. The stamp happens BEFORE the gate: a
+    gated-off agent still reports its version."""
     agent = await _authenticate_agent(session, agent_id, request)
     settings = get_settings()
 
@@ -436,6 +561,11 @@ async def get_update_manifest(
     agent.last_seen_at = now
     await session.commit()
 
+    _, _, effective = await policy_mod.resolve_effective_policy(session, agent)
+    auto = effective.get("auto_update")
+    if auto is False and not await _pending_self_update(session, agent_id):
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     releases = (
         await session.execute(select(AgentRelease).order_by(AgentRelease.created_at.desc()))
     ).scalars().all()
@@ -443,13 +573,19 @@ async def get_update_manifest(
         if not _covers(rel, agent, settings.agent_canary_group):
             continue
         if current and not _version_newer(rel.version, current):
-            # The newest covering release is not newer than what we run -> done.
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
+            # The newest covering release is not newer than what we run — the
+            # signed channel is done (the dist fallback below may still differ).
+            break
         if not _release_ready(settings, rel):
             # Manifest registered but artifacts not fully uploaded — do not offer
             # a manifest whose download would 404. Skip to older covering ones.
             continue
         return Response(content=_manifest_json(rel.manifest), media_type="application/json")
+
+    if not key_pinned:
+        dist = _dist_manifest_for(settings, current)
+        if dist is not None:
+            return Response(content=_manifest_json(dist), media_type="application/json")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -481,14 +617,95 @@ async def download_artifact(
     rel = (
         await session.execute(select(AgentRelease).where(AgentRelease.version == version))
     ).scalar_one_or_none()
+    settings = get_settings()
     if rel is None:
+        # The agent-dist bake is a VIRTUAL release (unsigned dist-fallback
+        # manifests reference it by its baked version): serve its files through
+        # this same authenticated path when the version matches.
+        root = agent_dist._dist_root(settings)
+        if agent_dist._version(root) == version:
+            target = (root.resolve() / filename)
+            if (
+                any(p.name == filename for p in agent_dist._artifacts(root))
+                and target.parent == root.resolve()
+                and target.is_file()
+            ):
+                return FileResponse(
+                    str(target), media_type="application/octet-stream", filename=filename
+                )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such release")
     if not any(a.get("url") == filename for a in _manifest_artifacts(rel.manifest)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "filename not in manifest")
-    settings = get_settings()
     path = _artifact_path(settings, version, filename)
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "artifact not uploaded")
     return FileResponse(
         str(path), media_type="application/octet-stream", filename=filename
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Operator plane — per-agent update trigger (console button, 2026-08-05)       #
+# --------------------------------------------------------------------------- #
+class SelfUpdateOut(BaseModel):
+    command_id: uuid.UUID
+    agent_id: uuid.UUID
+    target: str
+    expires_at: datetime
+
+
+@router.post(
+    "/agents/{agent_id}/self-update",
+    response_model=SelfUpdateOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def trigger_self_update(
+    agent_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> SelfUpdateOut:
+    """Queue a ``self_update`` command for one agent — applied at its next
+    command check-in (default 60s poll), regardless of its ``auto_update``
+    policy (the operator's click IS the authorization; the update-manifest
+    gate honors an in-flight command). 409 when no update is available or one
+    is already queued; the button in the console mirrors both conditions."""
+    settings = get_settings()
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
+    if agent.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "agent revoked")
+    target = await resolve_update_target(session, settings, agent)
+    if target is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "agent is already up to date")
+    if await _pending_self_update(session, agent_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "an update is already queued")
+
+    now = datetime.now(UTC)
+    cmd = AgentCommand(
+        agent_id=agent_id,
+        kind="self_update",
+        item_id=None,
+        payload={"target": target},
+        status="pending",
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=settings.agent_command_ttl_seconds),
+    )
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_UPDATE_TRIGGERED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "target": target,
+            "current": agent.agent_version,
+        },
+    )
+    return SelfUpdateOut(
+        command_id=cmd.id, agent_id=agent_id, target=target, expires_at=cmd.expires_at
     )

@@ -21,6 +21,9 @@ type client struct {
 	agentID string
 	authFn  func() string
 	http    *http.Client
+	// keyPinned is advertised on the manifest poll so central can skip the
+	// unsigned dist-fallback channel for builds that would refuse it.
+	keyPinned bool
 }
 
 // fetchManifest GETs the newest release manifest that covers this agent and is
@@ -29,8 +32,8 @@ type client struct {
 // version — that report IS the §6.3 confirmed-version signal (central records it
 // on “agents.agent_version“), so a normal poll doubles as a health confirm.
 func (c *client) fetchManifest(ctx context.Context, current string) (*Manifest, error) {
-	u := fmt.Sprintf("%s/api/v1/agents/%s/update-manifest?current=%s",
-		c.baseURL, c.agentID, url.QueryEscape(current))
+	u := fmt.Sprintf("%s/api/v1/agents/%s/update-manifest?current=%s&key_pinned=%t",
+		c.baseURL, c.agentID, url.QueryEscape(current), c.keyPinned)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

@@ -460,8 +460,65 @@ previous binary** and re-execs it (systemd-boot boot-assessment pattern, researc
 `Restart=on-failure` + `StartLimitBurst`, a Windows Service failure action, or
 launchd `KeepAlive`) so a crashed agent is relaunched to trigger the rollback.
 
-A `sha256` mismatch on download, an invalid signature, or an unpinned build all
-**refuse the update** (fail-closed) rather than swapping.
+A `sha256` mismatch on download or an invalid signature **refuse the update**
+(fail-closed) rather than swapping. An unpinned build refuses every *signed*
+manifest it cannot verify — but see §8.4 for the dist channel it CAN use.
+
+### 8.4 Central-version updates (the dist channel, 2026-08-05)
+
+Central also tracks the **published central console version**: the agent-dist
+bake inside the Docker image (`/app/agent-dist`, the same binaries the
+first-install scripts serve, stamped e.g. `main-1a2b3c4`). When an agent's
+update-manifest poll finds **no covering signed release** but the dist version
+*differs* from what the agent runs, central serves an **UNSIGNED** manifest
+derived from the dist bake (artifacts ride the same per-release download path
+as a virtual release). Deploying a new central image is therefore all it takes
+for the fleet to converge on that image's agent build.
+
+Trust model split, enforced on both ends:
+
+- **Unpinned builds** (everything installed via the agent-dist scripts) accept
+  the unsigned manifest — their trust root is the authenticated TLS channel to
+  their enrolled central plus the manifest sha256, exactly the trust their
+  original install carried. The agent logs a WARN when it does this.
+- **Key-pinned builds** refuse unsigned bits (fail-closed, unchanged) and
+  advertise `key_pinned=true` on the poll so central never offers them the
+  dist channel — they update only via the signed §8.2 flow.
+
+Because decorated build stamps (`main-1a2b3c4`) have no defined ordering, the
+dist channel uses **string inequality** ("track the exact published central
+build"), while clean release tags keep semver ordering (never downgrade) —
+`update.ShouldApply` / central's `_should_offer`, kept in sync.
+
+### 8.5 Gating + staged rollout: the `auto_update` policy
+
+The update-manifest poll is gated **server-side** by the effective agent policy
+key `auto_update` (absent = **true**, preserving historic behavior). When
+false, the poll answers 204 — the agent still reports its version (the console
+still sees drift), it just isn't offered anything. Staged rollout recipes:
+
+- signed releases: the existing canary→general stages (§8.2);
+- dist channel: set the GLOBAL policy `{"auto_update": false, ...}` and enable
+  it per rollout-group or per-agent scope. Remember policy resolution is
+  most-specific-wins with **no key merging** — a narrower doc must carry every
+  key it needs, not just `auto_update`.
+
+### 8.6 Console: update badge + per-agent trigger
+
+`GET /api/v1/agents` now surfaces `update_available` / `update_target` (newest
+covering ready signed release, else the differing dist version) and
+`update_pending` per agent. The Agents page shows an **"update available"**
+badge next to the version and an **update** action that queues a
+`self_update` command via `POST /api/v1/agents/{id}/self-update` (write scope;
+audited as `agent_update_triggered`; 409 when up-to-date or already queued).
+The agent picks it up at its next command check-in (default 60s), runs one
+immediate check-and-apply, and completes the command with
+`{"status": "applying", "version": ...}` just before the swap — the version it
+reports on its next manifest poll is the real confirmation. An in-flight
+`self_update` command **overrides** an `auto_update: false` policy (the click
+is the authorization), so the button works on gated fleets too. While one is
+queued the console shows **"update queued"** and hides the button; agents with
+no update available show no button at all.
 
 ## 9. Configuration groups + remote configuration (W6-D2)
 

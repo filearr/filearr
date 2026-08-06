@@ -1,6 +1,7 @@
 package update
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -48,6 +49,28 @@ func CompareVersions(a, b string) int {
 // IsNewer reports whether candidate is strictly newer than current.
 func IsNewer(candidate, current string) bool {
 	return CompareVersions(candidate, current) > 0
+}
+
+// cleanVersionRe matches a "clean" release tag whose ordering CompareVersions
+// actually understands (v1.2.3, 1.2.3-rc1, 2.0). Branch/sha builds like
+// "main-1a2b3c4" (the central image's agent-dist stamp) do NOT match: their
+// components have no defined ordering.
+var cleanVersionRe = regexp.MustCompile(`^[vV]?\d+(\.\d+)*([-+].*)?$`)
+
+// ShouldApply decides whether an offered manifest version should replace the
+// running one. Clean release tags on BOTH sides use semver ordering (never
+// downgrade); any decorated build (branch-sha stamps) falls back to plain
+// inequality — central only offers the dist bake when it differs, and "track
+// the exact published central build" is the contract there, not ordering.
+// Mirrored by central's _should_offer (agent_updates.py) — keep in sync.
+func ShouldApply(candidate, current string) bool {
+	if candidate == "" {
+		return false
+	}
+	if cleanVersionRe.MatchString(candidate) && cleanVersionRe.MatchString(current) {
+		return IsNewer(candidate, current)
+	}
+	return candidate != current
 }
 
 // splitVersion normalizes a version into (release, prerelease). Build metadata

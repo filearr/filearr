@@ -38,3 +38,29 @@ func TestIsNewer(t *testing.T) {
 		t.Error("dev build should not be newer than a release")
 	}
 }
+
+func TestShouldApply(t *testing.T) {
+	cases := []struct {
+		candidate, current string
+		want               bool
+	}{
+		// clean tags: semver ordering (never downgrade)
+		{"1.5.0", "1.4.0", true},
+		{"1.4.0", "1.5.0", false},
+		{"v1.4.0", "1.4.0", false},
+		{"1.4.0-rc1", "1.4.0", false},
+		// decorated builds: plain inequality (track the exact central build)
+		{"main-1a2b3c4", "main-0000000", true},
+		{"main-1a2b3c4", "main-1a2b3c4", false},
+		{"main-1a2b3c4", "1.4.0", true},
+		{"1.5.0", "main-1a2b3c4", true},
+		// degenerate
+		{"", "1.0.0", false},
+		{"1.0.0", "", true},
+	}
+	for _, c := range cases {
+		if got := ShouldApply(c.candidate, c.current); got != c.want {
+			t.Errorf("ShouldApply(%q, %q) = %v, want %v", c.candidate, c.current, got, c.want)
+		}
+	}
+}
