@@ -1559,8 +1559,30 @@ export const timeline = (bucket: "month" | "year" = "month", library = "") => {
   return request<TimelineResponse>(`/stats/timeline?${qs}`);
 };
 
+export interface LibraryStatsRow {
+  library_id: string;
+  name: string;
+  is_agent: boolean;
+  file_count: number;
+  total_bytes: number;
+  sidecar_count: number;
+  missing_count: number;
+  trashed_count: number;
+}
+
+export interface LibraryStatsResponse {
+  libraries: LibraryStatsRow[];
+  total_files: number;
+  total_bytes: number;
+}
+
+/** Per-library catalog footprint (active file count + bytes, tombstone tails)
+ *  plus catalog-wide totals. One grouped aggregate — cheap, but run on demand
+ *  (the Admin overview), not on every library-dropdown load. */
+export const libraryStats = () => request<LibraryStatsResponse>("/stats/libraries");
+
 // ---- P11 reporting v1 ----
-export type RowLink = "item" | "search_ext" | "search_hash" | "none";
+export type RowLink = "item" | "search_ext" | "search_hash" | "browse" | "none";
 
 export interface ReportMeta {
   id: string;

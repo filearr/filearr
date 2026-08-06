@@ -48,8 +48,22 @@ from typing import Any
 from xml.sax.saxutils import escape as _xml_escape
 from xml.sax.saxutils import quoteattr as _xml_quoteattr
 
-from sqlalchemy import Select, Text, case, cast, func, literal, or_, select, text
+from sqlalchemy import (
+    Select,
+    Text,
+    case,
+    cast,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    true,
+    type_coerce,
+)
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import Grouping
 
 from filearr import share_map
 from filearr.models import Item, ItemStatus, Library
@@ -473,6 +487,59 @@ def _row_duplicates(r: Any) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 7. largest_folders — du-style recursive folder totals (capped)              #
+# --------------------------------------------------------------------------- #
+def _build_largest_folders(params: ReportParams) -> Select:
+    # Explode each item's rel_path into every ancestor-folder prefix via a
+    # LATERAL generate_series over the path depth (du semantics: a folder's
+    # total includes everything under it, so a parent always ranks at or above
+    # its children). Items sitting directly in the library root (rel_path with
+    # no '/') contribute to no folder — the library overview covers root totals.
+    parts_raw = func.string_to_array(Item.rel_path, "/")
+    # Grouping forces the parens Postgres requires to subscript a function
+    # result — SQLAlchemy renders the bare (invalid) `string_to_array(...)[..]`
+    # otherwise; type_coerce to ARRAY makes the slice operator available.
+    parts = type_coerce(Grouping(parts_raw), PG_ARRAY(Text))
+    depth = (
+        func.generate_series(1, func.cardinality(parts_raw) - 1)
+        .table_valued("depth")
+        .render_derived()
+        .lateral("d")
+    )
+    folder = func.array_to_string(parts[1 : depth.c.depth], "/").label("folder")
+    stmt = (
+        select(
+            Library.id.label("library_id"),
+            Library.name.label("library"),
+            folder,
+            depth.c.depth.label("depth"),
+            func.count().label("file_count"),
+            func.coalesce(func.sum(Item.size), 0).label("total_bytes"),
+        )
+        .select_from(Item)
+        .join(Library, Item.library_id == Library.id)
+        .join(depth, true())
+        .where(_ACTIVE)
+        .group_by(Library.id, Library.name, folder, depth.c.depth)
+        .order_by(func.coalesce(func.sum(Item.size), 0).desc(), folder.asc())
+    )
+    return _apply_library(stmt, params)
+
+
+def _row_largest_folders(r: Any) -> dict:
+    return {
+        # library_id is not a declared column (never exported to a spreadsheet,
+        # like item_id) — it powers the UI's Browse deep-link for the row.
+        "library_id": str(r.library_id),
+        "library": r.library,
+        "folder": r.folder,
+        "depth": int(r.depth),
+        "file_count": int(r.file_count),
+        "total_bytes": int(r.total_bytes or 0),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Registry                                                                     #
 # --------------------------------------------------------------------------- #
 _REPORTS: tuple[CannedReport, ...] = (
@@ -574,6 +641,24 @@ _REPORTS: tuple[CannedReport, ...] = (
         row=_row_duplicates,
         supports_library=True,
         row_link="search_hash",
+    ),
+    CannedReport(
+        id="largest_folders",
+        title="Largest folders",
+        description=(
+            "Folders ranked by recursive size (du-style): every folder at every "
+            "depth with its total INCLUDING subfolders — a parent always ranks "
+            "at or above its children. file_count is all active files under the "
+            "folder; files sitting directly in the library root belong to no "
+            "folder. Top N by size (default 500)."
+        ),
+        columns=("folder", "library", "depth", "file_count", "total_bytes"),
+        build=_build_largest_folders,
+        row=_row_largest_folders,
+        supports_library=True,
+        is_capped=True,
+        default_limit=500,
+        row_link="browse",
     ),
 )
 

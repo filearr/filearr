@@ -15,12 +15,19 @@ the operator's reference for the thresholds, what pauses when, and how to recove
 
 Override the whole list with `FILEARR_DISK_WATCH_PATHS` (JSON).
 
-> **Single-volume deploys (the Proxmox LXC):** `/config`, the Postgres volume and
-> the Meili store all sit on one filesystem, so watching the thumbnail dir already
-> covers Postgres. In the split-container compose stack Postgres has its own
-> volume that the app cannot statvfs — set `FILEARR_DISK_PG_PATH` inside the
-> Postgres container's world if you want the extract PG-pause, otherwise it stays
-> inert.
+> **Compose stacks (2026-08+):** `docker-compose.yml` now mounts the `pgdata`
+> volume **read-only** into `app` and `worker` at `/pgdata` and sets
+> `FILEARR_DISK_PG_PATH=/pgdata` by default, purely so `statvfs` can see the
+> filesystem actually holding the database — the Jobs tile gains a
+> `database (postgres)` row and the extract PG-pause below is active out of the
+> box. Unset the variable to drop the watch. On single-filesystem deploys (the
+> Proxmox LXC) the row simply merges with whichever other watch roles share that
+> device.
+>
+> The `temp (app disk)` row is the app **container's** temp dir — i.e. the free
+> space of the filesystem the app itself runs on (under Docker, the writable
+> layer on the host's Docker data-root). On a single-disk host that is the same
+> physical disk as the database volumes even when the device IDs differ.
 
 ## Thresholds (whichever floor is more conservative wins)
 

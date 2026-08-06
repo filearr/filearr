@@ -5,6 +5,7 @@
   import ReportSchedulesPanel from "./ReportSchedulesPanel.svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import { encodeSearchHash } from "./searchparams";
+  import { gotoBrowse } from "./routes";
   import {
     listReports,
     runReport,
@@ -81,6 +82,8 @@
         return "Find files";
       case "search_hash":
         return "Find copies";
+      case "browse":
+        return "Browse";
       default:
         return null;
     }
@@ -92,6 +95,7 @@
     if (selected.row_link === "search_ext") return !row.extension;
     if (selected.row_link === "search_hash")
       return !(row.content_hash || row.quick_hash);
+    if (selected.row_link === "browse") return !(row.library_id && row.folder);
     return true;
   }
 
@@ -105,6 +109,9 @@
     } else if (selected.row_link === "search_hash") {
       const h = String(row.content_hash ?? row.quick_hash ?? "");
       if (h) location.hash = encodeSearchHash({ hash: h });
+    } else if (selected.row_link === "browse") {
+      if (row.library_id && row.folder)
+        gotoBrowse(String(row.library_id), String(row.folder));
     }
   }
 

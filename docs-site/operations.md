@@ -321,7 +321,8 @@ du -sh /config/* | sort -h                           # biggest consumer
 GB (warn 20 / critical 5) and percent-free (warn 10% / critical 2%). At **WARN**
 producers keep writing; at **CRITICAL** thumbnail writes fail-closed (no retry
 loop; serve path returns a 404 placeholder, never a 500), OCR is skipped, the
-embedding-model download is refused, and — if `FILEARR_DISK_PG_PATH` is set —
+embedding-model download is refused, and — when `FILEARR_DISK_PG_PATH` is set
+(the bundled compose does this by default via a read-only `pgdata` mount) —
 extract pauses. Other queues and the workers stay alive.
 
 **Recovery of a box that already filled.**

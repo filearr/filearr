@@ -39,12 +39,12 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 | Libraries | `libraries`, `scan-paths` | Define libraries, roots, schedules, presets. |
 | Scans | `scans` (with SSE) | Trigger/stop scans; live progress via Server-Sent Events. |
 | Query | `query/preview`, `query/keys` | Filter-builder DSL preview and value pickers. |
-| Reports | `custom-reports`, `report-schedules`, `exports` | Saved reports, scheduled delivery, CSV/NDJSON/XLSX exports. |
+| Reports | `reports`, `custom-reports`, `report-schedules`, `exports` | Prebuilt (canned) reports — unmapped extensions, future-dated files, extraction errors, largest files, largest folders (du-style recursive totals), low-quality video, duplicates — plus saved reports, scheduled delivery, CSV/NDJSON/XLSX exports. |
 | Saved searches | `saved-searches` | Persisted search definitions. |
 | Metadata | `metadata-profiles`, `custom-fields` | Extraction profiles and user-defined fields. |
 | Filesystem | `fs/browse` | Allow-listed server-side folder browser (for the library form). |
 | System | `system` (health, disk, jobs, `rebuild-index`, share-map, version) | Ops endpoints. |
-| Stats | `stats` | Catalog and operational statistics. |
+| Stats | `stats` (`timeline`, `libraries`) | Catalog statistics: the mtime histogram and per-library file counts / total bytes with catalog-wide totals. |
 | Auth & identity | `auth`, `oidc`, `rbac`, `audit` | Login/session, SSO, path grants, audit log. |
 | Alerts | `alerts` | Channels, rules, events. |
 | Agents *(when enabled)* | `agents`, `agent-commands`, `agent-policies`, `agent-releases`, `transfers`, `agent-staging`, `agent-thumbs`, `agent-share-maps` | The distributed-agent control and data planes — including `POST /agents/{id}/self-update` (queue an update for the agent's next check-in). |

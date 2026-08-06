@@ -218,7 +218,7 @@ async def _mk_item(
 # --------------------------------------------------------------------------- #
 # Registry + validation                                                       #
 # --------------------------------------------------------------------------- #
-async def test_registry_lists_all_six(api):
+async def test_registry_lists_all_seven(api):
     client, _ = api
     r = await client.get("/api/v1/reports")
     assert r.status_code == 200
@@ -230,6 +230,7 @@ async def test_registry_lists_all_six(api):
         "largest_files",
         "low_quality_video",
         "duplicate_files",
+        "largest_folders",
     }
 
 
@@ -380,6 +381,48 @@ async def test_duplicate_files_excludes_zero_byte(api):
     rows = {row["dup_key"]: row for row in r.json()["rows"]}
     assert "emptyhash:0" not in rows  # zero-byte cluster suppressed
     assert rows["dead"]["copies"] == 2  # non-empty duplicate group survives
+
+
+async def test_largest_folders_recursive_rollup(api):
+    """du semantics: every folder at every depth, totals INCLUDE subfolders (a
+    parent ranks at or above its children); root-level files belong to no
+    folder; rows carry library_id for the UI's Browse deep-link."""
+    client, maker = api
+    lib = await _mk_lib(maker, name="F")
+    await _mk_item(maker, lib, "Movies/A/a.mkv", size=1000)
+    await _mk_item(maker, lib, "Movies/A/a.srt", size=10)
+    await _mk_item(maker, lib, "Movies/B/b.mkv", size=500)
+    await _mk_item(maker, lib, "Music/song.flac", size=200)
+    await _mk_item(maker, lib, "rootfile.bin", size=9999)  # no folder — excluded
+    r = await client.get("/api/v1/reports/largest_folders")
+    assert r.status_code == 200
+    rows = {row["folder"]: row for row in r.json()["rows"]}
+    assert rows["Movies"]["total_bytes"] == 1510 and rows["Movies"]["file_count"] == 3
+    assert rows["Movies/A"]["total_bytes"] == 1010 and rows["Movies/A"]["depth"] == 2
+    assert rows["Movies/B"]["total_bytes"] == 500
+    assert rows["Music"]["total_bytes"] == 200
+    assert "rootfile.bin" not in rows and "" not in rows
+    ordered = [row["folder"] for row in r.json()["rows"]]
+    assert ordered[0] == "Movies"  # parent outranks its children
+    assert ordered.index("Movies/A") < ordered.index("Movies/B")
+    top = r.json()["rows"][0]
+    assert top["library"] == "F" and top["library_id"] == str(lib)
+
+
+async def test_largest_folders_capped_and_library_scoped(api):
+    client, maker = api
+    lib1 = await _mk_lib(maker, name="One")
+    lib2 = await _mk_lib(maker, name="Two")
+    for i in range(4):
+        await _mk_item(maker, lib1, f"dir{i}/f.bin", size=100 - i)
+    await _mk_item(maker, lib2, "other/f.bin", size=100000)
+    r = await client.get("/api/v1/reports/largest_folders?limit=2")
+    rows = r.json()["rows"]
+    assert len(rows) == 2  # top-N cap
+    assert rows[0]["folder"] == "other"  # biggest across libraries first
+    r = await client.get(f"/api/v1/reports/largest_folders?library_id={lib1}")
+    folders = {row["folder"] for row in r.json()["rows"]}
+    assert folders == {"dir0", "dir1", "dir2", "dir3"}
 
 
 async def test_library_filter(api):

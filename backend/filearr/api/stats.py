@@ -20,8 +20,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.db import get_session
-from filearr.models import Item
-from filearr.schemas import TimelineBucket, TimelineResponse
+from filearr.models import Item, ItemStatus, Library
+from filearr.schemas import (
+    LibraryStatsResponse,
+    LibraryStatsRow,
+    TimelineBucket,
+    TimelineResponse,
+)
 from filearr.security import PermissionContext, require_permission
 
 router = APIRouter()
@@ -131,4 +136,65 @@ async def timeline(
         buckets=buckets,
         invalid_count=int(invalid_count),
         invalid_mtime_gte=invalid_mtime_gte,
+    )
+
+
+@router.get("/libraries", response_model=LibraryStatsResponse)
+async def library_stats(
+    session: AsyncSession = Depends(get_session),
+    ctx: PermissionContext = Depends(require_permission("search_metadata")),
+) -> LibraryStatsResponse:
+    """Catalog footprint per library: active file count + total bytes (with the
+    sidecar subset called out), plus the tombstoned missing/trashed tails.
+
+    One grouped aggregate over ``items`` (count/sum by library and status) — a
+    bounded full-column pass, same cost class as the timeline histogram, run
+    only when the overview is opened (deliberately NOT folded into
+    ``GET /libraries``, which many dropdowns hit). Scoped principals only count
+    items they can read (P6-T4)."""
+    scope_clause = ctx.sql_clause()
+
+    lib_rows = (
+        await session.execute(
+            select(Library.id, Library.name, Library.source_agent_id)
+        )
+    ).all()
+
+    base = select(
+        Item.library_id,
+        Item.status,
+        func.count().label("n"),
+        func.coalesce(func.sum(Item.size), 0).label("bytes"),
+        func.count().filter(Item.sidecar_of.isnot(None)).label("sidecars"),
+    ).group_by(Item.library_id, Item.status)
+    if scope_clause is not None:
+        base = base.where(scope_clause)
+    agg = {(r.library_id, r.status): r for r in (await session.execute(base)).all()}
+
+    rows: list[LibraryStatsRow] = []
+    total_files = total_bytes = 0
+    for lib_id, name, source_agent_id in lib_rows:
+        active = agg.get((lib_id, ItemStatus.active))
+        missing = agg.get((lib_id, ItemStatus.missing))
+        trashed = agg.get((lib_id, ItemStatus.trashed))
+        file_count = int(active.n) if active else 0
+        lib_bytes = int(active.bytes) if active else 0
+        rows.append(
+            LibraryStatsRow(
+                library_id=lib_id,
+                name=name,
+                is_agent=source_agent_id is not None,
+                file_count=file_count,
+                total_bytes=lib_bytes,
+                sidecar_count=int(active.sidecars) if active else 0,
+                missing_count=int(missing.n) if missing else 0,
+                trashed_count=int(trashed.n) if trashed else 0,
+            )
+        )
+        total_files += file_count
+        total_bytes += lib_bytes
+
+    rows.sort(key=lambda r: (-r.total_bytes, r.name.lower()))
+    return LibraryStatsResponse(
+        libraries=rows, total_files=total_files, total_bytes=total_bytes
     )

@@ -5,7 +5,8 @@
     listLibraries, listPresets, listScans, listShareMap, resolveShareHint,
     retryExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
-    type FailedJob, type FailingItem, type Library,
+    libraryStats,
+    type FailedJob, type FailingItem, type Library, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
   } from "./api";
   import TaxonomySelector from "./TaxonomySelector.svelte";
@@ -44,6 +45,53 @@
   // forever-empty "Last scan" column.
   const centralLibraries = $derived(libraries.filter((l) => !l.source_agent_id));
   const agentLibraries = $derived(libraries.filter((l) => !!l.source_agent_id));
+
+  // Catalog footprint (file count + bytes per library, catalog totals). One
+  // grouped aggregate over `items` — loaded once on mount + on demand via the
+  // refresh button, NOT on the 30s safety poll (a million-row sum every 30s is
+  // real DB load for a number that changes only when scans/purges run).
+  let libStats = $state<LibraryStatsResponse | null>(null);
+  let libStatsBusy = $state(false);
+  const statsByLib = $derived(
+    new Map((libStats?.libraries ?? []).map((r) => [r.library_id, r])),
+  );
+
+  async function loadLibStats() {
+    if (libStatsBusy) return;
+    libStatsBusy = true;
+    try {
+      libStats = await libraryStats();
+    } catch {
+      libStats = null; // older backend / transient failure — columns show "—"
+    } finally {
+      libStatsBusy = false;
+    }
+  }
+
+  function fmtBytes(b: number): string {
+    if (!isFinite(b) || b <= 0) return "0 B";
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+  }
+
+  function statCell(libId: string, kind: "count" | "bytes"): string {
+    const row = statsByLib.get(libId);
+    if (!row) return "—";
+    return kind === "count" ? row.file_count.toLocaleString() : fmtBytes(row.total_bytes);
+  }
+
+  function statTitle(libId: string): string {
+    const row = statsByLib.get(libId);
+    if (!row) return "";
+    const parts = [
+      `${row.file_count.toLocaleString()} active files, ${fmtBytes(row.total_bytes)}`,
+    ];
+    if (row.sidecar_count) parts.push(`${row.sidecar_count.toLocaleString()} linked sidecars`);
+    if (row.missing_count) parts.push(`${row.missing_count.toLocaleString()} missing (tombstoned)`);
+    if (row.trashed_count) parts.push(`${row.trashed_count.toLocaleString()} trashed (recycle bin)`);
+    return parts.join(" · ");
+  }
 
   function agentStatusClass(s: string | null): string {
     if (s === "active") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
@@ -596,6 +644,7 @@
   let safety: ReturnType<typeof setInterval>;
   onMount(() => {
     refresh();
+    loadLibStats();
     listPresets()
       .then((m) => (presetsMeta = m))
       .catch((e) => (error = String(e)));
@@ -615,6 +664,20 @@
 <div class="mt-4">
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">Libraries</h2>
+    {#if libStats}
+      <span
+        class="text-sm text-slate-500"
+        title="Active files across every library (central + agent). Linked sidecars are included; missing/trashed tombstones are not.">
+        {libStats.total_files.toLocaleString()} files · {fmtBytes(libStats.total_bytes)}
+      </span>
+    {/if}
+    <button
+      class="rounded border border-slate-300 px-1.5 py-0.5 text-xs text-slate-500 disabled:opacity-40 dark:border-slate-700"
+      title="Recount files and sizes (one aggregate query over the whole catalog)"
+      onclick={loadLibStats}
+      disabled={libStatsBusy}>
+      {libStatsBusy ? "…" : "↻"}
+    </button>
     <div class="grow"></div>
     <!-- W8: the taxonomy editor lives on its own route, reachable from here. -->
     <a
@@ -632,6 +695,8 @@
         <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
           <th class="py-2 pr-3 font-medium">Name</th>
           <th class="py-2 pr-3 font-medium">Root</th>
+          <th class="py-2 pr-3 text-right font-medium">Items</th>
+          <th class="py-2 pr-3 text-right font-medium">Size</th>
           <th class="py-2 pr-3 font-medium">Types</th>
           <th class="py-2 pr-3 font-medium">Hash</th>
           <th class="py-2 pr-3 font-medium">Cron</th>
@@ -654,6 +719,12 @@
             </td>
             <td class="max-w-[16rem] truncate py-2 pr-3 font-mono text-xs text-slate-500" title={lib.root_path}>
               {lib.root_path}
+            </td>
+            <td class="py-2 pr-3 text-right tabular-nums text-xs text-slate-500" title={statTitle(lib.id)}>
+              {statCell(lib.id, "count")}
+            </td>
+            <td class="whitespace-nowrap py-2 pr-3 text-right tabular-nums text-xs text-slate-500" title={statTitle(lib.id)}>
+              {statCell(lib.id, "bytes")}
             </td>
             <td class="py-2 pr-3">
               <span class="inline-flex flex-wrap gap-1">
@@ -820,7 +891,7 @@
           </tr>
           {#if expanded[lib.id]}
             <tr>
-              <td colspan="9" class="bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
+              <td colspan="11" class="bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
                 {#if (failing[lib.id]?.length ?? 0) === 0}
                   <span class="text-slate-500">No failing items.</span>
                 {:else}
@@ -856,7 +927,7 @@
             </tr>
           {/if}
         {:else}
-          <tr><td colspan="9" class="py-4 text-slate-500">No libraries yet — add one below.</td></tr>
+          <tr><td colspan="11" class="py-4 text-slate-500">No libraries yet — add one below.</td></tr>
         {/each}
       </tbody>
     </table>
@@ -875,6 +946,8 @@
         <thead>
           <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
             <th class="py-2 pr-3 font-medium">Name</th>
+            <th class="py-2 pr-3 text-right font-medium">Items</th>
+            <th class="py-2 pr-3 text-right font-medium">Size</th>
             <th class="py-2 pr-3 font-medium">Agent</th>
             <th class="py-2 pr-3 font-medium">Agent status</th>
             <th class="py-2 pr-3 font-medium">Last sync</th>
@@ -890,6 +963,12 @@
               <td class="py-2 pr-3 font-medium">
                 {lib.name}
                 {#if !lib.enabled}<span class="ml-1 rounded bg-slate-200 px-1 text-[10px] text-slate-500 dark:bg-slate-800">off</span>{/if}
+              </td>
+              <td class="py-2 pr-3 text-right tabular-nums text-xs text-slate-500" title={statTitle(lib.id)}>
+                {statCell(lib.id, "count")}
+              </td>
+              <td class="whitespace-nowrap py-2 pr-3 text-right tabular-nums text-xs text-slate-500" title={statTitle(lib.id)}>
+                {statCell(lib.id, "bytes")}
               </td>
               <td class="py-2 pr-3">{lib.agent_name ?? "unknown"}</td>
               <td class="py-2 pr-3">
@@ -929,7 +1008,7 @@
             </tr>
             {#if expanded[lib.id]}
               <tr>
-                <td colspan="7" class="bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
+                <td colspan="9" class="bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
                   {#if (failing[lib.id]?.length ?? 0) === 0}
                     <span class="text-slate-500">No failing items.</span>
                   {:else}

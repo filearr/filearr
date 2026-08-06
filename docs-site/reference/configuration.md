@@ -141,7 +141,7 @@ model and the source `config.py` for every field.
 | `FILEARR_DISK_WARN_FREE_GB` | `20` | Warn below this (absolute floor). |
 | `FILEARR_DISK_CRIT_PCT_FREE` | `2` | Critical below this percent free. |
 | `FILEARR_DISK_WARN_PCT_FREE` | `10` | Warn below this percent free. |
-| `FILEARR_DISK_PG_PATH` | *(unset)* | Postgres data path to watch; when critical, extract pauses. |
+| `FILEARR_DISK_PG_PATH` | *(unset; compose sets `/pgdata`)* | Postgres data path to watch; when critical, extract pauses. The bundled `docker-compose.yml` mounts the `pgdata` volume read-only into app/worker and points this at it. |
 | `FILEARR_DISK_GC_TARGET_FREE_GB` | `0` | `>0` LRU-evicts valid thumbnails to this target at critical. |
 
 ## Distributed agents (all off unless enabled)

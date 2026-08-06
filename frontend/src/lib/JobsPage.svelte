@@ -148,6 +148,23 @@
     return `${v.toFixed(i === 0 || v >= 100 ? 0 : 1)} ${units[i]}`;
   }
 
+  // Friendly names for the disk watch roles. The backend labels rows by ROLE
+  // ("tmp" = the app container's temp dir, which sits on the app's own disk);
+  // spelled out here so "tmp" doesn't read as "only a scratch mount" when it is
+  // in fact the free space of the filesystem the app itself runs on. Merged
+  // rows arrive comma-joined ("thumbnails, postgres"), hence the per-part map.
+  const DISK_ROLE_NAMES: Record<string, string> = {
+    thumbnails: "thumbnails",
+    tmp: "temp (app disk)",
+    postgres: "database (postgres)",
+  };
+  function diskLabel(label: string): string {
+    return label
+      .split(", ")
+      .map((part) => DISK_ROLE_NAMES[part] ?? part)
+      .join(", ");
+  }
+
   // Maintenance panel — the registry of periodic housekeeping tasks with
   // schedule overrides + run-now (rides refresh() on a slower 30s throttle:
   // schedules change rarely and the list is a heavier join than the summary).
@@ -659,7 +676,7 @@
             <span class="font-medium">Disk space</span>
             <span
               class="text-xs text-slate-400"
-              title="Free headroom on each filesystem the app monitors (thumbnail cache, temp dir, and — where visible — the Postgres data dir). Rows turn amber/red as they approach the low-space floors that pause thumbnail writes.">
+              title="Free headroom on each filesystem the app monitors: the thumbnail cache, the app container's temp dir (i.e. the disk the app itself runs on), and — when the pgdata volume is mounted (compose default) — the filesystem holding the Postgres database. Roles on the same filesystem merge into one row. Rows turn amber/red as they approach the low-space floors that pause thumbnail writes.">
               monitored paths
             </span>
           </div>
@@ -679,8 +696,8 @@
                   <span
                     class="truncate font-medium"
                     title={d.members && d.members.length > 1
-                      ? d.members.map((m) => `${m.label}: ${m.path}`).join("\n")
-                      : d.path}>{d.label}</span>
+                      ? d.members.map((m) => `${diskLabel(m.label)}: ${m.path}`).join("\n")
+                      : d.path}>{diskLabel(d.label)}</span>
                   <span class="tabular-nums text-slate-500">
                     {fmtBytes(d.free)} free of {fmtBytes(d.total)} ({d.pct_free.toFixed(0)}%)
                   </span>

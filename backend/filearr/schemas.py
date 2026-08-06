@@ -578,3 +578,29 @@ class TimelineResponse(BaseModel):
     buckets: list[TimelineBucket] = Field(default_factory=list)
     invalid_count: int = 0
     invalid_mtime_gte: int
+
+
+class LibraryStatsRow(BaseModel):
+    """Per-library catalog footprint (``GET /stats/libraries``). ``file_count``/
+    ``total_bytes`` cover ``status='active'`` items (what the catalog currently
+    tracks on disk); ``sidecar_count`` is the subset of those that are linked
+    sidecars (hidden from default search but still real files); ``missing_count``
+    and ``trashed_count`` are the tombstoned tails awaiting purge."""
+
+    library_id: uuid.UUID
+    name: str
+    is_agent: bool = False
+    file_count: int = 0
+    total_bytes: int = 0
+    sidecar_count: int = 0
+    missing_count: int = 0
+    trashed_count: int = 0
+
+
+class LibraryStatsResponse(BaseModel):
+    """``GET /stats/libraries`` — one row per library plus catalog-wide totals
+    (actives only, matching the per-row ``file_count``/``total_bytes``)."""
+
+    libraries: list[LibraryStatsRow] = Field(default_factory=list)
+    total_files: int = 0
+    total_bytes: int = 0

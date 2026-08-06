@@ -8,8 +8,15 @@ services:
     ports:
       - "8484:8000"
     env_file: .env
+    environment:
+      # The pgdata volume is mounted (read-only, below) purely so the disk
+      # monitor can statvfs the filesystem actually holding the database — the
+      # Jobs-page tile gains a "postgres" row and the extract-guard's PG
+      # low-space check becomes active. Override/unset to drop the watch.
+      FILEARR_DISK_PG_PATH: /pgdata
     volumes:
       - ./config:/config
+      - pgdata:/pgdata:ro
       # long-form bind with rslave: if the FUSE/SMB mount under this path is
       # remounted on the host, running containers see the NEW mount instead of
       # a dead endpoint (fixes OSError: EIO after rclone restarts)
@@ -126,8 +133,13 @@ services:
     # iGPU (/dev/dri) mapping is added CONDITIONALLY by the deploy scripts
     # override (only when the device exists in the CT) — a hardcoded devices:
     # entry hard-fails docker on hosts without passthrough (live 2026-07-13).
+    environment:
+      # Same PG-volume disk watch as `app` — the guards (extract refuses writes
+      # when the DB filesystem is critical) run in the worker.
+      FILEARR_DISK_PG_PATH: /pgdata
     volumes:
       - ./config:/config
+      - pgdata:/pgdata:ro
       # long-form bind with rslave: if the FUSE/SMB mount under this path is
       # remounted on the host, running containers see the NEW mount instead of
       # a dead endpoint (fixes OSError: EIO after rclone restarts)
