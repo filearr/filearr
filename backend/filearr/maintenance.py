@@ -330,6 +330,21 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         category="ondemand", default_cron=None, queue="embed",
         timestamp_arg=False,
     ),
+    MaintTaskSpec(
+        key="content_sniff",
+        task_name="filearr.worker.content_sniff",
+        title="Content-sniff extensionless files",
+        description=(
+            "Magic-sniffs a bounded prefix of extensionless files still "
+            "classified 'other' and reclassifies them by detected content "
+            "type (libmagic). No-op unless FILEARR_CONTENT_SNIFF_ENABLED; "
+            "processes one bounded batch per run — run again while the "
+            "result reports remaining candidates. Agent-hosted files are "
+            "skipped (central cannot read them)."
+        ),
+        category="ondemand", default_cron=None, queue="extract",
+        timestamp_arg=False,
+    ),
 )
 
 MAINT_TASKS: dict[str, MaintTaskSpec] = {s.key: s for s in _SPECS}

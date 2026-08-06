@@ -644,6 +644,30 @@ async def associate_agent_sidecars(timestamp: int) -> dict:
     return {"libraries": len(lib_ids), "deferred": deferred}
 
 
+# On-demand from the maintenance registry ("Content-sniff extensionless files").
+# FIX-8: no retry — re-run from the Jobs page; the pass is idempotent/resumable.
+@proc_app.task(queue="extract", name="filearr.worker.content_sniff")
+async def content_sniff() -> dict:
+    """One bounded libmagic pass over extensionless (other, other) items
+    (roadmap §4). No-op unless FILEARR_CONTENT_SNIFF_ENABLED; re-projects and
+    re-extracts every reclassified item; run again while ``remaining`` > 0."""
+    settings = get_settings()
+    if not settings.content_sniff_enabled:
+        return {"skipped": "content sniffing disabled (FILEARR_CONTENT_SNIFF_ENABLED)"}
+    from filearr.tasks.sniff import sniff_extensionless
+
+    async with SessionLocal() as session:
+        stats = await sniff_extensionless(session)
+    changed = stats.pop("changed_ids", [])
+    for start in range(0, len(changed), 1000):
+        chunk = changed[start : start + 1000]
+        await defer_index_sync(chunk)
+        # A new category may route to a real extractor (video/image/document…) —
+        # extraction fills the type-specific metadata the item never had.
+        await defer_extract(chunk)
+    return {**stats, "reprojected": len(changed)}
+
+
 async def defer_thumb_item(item_id: str, tier: int) -> None:
     """Enqueue a ``thumb_item`` for one item + tier on the low-priority thumbs
     queue (P12 slice 2). Used by the serve endpoint on a VIDEO thumbnail miss:

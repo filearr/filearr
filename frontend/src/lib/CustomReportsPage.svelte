@@ -444,5 +444,5 @@
 </div>
 
 {#if detailId}
-  <ItemDetail id={detailId} onClose={() => (detailId = null)} />
+  <ItemDetail id={detailId} onClose={() => (detailId = null)} onOpen={(nid) => (detailId = nid)} />
 {/if}

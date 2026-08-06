@@ -8,6 +8,17 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 
 ## 1. Distributed agent architecture
 
+> **SHIPPED** (Phase 5 + P10 + W6 waves, July 2026; auto-update extensions
+> 2026-08-05). Everything below is live: step-ca enrollment + short-lived mTLS
+> certs (+ fingerprint rebind self-heal, expired-leaf recovery OTT), versioned
+> policy push (global/group/agent scopes, ETag poll), local SQLite+FTS5 index,
+> outbox replication with per-agent seq + full-manifest reconcile sweep,
+> tombstones, and signed staged-rollout updates — now extended with
+> central-version tracking (unsigned dist channel for unpinned builds),
+> a server-side `auto_update` policy gate, and a console per-agent update
+> trigger. First-install distribution is served by central itself
+> (`/api/v1/agent-dist` + install scripts). Runbook: `docs/ops/agents.md`.
+
 **Native clients (agents)** installable on Windows/Linux/macOS, centrally
 configured:
 - **Enrollment:** one-time token → agent generates key + CSR → central server
@@ -31,6 +42,12 @@ configured:
   groups (Fleet/Wazuh precedent).
 
 ## 2. Local query access
+
+> **SHIPPED** (P7, July 2026): local CLI query + loopback web UI against the
+> agent index, policy-gated from central (`local_access_enabled`,
+> `web_ui_enabled`, `auth_required`, fail-closed `read_only`), with the
+> container's opt-in remote-bind override for Docker hosts.
+
 - **Local CLI** (`filearr query ...`) and optional **local web UI** against the
   agent's SQLite index — answers "where did I put that file" even when the
   central server is unreachable.
@@ -38,6 +55,16 @@ configured:
   disabled per machine group, optionally auth-required, read-only scope.
 
 ## 3. Identity, auth & RBAC (central console)
+
+> **MOSTLY SHIPPED** (P6/P7 waves, July 2026): local accounts (argon2id,
+> first-visit bootstrap-admin), **LDAP** (via `ldap3` after all — the
+> python-ldap preference was reversed, see `docs/ops/auth.md`), **OIDC/SSO**
+> (Authlib), two-layer RBAC with path-scope grants, and Meili **tenant-token**
+> enforcement. **SAML remains deliberately unshipped**: pysaml2 hard-pins
+> `pyopenssl<24.3.0` (would downgrade the crypto stack) and python3-saml drags
+> in-process libxmlsec1 — rationale recorded in `filearr/authx.py`; revisit
+> only if a maintained dependency path appears.
+
 - **Auth providers:** local accounts, **LDAP** (`python-ldap` — ldap3 is
   stalled since 2021), **SAML** (`pysaml2`), **OIDC/SSO** (`Authlib`).
   fastapi-users is in maintenance mode — avoid.
@@ -54,6 +81,16 @@ configured:
   native RBAC (roadmap-only) — the app layer owns the permission model.
 
 ## 4. Indexing controls
+
+> **SHIPPED** (July 2026; content-sniffing 2026-08-06): include/exclude globs
+> + one-click preset bundles, per-agent policy scopes, taxonomy extension
+> groups (W8), config-group default scan selections, hot-folder scheduling,
+> AND the extensionless content-sniffing reclassify job — an opt-in
+> (`FILEARR_CONTENT_SNIFF_ENABLED`) on-demand maintenance action that
+> libmagic-sniffs a bounded prefix, maps MIME → the live taxonomy's groups,
+> and re-projects/re-extracts what it reclassifies. Bounded batches,
+> idempotent stamps, agent-hosted files excluded.
+
 - **Inclusions/exclusions:** per-library and per-agent folder include/exclude
   (globs — already in v1 schema), plus **preset bundles** toggled with one
   click: "system files", "hidden/dotfiles", "caches/temp", "node_modules &
@@ -76,6 +113,16 @@ configured:
   filesystem supports it.
 
 ## 5. Search & findability (the "where did I put that file?" feature set)
+
+> **STATUS (2026-08-06):** P0 and P1 fully shipped — similar-files landed in
+> P3-T9 all along (`GET /items/{id}/similar` over Meili `/similar`; the
+> detail-panel section was upgraded 2026-08-06 to a clickable thumbnail grid,
+> hidden entirely when semantic search is off). P2 shipped (timeline, EXIF/GPS
+> gate, tag type-ahead, archive member indexing) except **email indexing
+> (mbox/PST)** and **natural-language query assist** (the LLM facade is the
+> natural host). P3 (provenance download-URL, central frecency profiles)
+> still open — agent-side frecency exists locally.
+
 Priority-ordered from prior-art research (Everything, Recoll, sist2, Spotlight,
 Paperless-ngx, Immich, 2024-26 local-AI tools):
 
@@ -119,6 +166,13 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 - Frecency (frequency+recency) personal ranking profiles.
 
 ## 6. Alerting
+
+> **SHIPPED** (P8, July 2026): file-change rules (path glob + event type
+> created/modified/deleted/moved), channels (webhook w/ SSRF guards + HMAC
+> signing, email), per-rule throttling/windows, AND the operational alerts
+> (scan failures, agent offline / replication stall, disk pressure,
+> extract-error spikes). Channel secrets AES-GCM-encrypted at rest.
+
 - **File-change alert rules:** watch expressions (path glob + event type:
   created/modified/deleted/moved + optional hash-change) → notification
   channels (webhook, email, Apprise → Discord/ntfy/etc.), with per-rule
@@ -128,6 +182,12 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
   extract-error spikes (extends Phase-1 T11).
 
 ## 7. Data model extensions
+
+> **SHIPPED** (July 2026): metadata profiles with validation, custom
+> user-defined fields, per-type detail displays + the always-available Raw
+> tab, and full provenance columns (source agent, first/last seen,
+> replication seq).
+
 - **Extended metadata:** keep JSONB `metadata` bag; add **typed per-domain
   schemas** (registered "metadata profiles" per file type with validation),
   and **custom user-defined fields** (central definition, per-location
@@ -140,6 +200,16 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
   replication seq, policy version that indexed it.
 
 ## 8. Meilisearch feature adoption plan (verified against v1.48.3)
+
+> **STATUS (2026-08-05):** adopt-now list done — tenant tokens, ≥1.48.2 pin
+> (now v1.49.0), facet search, index-swap (shadow-index reaper), per-attribute
+> typo tolerance, cutoff guard — EXCEPT **task webhooks**, which stay
+> unadopted on purpose (the v1.8–v1.34 webhook SSRF advisory made polling the
+> conservative choice; revisit deliberately). Adopt-later: hybrid/vector +
+> local embedder shipped (quantization deliberately deferred until the corpus
+> needs it); **`/similar` adopted** (P3-T9, `search_similar_documents`);
+> federated multi-search and geo filters still open (GPS stays gated).
+
 **Adopt now:** tenant tokens (RBAC); pin ≥1.48.2 (CVE-2026-57823/4); facet
 search endpoint; **index-swap** pattern for zero-downtime settings changes;
 **task webhooks** (replace polling in index-sync); prefer PATCH-style document
@@ -155,6 +225,10 @@ Operational notes: LMDB never shrinks on delete → periodic swap-based
 compaction; task DB capped 20GiB; `maxTotalHits` governs deep paging.
 
 ## 9. License recommendation
+
+> **DECIDED:** AGPL-3.0-or-later adopted (LICENSE + the §13 "Source" footer
+> link, `FILEARR_SOURCE_URL`).
+
 Goal: **stays open source, commercial use allowed.** All OSI licenses permit
 commercial use; the real question is copyleft scope:
 - **GPL-3.0** forces derivatives to stay open **only when distributed** — a
@@ -177,6 +251,12 @@ contributions CLA-free (DCO sign-off instead) so no single party can
 relicense, and register the "Filearr" name/logo as the trademark lever.
 
 ## 10. Sequencing sketch
+
+> **Both waves DELIVERED** (v2 July 2026; v3 July–August 2026, SAML excepted —
+> see §3). What remains project-wide is the tail-item inventory in §§11–19
+> plus similar-files/content-sniffing (§5/§4, in progress) and LLM M2/M3
+> (§21).
+
 v1.x (current roadmap) → **v2**: content extraction + OCR, saved searches,
 hash search UI, semantic search, alerting rules, extended metadata profiles,
 custom displays → **v3**: agent platform (enrollment CA, local index +

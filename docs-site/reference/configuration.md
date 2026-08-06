@@ -107,6 +107,14 @@ model and the source `config.py` for every field.
 | `FILEARR_OCR_TIMEOUT_S` | `120` | Per-subprocess wall clock. |
 | `FILEARR_OCR_LANG` | `eng` | Tesseract language. |
 
+### Content sniffing (opt-in)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_CONTENT_SNIFF_ENABLED` | `false` | Enables the on-demand "Content-sniff extensionless files" maintenance action (libmagic MIME → taxonomy reclassify). |
+| `FILEARR_CONTENT_SNIFF_BATCH` | `5000` | Candidates per run (idempotent — run again while `remaining` > 0). |
+| `FILEARR_CONTENT_SNIFF_READ_BYTES` | `65536` | Bounded prefix read per file. |
+
 ### Semantic search (opt-in)
 
 | Variable | Default | Purpose |

@@ -1,3 +1,18 @@
+<script module lang="ts">
+  import { semanticStats } from "./api";
+
+  // One semantic-enabled probe per page load, shared by every ItemDetail
+  // instance: the flag can't change without a server restart, so a cached
+  // promise avoids a /stats round-trip on every detail open.
+  let semanticProbe: Promise<boolean> | null = null;
+  function semanticEnabled(): Promise<boolean> {
+    semanticProbe ??= semanticStats()
+      .then((s) => !!s?.enabled)
+      .catch(() => false);
+    return semanticProbe;
+  }
+</script>
+
 <script lang="ts">
   import { copyText } from "./clipboard";
   import {
@@ -18,7 +33,17 @@
   import RetrievePanel from "./RetrievePanel.svelte";
   import AgentStatusPanel from "./AgentStatusPanel.svelte";
 
-  let { id, onClose }: { id: string; onClose: () => void } = $props();
+  let {
+    id,
+    onClose,
+    onOpen,
+  }: {
+    id: string;
+    onClose: () => void;
+    // Optional: navigate this panel to another item (similar-items tiles).
+    // Parents pass their selected-id setter; without it tiles are inert labels.
+    onOpen?: (id: string) => void;
+  } = $props();
 
   let item = $state<ItemRecord | null>(null);
   let error = $state("");
@@ -95,9 +120,15 @@
   let copiedPath = $state<string | null>(null);
   let copiedTimer: ReturnType<typeof setTimeout>;
 
-  // P3-T9: related / near-duplicate items via the semantic vector. Lazy — nothing
-  // is fetched until the user expands the section (semantic search may be off, in
-  // which case the endpoint 409s and we just show an "unavailable" note).
+  // P3-T9: related / near-duplicate items via the semantic vector. The whole
+  // section renders ONLY when semantic search is enabled server-side (cached
+  // module-level probe) — an always-off install no longer shows a clickable
+  // affordance that can only fail. Hits stay lazy-fetched on expand; a 409
+  // (this item unembedded yet) degrades to an "unavailable" note.
+  let semanticOn = $state(false);
+  $effect(() => {
+    semanticEnabled().then((on) => (semanticOn = on));
+  });
   let similar = $state<SimilarResponse | null>(null);
   let similarOpen = $state(false);
   let similarLoaded = $state(false);
@@ -320,9 +351,11 @@
       </div>
     {/if}
 
-    <!-- P3-T9 Similar section: lazy-loaded on expand. Hidden failure (409 when
-         semantic search is off or the item is unembedded) => an "unavailable" note. -->
-    {#if item}
+    <!-- P3-T9 Similar section (grid upgrade 2026-08-06): rendered only when
+         semantic search is enabled; hits lazy-load on expand as a clickable
+         thumbnail grid — a tile navigates this panel to that item. A 409
+         (this item not embedded yet) degrades to an "unavailable" note. -->
+    {#if item && semanticOn}
       <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
         <button
           type="button"
@@ -336,12 +369,21 @@
             {:else if similarError}
               <p class="text-xs text-slate-500">{similarError}</p>
             {:else if similar && similar.hits.length}
-              <ul class="flex flex-col gap-1">
+              <ul class="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {#each similar.hits as h (h.id)}
-                  <li class="flex items-center gap-2 text-xs">
-                    <span class="min-w-0 flex-1 truncate" title={hitPath(h)}>{hitLabel(h)}</span>
-                    <span class="shrink-0 truncate font-mono text-slate-400" title={hitPath(h)}
-                      >{hitPath(h)}</span>
+                  <li>
+                    <button
+                      type="button"
+                      class="w-full rounded-lg border border-slate-200 p-2 text-left hover:border-[var(--accent)] disabled:cursor-default disabled:hover:border-slate-200 dark:border-slate-800 dark:disabled:hover:border-slate-800"
+                      disabled={!onOpen}
+                      title={hitPath(h)}
+                      onclick={() => onOpen?.(String(h.id))}>
+                      <div class="flex h-20 items-center justify-center overflow-hidden">
+                        <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
+                      </div>
+                      <p class="mt-1 truncate text-xs">{hitLabel(h)}</p>
+                      <p class="truncate font-mono text-[10px] text-slate-400">{hitPath(h)}</p>
+                    </button>
                   </li>
                 {/each}
               </ul>

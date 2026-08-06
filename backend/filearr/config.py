@@ -519,6 +519,16 @@ class Settings(BaseSettings):
     # settings so an operator can override / point at an absolute path. ``ocr_max_chars``
     # caps the OCR text STORED in metadata_ (index-bloat + row-size control), reusing
     # the body-text-index cap on the projection side.
+    # Roadmap §4 content-sniffing: an OPT-IN, on-demand maintenance pass that
+    # libmagic-sniffs a bounded prefix of extensionless (other, other) items and
+    # reclassifies them by detected MIME. Off by default (a default install pays
+    # zero cost; sniffing thousands of files over SMB is a deliberate action).
+    # One run processes at most ``content_sniff_batch`` candidates (idempotent —
+    # sniffed items are stamped and skipped on re-run) reading at most
+    # ``content_sniff_read_bytes`` per file.
+    content_sniff_enabled: bool = False
+    content_sniff_batch: int = 5_000
+    content_sniff_read_bytes: int = 65_536
     ocr_enabled: bool = False                 # global default OFF (R4)
     ocr_min_text_chars: int = 100
     ocr_max_pages: int = 10                    # scanned-PDF page ceiling (rasterise+OCR)

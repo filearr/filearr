@@ -402,6 +402,6 @@
   {/if}
 
   {#if selected}
-    <ItemDetail id={selected} onClose={() => (selected = null)} />
+    <ItemDetail id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
   {/if}
 </div>
