@@ -416,10 +416,12 @@ async def test_installer_config_frozen_shape(client):
     assert sc["config_group"] == "wg"
     assert sc["log_level"] == "info"
     assert set(body["install_hint"]) == {"windows", "linux", "macos"}
-    # install_hint references the P5-T7 release-artifact download path + install cmd
+    # install_hint references the UNAUTHENTICATED first-install distribution
+    # scripts (the P5-T7 release path needs an enrolled agent's cert — useless
+    # for a machine that doesn't exist yet)
     for os_hint in body["install_hint"].values():
-        assert "/releases/" in os_hint and "/artifacts" in os_hint
-        assert "install --config filearr-agent.json" in os_hint
+        assert "/api/v1/agent-dist/install." in os_hint
+        assert "https://filearr.example.com" in os_hint
     # token was actually minted + persisted (by hash)
     async with maker() as s:
         from filearr.models import EnrollmentToken

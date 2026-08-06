@@ -42,8 +42,32 @@ a plain, user-editable JSON file the agent picks up during install:
 }
 ```
 
-Download the platform binary and the sidecar into one folder, then (as
-admin/root):
+**One-command install (recommended):** your central serves the agent binaries
+for every platform itself (`/api/v1/agent-dist` — baked into the Docker image,
+sha256-verified by the scripts, no GitHub access needed). Save the sidecar
+into a folder and run, from that folder:
+
+```bash
+# Linux / macOS
+curl -fsSL https://filearr.example.com/api/v1/agent-dist/install.sh | sh
+```
+
+```powershell
+# Windows (elevated PowerShell)
+irm https://filearr.example.com/api/v1/agent-dist/install.ps1 -OutFile install-agent.ps1
+.\install-agent.ps1
+```
+
+No sidecar saved yet? Pass the enrollment token directly — the script writes a
+minimal sidecar for you: `... | sh -s -- -t <token> [-n <name>]` on
+Linux/macOS, `.\install-agent.ps1 -Token <token> [-Name <name>]` on Windows.
+The scripts detect OS/arch, download the matching binary, verify its sha256
+against the manifest, and hand off to the installer below. (`-d` /
+`-DownloadOnly` fetches the binary without installing the service.)
+
+**Manual install:** download the platform binary (from
+`<central>/api/v1/agent-dist` or a release) and the sidecar into one folder,
+then (as admin/root):
 
 ```bash
 filearr-agent install --config filearr-agent.json

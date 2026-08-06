@@ -163,6 +163,20 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         category="integrity", default_cron="30 4 * * *", editable=True,
     ),
     MaintTaskSpec(
+        key="associate_agent_sidecars",
+        task_name="filearr.worker.associate_agent_sidecars",
+        title="Agent sidecar association",
+        description=(
+            "Links sidecar files (.xmp, .nfo, artwork) in agent-replicated "
+            "libraries to their parent items so they stay hidden from default "
+            "search and the timeline. Central-scanned libraries associate at "
+            "scan end; replication also triggers a debounced per-library pass "
+            "— this sweep is the safety net for pre-existing data."
+        ),
+        category="integrity", default_cron="20 5 * * *",
+        lock="associate-agent-sidecars", editable=True,
+    ),
+    MaintTaskSpec(
         key="reap_shadow_indexes",
         task_name="filearr.worker.reap_shadow_indexes",
         title="Reap shadow indexes",

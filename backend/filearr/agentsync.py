@@ -950,6 +950,10 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
         # Internal: touched central item ids for the post-commit Meili defer
         # (invariant 5). Filtered out of the endpoint's response_model.
         "item_ids": touched_ids,
+        # Internal: every library this batch referenced — the endpoint defers a
+        # debounced sidecar-association pass per library (T3 parity: replication
+        # never sets sidecar_of itself).
+        "library_ids": sorted({str(lib.id) for lib in lib_cache.values()}),
     }
 
 
@@ -1375,6 +1379,8 @@ async def reconcile_finish(
         # Internal: touched ids for the post-commit Meili defer (invariant 5),
         # filtered out of the endpoint response_model.
         "item_ids": touched_ids,
+        # Internal: for the endpoint's debounced sidecar-association defer.
+        "library_ids": [str(library.id)],
     }
 
 

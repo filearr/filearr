@@ -484,6 +484,12 @@ async def client(db_maker, monkeypatch):
 
     monkeypatch.setattr(agent_commands_mod, "defer_index_sync", _fake_defer)
 
+    # The T3 associate defer would open the real Procrastinate connector.
+    async def _fake_associate(library_ids):
+        return None
+
+    monkeypatch.setattr(agent_commands_mod, "defer_agent_associate", _fake_associate)
+
     app = create_app()
 
     async def _s():

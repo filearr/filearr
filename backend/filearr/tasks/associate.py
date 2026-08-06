@@ -18,8 +18,10 @@ sidecar-seen-before-parent ordering all converge to the same result.
 from __future__ import annotations
 
 import os
+import uuid as uuid_mod
+from typing import NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from filearr.models import Item, ItemStatus
 from filearr.nfo import parse_nfo_bytes
@@ -89,6 +91,14 @@ def resolve_links(items: list[Item]) -> dict[str, str | None]:
             key = (info.directory, info.parent_stem.lower())  # type: ignore[union-attr]
             parent = by_dir_stem.get(key)
             if parent is None:
+                # Double-extension convention (digiKam et al.): "photo.jpg.xmp"
+                # carries parent_stem "photo.jpg", but the sibling photo indexes
+                # under stem "photo" — retry with the secondary extension trimmed
+                # before giving up on an exact-stem match.
+                trimmed = os.path.splitext(info.parent_stem)[0]  # type: ignore[union-attr]
+                if trimmed and trimmed != info.parent_stem:
+                    parent = by_dir_stem.get((info.directory, trimmed.lower()))  # type: ignore[union-attr]
+            if parent is None:
                 # Fall back to directory primary if the exact stem sibling is gone.
                 parent = primary_for(info.directory)  # type: ignore[union-attr]
         else:
@@ -124,6 +134,7 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
     nfo_parsed = 0
     touched_parents: set[str] = set()
 
+    changed_ids: list[str] = []
     for sid, pid in links.items():
         sidecar = by_id[sid]
         sidecars += 1
@@ -131,6 +142,7 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
         current = str(sidecar.sidecar_of) if sidecar.sidecar_of else None
         if current != pid:
             sidecar.sidecar_of = pid
+            changed_ids.append(sid)
         if pid is not None:
             linked += 1
 
@@ -174,4 +186,75 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
         "linked": linked,
         "nfo_parsed": nfo_parsed,
         "parents_updated": len(touched_parents),
+        # Sidecars whose FK link changed this pass: the caller MUST re-project
+        # these to Meili (is_sidecar/sidecar_of live in the doc) and MUST pop
+        # this list before persisting the stats dict anywhere (ScanRun.stats).
+        "changed_ids": changed_ids,
+    }
+
+
+class _LightItem(NamedTuple):
+    """Column-only stand-in for :class:`Item` with exactly the attributes
+    :func:`resolve_links` reads — streaming these instead of full ORM rows keeps
+    a ~900k-item agent library at tens of MB instead of GB (reconcile.py's
+    ``yield_per`` pattern)."""
+
+    id: uuid_mod.UUID
+    rel_path: str
+    file_category: str | None
+    size: int
+    sidecar_of: uuid_mod.UUID | None
+
+
+async def associate_sidecars_light(session, library_id) -> dict:
+    """Link-only sidecar association for AGENT-backed libraries.
+
+    Replicated items never pass through the scan task, so nothing sets their
+    ``sidecar_of`` (agentsync deliberately never touches the column) — a bulk
+    .xmp export on an agent share lands as 400k first-class "other" items
+    (live 2026-08: the July timeline bar). This pass recomputes the links the
+    same way :func:`associate_sidecars` does but:
+
+      * streams only the columns :func:`resolve_links` needs (``yield_per``) —
+        never materializes full ORM rows for a whole agent library;
+      * skips NFO parsing entirely — central cannot open agent files
+        (``sidecar.path`` is a path on the AGENT's filesystem);
+      * bulk-updates only the rows whose link actually changed.
+
+    Returns ``{"sidecars", "linked", "changed", "changed_ids"}`` — the caller
+    commits and re-projects ``changed_ids`` to Meili.
+    """
+    rows: list[_LightItem] = []
+    result = await session.stream(
+        select(
+            Item.id, Item.rel_path, Item.file_category, Item.size, Item.sidecar_of
+        )
+        .where(Item.library_id == library_id, Item.status == ItemStatus.active)
+        .execution_options(yield_per=5000)
+    )
+    async for r in result:
+        rows.append(_LightItem(r.id, r.rel_path, r.file_category, r.size or 0, r.sidecar_of))
+
+    links = resolve_links(rows)
+    current = {str(r.id): (str(r.sidecar_of) if r.sidecar_of else None) for r in rows}
+    changed = [(sid, pid) for sid, pid in links.items() if current.get(sid) != pid]
+
+    for i in range(0, len(changed), 1000):
+        chunk = changed[i : i + 1000]
+        await session.execute(
+            update(Item),
+            [
+                {
+                    "id": uuid_mod.UUID(sid),
+                    "sidecar_of": uuid_mod.UUID(pid) if pid else None,
+                }
+                for sid, pid in chunk
+            ],
+        )
+
+    return {
+        "sidecars": len(links),
+        "linked": sum(1 for v in links.values() if v is not None),
+        "changed": len(changed),
+        "changed_ids": [sid for sid, _ in changed],
     }

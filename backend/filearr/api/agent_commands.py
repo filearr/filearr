@@ -46,7 +46,7 @@ from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.models import Agent, AgentCommand, Item
 from filearr.security import require_scope
-from filearr.worker import defer_index_sync
+from filearr.worker import defer_agent_associate, defer_index_sync
 
 router = APIRouter()
 
@@ -605,8 +605,12 @@ async def apply_replication_batch(
     # apply_batch commits (items + ledger + last_contiguous_seq_no + last_seen).
     result = await agentsync.apply_batch(session, agent, body)
     item_ids = result.pop("item_ids", [])
+    library_ids = result.pop("library_ids", [])
     if item_ids:
         await defer_index_sync(item_ids)  # invariant 5: AFTER commit
+        # T3 parity: replication never sets sidecar_of — queue the debounced
+        # per-library association pass (collapses across a scan's batch stream).
+        await defer_agent_associate(library_ids)
     return ReplicationResult(**result)
 
 
@@ -778,8 +782,10 @@ async def reconcile_finish_endpoint(
             )
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(err)) from err
     item_ids = result.pop("item_ids", [])
+    library_ids = result.pop("library_ids", [])
     if item_ids:
         await defer_index_sync(item_ids)  # invariant 5: AFTER commit
+        await defer_agent_associate(library_ids)
     await audit.emit(
         audit.AGENT_RECONCILED,
         request=request,

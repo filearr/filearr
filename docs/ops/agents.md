@@ -596,9 +596,9 @@ Response (FROZEN contract for the UI, W6-D4):
   "token_hash": "…",                     // for show/revoke in the UI
   "expires_at": "2026-07-18T…Z",
   "install_hint": {
-    "windows": "Invoke-WebRequest https://filearr.example.com/api/v1/agents/{agent_id}/releases/{version}/artifacts/filearr-agent-windows-amd64.exe -OutFile filearr-agent.exe; .\\filearr-agent.exe install --config filearr-agent.json",
-    "linux":   "curl -fsSL …/releases/{version}/artifacts/filearr-agent-linux-amd64 -o filearr-agent && chmod +x filearr-agent && ./filearr-agent install --config filearr-agent.json",
-    "macos":   "curl -fsSL …/releases/{version}/artifacts/filearr-agent-darwin-arm64 -o filearr-agent && chmod +x filearr-agent && ./filearr-agent install --config filearr-agent.json"
+    "windows": "irm https://filearr.example.com/api/v1/agent-dist/install.ps1 -OutFile install-agent.ps1; .\\install-agent.ps1   # elevated shell; add -Token <token> if filearr-agent.json is not beside it",
+    "linux":   "curl -fsSL https://filearr.example.com/api/v1/agent-dist/install.sh | sh   # add: -s -- -t <token> if filearr-agent.json is not in the cwd",
+    "macos":   "curl -fsSL https://filearr.example.com/api/v1/agent-dist/install.sh | sh   # add: -s -- -t <token> if filearr-agent.json is not in the cwd"
   }
 }
 ```
@@ -611,10 +611,18 @@ Notes:
   resolves it back to `config_group_id`. An **unknown name at register is
   fail-safe**: the agent enrolls with a `NULL` group and the register response
   carries a `config_group_warning` — enrollment is never blocked.
-- The install-hint artifact URLs reference the §8 release-artifact download path
-  (`/agents/{agent_id}/releases/{version}/artifacts/{filename}`, agent-authed);
-  `{agent_id}`/`{version}` are placeholders the operator fills from the fleet
-  console after the machine has a signed cert.
+- The install hints reference the **first-install distribution surface**
+  `/api/v1/agent-dist`: cross-compiled binaries baked into the central Docker
+  image (`/app/agent-dist`; override `FILEARR_AGENT_DIST_DIR`) plus generated
+  `install.sh` / `install.ps1` scripts templated with the central URL. The
+  surface is deliberately **unauthenticated** behind the `agents_enabled`
+  feature gate — the binaries are public AGPL artifacts, the scripts verify
+  sha256 against the manifest, and joining the fleet still requires an
+  operator-minted enrollment token. (The §8 release-artifact path is
+  agent-cert-authenticated and serves *self-update*, not first install.)
+  `GET /api/v1/agent-dist` returns the manifest: version + per-platform
+  `{filename, os, arch, size, sha256, url}`;
+  `GET /api/v1/agent-dist/<filename>.sha256` returns just the digest.
 - Audit records the token hash + config group only — **never** the raw token.
 
 ## 11. Extensible inventory framework (W6-D3)

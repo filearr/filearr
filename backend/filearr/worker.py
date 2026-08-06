@@ -564,6 +564,86 @@ async def defer_index_sync(item_ids: list[str]) -> None:
         ).defer_async(item_ids=item_ids)
 
 
+async def defer_agent_associate(library_ids: list[str]) -> None:
+    """Debounced sidecar-association defer for agent-backed libraries (T3 parity
+    for replicated items — agentsync never touches ``sidecar_of``). Called by the
+    replication/reconcile endpoints AFTER their commit. ``schedule_in`` plus a
+    per-library queueing lock collapse a scan's stream of batches into at most
+    one queued pass per debounce window."""
+    if not library_ids:
+        return
+    delay = get_settings().agent_associate_debounce_seconds
+    async with proc_app.open_async():
+        for lid in library_ids:
+            try:
+                await proc_app.configure_task(
+                    "filearr.worker.associate_agent_library",
+                    queue="index",
+                    queueing_lock=f"associate-agent:{lid}",
+                    schedule_in={"seconds": delay},
+                ).defer_async(library_id=lid)
+            except AlreadyEnqueued:
+                pass
+
+
+@proc_app.task(queue="index", name="filearr.worker.associate_agent_library")
+async def associate_agent_library(library_id: str) -> dict:
+    """Link-only sidecar association for ONE agent-backed library, then a
+    targeted Meili re-projection of every item whose link changed (the doc
+    carries ``is_sidecar``/``sidecar_of``). NFO parsing is skipped — central
+    cannot open files that live on the agent's filesystem."""
+    import uuid as uuid_mod
+
+    from filearr.tasks.associate import associate_sidecars_light
+
+    async with SessionLocal() as session:
+        stats = await associate_sidecars_light(session, uuid_mod.UUID(library_id))
+        await session.commit()
+    changed = stats.pop("changed_ids", [])
+    for start in range(0, len(changed), 1000):
+        await defer_index_sync(changed[start : start + 1000])
+    return {**stats, "reindexed": len(changed)}
+
+
+# Scheduled by maintenance_tick (registry default "20 5 * * *"). FIX-8: no retry.
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.associate_agent_sidecars",
+    queueing_lock="associate-agent-sidecars",
+)
+async def associate_agent_sidecars(timestamp: int) -> dict:
+    """Sweep: defer the per-library association pass for EVERY agent-backed
+    library. Replication triggers the debounced pass on new batches; this sweep
+    is the safety net for data that predates the feature or arrives while the
+    worker is down (live 2026-08: 446k pre-existing .xmp sidecars)."""
+    from sqlalchemy import select
+
+    from filearr.models import Library
+
+    async with SessionLocal() as session:
+        lib_ids = [
+            str(i)
+            for i in (
+                await session.execute(
+                    select(Library.id).where(Library.source_agent_id.is_not(None))
+                )
+            ).scalars()
+        ]
+    deferred = 0
+    async with proc_app.open_async():
+        for lid in lib_ids:
+            try:
+                await proc_app.configure_task(
+                    "filearr.worker.associate_agent_library",
+                    queue="index",
+                    queueing_lock=f"associate-agent:{lid}",
+                ).defer_async(library_id=lid)
+                deferred += 1
+            except AlreadyEnqueued:
+                continue
+    return {"libraries": len(lib_ids), "deferred": deferred}
+
+
 async def defer_thumb_item(item_id: str, tier: int) -> None:
     """Enqueue a ``thumb_item`` for one item + tier on the low-priority thumbs
     queue (P12 slice 2). Used by the serve endpoint on a VIDEO thumbnail miss:

@@ -352,29 +352,31 @@ async def assign_config_group(
 # Console installer distribution (admin) — POST /agents/installer-config       #
 # --------------------------------------------------------------------------- #
 def _install_hint(central_url: str) -> InstallHint:
-    """Per-OS one-line install commands. Each downloads the platform artifact from
-    the P5-T7 agent release-artifact path
-    (``/api/v1/agents/{agent_id}/releases/{version}/artifacts/{filename}``) and
-    runs ``filearr-agent install --config filearr-agent.json``. ``{agent_id}`` /
-    ``{version}`` are placeholders the operator fills from the fleet console after
-    enrollment (the artifact path is agent-authenticated)."""
+    """Per-OS one-line install commands against the UNAUTHENTICATED first-install
+    distribution surface (``/api/v1/agent-dist``: central-baked binaries +
+    sha256-verifying install scripts). The scripts pick the platform binary,
+    verify its digest, and run ``filearr-agent install --config
+    filearr-agent.json`` — the operator saves the sidecar from this response
+    next to the script (or passes the token as a flag instead).
+
+    (The former hint pointed at the P5-T7 release-artifact path, which is
+    agent-certificate-authenticated — unusable by a machine that isn't enrolled
+    yet.)"""
     base = central_url.rstrip("/")
-    art = f"{base}/api/v1/agents/{{agent_id}}/releases/{{version}}/artifacts"
+    dist = f"{base}/api/v1/agent-dist"
     return InstallHint(
         windows=(
-            f"Invoke-WebRequest {art}/filearr-agent-windows-amd64.exe "
-            "-OutFile filearr-agent.exe; "
-            ".\\filearr-agent.exe install --config filearr-agent.json"
+            f"irm {dist}/install.ps1 -OutFile install-agent.ps1; "
+            ".\\install-agent.ps1   # elevated shell; add -Token <token> "
+            "if filearr-agent.json is not beside it"
         ),
         linux=(
-            f"curl -fsSL {art}/filearr-agent-linux-amd64 -o filearr-agent && "
-            "chmod +x filearr-agent && "
-            "./filearr-agent install --config filearr-agent.json"
+            f"curl -fsSL {dist}/install.sh | sh   "
+            "# add: -s -- -t <token> if filearr-agent.json is not in the cwd"
         ),
         macos=(
-            f"curl -fsSL {art}/filearr-agent-darwin-arm64 -o filearr-agent && "
-            "chmod +x filearr-agent && "
-            "./filearr-agent install --config filearr-agent.json"
+            f"curl -fsSL {dist}/install.sh | sh   "
+            "# add: -s -- -t <token> if filearr-agent.json is not in the cwd"
         ),
     )
 

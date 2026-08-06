@@ -301,6 +301,15 @@ async def client(db_maker, monkeypatch):
 
     monkeypatch.setattr(agent_commands_mod, "defer_index_sync", _fake_defer)
 
+    # The associate defer opens the real Procrastinate connector — stub it and
+    # record the library ids so the endpoint test can assert the T3 defer fires.
+    associate_calls: list[list[str]] = []
+
+    async def _fake_associate(library_ids):
+        associate_calls.append(list(library_ids))
+
+    monkeypatch.setattr(agent_commands_mod, "defer_agent_associate", _fake_associate)
+
     app = create_app()
 
     async def _s():
@@ -310,7 +319,7 @@ async def client(db_maker, monkeypatch):
     app.dependency_overrides[get_session] = _s
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        yield c, maker, settings, calls
+        yield c, maker, settings, calls, associate_calls
     app.dependency_overrides.clear()
 
 
@@ -323,7 +332,7 @@ def _body(agent_id, *events) -> dict:
 
 
 async def test_endpoint_gate_404_when_disabled(client, monkeypatch):
-    c, maker, settings, _ = client
+    c, maker, settings, _, _ = client
     agent_id, fp = await _seed_agent(maker)
     monkeypatch.setattr(settings, "agents_enabled", False)
     r = await c.post(
@@ -335,7 +344,7 @@ async def test_endpoint_gate_404_when_disabled(client, monkeypatch):
 
 
 async def test_endpoint_auth(client):
-    c, maker, _, _ = client
+    c, maker, _, _, _ = client
     agent_id, fp = await _seed_agent(maker)
     other_id, other_fp = await _seed_agent(maker, name="other")
     # missing bearer -> 401
@@ -361,7 +370,7 @@ async def test_endpoint_auth(client):
 
 
 async def test_endpoint_seq_gap_409(client):
-    c, maker, _, _ = client
+    c, maker, _, _, _ = client
     agent_id, fp = await _seed_agent(maker)  # last_contiguous_seq_no = 0
     # start at seq 5 -> gap, expected 1
     r = await c.post(
@@ -378,7 +387,7 @@ async def test_endpoint_seq_gap_409(client):
 
 
 async def test_endpoint_happy_path_and_defer_after_commit(client):
-    c, maker, _, calls = client
+    c, maker, _, calls, associate_calls = client
     agent_id, fp = await _seed_agent(maker)
     r = await c.post(
         f"/api/v1/agents/{agent_id}/replication-batch",
@@ -398,6 +407,9 @@ async def test_endpoint_happy_path_and_defer_after_commit(client):
     # index_sync defer was called with the two touched item ids, AFTER commit:
     # the ids must be resolvable as committed rows in a fresh session.
     assert len(calls) == 1 and len(calls[0]) == 2
+    # T3 parity: the debounced sidecar-association defer fired for the
+    # auto-provisioned library.
+    assert len(associate_calls) == 1 and len(associate_calls[0]) == 1
     async with maker() as s:
         for iid in calls[0]:
             got = await s.get(Item, uuid.UUID(iid))
@@ -407,7 +419,7 @@ async def test_endpoint_happy_path_and_defer_after_commit(client):
 
 
 async def test_endpoint_entries_cap_413(client, monkeypatch):
-    c, maker, settings, _ = client
+    c, maker, settings, _, _ = client
     agent_id, fp = await _seed_agent(maker)
     monkeypatch.setattr(settings, "agent_replication_max_entries", 2)
     events = [_ev(i, "created", f"f{i}") for i in range(1, 4)]  # 3 > cap 2
@@ -453,7 +465,7 @@ async def test_scheduler_excludes_agent_owned_library(db_maker, monkeypatch):
 
 
 async def test_manual_scan_trigger_422_on_agent_owned(client):
-    c, maker, _, _ = client
+    c, maker, _, _, _ = client
     agent_id, _ = await _seed_agent(maker)
     async with maker() as s:
         lib = Library(

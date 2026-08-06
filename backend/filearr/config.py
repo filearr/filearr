@@ -900,6 +900,11 @@ class Settings(BaseSettings):
     # (413) so a hostile/buggy agent cannot force an unbounded single-transaction
     # apply. The agent's outbox drains in bounded slices anyway (§4.2).
     agent_replication_max_entries: int = 1000
+    # T3-for-agents: debounce window for the post-replication sidecar-association
+    # defer. A scanning agent streams batches every few seconds; the per-library
+    # queueing lock plus this delay collapse them into at most one association
+    # pass per window (the pass itself is idempotent and cheap once converged).
+    agent_associate_debounce_seconds: int = 120
     # P5-T5 full-manifest reconciliation sweep (§4.4). The agent pages its whole
     # manifest to /agents/{id}/reconcile/{session}/rows; a page above this many
     # rows is rejected (413) so one POST cannot force an unbounded staging insert
@@ -970,6 +975,12 @@ class Settings(BaseSettings):
     # endpoint serves ONLY filenames listed in that release's stored manifest
     # (no path traversal — the filename is looked up, never joined blindly).
     agent_releases_dir: str | None = None
+    # First-install distribution: directory of cross-compiled agent binaries the
+    # Docker image bakes in (filearr-agent-<os>-<arch>[.exe] + VERSION). Served
+    # UNAUTHENTICATED (feature-gated) by /api/v1/agent-dist for the install
+    # scripts — a machine that isn't enrolled yet can't use the agent-authed
+    # release path above. None => /app/agent-dist (the image's bake location).
+    agent_dist_dir: str | None = None
     # The rollout_group whose agents receive stage='canary' releases before the
     # operator promotes them to 'general' (R5). Everyone sees 'general'; only this
     # group sees an un-promoted 'canary'. Rename per deployment if desired.

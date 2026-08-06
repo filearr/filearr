@@ -8,9 +8,16 @@ and the two gotchas that bite people.
 
 ```bash
 cp .env.example .env          # then edit the secrets (see below)
-docker compose up -d postgres meilisearch
-docker compose run --rm app python scripts/init_db.py    # idempotent bootstrap
 docker compose up -d
+```
+
+The app container runs the idempotent bootstrap itself on start (waiting for
+Postgres), so `docker compose up -d` is the whole quick start. Running the
+bootstrap explicitly still works — useful for watching migration output — and
+`FILEARR_AUTO_INIT_DB=false` on the app service disables the automatic run:
+
+```bash
+docker compose run --rm app python scripts/init_db.py    # idempotent bootstrap
 ```
 
 The web UI is then at `http://localhost:8484` and the interactive API docs at

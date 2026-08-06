@@ -82,6 +82,7 @@ async def _mk_item(
     quick_hash=None,
     size=100,
     mtime=None,
+    sidecar_of=None,
 ):
     async with maker() as s:
         item = Item(
@@ -100,6 +101,7 @@ async def _mk_item(
             user_metadata={},
             external_ids={},
             tags=[],
+            sidecar_of=sidecar_of,
         )
         s.add(item)
         await s.commit()
@@ -312,6 +314,27 @@ async def test_timeline_invalid_future_bucket(api):
     # int() truncation makes exact-second equality legitimate (CI flake
     # 2026-08-05: `assert X > X` when both clocks hit the same second).
     assert body["invalid_mtime_gte"] >= int((t0 + timedelta(hours=48)).timestamp())
+
+
+async def test_timeline_excludes_sidecars(api):
+    # Sidecars are hidden from default search (T3); the histogram must match
+    # that visibility — a bulk .xmp export must not become a giant month bar.
+    client, maker = api
+    lib = await _mk_lib(maker)
+    jul = datetime(2026, 7, 14, tzinfo=UTC)
+    photo = await _mk_item(maker, lib, "IMG_1.jpg", mtime=jul)
+    await _mk_item(maker, lib, "IMG_1.jpg.xmp", mtime=jul, sidecar_of=uuid.UUID(photo))
+    # a future-dated sidecar must not count into the invalid bucket either
+    await _mk_item(
+        maker, lib, "IMG_2.jpg.xmp",
+        mtime=datetime.now(UTC) + timedelta(days=10), sidecar_of=uuid.UUID(photo),
+    )
+
+    r = await client.get("/api/v1/stats/timeline?bucket=month")
+    body = r.json()
+    counts = {b["start"][:7]: b["count"] for b in body["buckets"]}
+    assert counts == {"2026-07": 1}
+    assert body["invalid_count"] == 0
 
 
 async def test_timeline_bad_bucket_rejected(api):

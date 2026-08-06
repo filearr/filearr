@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/pwsh/filearr/discussions</Support>
   <Project>https://www.meilisearch.com/</Project>
-  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.48.3 (includes fixes for CVE-2026-57823/57824 — do not run older 1.48.x/1.47.0 or floating 'latest').&#13;&#10;&#13;&#10;Install before the filearr container. Requires the user-defined Docker network 'filearr':  docker network create filearr</Overview>
+  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.49.0 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;Install before the filearr container. Requires the user-defined Docker network 'filearr':  docker network create filearr</Overview>
   <Category>Other:</Category>
   <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-meilisearch.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/meilisearch/meilisearch/main/assets/logo.svg</Icon>

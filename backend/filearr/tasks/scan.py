@@ -930,9 +930,19 @@ async def _scan_body(
         # pass is idempotent: it recomputes links from the current row set.
         sidecar_stats = await associate_sidecars(session, library.id)
         await session.commit()
+        # Pop BEFORE persisting stats (could be thousands of ids in JSONB).
+        changed_ids = sidecar_stats.pop("changed_ids", [])
         # Re-index parents whose extracted metadata changed via NFO parsing.
         if sidecar_stats.get("parents_updated"):
             await _reindex_library(session, library.id)
+        elif changed_ids:
+            # FK-only link changes still flip is_sidecar/sidecar_of in the Meili
+            # doc — without this, a newly linked sidecar stays visible in default
+            # search until the next nightly rebuild.
+            from filearr.tasks.index_sync import sync_items
+
+            for start in range(0, len(changed_ids), 1000):
+                await sync_items.defer_async(item_ids=changed_ids[start : start + 1000])
         run.stats = {**run.stats, "sidecars": sidecar_stats}
         await notify_scan_progress(session, run.id)
         await session.commit()

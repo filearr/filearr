@@ -29,8 +29,11 @@ Until they are published to Community Applications, install them manually.
    and DSNs, and the same `MEILI_MASTER_KEY`, everywhere they appear. These are
    masked fields you fill once each.
 
-4. **Initialise the schema once.** After first start:
-   Docker tab → `filearr` → **Console** → `python scripts/init_db.py`.
+4. **Start the containers** in install order. The `filearr` app bootstraps the
+   database itself on first start (idempotent `scripts/init_db.py`, retrying
+   while Postgres finishes coming up) — there is no console step. Set
+   `FILEARR_AUTO_INIT_DB=false` on the app container only if you prefer to run
+   migrations manually.
 
 ## Notes and conventions
 

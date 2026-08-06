@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from filearr.api import (
     agent_commands,
     agent_config_groups,
+    agent_dist,
     agent_inventory,
     agent_policies,
     agent_share_maps,
@@ -80,6 +81,7 @@ v1_router.include_router(transfers.router, tags=["transfers"])
 v1_router.include_router(agents.router, tags=["agents"])
 v1_router.include_router(agent_commands.router, tags=["agents"])
 v1_router.include_router(agent_config_groups.router, tags=["agents"])
+v1_router.include_router(agent_dist.router, tags=["agents"])
 v1_router.include_router(agent_inventory.router, tags=["agents"])
 v1_router.include_router(agent_policies.router, tags=["agents"])
 v1_router.include_router(agent_share_maps.router, tags=["agents"])

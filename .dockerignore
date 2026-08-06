@@ -1,0 +1,11 @@
+# Keep local build junk out of the image build context (the agentdist stage
+# COPYs agent/ wholesale; a stale local .exe must never ride along).
+**/.git
+agent/filearr-agent
+agent/filearr-agent.exe
+frontend/node_modules
+frontend/dist
+backend/.venv*
+backend/__pycache__
+**/*.pyc
+archive/

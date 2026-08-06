@@ -13,7 +13,11 @@
   <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-postgres.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/docker-library/docs/master/postgres/logo.png</Icon>
   <ExtraParams>--restart=unless-stopped --health-cmd="pg_isready -U filearr" --health-interval=10s</ExtraParams>
-  <PostArgs>postgres -c io_method=worker</PostArgs>
+  <!-- FIX-17 memory tuning mirrored from docker-compose.yml: the image default
+       shared_buffers=128MB collapsed to a 56% cache-hit ratio on a 1M-item
+       catalog and starved the job queue. effective_cache_size is planner
+       ADVICE (no allocation). Shrink shared_buffers on a low-RAM box. -->
+  <PostArgs>postgres -c io_method=worker -c shared_buffers=1GB -c effective_cache_size=3GB -c maintenance_work_mem=256MB</PostArgs>
   <Requires>docker network 'filearr'</Requires>
   <Config Name="Data" Target="/var/lib/postgresql" Default="/mnt/cache/appdata/filearr-postgres" Mode="rw" Description="Database files. Use the DIRECT pool path (/mnt/cache/appdata/...) — Postgres through the /mnt/user FUSE layer risks locking/corruption (the classic Unraid database rule). Never on the array." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/filearr-postgres</Config>
   <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="filearr" Mode="" Description="Database user" Type="Variable" Display="always" Required="true" Mask="false">filearr</Config>

@@ -36,8 +36,10 @@ console. Full runbook: `docs/ops/agents.md` §12.
    across containers (templates default to matching values; passwords are masked
    fields you fill once each).
 
-4. After first start, initialise the schema once:
-   Docker tab → filearr → Console →  `python scripts/init_db.py`
+4. That's it — on first start the `filearr` app container bootstraps the
+   database itself (idempotent `scripts/init_db.py`, retrying while Postgres
+   is still coming up). No console step. Set `FILEARR_AUTO_INIT_DB=false` on
+   the container only if you prefer to run migrations manually.
 
 ## Notes
 

@@ -92,3 +92,32 @@ def test_sidecar_never_points_at_itself():
     items = [FakeItem("X/movie.nfo", "other")]
     links = resolve_links(items)
     assert links[str(items[0].id)] is None
+
+
+def test_double_extension_xmp_links_to_exact_photo():
+    # digiKam convention: "photo.jpg.xmp" describes "photo.jpg" — the sidecar's
+    # parent_stem is "photo.jpg" while the photo indexes under stem "photo".
+    # The trimmed-extension retry must find the EXACT sibling, not fall back to
+    # the directory's largest image.
+    items = [
+        FakeItem("Pics/2024/IMG_0001.jpg", "image", size=5_000),
+        FakeItem("Pics/2024/IMG_0002.jpg", "image", size=9_999_999),
+        FakeItem("Pics/2024/IMG_0001.jpg.xmp", "other"),
+    ]
+    links = resolve_links(items)
+    p = _by_path(items)
+    assert links[str(p["Pics/2024/IMG_0001.jpg.xmp"].id)] == str(
+        p["Pics/2024/IMG_0001.jpg"].id
+    )
+
+
+def test_adobe_style_xmp_still_links_same_stem():
+    # Adobe convention: "photo.xmp" next to "photo.jpg" — exact stem match, the
+    # pre-existing behavior, must keep working alongside the trimmed retry.
+    items = [
+        FakeItem("Pics/IMG_0003.jpg", "image", size=5_000),
+        FakeItem("Pics/IMG_0003.xmp", "other"),
+    ]
+    links = resolve_links(items)
+    p = _by_path(items)
+    assert links[str(p["Pics/IMG_0003.xmp"].id)] == str(p["Pics/IMG_0003.jpg"].id)

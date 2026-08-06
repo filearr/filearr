@@ -60,8 +60,10 @@ async def timeline(
 ) -> TimelineResponse:
     """Date histogram of active items by ``mtime`` (P3-T14).
 
-    Buckets are ``date_trunc(bucket, mtime)`` counts over ``status='active'`` items
-    (optionally scoped to ``library``), ascending. Items with an mtime beyond the
+    Buckets are ``date_trunc(bucket, mtime)`` counts over ``status='active'``
+    non-sidecar items (optionally scoped to ``library``), ascending. Sidecars
+    (``sidecar_of`` set) are excluded to match search's default visibility.
+    Items with an mtime beyond the
     48h future-skew window are excluded from the bars and reported as
     ``invalid_count`` with an ``invalid_mtime_gte`` the UI can turn into a
     ``mtime_gte`` filter to inspect them."""
@@ -77,7 +79,11 @@ async def timeline(
     bucket_col = func.date_trunc(
         bucket, Item.mtime.op("AT TIME ZONE")("UTC")
     ).label("bucket")
-    base = Item.status == "active"
+    # T3 consistency: sidecar files (.xmp/.nfo/artwork) are hidden from default
+    # search, so they must not distort the histogram either — a bulk metadata
+    # export that stamps 400k .xmp sidecars in one week is a tooling event, not
+    # a content timeline (live 2026-08: July bar was 87% .xmp sidecars).
+    base = (Item.status == "active") & (Item.sidecar_of.is_(None))
     if library is not None:
         base = base & (Item.library_id == library)
     # P6-T4: histogram counts only the caller's readable items.

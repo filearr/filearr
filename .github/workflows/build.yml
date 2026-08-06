@@ -69,6 +69,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Stamps the agentdist stage's cross-compiled first-install binaries
+          # (served by /api/v1/agent-dist) — same VERSION scheme as agent-image.
+          build-args: |
+            VERSION=${{ github.ref_name }}@${{ github.sha }}
           # The ci call's validation build just wrote amd64 layers to the GHA
           # cache at this same ref — reuse them so gating doesn't double the
           # wall time; mode=max also caches arm64 for the next release.
