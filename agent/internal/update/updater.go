@@ -51,9 +51,13 @@ type Config struct {
 	// CurrentVersion is this running binary's version (main.Version). Compared
 	// against the manifest to decide "is this newer", and reported to central.
 	CurrentVersion string
-	// PublicKey is the pinned release-signing key. When nil the updater refuses
-	// every update (fail-closed). Injectable for tests; production passes PinnedKey().
+	// PublicKey is the pinned release-signing key. When nil (and PublicKeys is
+	// empty) the updater treats the build as unpinned. Injectable for tests.
 	PublicKey ed25519.PublicKey
+	// PublicKeys holds ALL pinned keys (dual-pin rotation: current + next) —
+	// production passes PinnedKeys(). Combined with PublicKey when both set; a
+	// manifest verifying against ANY of them is accepted.
+	PublicKeys []ed25519.PublicKey
 
 	// ExePath overrides the binary path to swap (defaults to os.Executable()).
 	ExePath string
@@ -84,6 +88,7 @@ type Config struct {
 // Updater performs the fetch/verify/download/swap + boot-count rollback cycle.
 type Updater struct {
 	cfg    Config
+	keys   []ed25519.PublicKey // every pinned key (PublicKeys + PublicKey)
 	client *client
 	log    *slog.Logger
 	clock  func() time.Time
@@ -125,8 +130,13 @@ func New(cfg Config) *Updater {
 	if cfg.exit == nil {
 		cfg.exit = os.Exit
 	}
+	keys := append([]ed25519.PublicKey(nil), cfg.PublicKeys...)
+	if len(cfg.PublicKey) == ed25519.PublicKeySize {
+		keys = append(keys, cfg.PublicKey)
+	}
 	return &Updater{
-		cfg: cfg,
+		cfg:  cfg,
+		keys: keys,
 		client: &client{
 			baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 			agentID: cfg.AgentID,
@@ -135,7 +145,7 @@ func New(cfg Config) *Updater {
 			// Tell central whether this build can verify signatures: a pinned
 			// build must never be offered the unsigned dist-fallback channel
 			// (it would refuse it anyway — this avoids the noisy refusal loop).
-			keyPinned: len(cfg.PublicKey) == ed25519.PublicKeySize,
+			keyPinned: len(keys) > 0,
 		},
 		log:   cfg.Logger,
 		clock: cfg.Clock,
@@ -168,7 +178,7 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*Manifest, *Artifact, boo
 	if m == nil {
 		return nil, nil, false, nil // central says up to date (204)
 	}
-	if err := Verify(*m, u.cfg.PublicKey); err != nil {
+	if err := VerifyAny(*m, u.keys); err != nil {
 		if errors.Is(err, ErrNoPinnedKey) {
 			// This build pins no release key, so signature verification is
 			// impossible BY CONSTRUCTION — the trust root is the authenticated

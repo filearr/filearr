@@ -134,6 +134,24 @@ func Verify(m Manifest, pub ed25519.PublicKey) error {
 	return nil
 }
 
+// VerifyAny verifies the manifest against ANY of pubs — the dual-pin rotation
+// scheme (a build may pin current+next keys). Nil on the first key that
+// verifies; ErrNoPinnedKey for an empty set; else the last verification error.
+func VerifyAny(m Manifest, pubs []ed25519.PublicKey) error {
+	if len(pubs) == 0 {
+		return ErrNoPinnedKey
+	}
+	var last error
+	for _, pub := range pubs {
+		if err := Verify(m, pub); err == nil {
+			return nil
+		} else { //nolint:revive // keep the last error for the caller
+			last = err
+		}
+	}
+	return last
+}
+
 // ParseManifest decodes a manifest document (central's response body).
 func ParseManifest(data []byte) (Manifest, error) {
 	var m Manifest

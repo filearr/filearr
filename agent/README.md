@@ -172,7 +172,11 @@ done
 ```
 
 An agent built **without** the `-X ...update.PublicKeyBase64=` pin cannot verify
-any manifest and **refuses every update** (fail-closed, logged once at startup).
+any manifest and **refuses every signed release** (fail-closed, logged once at
+startup) — it can still follow central's unsigned dist channel. The pin accepts
+**multiple comma-separated keys** (`"<current>,<next>"`) for dual-pin key
+rotation: pin both, roll the fleet via a normal update, start signing with the
+next key, then drop the old key on the following build (ops runbook §8.7).
 
 ### Sign the built artifacts
 

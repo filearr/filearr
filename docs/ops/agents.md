@@ -520,6 +520,52 @@ is the authorization), so the button works on gated fleets too. While one is
 queued the console shows **"update queued"** and hides the button; agents with
 no update available show no button at all.
 
+### 8.7 Key rotation without a fleet rebuild (dual-pin)
+
+`PublicKeyBase64` accepts **multiple comma-separated keys** — a manifest
+verifying against ANY pinned key is accepted. Rotation is therefore a rolling
+three-step, all through the normal update channel:
+
+1. Generate the next keypair (`filearr-release keygen` to a NEW directory).
+   Build + sign a release with the **old** key whose binaries pin BOTH:
+   `-X ...PublicKeyBase64=<current>,<next>`. Roll it out normally.
+2. Once the fleet has confirmed that release (`GET /api/v1/agent-releases`
+   rollup), start signing with the **next** key. Old-pinned stragglers refuse
+   it (fail-closed) and show up in the version rollup — update them first.
+3. On the following release, drop the old key from the pin. Retire/destroy
+   the old private key.
+
+A malformed entry anywhere in the comma list fails the WHOLE pin set at
+startup (never silently drop a key an operator thought was active).
+
+### 8.8 Key custody + public build provenance
+
+**Custody:** keep the signing private key OFF disk where possible — a YubiKey
+(PIV) or a cloud KMS the signing step calls, with the vault backup as the
+recovery path. The dual-pin rotation above is what makes a custody upgrade
+cheap: generate the new key ON the hardware, rotate to it, retire the file
+key. The key never needs to exist on a laptop filesystem again.
+
+**Provenance (Sigstore, keyless):** every published image is attested by the
+release workflow via `actions/attest-build-provenance` — a Fulcio-signed,
+Rekor-logged statement binding the image digest to this repo + workflow +
+commit, with **no private key in custody at all**. Verify any pull:
+
+```bash
+gh attestation verify oci://ghcr.io/pwsh/filearr:latest       -R pwsh/filearr
+gh attestation verify oci://ghcr.io/pwsh/filearr-agent:latest -R pwsh/filearr
+```
+
+This covers the agent-dist first-install binaries too — they are baked inside
+the attested main image, so the image attestation is their provenance chain.
+The two mechanisms are complementary, not redundant: Sigstore proves *where a
+build came from* (and moves trust to GitHub+Sigstore infrastructure); the
+pinned Ed25519 manifest signature proves *the operator authorized this exact
+update* even against a compromised central or CI. High-assurance fleets keep
+both; OS-level trust (Windows Authenticode via Azure Trusted Signing, macOS
+notarization) is the third, deferred layer for when binaries target users
+outside the operator's own trust domain.
+
 ## 9. Configuration groups + remote configuration (W6-D2)
 
 A **config group** is a named, reusable bundle of remote-configuration settings

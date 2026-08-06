@@ -42,9 +42,11 @@ func selfUpdateDisabled() bool {
 // every update (fail-closed), logged once at startup.
 func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) *update.Updater {
 	log := newLogger()
-	pub, err := update.PinnedKey()
+	pubs, err := update.PinnedKeys()
 	if err != nil {
-		log.Warn("agent updater: no valid pinned signing key; self-updates are DISABLED (build with -ldflags -X ...update.PublicKeyBase64=<key>)", "err", err)
+		// Unpinned builds still update via central's unsigned dist channel
+		// (authenticated TLS + sha256); only SIGNED releases need the pin.
+		log.Warn("agent updater: no pinned signing key; signed releases will be refused, the central dist channel still applies (build with -ldflags -X ...update.PublicKeyBase64=<key>[,<next-key>] to pin)", "err", err)
 	}
 	return update.New(update.Config{
 		BaseURL:        centralURL,
@@ -53,7 +55,7 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 		HTTP:           httpClient,
 		DataDir:        dataDir,
 		CurrentVersion: Version,
-		PublicKey:      pub,
+		PublicKeys:     pubs,
 		Interval:       envDuration(envUpdatePollInterval, 6*time.Hour),
 		Logger:         log,
 		// Under a service manager, prefer a clean restart-exit after an A/B swap

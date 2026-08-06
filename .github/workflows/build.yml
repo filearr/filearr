@@ -40,6 +40,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless build provenance (SLSA): the workflow's OIDC identity
+      # signs an attestation binding the pushed image digest to this repo,
+      # workflow, and commit — publicly logged (Rekor), no key custody.
+      # Verify: gh attestation verify oci://ghcr.io/pwsh/filearr:latest -R pwsh/filearr
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +69,7 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: push
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -78,6 +85,11 @@ jobs:
           # wall time; mode=max also caches arm64 for the next release.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   # Standalone inventory-agent container (agent/Dockerfile): the pure-Go agent
   # + enrollment/rescan entrypoint, published as <repo>-agent for the Unraid
@@ -91,6 +103,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Same Sigstore keyless provenance as the main image job.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -112,6 +127,7 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: push
         with:
           context: ./agent
           platforms: linux/amd64,linux/arm64
@@ -124,3 +140,8 @@ jobs:
           # build and the two would evict each other's layers.
           cache-from: type=gha,scope=agent-image
           cache-to: type=gha,mode=max,scope=agent-image
+      - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}-agent
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

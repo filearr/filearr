@@ -141,11 +141,28 @@ source IP. Either bucket crossing the threshold locks it, and the lock is checke
 ## Signed agent updates
 
 Agent self-update integrity does **not** trust central. Releases are Ed25519-signed
-with a key that lives only on your signing machine; the public key is pinned into
-each agent binary at build time; a mismatched sha256, an invalid signature, or an
-unpinned build all refuse the update. Rollout is a **canary → promote** gate, and
+with a key that lives only on your signing machine (or hardware token); the public
+key is pinned into each agent binary at build time; a mismatched sha256 or an
+invalid signature refuses the update. Rollout is a **canary → promote** gate, and
 a crash-looping new binary is **automatically rolled back** by boot counting. See
 [Agents → self-update](agents.md#self-update-with-signed-releases).
+
+Three complementary trust layers:
+
+- **Pinned Ed25519 manifest signatures** — the operator authorized this exact
+  update, valid even against a compromised central or CI. Binaries can pin
+  **two comma-separated keys** (current + next) so key rotation rolls through
+  the normal update channel instead of a fleet rebuild.
+- **Sigstore build provenance** — every published image is attested keylessly
+  by the release workflow (`actions/attest-build-provenance`: Fulcio-signed,
+  Rekor-logged, no private key in custody). Anyone can verify a pull came from
+  this repo's workflow: `gh attestation verify oci://ghcr.io/pwsh/filearr:latest
+  -R pwsh/filearr`. The first-install agent binaries are baked inside the
+  attested image, inheriting its provenance.
+- **Unpinned builds** (installed via the central install scripts) accept
+  central's dist update channel over their authenticated TLS session plus
+  sha256 — the same trust their original install carried; pinned builds refuse
+  unsigned bits entirely (fail-closed).
 
 ## Data-safety model (recycle bin / tombstones)
 

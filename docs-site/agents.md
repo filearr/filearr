@@ -391,8 +391,11 @@ re-sign a manifest, so a compromised central cannot push a wrongly-signed binary
 - The **signing private key lives only on your signing machine** (default
   `~/.filearr-signing`), backed up to a vault, never committed, never on central.
 - The matching **public key is pinned into the agent binary at build time**
-  (`-ldflags`). A binary built **without** the pin refuses every update
-  (fail-closed) — fine for dev, wrong for a fleet.
+  (`-ldflags`). A binary built **without** the pin refuses every signed
+  release (it can still follow the central-version channel below). The pin
+  accepts **two comma-separated keys** (current + next), so key rotation —
+  including moving the key onto a YubiKey or KMS — rolls through the normal
+  update channel instead of rebuilding the fleet.
 - Each release is Ed25519-signed over a canonical manifest; the agent re-derives
   the canonical bytes and verifies before swapping.
 

@@ -132,3 +132,58 @@ func TestDecodePublicKey(t *testing.T) {
 		t.Fatal("malformed key decoded without error")
 	}
 }
+
+func TestPinnedKeysMultiAndVerifyAny(t *testing.T) {
+	pubA, privA := testKeypair(t)
+	pubB, privB := testKeypair(t)
+
+	// PinnedKeys parses comma-separated dual pins (rotation: current,next).
+	old := PublicKeyBase64
+	defer func() { PublicKeyBase64 = old }()
+	PublicKeyBase64 = base64.StdEncoding.EncodeToString(pubA) + "," +
+		base64.StdEncoding.EncodeToString(pubB)
+	keys, err := PinnedKeys()
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("dual pin parse: keys=%d err=%v", len(keys), err)
+	}
+
+	m := Manifest{Version: "1.0.0", CreatedAt: "2026-08-05T00:00:00Z",
+		Artifacts: []Artifact{{Platform: "linux", Arch: "amd64", SHA256: "ab", Size: 1, URL: "a"}}}
+
+	// signed by the SECOND key -> still accepted (any pinned key verifies)
+	sig, err := Sign(m, privB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+	if err := VerifyAny(m, keys); err != nil {
+		t.Fatalf("second-key manifest must verify: %v", err)
+	}
+	// signed by the first key too
+	sig, _ = Sign(m, privA)
+	m.Signature = sig
+	if err := VerifyAny(m, keys); err != nil {
+		t.Fatalf("first-key manifest must verify: %v", err)
+	}
+	// a foreign key verifies against neither
+	_, privC := testKeypair(t)
+	sig, _ = Sign(m, privC)
+	m.Signature = sig
+	if err := VerifyAny(m, keys); err == nil {
+		t.Fatal("foreign-key manifest must be refused")
+	}
+	// empty set fails closed
+	if err := VerifyAny(m, nil); err != ErrNoPinnedKey {
+		t.Fatalf("empty key set: got %v, want ErrNoPinnedKey", err)
+	}
+
+	// one malformed entry fails the WHOLE set
+	PublicKeyBase64 = base64.StdEncoding.EncodeToString(pubA) + ",###"
+	if _, err := PinnedKeys(); err == nil {
+		t.Fatal("malformed second pin must fail the whole set")
+	}
+	PublicKeyBase64 = ""
+	if _, err := PinnedKeys(); err != ErrNoPinnedKey {
+		t.Fatalf("empty pin: got %v, want ErrNoPinnedKey", err)
+	}
+}
