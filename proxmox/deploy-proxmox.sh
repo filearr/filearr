@@ -1023,11 +1023,12 @@ agents_summary() {
     echo "  mTLS agent plane:      https://agents.${TLS_DOMAIN}  (for the later auth-mode flip)"
     echo "  LAN DNS overrides needed: ca.${TLS_DOMAIN} + agents.${TLS_DOMAIN} -> ${ip}"
   fi
-  echo "  Enroll a machine:"
+  echo "  Enroll a machine (one command — central serves the binaries + installer):"
   echo "    1. Admin -> Agents -> Mint token (shown once, single-use, short TTL)"
-  echo "    2. on the device:  filearr-agent enroll -central ${central} -token <paste> -name <name>"
-  echo "    3.                 filearr-agent scan --root <media path>   (repeatable)"
-  echo "    4.                 filearr-agent run                        (daemon; wrap in a service)"
+  echo "    2. Linux/macOS:  curl -fsSL ${central}/api/v1/agent-dist/install.sh | sh -s -- -t <token>"
+  echo "       Windows:     irm ${central}/api/v1/agent-dist/install.ps1 -OutFile install-agent.ps1; .\\install-agent.ps1 -Token <token>   (elevated shell)"
+  echo "       (downloads the platform binary sha256-verified, enrolls, installs the auto-start service)"
+  echo "    Manual alternative: filearr-agent enroll -central ${central} -token <paste> && sudo filearr-agent install"
   echo "  Full guide: docs/ops/agents.md"
 }
 

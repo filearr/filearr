@@ -152,6 +152,8 @@ queue through which central asks an agent to do ONE thing on demand:
 | `stat_check` | cheap existence/freshness `stat()` of an agent-hosted item | verify UX (P10-T3) |
 | `rehash_check` | strong verify: quick/content hash re-read | verify UX (P10-T3) |
 | `stage_upload` | start an agent→central retrieve staging upload | retrieve API (P10-T13) |
+| `inventory` | run the W6-D3 inventory collectors on the agent host | inventory UX (W6-D3) |
+| `self_update` | run one immediate update check-and-apply (§8.6) — **agent-scoped: `item_id` is absent** | console update button (`POST /agents/{id}/self-update`) |
 
 **Lifecycle.** `pending` → (agent poll delivers) `picked_up` → (agent reports)
 `done` / `failed`. A per-minute maintenance sweep flips a stale unpicked

@@ -86,6 +86,29 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
       when enabled it computes dense vectors locally (never a cloud API — private
       files never leave the box) and downloads a ~130 MB model once.
 
+## Sidecar files (.nfo, .xmp, artwork) {#sidecar-files}
+
+Media collections are full of files that *describe* other files: Kodi/Emby
+`.nfo` metadata, `poster.jpg`/`folder.jpg` artwork, `-thumb` images, JRiver
+`*_JRSidecar.xml`, and photo-tool XMP sidecars (both `photo.xmp` and the
+digiKam-style `photo.jpg.xmp` double extension). Filearr catalogs them but
+treats them as **sidecars, not content**:
+
+- Every scan classifies sidecars by path shape and links each to its parent
+  item (`sidecar_of`) — the same-stem sibling, or the folder's primary media
+  file for folder-level artwork. Kodi NFO title/plot/year fold into the
+  parent's extracted metadata.
+- Sidecars are **hidden from default search results and from the timeline
+  histogram** (they'd otherwise dominate both — a bulk photo-tool metadata
+  export can stamp hundreds of thousands of `.xmp` files in a week). They stay
+  in the catalog and are reachable with the search filters
+  `include_sidecars=true` or `sidecar_of=<parent-id>`.
+- **Agent-replicated libraries get the same treatment**: replication itself
+  never sets the link, so central runs a debounced link-only association pass
+  after each replication burst plus a nightly sweep ("Agent sidecar
+  association" on the Jobs page). NFO parsing is skipped there — central
+  cannot read files on the agent's disk.
+
 ## Extracted metadata vs. user edits (the separation contract)
 
 Filearr keeps two distinct metadata stores on every item:

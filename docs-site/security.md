@@ -28,11 +28,13 @@ Local passwords use **argon2id** (a slow, memory-hard KDF appropriate for
 low-entropy human secrets) — a deliberately different trust model from the
 sha256-at-rest API keys.
 
-**Auth is off by default** (`FILEARR_AUTH_ENABLED=false`) for a frictionless
-first look. Turning it on is additive and zero-downtime; existing API keys keep
-working. The **first admin is always a local account**, which is your break-glass
-path if a federated provider locks everyone out. See
-[Operations → enabling auth](operations.md#enabling-authentication).
+**Auth is ON by default** (`FILEARR_AUTH_ENABLED=true`): the first browser
+visit shows a one-time **"create the administrator account"** screen (backed by
+`POST /api/v1/auth/bootstrap`, which refuses once any user exists). Setting
+`FILEARR_AUTH_ENABLED=false` opens every route — a development/trusted-LAN
+convenience only. The **first admin is always a local account**, which is your
+break-glass path if a federated provider locks everyone out. See
+[Operations → authentication](operations.md#enabling-authentication).
 
 ### Federated login (optional)
 

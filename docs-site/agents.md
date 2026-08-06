@@ -65,9 +65,9 @@ The scripts detect OS/arch, download the matching binary, verify its sha256
 against the manifest, and hand off to the installer below. (`-d` /
 `-DownloadOnly` fetches the binary without installing the service.)
 
-**Manual install:** download the platform binary (from
-`<central>/api/v1/agent-dist` or a release) and the sidecar into one folder,
-then (as admin/root):
+**Manual install:** download the platform binary from
+`<central>/api/v1/agent-dist` (the manifest lists every platform with its
+sha256) and put it beside the sidecar in one folder, then (as admin/root):
 
 ```bash
 filearr-agent install --config filearr-agent.json

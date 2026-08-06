@@ -31,6 +31,10 @@ Additional considerations:
   pipeline falls back to software automatically when no device is present.
 - **RAM for semantic search (optional).** The local ONNX embedder adds roughly
   half a gigabyte of resident memory when enabled; it is **off by default**.
+- **Host tooling.** A current **Docker Engine with the Compose v2 plugin**
+  (`docker compose` — the stack uses profiles and healthcheck conditions) and
+  **`git`** to fetch the source. The Proxmox wizard installs Docker inside the
+  CT itself; Unraid ships its own Docker.
 
 ## Platform / OS matrix
 
@@ -50,7 +54,7 @@ The stack is version-pinned. These are the current pins:
 
 | Component | Version | Why it matters |
 |---|---|---|
-| Python | 3.13 | Backend runtime (the image uses `python:3.13-slim`). |
+| Python | 3.14 | Backend runtime (the image uses `python:3.14-slim`). |
 | PostgreSQL | 18.x (18.4 pinned) | Source of truth **and** job queue; uses native `uuidv7()` primary keys and PG18 async I/O. |
 | Meilisearch | v1.49.0 (pin **≥ 1.48.2**) | Search projection. See the security note below. |
 | FastAPI | 0.139 | Native Server-Sent Events (requires ≥ 0.135). |

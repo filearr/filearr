@@ -26,6 +26,7 @@ internal knob. Defaults shown are the built-in defaults.
 | `FILEARR_SECRET_KEY` | *(unset)* | Envelope key for alert-channel secret encryption (**required** for alerts; never auto-rotated). |
 | `FILEARR_PUBLIC_BASE_URL` | *(unset)* | Absolute prefix for export/report download links; blank = site-relative. |
 | `FILEARR_SHARE_MAP_PATH` | `/config/share-map.json` | Deploy-written share map for auto share locations. |
+| `FILEARR_AUTO_INIT_DB` | `true` | Container-level (entrypoint, app command only): run the idempotent `scripts/init_db.py` bootstrap on start, retrying while Postgres comes up. Set `false` to manage migrations manually. |
 
 ## Authentication & sessions
 
@@ -150,6 +151,10 @@ model and the source `config.py` for every field.
 | `FILEARR_PROXY_SHARED_SECRET` | *(unset)* | **Secret** — mTLS proxy ↔ backend trust (required for mtls modes). |
 | `FILEARR_AGENT_OFFLINE_ALERT_SECONDS` | `172800` | Agent-offline alert threshold (48h). |
 | `FILEARR_AGENT_REPLICATION_STALL_ALERT_SECONDS` | `21600` | Replication-stall alert threshold (6h). |
+| `FILEARR_AGENT_DIST_DIR` | `/app/agent-dist` | First-install agent binaries + install scripts served by `/api/v1/agent-dist` (baked into the image; the API 404s gracefully when absent). |
+| `FILEARR_AGENT_ASSOCIATE_DEBOUNCE_SECONDS` | `120` | Debounce for the post-replication sidecar-association pass on agent-backed libraries. |
+| `FILEARR_AGENT_RELEASES_DIR` | `{config_dir}/agent-releases` | Uploaded signed-release artifact binaries (manifests live in Postgres). |
+| `FILEARR_AGENT_CANARY_GROUP` | `canary` | Rollout group that receives `canary`-stage releases before promotion. |
 
 ## Alerting
 

@@ -22,8 +22,16 @@ procedure and how to verify a dump.
 cd /opt/filearr
 git pull                                        # or fetch the new source
 docker compose build --pull                     # rebuild the app/worker image
-docker compose run --rm app python scripts/init_db.py    # idempotent migrate
-docker compose up -d
+docker compose up -d                            # app auto-runs the idempotent migrate on start
+```
+
+The app container runs `scripts/init_db.py` itself on start, so `up -d` is the
+whole migration step. To watch migration output explicitly (or if you set
+`FILEARR_AUTO_INIT_DB=false`), run it by hand first — it is idempotent either
+way:
+
+```bash
+docker compose run --rm app python scripts/init_db.py
 ```
 
 ## Proxmox LXC upgrade

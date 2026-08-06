@@ -1,18 +1,31 @@
 # Docker Compose
 
 The compose stack is the canonical Filearr deployment. This page walks through
-the compose file, the one-time bootstrap, the environment variables you must set,
+the prerequisites, the compose file, the environment variables you must set,
 and the two gotchas that bite people.
+
+## Prerequisites
+
+- **Docker Engine with the Compose v2 plugin** (`docker compose`, not the old
+  `docker-compose` binary — the stack uses profiles and healthcheck
+  conditions). Any current Engine release qualifies.
+- **`git`** to fetch the source. The shipped compose file **builds the images
+  locally** (`build: .`), so the full source tree is required; pre-built
+  multi-arch images also exist at `ghcr.io/pwsh/filearr` /
+  `ghcr.io/pwsh/filearr-agent` if you'd rather swap `build:` for `image:`.
+- Your media reachable on the host at a stable path (local disk, or an
+  SMB/NFS/rclone mount) — mounted **read-only** into the containers.
 
 ## Quick start
 
 ```bash
+git clone https://github.com/pwsh/filearr.git && cd filearr
 cp .env.example .env          # then edit the secrets (see below)
-docker compose up -d
+docker compose up -d          # builds images on first run, then starts the stack
 ```
 
-The app container runs the idempotent bootstrap itself on start (waiting for
-Postgres), so `docker compose up -d` is the whole quick start. Running the
+The app container runs the idempotent DB bootstrap itself on start (waiting
+for Postgres), so `docker compose up -d` is the whole quick start. Running the
 bootstrap explicitly still works — useful for watching migration output — and
 `FILEARR_AUTO_INIT_DB=false` on the app service disables the automatic run:
 
@@ -20,7 +33,9 @@ bootstrap explicitly still works — useful for watching migration output — an
 docker compose run --rm app python scripts/init_db.py    # idempotent bootstrap
 ```
 
-The web UI is then at `http://localhost:8484` and the interactive API docs at
+The web UI is then at `http://localhost:8484` (first visit shows the one-time
+**create-the-administrator-account** screen — see
+[First run](index.md#first-run)) and the interactive API docs at
 `http://localhost:8484/api/docs`.
 
 ## The compose file, service by service
@@ -57,7 +72,10 @@ flaps. Keep it.
 
 ## Environment variables
 
-Start from `.env.example` and change at least these:
+Start from `.env.example` and change at least these (generate the two
+passwords with `openssl rand -hex 24` or
+`python -c "import secrets; print(secrets.token_urlsafe(32))"` — they are
+service credentials nobody types):
 
 ```bash
 POSTGRES_PASSWORD=change-me-too
@@ -95,6 +113,10 @@ The full, grouped list is in the [Configuration reference](../reference/configur
 
 ## The bootstrap: `init_db.py`
 
+The app container **runs this automatically on every start** (retrying while
+Postgres comes up; `FILEARR_AUTO_INIT_DB=false` opts out) — invoke it manually
+only when you want to watch migration output or manage migrations yourself:
+
 ```bash
 docker compose run --rm app python scripts/init_db.py
 ```
@@ -121,15 +143,55 @@ This is **idempotent** and safe to re-run. It:
     set in the image's `ENV`; do not drop it if you customize the entrypoint or
     the worker command.
 
+## HTTPS with the bundled Caddy {#https-with-the-bundled-caddy}
+
+The compose file ships an optional **`caddy`** TLS front (a custom build:
+Caddy + the Cloudflare DNS and layer-4 plugins) publishing 443/8443. Two
+modes, chosen by which Caddyfile the service loads:
+
+- **Internal CA (LAN, the default `Caddyfile.internal`):** runs as part of the
+  normal `docker compose up -d` and serves `https://<host>:8443` with
+  certificates from Caddy's own local CA; each client browser must trust that
+  CA root once (from the `caddy_data` volume under
+  `pki/authorities/local`) or click through the warning.
+- **Real certificates (DNS-01 via Cloudflare):** set in `.env`
+  `FILEARR_CADDYFILE=Caddyfile.acme`, `FILEARR_TLS_DOMAIN=<your.zone>`,
+  `FILEARR_ACME_EMAIL=<you@example.com>`, and a `CLOUDFLARE_API_TOKEN` scoped
+  to DNS edits for the zone, then `docker compose up -d caddy` to reload.
+  DNS-01 issuance needs no inbound port from the internet — LAN-only
+  deployments get real certificates.
+
+Any other reverse proxy you already run (SWAG, NPM, Traefik…) works exactly
+as well — point it at `app:8000` / host port 8484 and forward
+`X-Forwarded-*`. Serve HTTPS before relying on logins: the session cookie is
+`Secure`-only.
+
 ## Verifying it works
 
 ```bash
-curl http://localhost:8484/api/v1/health          # -> 200
+docker compose ps                                  # every service Up; postgres healthy
+docker compose logs app --tail 20                  # look for the init_db bootstrap + uvicorn startup
+curl http://localhost:8484/api/v1/health           # -> 200 {"status":"ok"}
+```
+
+Then do the [first-run flow](index.md#first-run) in the browser: create the
+admin account, add a library, scan it, and search. The equivalent API calls
+need credentials once the admin exists (auth is on by default) — a session
+cookie from login, or `FILEARR_AUTH_ENABLED=false` in a throwaway dev stack:
+
+```bash
+# dev stack with auth disabled ONLY:
 curl -X POST http://localhost:8484/api/v1/libraries \
   -H 'Content-Type: application/json' \
   -d '{"name":"media","root_path":"/data/media"}'
-# then start a scan with the returned id:
 curl -X POST http://localhost:8484/api/v1/libraries/<id>/scan
 ```
 
-Results appear in the UI search as extraction completes.
+Results appear in search as the scan commits batches; heavier metadata
+extraction back-fills over the following minutes.
+
+## After it's up
+
+Follow the shared [first-run guide](index.md#first-run) — first admin, first
+library, TLS, **Postgres backups** (`scripts/backup.sh`), and where to go next
+(agents, alerts, [upgrades](upgrades.md)).

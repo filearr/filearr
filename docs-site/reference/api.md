@@ -47,7 +47,8 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 | Stats | `stats` | Catalog and operational statistics. |
 | Auth & identity | `auth`, `oidc`, `rbac`, `audit` | Login/session, SSO, path grants, audit log. |
 | Alerts | `alerts` | Channels, rules, events. |
-| Agents *(when enabled)* | `agents`, `agent-commands`, `agent-policies`, `agent-releases`, `transfers`, `agent-staging`, `agent-thumbs`, `agent-share-maps` | The distributed-agent control and data planes. |
+| Agents *(when enabled)* | `agents`, `agent-commands`, `agent-policies`, `agent-releases`, `transfers`, `agent-staging`, `agent-thumbs`, `agent-share-maps` | The distributed-agent control and data planes — including `POST /agents/{id}/self-update` (queue an update for the agent's next check-in). |
+| Agent install *(when enabled)* | `agent-dist` | **Unauthenticated** first-install surface: platform-binary manifest with sha256s, downloads, and the templated `install.sh` / `install.ps1` scripts. |
 
 ## A few common calls
 

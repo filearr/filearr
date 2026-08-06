@@ -641,23 +641,27 @@ Postgres in one `rebuild-index` call.
 application; the project's history is kept in a git bundle that you clone rather
 than initializing a repo on a network share (SMB corrupts git lock/rename ops).
 
-## Enabling authentication
+## Authentication and the first admin {#enabling-authentication}
 
-Auth is **off by default** (`FILEARR_AUTH_ENABLED=false`). Turning it on is
-additive and zero-downtime — existing Bearer API keys keep working alongside
-cookie sessions.
+Auth is **on by default** (`FILEARR_AUTH_ENABLED=true`). On a fresh install the
+**first browser visit shows a one-time "create the administrator account"
+screen** — that's the whole bootstrap for the normal path. The equivalent API
+call (once only; 409 after any user exists — and the last admin can't be
+deleted, so you can't lock yourself out):
 
-1. **Serve over TLS first** (the session cookie is `Secure` only over HTTPS;
-   behind Caddy, start uvicorn with `--proxy-headers`).
-2. Set `FILEARR_AUTH_ENABLED=true`, restart the app.
-3. Bootstrap the first admin (once only; returns 409 after any user exists — and
-   the last admin can't be deleted, so you can't lock yourself out):
+```bash
+curl -X POST http://<host>:8484/api/v1/auth/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"a-strong-passphrase"}'
+```
 
-    ```bash
-    curl -X POST https://filearr.example.com:8443/api/v1/auth/bootstrap \
-      -H 'Content-Type: application/json' \
-      -d '{"username":"admin","password":"a-strong-passphrase"}'
-    ```
+Notes:
+
+- **Serve over TLS before real use** (the session cookie is `Secure` only over
+  HTTPS; behind Caddy, start uvicorn with `--proxy-headers`).
+- `FILEARR_AUTH_ENABLED=false` opens every route — a development / trusted-LAN
+  convenience, not a production posture. Flipping auth on later is additive
+  and zero-downtime; Bearer API keys keep working alongside cookie sessions.
 
 **Break-glass (SSO/LDAP lockout).** The first admin is always local. If an IdP is
 down or a role map locks everyone out, set `FILEARR_OIDC_ENABLED=false` (and/or

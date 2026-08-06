@@ -21,13 +21,23 @@ Until they are published to Community Applications, install them manually.
     docker network create filearr
     ```
 
-2. **Install the templates.** Copy the four XML files to
+2. **Install the templates.** Fetch the four XML files from the repo's
+   [`unraid/` folder](https://github.com/pwsh/filearr/tree/main/unraid) (e.g.
+   `wget https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr.xml`
+   and siblings), copy them to
    `/boot/config/plugins/dockerMan/templates-user/` on the server, then in the
-   Docker tab choose **Add Container** and pick each template.
+   Docker tab choose **Add Container** and pick each template. **Delete the
+   copied XMLs after each container is created** — Unraid saves its own
+   `my-<name>.xml` on Apply, and a leftover pristine copy shadows your saved
+   settings.
 
 3. **Set matching secrets across containers.** Use the same `POSTGRES_PASSWORD`
    and DSNs, and the same `MEILI_MASTER_KEY`, everywhere they appear. These are
-   masked fields you fill once each.
+   masked fields you fill once each — generate values with
+   `openssl rand -hex 24` in the Unraid terminal. If you plan to use alert
+   channels, also set `FILEARR_SECRET_KEY` on the `filearr` container
+   (`openssl rand -hex 32`; the alerts API returns 503 without it, and it must
+   never be rotated once channels exist).
 
 4. **Start the containers** in install order. The `filearr` app bootstraps the
    database itself on first start (idempotent `scripts/init_db.py`, retrying
@@ -55,9 +65,11 @@ Unraid-native path is to put the app behind a reverse proxy:
   plugin), which includes the Caddy TLS sidecar (self-signed LAN CA, HTTPS on
   8443).
 
-!!! note "Set up HTTPS before enabling login"
-    Session cookies are marked `Secure`, so the login flow requires HTTPS. Put
-    the reverse proxy in place before you turn authentication on.
+!!! note "Set up HTTPS early — login needs it"
+    Auth is **on by default** and session cookies are marked `Secure`, so the
+    login flow requires HTTPS anywhere beyond plain-HTTP LAN testing. Put the
+    reverse proxy in place before relying on logins (or set
+    `FILEARR_AUTH_ENABLED=false` while evaluating on a trusted LAN).
 
 ## Optional: hardware-accelerated video thumbnails
 
@@ -70,3 +82,15 @@ the **`filearr-worker`** container's Extra Parameters:
 
 Safe to skip — the thumbnail pipeline falls back to software decoding
 automatically when no render device is present.
+
+## After it's up
+
+Open `http://<tower>:8484` and follow the shared
+[first-run guide](index.md#first-run): the one-time create-admin screen, your
+first library (`/data/media/...` paths as mapped above), a scan, and a search.
+Then set up **Postgres backups** — the `filearr-postgres` appdata is the only
+unrecoverable state (`pg_dump -Fc` from the container console, or the repo's
+`scripts/backup.sh` pattern; Meilisearch and thumbnails are rebuildable). To
+feed this catalog from other machines, see
+[distributed agents](../agents.md) — this box can also *be* an agent for a
+central running elsewhere via the `filearr-agent` template.

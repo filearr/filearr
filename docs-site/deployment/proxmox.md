@@ -8,6 +8,7 @@ wizard on first run and an idempotent redeploy on later runs.
 Run it on the **Proxmox host shell** (as root), from inside the project folder:
 
 ```bash
+git clone https://github.com/pwsh/filearr.git && cd filearr   # once
 bash proxmox/deploy-proxmox.sh                # first run -> wizard, then deploy
 bash proxmox/deploy-proxmox.sh               # later runs -> redeploy with saved defaults
 bash proxmox/deploy-proxmox.sh --reconfigure # re-run the wizard
@@ -31,6 +32,10 @@ The wizard saves your answers so redeploys never re-ask. It prompts once for:
   and the step-ca SNI passthrough).
 - **Distributed agents** — enable the step-ca certificate authority and the
   enrollment endpoints. Safe to enable now and enroll machines later.
+- **Thumbnail volume** — an optional dedicated volume for the thumbnail cache
+  (`THUMBS_STORAGE` + size in GB): pick a storage to keep a large cache off
+  the CT rootfs, or leave blank to share the rootfs. The cache is disposable
+  either way (bounded by the thumbnail GC).
 - **Storage definitions** — one or more network shares (see below).
 
 ### The prompt-once model, and where secrets go
@@ -137,3 +142,13 @@ A redeploy is safe and self-quiescing. It:
 
 See [Upgrades & migrations](upgrades.md) for what happens to the schema on
 redeploy.
+
+## After it's up
+
+The wizard's summary prints your URLs (and, with agents on, the one-command
+agent installer line). Then follow the shared
+[first-run guide](index.md#first-run): the one-time create-admin screen on
+first visit, your first library, a scan, and a search. Back up **Postgres**
+from the host on a schedule — `scripts/backup.sh` is `pct exec`-friendly and
+wraps a `pg_dump -Fc` with retention; everything else in the CT is
+disposable/rebuilt by redeploy.
