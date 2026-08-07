@@ -152,3 +152,29 @@ first visit, your first library, a scan, and a search. Back up **Postgres**
 from the host on a schedule — `scripts/backup.sh` is `pct exec`-friendly and
 wraps a `pg_dump -Fc` with retention; everything else in the CT is
 disposable/rebuilt by redeploy.
+
+## Shell access — where's the container password?
+
+Nowhere: the wizard deliberately never sets a root password inside the CT, so
+there is no stored credential to look up. Administration happens from the
+**Proxmox host** shell (node → **Shell** in the web UI, or SSH to the host),
+which can always enter an LXC as root without one:
+
+```bash
+pct enter <vmid>            # root shell inside the container
+pct exec <vmid> -- <cmd>    # run one command without entering
+```
+
+The CT's **>_ Console** in the web UI shows a `login:` prompt, and with no
+password set `root` cannot log in there. If you want console (or in-CT SSH)
+logins to work, set a password once from the host:
+
+```bash
+pct exec <vmid> -- passwd   # interactively set root's password
+```
+
+Inside the container the stack lives at `/opt/filearr` — that directory holds
+`.env`, `docker-compose.yml`, and `config/`, and it's where `docker compose`
+commands run. The **application's** admin login is separate and unrelated: it
+is whatever you created on the first-visit create-admin screen
+([first-run guide](index.md#first-run)).
