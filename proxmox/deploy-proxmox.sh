@@ -865,10 +865,17 @@ push_source() {
   echo "==> pushing project source into CT:$CT_APP_DIR"
   warn_dirty_tree "$PROJECT_DIR"
   local tarball; tarball=$(mktemp /tmp/filearr-src.XXXX.tar.gz)
+  # GNU tar --exclude matches the pattern at ANY path depth: a bare
+  # `--exclude config` also stripped agent/internal/config (a Go package!)
+  # from the push, so the in-CT image build failed at the agent-binaries
+  # stage — silently, for as long as BuildKit could serve the stage from
+  # cache (live incident 2026-08-07). Anchor project-specific dirs with ./ ;
+  # only universal junk names (.git, node_modules, .venv, __pycache__) may
+  # match recursively.
   tar -C "$PROJECT_DIR" -czf "$tarball" \
-    --exclude .git --exclude node_modules --exclude .venv --exclude dist \
-    --exclude __pycache__ --exclude config --exclude '*.bundle*' \
-    --exclude 'RECOVERY-*' .
+    --exclude .git --exclude node_modules --exclude .venv \
+    --exclude __pycache__ --exclude ./config --exclude ./frontend/dist \
+    --exclude '*.bundle*' --exclude 'RECOVERY-*' .
   # Content stamp: proves WHICH source this deploy pushed, end to end. The
   # stamp is baked into the image (backend/.build-stamp -> /app/.build-stamp)
   # and verified after the stack starts (see deploy_stack).
