@@ -32,6 +32,13 @@ if sys.platform == "win32":
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
+# The DB log sink (filearr.logsink) installs itself at worker-module import /
+# app lifespan and spawns a flusher thread against the live database_url —
+# never wanted under tests (sink tests construct DbLogSink directly with a
+# private conninfo). Env, not monkeypatch: import-time installs precede any
+# fixture. setdefault so a deliberate override still wins.
+os.environ.setdefault("FILEARR_LOG_DB_ENABLED", "false")
+
 # uuidv7() shim so the baseline migration's `SELECT uuidv7()` guard + server
 # defaults work on stock Postgres in CI/sandbox.
 # --------------------------------------------------------------------------- #

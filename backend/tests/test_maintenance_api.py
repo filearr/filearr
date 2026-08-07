@@ -219,3 +219,69 @@ async def test_pre_migration_window_is_graceful(db):
         rows = await maintenance.maintenance_status(s)
     assert {r["key"] for r in rows} == set(maintenance.MAINT_TASKS)
     assert all(not r["overridden"] for r in rows)
+
+
+async def test_last_run_duration_from_events(db):
+    """Last-run rows carry the wall time of the latest attempt, derived from
+    procrastinate's event log (started -> succeeded/failed/aborted). A retry
+    whose newest 'started' postdates every finish event is still running, so
+    it reports no duration. Minimal stand-in tables — the real schema is
+    procrastinate-owned and absent from test DBs."""
+    from sqlalchemy import text as sqltext
+
+    t0 = datetime(2026, 8, 7, 12, 0, 0, tzinfo=UTC)
+    async with db() as s:
+        await s.execute(
+            sqltext(
+                "CREATE TABLE procrastinate_jobs "
+                "(id bigint PRIMARY KEY, task_name text, status text)"
+            )
+        )
+        await s.execute(
+            sqltext(
+                "CREATE TABLE procrastinate_events "
+                "(id bigserial PRIMARY KEY, job_id bigint, type text, "
+                "at timestamptz)"
+            )
+        )
+        await s.execute(
+            sqltext(
+                "INSERT INTO procrastinate_jobs VALUES "
+                "(1, 'taskA', 'succeeded'), (2, 'taskA', 'succeeded'), "
+                "(3, 'taskB', 'doing')"
+            )
+        )
+        await s.execute(
+            sqltext(
+                "INSERT INTO procrastinate_events (job_id, type, at) VALUES "
+                # taskA older run: must be ignored (only the latest job counts)
+                "(1, 'started', :t0), (1, 'succeeded', :t0_1h), "
+                # taskA latest run: 95 s wall time
+                "(2, 'started', :t1), (2, 'succeeded', :t1_95s), "
+                # taskB: failed attempt then a retry that is still running
+                "(3, 'started', :t2), (3, 'failed', :t2_10s), "
+                "(3, 'started', :t2_60s)"
+            ),
+            {
+                "t0": t0,
+                "t0_1h": t0.replace(hour=13),
+                "t1": t0.replace(hour=14),
+                "t1_95s": t0.replace(hour=14, minute=1, second=35),
+                "t2": t0.replace(hour=15),
+                "t2_10s": t0.replace(hour=15, second=10),
+                "t2_60s": t0.replace(hour=15, minute=1),
+            },
+        )
+        await s.commit()
+
+        out = await maintenance._last_runs(s, ["taskA", "taskB", "taskC"])
+
+        await s.execute(sqltext("DROP TABLE procrastinate_events"))
+        await s.execute(sqltext("DROP TABLE procrastinate_jobs"))
+        await s.commit()
+
+    assert out["taskA"]["duration_seconds"] == 95.0
+    assert out["taskA"]["started_at"] == t0.replace(hour=14).isoformat()
+    assert out["taskB"]["duration_seconds"] is None  # retry still running
+    assert out["taskB"]["status"] == "doing"
+    assert "taskC" not in out  # never ran

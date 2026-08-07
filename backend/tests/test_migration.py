@@ -16,7 +16,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "b8d4e6f2a157"
+HEAD = "d4b8e1f6c290"
+# app_logs (console Logs panel) revision's predecessor = doc_chunks.
+APP_LOGS_PRED = "b8d4e6f2a157"
 # doc_chunks (LLM M2) revision's predecessor = the item_frecency revision.
 CHUNKS_PRED = "a3f1c7e2d940"
 # item_frecency revision's predecessor (self_update command kind).
@@ -116,6 +118,16 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # Console Logs panel: app_logs exists at head; a one-step downgrade
+        # drops it cleanly and leaves the doc_chunks predecessor intact.
+        assert "app_logs" in _tables(engine)
+        assert {"ts", "source", "level", "levelno", "logger", "message", "exc"} <= (
+            _columns(engine, "app_logs")
+        )
+        command.downgrade(cfg, APP_LOGS_PRED)
+        assert "app_logs" not in _tables(engine)
+        assert "doc_chunks" in _tables(engine)  # predecessor intact
+        command.upgrade(cfg, "head")
         # LLM M2 (doc_chunks): passage store + the per-library chunking opt-in
         # at head; a one-step downgrade drops both, leaving item_frecency.
         assert "doc_chunks" in _tables(engine)

@@ -128,6 +128,18 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         lock="purge-job-history", editable=True,
     ),
     MaintTaskSpec(
+        key="purge_app_logs",
+        task_name="filearr.worker.purge_app_logs",
+        title="Purge console logs",
+        description=(
+            "Deletes log-stream rows (the Jobs page Logs panel) past the "
+            "retention window, plus a hard row-count trim as a log-storm "
+            "backstop."
+        ),
+        category="cleanup", default_cron="35 4 * * *",
+        lock="purge-app-logs", editable=True,
+    ),
+    MaintTaskSpec(
         key="gc_thumbnails",
         task_name="filearr.tasks.thumbs.gc_thumbnails",
         title="Thumbnail cache GC",
@@ -482,7 +494,12 @@ _LAST_RUN_SQL = text(
     """
     SELECT DISTINCT ON (j.task_name)
            j.task_name, j.id, j.status,
-           (SELECT max(e.at) FROM procrastinate_events e WHERE e.job_id = j.id) AS at
+           (SELECT max(e.at) FROM procrastinate_events e WHERE e.job_id = j.id) AS at,
+           (SELECT max(e.at) FROM procrastinate_events e
+             WHERE e.job_id = j.id AND e.type = 'started') AS started_at,
+           (SELECT max(e.at) FROM procrastinate_events e
+             WHERE e.job_id = j.id
+               AND e.type IN ('succeeded', 'failed', 'aborted')) AS finished_at
     FROM procrastinate_jobs j
     WHERE j.task_name IN :names
     ORDER BY j.task_name, j.id DESC
@@ -505,13 +522,26 @@ async def _last_runs(session: AsyncSession, names: list[str]) -> dict[str, dict]
     except Exception:  # noqa: BLE001 - projection must stay total
         return {}
     out: dict[str, dict] = {}
-    for task_name, job_id, status, at in rows:
+    for task_name, job_id, status, at, started_at, finished_at in rows:
         if at is not None and at.tzinfo is None:
             at = at.replace(tzinfo=UTC)
+        if started_at is not None and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        # Wall time of the LAST attempt. After a retry, max(started) is newer
+        # than max(finished) — that attempt is still running, so no duration.
+        duration = None
+        if (
+            started_at is not None
+            and finished_at is not None
+            and finished_at >= started_at
+        ):
+            duration = round((finished_at - started_at).total_seconds(), 1)
         out[task_name] = {
             "job_id": job_id,
             "status": status,
             "at": at.isoformat() if at else None,
+            "started_at": started_at.isoformat() if started_at else None,
+            "duration_seconds": duration,
         }
     return out
 

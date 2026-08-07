@@ -201,6 +201,7 @@ references (e.g. an OTT's `jti`) appear. See
 | GPS coordinates | Postgres (hidden unless opted in) | No |
 | Search projection | Meilisearch (local) | No |
 | Thumbnails / posters | Config-volume cache (disposable) | No |
+| Application log stream (Jobs page Logs panel) | Postgres (7-day retention) | No |
 | Agent local search history | Agent-local SQLite | **Never** |
 | File contents | Your media (read-only) | Only on explicit retrieve/thumbnail |
 | Telemetry / analytics | — | **None exists** |

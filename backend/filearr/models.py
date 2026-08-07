@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     SmallInteger,
@@ -554,6 +555,28 @@ class DocChunk(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
+
+
+class AppLog(Base):
+    """Unified log stream backing the console Logs panel. App and worker run
+    in separate containers, so both persist WARNING+ (and ``filearr.*`` INFO)
+    records here via the fail-open batching sink in :mod:`filearr.logsink`.
+    High-churn: bigint identity PK (keyset pagination), rows bounded by the
+    ``purge_app_logs`` retention task. ``exc`` is the length-capped traceback
+    when the record carried one."""
+
+    __tablename__ = "app_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), index=True
+    )
+    source: Mapped[str] = mapped_column(Text)
+    level: Mapped[str] = mapped_column(Text)
+    levelno: Mapped[int] = mapped_column(SmallInteger)
+    logger: Mapped[str] = mapped_column(Text)
+    message: Mapped[str] = mapped_column(Text)
+    exc: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class MetadataProfile(Base):

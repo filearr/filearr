@@ -17,7 +17,7 @@ from filearr.errors import (
 )
 from filearr.jobs_stats import jobs_summary, running_jobs, thumbnail_totals
 from filearr.meili_stats import meili_snapshot
-from filearr.models import Item, ItemStatus
+from filearr.models import AppLog, Item, ItemStatus
 from filearr.queue_stats import queue_snapshot
 from filearr.schemas import FailedJobPage
 from filearr.security import require_scope
@@ -319,6 +319,61 @@ async def failed_jobs_view(
     items = await failed_jobs(session, limit=limit, offset=offset)
     total = await failed_jobs_count(session)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+_LOG_LEVELNO = {"info": 20, "warning": 30, "error": 40, "critical": 50}
+
+
+@router.get(
+    "/system/logs",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def logs_view(
+    min_level: Literal["info", "warning", "error", "critical"] = "info",
+    source: Literal["app", "worker"] | None = None,
+    q: str | None = None,
+    limit: int = 200,
+    before_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Tail of the unified app+worker log stream (the Jobs page Logs panel).
+
+    Newest first, keyset-paginated by row id (``before_id`` = the last id of
+    the previous page). ``q`` substring-matches message and logger name.
+    Same read scope as the page's other monitoring views (failed jobs already
+    expose error text and paths). ``enabled`` reflects the sink config so the
+    UI can explain an empty panel; a pre-migration DB degrades to empty."""
+    limit = max(1, min(limit, 1000))
+    stmt = select(AppLog).where(AppLog.levelno >= _LOG_LEVELNO[min_level])
+    if source is not None:
+        stmt = stmt.where(AppLog.source == source)
+    if q:
+        pat = f"%{q}%"
+        stmt = stmt.where(or_(AppLog.message.ilike(pat), AppLog.logger.ilike(pat)))
+    if before_id is not None:
+        stmt = stmt.where(AppLog.id < before_id)
+    stmt = stmt.order_by(AppLog.id.desc()).limit(limit)
+    try:
+        rows = (await session.execute(stmt)).scalars().all()
+    except Exception:  # noqa: BLE001 - table absent pre-migration
+        await session.rollback()
+        rows = []
+    return {
+        "enabled": get_settings().log_db_enabled,
+        "logs": [
+            {
+                "id": r.id,
+                "ts": r.ts.isoformat(),
+                "source": r.source,
+                "level": r.level,
+                "logger": r.logger,
+                "message": r.message,
+                "exc": r.exc,
+            }
+            for r in rows
+        ],
+        "next_before_id": rows[-1].id if len(rows) == limit else None,
+    }
 
 
 @router.get(

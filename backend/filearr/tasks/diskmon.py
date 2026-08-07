@@ -193,3 +193,14 @@ try:  # pragma: no cover - import-time side effect, exercised by the worker
     _log_startup()
 except Exception:  # noqa: BLE001
     pass
+
+# Console Logs panel: the worker's DB log sink rides the same only-the-worker-
+# imports-this seam (the app process installs its own in main.lifespan with
+# source='app'; install() is first-wins so test imports can't relabel). Guarded
+# and fail-open like everything above; disabled entirely under the test suite.
+try:  # pragma: no cover - import-time side effect, exercised by the worker
+    from filearr.logsink import install as _install_logsink
+
+    _install_logsink("worker")
+except Exception:  # noqa: BLE001
+    pass

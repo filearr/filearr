@@ -71,6 +71,22 @@ model and the source `config.py` for every field.
 | `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` | `2880` | Furthest-back missed cron a recovery tick fires (48h). |
 | `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` | `600` | Grace before finalizing an orphaned scan run. |
 
+### Console log stream (Jobs page Logs panel)
+
+App and worker each persist selected log records to a shared table so the Jobs
+page shows one unified activity/error stream (the two processes are separate
+containers). `filearr.*` loggers record at the configured level (the activity
+stream); every other logger records warnings and up only; per-request access
+lines are never recorded. The sink is fail-open: a broken database drops
+records rather than blocking the application.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_LOG_DB_ENABLED` | `true` | Record the log stream at all. |
+| `FILEARR_LOG_DB_LEVEL` | `INFO` | Threshold for `filearr.*` loggers. |
+| `FILEARR_LOG_RETENTION_DAYS` | `7` | Daily purge window for log rows. |
+| `FILEARR_LOG_MAX_ROWS` | `200000` | Hard row cap (log-storm backstop). |
+
 ## Search reconciliation & rebuild
 
 | Variable | Default | Purpose |

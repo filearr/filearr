@@ -353,6 +353,21 @@ class Settings(BaseSettings):
     job_history_retention_days: int = 14
     job_history_succeeded_retention_hours: int = 48
 
+    # --- Console Logs panel (filearr.logsink) ------------------------------
+    # App and worker each persist log records to the shared ``app_logs`` table
+    # so the Jobs page can show one unified activity/error stream (the two
+    # processes are separate containers — no single stdout to tail). The sink
+    # is strictly fail-open: a broken DB drops records, never blocks logging.
+    # log_db_level gates ``filearr.*`` loggers (activity); every OTHER logger
+    # is always WARNING+ only (uvicorn.access is excluded entirely — request
+    # access lines would swamp the table). Rows past the retention window are
+    # deleted by the daily ``purge_app_logs`` maintenance task, plus a hard
+    # row cap as a log-storm backstop.
+    log_db_enabled: bool = True
+    log_db_level: str = "INFO"           # threshold for filearr.* loggers
+    log_retention_days: int = 7          # FILEARR_LOG_RETENTION_DAYS
+    log_max_rows: int = 200_000          # storm backstop (purge trims to this)
+
     # --- P4-T9: ItemVersion audit retention -------------------------------
     # Attributed extractor-sourced audit rows (source='scan'/'extract:<type>')
     # are purged past this window by the daily ``purge_item_versions`` task so

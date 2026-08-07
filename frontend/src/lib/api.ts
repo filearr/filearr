@@ -1157,7 +1157,15 @@ export type MaintenanceTask = {
   editable: boolean;
   runnable: boolean;
   next_run_at: string | null;
-  last_run: { job_id: number; status: string; at: string | null } | null;
+  last_run: {
+    job_id: number;
+    status: string;
+    at: string | null;
+    /** When the latest attempt began; basis for live elapsed while `doing`. */
+    started_at?: string | null;
+    /** Wall time of the last completed attempt (started → succeeded/failed). */
+    duration_seconds?: number | null;
+  } | null;
 };
 
 /** Every registered maintenance task (read scope), registry order. */
@@ -1182,6 +1190,46 @@ export const updateMaintenance = (
     method: "PATCH",
     body: JSON.stringify(body),
   });
+
+/** One row of the unified app+worker log stream (Jobs page Logs panel). */
+export type LogRow = {
+  id: number;
+  ts: string;
+  source: "app" | "worker";
+  level: string;
+  logger: string;
+  message: string;
+  /** Length-capped traceback when the record carried one. */
+  exc: string | null;
+};
+
+export type LogsResponse = {
+  /** False when the DB log sink is disabled (explains an empty panel). */
+  enabled: boolean;
+  logs: LogRow[];
+  /** Keyset cursor for the next (older) page; null when this page was short. */
+  next_before_id: number | null;
+};
+
+/** Tail of the unified log stream, newest first (read scope). */
+export const fetchLogs = (
+  opts: {
+    min_level?: "info" | "warning" | "error" | "critical";
+    source?: "app" | "worker";
+    q?: string;
+    limit?: number;
+    before_id?: number;
+  } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (opts.min_level) qs.set("min_level", opts.min_level);
+  if (opts.source) qs.set("source", opts.source);
+  if (opts.q) qs.set("q", opts.q);
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  if (opts.before_id) qs.set("before_id", String(opts.before_id));
+  const s = qs.toString();
+  return request<LogsResponse>(`/system/logs${s ? `?${s}` : ""}`);
+};
 
 /** Re-prioritise a queue's PENDING (todo) jobs (UI-T14, admin scope). `priority`
  *  is clamped server-side to -100..100; higher runs sooner. Running jobs are

@@ -62,6 +62,31 @@ default schedule, enabled). The API surface is
 `GET/PATCH /api/v1/system/maintenance[/{task}]` and
 `POST /api/v1/system/maintenance/{task}/run`.
 
+Each task row also shows **how long the last run took** (wall time of the
+latest attempt, derived from job history) — a purge that suddenly takes
+minutes instead of seconds is an early signal worth investigating.
+
+## The Logs panel (Jobs page) {#logs-panel}
+
+Below the maintenance table, the **Logs** panel tails a unified log stream
+from both processes — the app container *and* the worker container — so you
+don't need shell access and two `docker logs` sessions to see what the system
+is doing. `filearr.*` loggers record activity at INFO and up; every other
+component records warnings and errors only; per-request access lines are never
+recorded. Error records carry their traceback (expandable per row).
+
+Filters: minimum level, process (`app`/`worker`), and a message substring;
+auto-refresh re-fetches the newest page every 10 s; "Load older" pages
+backward. The stream is bounded — rows are purged after
+`FILEARR_LOG_RETENTION_DAYS` (default 7) by the "Purge console logs" task,
+with a hard row cap as a log-storm backstop — and it stays entirely local (see
+[data collection](data-collection.md)). The API is `GET /api/v1/system/logs`.
+Recording can be disabled with `FILEARR_LOG_DB_ENABLED=false`.
+
+For *why a background job failed*, the *failed jobs* list (with per-job error
+text) remains the sharper tool; the Logs panel is the wider net — warnings
+that never failed a job, app-side request errors, startup messages.
+
 ## Scan-scheduling storms / stalled jobs / the reaper
 
 **Symptom.** A library's scheduled scan fires every scheduler tick instead of on

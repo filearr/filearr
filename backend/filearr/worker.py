@@ -1067,6 +1067,45 @@ async def purge_job_history(timestamp: int) -> int:
     return (await purge_job_history_now())["deleted"]
 
 
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.purge_app_logs",
+    queueing_lock="purge-app-logs",  # FIX-8: no retry (periodic re-runs)
+)
+async def purge_app_logs(timestamp: int) -> dict:
+    """Bound the console log stream (``app_logs``): delete rows past the
+    retention window, then — log-storm backstop — trim to the newest
+    ``log_max_rows`` regardless of age. Returns counts per phase."""
+    return await purge_app_logs_now()
+
+
+async def purge_app_logs_now() -> dict:
+    """The purge itself (task-independent, same convention as
+    ``purge_job_history_now``)."""
+    from sqlalchemy import text as sql_text
+
+    settings = get_settings()
+    async with SessionLocal() as session:
+        aged = await session.execute(
+            sql_text(
+                "DELETE FROM app_logs "
+                "WHERE ts < now() - make_interval(days => :days)"
+            ),
+            {"days": settings.log_retention_days},
+        )
+        # (cap+1)th-newest id; NULL (table smaller than cap) deletes nothing.
+        capped = await session.execute(
+            sql_text(
+                "DELETE FROM app_logs WHERE id <= ("
+                "  SELECT id FROM app_logs ORDER BY id DESC"
+                "  OFFSET :cap LIMIT 1)"
+            ),
+            {"cap": settings.log_max_rows},
+        )
+        await session.commit()
+    return {"aged": aged.rowcount, "capped": capped.rowcount}
+
+
 # --- QH-T4: small-file re-hash sweep ----------------------------------------
 # The QH-T1..T3 hashing fix (quick_hash 64-128 KiB partial-read repair, small-file
 # unconditional content_hash, xxh3-64 -> xxh3-128) changed the stored hashes for

@@ -16,6 +16,7 @@
     type ReapResult,
     type ScanRunning,
   } from "./api";
+  import LogsPanel from "./LogsPanel.svelte";
   import { help } from "./help";
 
   // UI-T10 — live job-system dashboard. Polls ONE composite endpoint
@@ -1296,6 +1297,11 @@
                     {#if t.last_run.at}
                       <span class="ml-1 tabular-nums" title={new Date(t.last_run.at).toLocaleString()}>{relTime(t.last_run.at)}</span>
                     {/if}
+                    {#if t.last_run.status === "doing" && t.last_run.started_at}
+                      <span class="ml-1 tabular-nums text-slate-400" title="Elapsed so far (refreshes with the page poll)">· {fmtDuration((Date.now() - new Date(t.last_run.started_at).getTime()) / 1000)}</span>
+                    {:else if t.last_run.duration_seconds != null}
+                      <span class="ml-1 tabular-nums text-slate-400" title="Wall time of the last completed run{t.last_run.started_at ? ` (started ${new Date(t.last_run.started_at).toLocaleString()})` : ''}">· took {fmtDuration(t.last_run.duration_seconds)}</span>
+                    {/if}
                   {:else}
                     <span class="text-xs text-slate-400" title="No run within the job-history retention window (succeeded runs are kept ~48h).">no recent run</span>
                   {/if}
@@ -1357,5 +1363,9 @@
       </tbody>
     </table>
   {/if}
+
+  <div class="mt-6">
+    <LogsPanel />
+  </div>
 
 </div>

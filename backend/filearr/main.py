@@ -15,6 +15,12 @@ from filearr.search import ensure_index
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Console Logs panel: persist this process's log stream to app_logs.
+    # In lifespan (not create_app) so unit tests on ASGITransport — which
+    # skip lifespan — never spawn flusher threads against test databases.
+    from filearr.logsink import install as install_logsink
+
+    install_logsink("app")
     # P4-T1: register the code-shipped metadata profiles (idempotent upsert).
     await seed_profiles_to_db()
     await ensure_index()
