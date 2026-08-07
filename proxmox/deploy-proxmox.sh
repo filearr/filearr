@@ -32,7 +32,7 @@ set -E  # ERR trap inherits into functions/subshells
 # Any command failing under `set -e` used to kill the script SILENTLY —
 # several "successful-looking" no-op deploys were exactly this. Now every
 # unexpected exit names the line and command, and major steps are banners.
-trap 'rc=$?; echo; echo "✗ DEPLOY FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2; echo "  Rerun with:  bash -x $0 ...  for a full trace." >&2' ERR
+trap 'rc=$?; echo; echo "✗ DEPLOY FAILED (exit $rc) at line $LINENO: $BASH_COMMAND" >&2; echo "  Rerun with:  bash -x $0 ...  for a full trace." >&2; if [[ -s "${QUIESCED_LIBS_FILE:-}" ]]; then echo "  ⚠ scans quiesced for this deploy were NOT resumed — restart them from the Admin page, or rerun the deploy." >&2; fi' ERR
 
 step() { echo; echo "═══ STEP: $* ═══"; }
 
@@ -987,8 +987,24 @@ else
   echo 'no /dev/dri in CT: video thumbs use software decode (see deploy-proxmox.sh iGPU note to enable QSV)'
 fi
 docker compose pull postgres meilisearch --quiet || true
-docker compose ${profile_args} build --pull ${FORCE_REBUILD:+--no-cache}
-docker compose ${profile_args} up -d --remove-orphans
+# Fail-fast guards (2026-08-07): this bash -c block runs WITHOUT set -e (the
+# grep/sed .env hygiene above is deliberately failure-tolerant), so a failed
+# build used to sail on — up -d restarted the OLD image, init_db bootstrapped
+# against it, and the deploy only died at the final stamp check with the real
+# error scrolled far off-screen. Abort HERE instead, at the point of failure.
+docker compose ${profile_args} build --pull ${FORCE_REBUILD:+--no-cache} || {
+  echo
+  echo '✗ image build FAILED — the running stack was NOT touched; it still runs the previous build.'
+  echo '  Common causes: CT disk full (df -h /), Docker Hub unreachable (build uses --pull),'
+  echo '  or a genuine build error — see the error output directly above.'
+  exit 1
+}
+docker compose ${profile_args} up -d --remove-orphans || {
+  echo
+  echo '✗ container start FAILED — the stack may be partially updated.'
+  echo '  Inspect with: docker compose ps  and  docker compose logs app'
+  exit 1
+}
 # Bound the buildkit cache (2026-07-21 audit: repeated deploys had accreted
 # 11 GB, 8.8 GB reclaimable, on the CT rootfs). Runs AFTER build+up so the
 # layers just built are the most-recently-used and are what --keep-storage
@@ -1089,17 +1105,44 @@ resume_scans() {
   rm -f "$QUIESCED_LIBS_FILE"
 }
 
+# "20260804T215200Z" (the fixed suffix after a stamp's last dash) -> a human
+# "2026-08-04 21:52 UTC". Pure bash slicing; empty/odd input passes through.
+_stamp_time() {
+  local ts="${1##*-}"
+  [[ "$ts" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || { echo "$1"; return; }
+  echo "${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2} UTC"
+}
+
 verify_deploy() {
   echo "==> verifying deployed image matches pushed source"
+  echo "    (stamp = content hash of the pushed source + push time; the running"
+  echo "     container reports which push it was actually built from)"
   local pushed deployed
   pushed="${BUILD_STAMP:-unknown}"
   deployed=$(pct exec "$VMID" -- bash -c \
     "cd $CT_APP_DIR && docker compose exec -T app cat /app/.build-stamp 2>/dev/null" || echo MISSING)
   echo "    pushed:   $pushed"
   echo "    deployed: $deployed"
+  if [[ "$deployed" == "MISSING" || -z "$deployed" ]]; then
+    echo "    ✗ NO STAMP READABLE — the app container is not running (or runs a stampless image)."
+    echo "      Impact: the site is likely DOWN or still on the previous build."
+    echo "      Inspect in the CT:  pct exec $VMID -- bash -c 'cd $CT_APP_DIR && docker compose ps && docker compose logs --tail=50 app'"
+    exit 1
+  fi
   if [[ "$deployed" != "$pushed" || "$pushed" == "unknown" ]]; then
-    echo "    ✗ STAMP MISMATCH — the running app was NOT built from the source just pushed."
-    echo "      Retry with a forced clean build:  FORCE_REBUILD=1 $0 <same args>"
+    echo "    ✗ STAMP MISMATCH — the running app was built from the source pushed $(_stamp_time "$deployed"),"
+    echo "      NOT the source just pushed ($(_stamp_time "$pushed"))."
+    echo "      Impact:"
+    echo "        • None of the changes just pushed are live; the stack still runs the previous"
+    echo "          build in its entirety (a coherent old version — nothing partial)."
+    echo "        • The DB bootstrap above ran against that old image, so no new migrations applied."
+    echo "        • Scans quiesced for this deploy will NOT be auto-resumed — restart them from"
+    echo "          the Admin page, or simply rerun the deploy."
+    echo "        • The new source IS on the CT at $CT_APP_DIR; only the image/container is stale."
+    echo "      Diagnose: scroll up for a failed 'docker compose build' (CT disk full? check"
+    echo "      'pct exec $VMID -- df -h /'; Docker Hub unreachable? the build uses --pull)."
+    echo "      Then retry — after fixing the cause — with a forced cache-less rebuild:"
+    echo "        FORCE_REBUILD=1 $0 <same args>"
     exit 1
   fi
   echo "    ✓ deployed image was built from this push"

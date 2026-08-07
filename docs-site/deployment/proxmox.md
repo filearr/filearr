@@ -143,6 +143,30 @@ A redeploy is safe and self-quiescing. It:
 See [Upgrades & migrations](upgrades.md) for what happens to the schema on
 redeploy.
 
+### Deploy fails with `STAMP MISMATCH`
+
+Every deploy fingerprints the source it pushes (a content hash + push
+timestamp), bakes that stamp into the image, and — after the stack starts —
+reads the stamp back out of the *running* app container. `STAMP MISMATCH`
+means the running container was built from an **earlier** push: the source
+just pushed is on the CT's disk, but the image build for it didn't take, so
+Docker kept running the previous build.
+
+What state you're in:
+
+- **Nothing partial** — the stack still runs the previous build in its
+  entirety, and no new database migrations were applied.
+- Scans the deploy quiesced were **not** auto-resumed (the script aborts
+  before that step) — restart them from the Admin page, or just rerun the
+  deploy.
+
+The two usual causes are a **full CT disk** (`pct exec <vmid> -- df -h /`)
+and **Docker Hub being unreachable** (the build pulls base images); the
+script now aborts at the build step with the real error, so scroll up to it.
+After fixing the cause, retry with `FORCE_REBUILD=1 ./deploy-proxmox.sh
+<same args>` — that forces a cache-less rebuild, which also cures the rarer
+corrupted-build-cache case.
+
 ## After it's up
 
 The wizard's summary prints your URLs (and, with agents on, the one-command
