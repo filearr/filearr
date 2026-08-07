@@ -27,11 +27,14 @@ never appears in the preview NOR the (capped) total count.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from filearr import nlquery
 from filearr.api.custom_reports import _compile, _load_custom_defs
 from filearr.api.reports import _json_page
+from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.file_groups import FILE_CATEGORIES, FILE_GROUPS
 from filearr.models import CustomField
@@ -63,6 +66,12 @@ PREVIEW_MAX_LIMIT = 50
 #: for a live keystroke-debounced preview; we count up to the ceiling + 1 and
 #: report ``total_capped`` so the UI can render e.g. "10,000+ matches" cheaply.
 COUNT_CAP = 10_000
+
+
+class AssistIn(BaseModel):
+    """``POST /query/assist`` body — a short natural-language description."""
+
+    text: str = Field(min_length=1, max_length=500)
 
 
 @router.post("/preview")
@@ -168,4 +177,29 @@ async def get_query_keys(session: AsyncSession = Depends(get_session)) -> dict:
         "kinds": sorted(FILE_CATEGORIES),
         "groups": sorted(FILE_GROUPS),
         "source": "metadata_profiles+custom_fields",
+    }
+
+
+@router.post("/assist", dependencies=[Depends(require_scope("read"))])
+async def assist_query(body: AssistIn) -> dict:
+    """Translate a natural-language description into a valid querydsl string.
+
+    Heuristic by default (deterministic, always available); when
+    ``FILEARR_NL_OLLAMA_URL`` is configured, a local Ollama model is tried
+    first and the heuristic remains the fallback. The returned ``dsl`` is
+    guaranteed parseable — the caller can hand it straight to
+    ``POST /query/preview``. No DB access: pure translation."""
+    settings = get_settings()
+    result = await nlquery.translate(
+        body.text,
+        ollama_url=settings.nl_ollama_url,
+        ollama_model=settings.nl_ollama_model,
+    )
+    return {
+        "dsl": result.dsl,
+        "source": result.source,
+        "filters": result.filters,
+        "terms": result.terms,
+        "notes": result.notes,
+        "llm_available": bool(settings.nl_ollama_url and settings.nl_ollama_model),
     }

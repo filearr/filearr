@@ -1,4 +1,4 @@
-# LLM integration (M1) — connecting Ollama, OpenWebUI, and MCP clients
+# LLM integration — connecting Ollama, OpenWebUI, and MCP clients
 
 Filearr exposes a role-gated **LLM tool facade** at `/api/llm/v1` so a
 model can search the catalog, look up where files live, run reports, and
@@ -13,9 +13,18 @@ Console → Admin → **LLM access keys** → Mint key (or
 | Role | Tools | Reads content | Sees paths |
 |---|---|---|---|
 | `librarian` | search, get_file, where_is, filter, reports, aggregate, overview | no | yes |
-| `analyst` | librarian + `read_content` | **yes** | yes |
+| `analyst` | librarian + `read_content` + `retrieve_passages` | **yes** | yes |
 | `guest` | search, get_file, overview (no snippets) | no | **no** |
 | `auditor` | reports, aggregate, overview | no | yes |
+| `curator` | analyst + `tag_files`, `annotate` (M3 writes) | **yes** | yes |
+
+`curator` is the ONLY writing role, and its writes are bounded: PATCH-only
+tag add/remove (union/difference — unnamed tags untouched) and a single
+`note` user-metadata field. Never deletes, never touches extracted
+metadata; every change lands an `ItemVersion` row attributed to
+`llm:<key name>` plus an `LLM_TOOL_WRITE` audit event, and the item
+re-syncs into search immediately. The key list shows each key's audited
+tool-call count and last call time.
 
 Optional per-key: expiry, ltree path scope, library allow-list, rate limit
 (default 60 calls/min). The key is shown once. Enforcement is server-side —
@@ -72,7 +81,30 @@ Use any OpenAPI→MCP bridge; the facade is a standard OpenAPI tool server.
 With OpenWebUI's `mcpo` you can also bridge the other direction. A native
 in-repo `filearr-mcp` adapter is planned (design §2, M-followup).
 
-## 6. Security posture
+## 6. Content-RAG (M2): retrieve_passages
+
+`retrieve_passages(query, k<=12, dsl?)` answers "from inside my documents"
+questions with ranked ~1,000-char passages, each carrying its file
+citation. Backing store: the `doc_chunks` table (Postgres truth) projected
+into a second Meili index `<index>_chunks` — semantic (bge-small hybrid)
+when `FILEARR_SEMANTIC_ENABLED=true`, plain keyword otherwise. Wiring:
+
+1. Per-library opt-in: library edit → **RAG chunking** (off by default —
+   the chunk+embed pass is real CPU/storage; enable it for text-bearing
+   libraries only).
+2. Backfill: Jobs page → **Chunk documents for RAG** (bounded per run;
+   repeat until it defers 0). New/changed documents chunk automatically
+   after extraction from then on.
+3. Rebuild (ops): **Rebuild the passages search index** re-projects the
+   chunks index from Postgres. Chunk vectors are persisted per row, so a
+   rebuild never re-embeds. Tunables: `FILEARR_CHUNK_SIZE_CHARS` (1000),
+   `FILEARR_CHUNK_OVERLAP_CHARS` (150), `FILEARR_CHUNK_MAX_PER_ITEM`
+   (200), `FILEARR_CHUNK_BACKFILL_BATCH` (2000).
+
+The optional `dsl` argument narrows retrieval with the shared query
+grammar (`kind:document tag:project-x`) before the passage search runs.
+
+## 7. Security posture
 
 - Keys are read-only; rate-limited (429 + Retry-After); every tool call is
   written to the audit log (`LLM_TOOL_CALL`, with tool, role, row count).

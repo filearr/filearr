@@ -171,6 +171,11 @@ class Library(Base):
     # invariant 2) but are stripped from the Meili projection + public API unless
     # this is true. Default false = privacy-safe; ships with GPS extraction (R5).
     expose_gps: Mapped[bool] = mapped_column(server_default=text("false"))
+    # LLM/RAG M2: per-library opt-in for chunking extracted text into the
+    # doc_chunks passage store (retrieve_passages RAG). Off by default — the
+    # chunk+embed pass is real CPU/storage cost, and most libraries (media)
+    # carry no text worth chunking. Mirrors the ocr_enabled opt-in shape.
+    chunking_enabled: Mapped[bool] = mapped_column(server_default=text("false"))
     # Scan-accounting opt-in: enumerate PRUNED subtrees (cheap scandir count, no
     # stat/ingest) so `seen + excluded + pruned_files` reconciles exactly with the
     # on-disk file count. Default false because that pass costs a full directory
@@ -494,6 +499,60 @@ class ItemVersion(Base):
     # exempt 'user' partition.
     __table_args__ = (
         Index("ix_item_versions_source_changed_at", "source", "changed_at"),
+    )
+
+
+class ItemFrecency(Base):
+    """Central frecency store (roadmap §5 P3): one row per (owner, item).
+
+    ``owner`` is the principal UUID string, or ``'anonymous'`` when auth is off
+    (single-user deploys still get personalization). ``rank`` accumulates one
+    unit per use; ``last_used`` drives the bucketed recency weight at read time
+    — deliberately the same zoxide-style shape as the agent's local
+    ``history.db`` (agent/internal/history), so the two rankers agree on
+    behaviour. Maintenance (retention prune + rank halving past a per-owner
+    total) runs opportunistically inside the recording path, exactly like the
+    agent's ``maintain()``. Rows cascade away with their item.
+    """
+
+    __tablename__ = "item_frecency"
+
+    owner: Mapped[str] = mapped_column(Text, primary_key=True)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("items.id", ondelete="CASCADE"), primary_key=True
+    )
+    rank: Mapped[float] = mapped_column(server_default=text("0"))
+    last_used: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_item_frecency_owner", "owner"),)
+
+
+class DocChunk(Base):
+    """LLM/RAG M2 passage store: one ~1,000-char chunk of an item's extracted
+    text (design §4 tier 2). Postgres truth — the Meili chunks projection is
+    disposable and rebuilt from these rows (invariant 1). ``sha256`` is the
+    chunk text digest; ``embedding`` persists the local bge-small vector so a
+    projection rebuild never re-embeds (the item-level ``_embedding``
+    refinement, applied here). Rows are replaced wholesale when the source
+    text changes (the item carries a ``_chunks_fp`` fingerprint stamp)."""
+
+    __tablename__ = "doc_chunks"
+    __table_args__ = (
+        UniqueConstraint("item_id", "chunk_no", name="uq_doc_chunks_item_chunk"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("items.id", ondelete="CASCADE"), index=True
+    )
+    chunk_no: Mapped[int] = mapped_column()
+    text_: Mapped[str] = mapped_column("text", Text)
+    sha256: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
     )
 
 

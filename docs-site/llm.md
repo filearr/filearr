@@ -10,9 +10,11 @@ and any OpenAI-compatible or MCP tool-calling client.
 
 1. **Mint a key**: Admin page → *LLM access keys* → Mint. Pick a role:
    `librarian` (search/where, no content), `analyst` (adds document-text
-   reading for RAG), `guest` (filenames only, no paths), `auditor`
-   (reports only). Optional expiry, path scope, library allow-list, rate
-   limit. The key is shown once.
+   reading + passage retrieval for RAG), `guest` (filenames only, no
+   paths), `auditor` (reports only), `curator` (analyst plus bounded
+   writes: tags and notes — PATCH-only, never deletes, always audited).
+   Optional expiry, path scope, library allow-list, rate limit. The key is
+   shown once; the key list shows each key's audited tool-call count.
 2. **Fetch the system prompt** (it is generated from the key's actual role,
    so the model's stated capabilities always match what the server
    enforces):
@@ -34,16 +36,38 @@ and any OpenAI-compatible or MCP tool-calling client.
 ## The tools
 
 `search_files` (keyword/semantic/hybrid), `get_file`, `where_is` (library,
-host, share URL), `read_content` (extracted document text, analyst only),
+host, share URL), `read_content` (extracted document text, content roles
+only), `retrieve_passages` (ranked in-document passages — see below),
 `filter_files` (the same query grammar the console uses), `run_report`,
-`aggregate`, `catalog_overview`.
+`aggregate`, `catalog_overview`, and — `curator` role only — `tag_files`
+and `annotate` (add/remove tags, set a note; PATCH of user metadata only).
+
+## Content-RAG: retrieve_passages
+
+For "answer from *inside* my documents" questions, Filearr chunks extracted
+text (PDF/DOCX/TXT/MD bodies, OCR results) into ~1,000-character passages,
+stores them in Postgres, and projects them into a second search index —
+semantic when the local embedder is enabled, keyword otherwise. It is a
+**per-library opt-in**:
+
+1. Edit the library → Content processing → enable **RAG chunking**.
+2. Jobs page → **Chunk documents for RAG** → Run now (repeat until it
+   defers 0; new scans keep chunks current automatically).
+3. `analyst`/`curator` keys can then call `retrieve_passages` — each hit
+   carries the file citation, so answers stay grounded.
+
+The chunk store rides the same disposable-projection rule as the main
+index: **Rebuild the passages search index** (Jobs page) re-projects it
+from Postgres without re-embedding.
 
 !!! note "Enforcement is server-side"
     Roles, path/library scope, result caps, and rate limits are enforced in
     the API handlers — the system prompt describes the boundary but never
-    IS the boundary. Every tool call lands in the audit log. `read_content`
-    only ever serves sanitized extracted text, never raw file bytes.
+    IS the boundary. Every tool call lands in the audit log (the Admin key
+    list shows per-key call counts), and every curator write additionally
+    records an item-version row attributed to the key. `read_content` and
+    `retrieve_passages` only ever serve sanitized extracted text, never raw
+    file bytes.
 
 See `docs/ops/llm.md` in the repository for the full runbook and
-`docs/research/llm-rag-integration.md` for the design (including the M2
-passage-retrieval roadmap).
+`docs/research/llm-rag-integration.md` for the design.

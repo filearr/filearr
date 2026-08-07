@@ -529,6 +529,30 @@ class Settings(BaseSettings):
     content_sniff_enabled: bool = False
     content_sniff_batch: int = 5_000
     content_sniff_read_bytes: int = 65_536
+    # Natural-language query assist (roadmap §5 P2): POST /query/assist turns
+    # plain English into the filter DSL. The deterministic heuristic engine is
+    # always on and needs nothing; setting NL_OLLAMA_URL to a local Ollama
+    # (e.g. http://ollama:11434) upgrades translation to the named model, with
+    # the heuristic as automatic fallback on any model failure. Local-only by
+    # design — search text never leaves the deployment.
+    nl_ollama_url: str = ""
+    nl_ollama_model: str = "qwen2.5:7b"
+    # LLM/RAG M2 passage chunking (design §4 tier 2): per-library opt-in
+    # (Library.chunking_enabled); these bound the pass globally. ~1,000-char
+    # chunks / 15% overlap per the design; max_per_item caps pathological
+    # documents (a 100k-char body_text yields ~120 chunks — the cap is
+    # headroom, not the norm). chunk_backfill_batch bounds one chunk_missing
+    # maintenance run, mirroring embed_backfill_batch.
+    chunk_size_chars: int = 1_000
+    chunk_overlap_chars: int = 150
+    chunk_max_per_item: int = 200
+    chunk_backfill_batch: int = 2_000
+    # Frecency personal ranking (roadmap §5 P3): item-detail opens accumulate a
+    # per-principal frequency+recency profile ('anonymous' when auth is off);
+    # default-relevance search results get a bounded page-local lift for the
+    # caller's habitual items. Purely additive — disable to restore
+    # pre-personalization ordering (rows stop being written AND read).
+    frecency_enabled: bool = True
     ocr_enabled: bool = False                 # global default OFF (R4)
     ocr_min_text_chars: int = 100
     ocr_max_pages: int = 10                    # scanned-PDF page ceiling (rasterise+OCR)

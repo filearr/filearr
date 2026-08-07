@@ -123,6 +123,28 @@ model and the source `config.py` for every field.
 | `FILEARR_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Local embedding model (downloaded once). |
 | `FILEARR_EMBEDDER_CONCURRENCY` | `1` | One memory-capped, lowest-priority worker. |
 
+### RAG passage chunking (per-library opt-in)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_CHUNK_SIZE_CHARS` | `1000` | Passage window for the doc_chunks store (LLM `retrieve_passages`). |
+| `FILEARR_CHUNK_OVERLAP_CHARS` | `150` | Overlap between consecutive passages. |
+| `FILEARR_CHUNK_MAX_PER_ITEM` | `200` | Chunk cap per document. |
+| `FILEARR_CHUNK_BACKFILL_BATCH` | `2000` | Items per "Chunk documents for RAG" run. |
+
+### Natural-language query assist
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_NL_OLLAMA_URL` | *(unset)* | Local Ollama endpoint (e.g. `http://ollama:11434`) to upgrade `POST /query/assist` beyond the built-in heuristic; heuristic remains the automatic fallback. |
+| `FILEARR_NL_OLLAMA_MODEL` | `qwen2.5:7b` | Model name used for translation. |
+
+### Frecency personal ranking
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_FRECENCY_ENABLED` | `true` | Per-principal frequency+recency profile from item-detail opens; bounded page-local lift of habitual items in default-relevance search. Disable to stop recording AND reading. |
+
 ## Thumbnails
 
 | Variable | Default | Purpose |

@@ -61,6 +61,7 @@
     presets: [...(library.enabled_presets ?? [])],
     groups: [...(library.enabled_extension_groups ?? [])],
     ocrEnabled: library.ocr_enabled,
+    chunkingEnabled: library.chunking_enabled,
     exposeGps: library.expose_gps,
     countPrunedFiles: library.count_pruned_files,
   }));
@@ -94,6 +95,7 @@
   let presets = $state<string[]>(seed.presets);
   let groups = $state<string[]>(seed.groups);
   let ocrEnabled = $state(seed.ocrEnabled);
+  let chunkingEnabled = $state(seed.chunkingEnabled);
   let exposeGps = $state(seed.exposeGps);
   let countPrunedFiles = $state(seed.countPrunedFiles);
 
@@ -153,6 +155,7 @@
         enabled_presets: presets,
         enabled_extension_groups: groups,
         ocr_enabled: ocrEnabled,
+        chunking_enabled: chunkingEnabled,
         expose_gps: exposeGps,
         count_pruned_files: countPrunedFiles,
       });
@@ -337,6 +340,17 @@
             <input type="checkbox" class="mt-1" bind:checked={ocrEnabled} />
             <span class="text-slate-500">
               OCR images &amp; scanned PDFs so their text is searchable (CPU-heavy; off by default).
+            </span>
+          </label>
+
+          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
+            RAG chunking <Help text={HELP.chunking_enabled} label="RAG chunking" />
+          </label>
+          <label class="inline-flex items-start gap-2">
+            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} />
+            <span class="text-slate-500">
+              Chunk extracted document text for LLM passage retrieval (retrieve_passages).
+              Off by default; after enabling, run &ldquo;Chunk documents for RAG&rdquo; on the Jobs page.
             </span>
           </label>
 

@@ -35,10 +35,10 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 | Area | Routes (under `/api/v1`) | What it does |
 |---|---|---|
 | Search | `search` | Typo-tolerant search, facets, filters. |
-| Items | `items` (incl. `PATCH`, batch, `digests`) | Read items; edit `user_metadata`/tags; batch edits; on-demand digests. |
+| Items | `items` (incl. `PATCH`, batch, `digests`, `POST /items/{id}/touch`) | Read items; edit `user_metadata`/tags; batch edits; on-demand digests; frecency use pings. |
 | Libraries | `libraries`, `scan-paths` | Define libraries, roots, schedules, presets. |
 | Scans | `scans` (with SSE) | Trigger/stop scans; live progress via Server-Sent Events. |
-| Query | `query/preview`, `query/keys` | Filter-builder DSL preview and value pickers. |
+| Query | `query/preview`, `query/keys`, `query/assist` | Filter-builder DSL preview, value pickers, and natural-language → DSL translation (heuristic; optional local Ollama). |
 | Reports | `reports`, `custom-reports`, `report-schedules`, `exports` | Prebuilt (canned) reports — unmapped extensions, future-dated files, extraction errors, largest files, largest folders (du-style recursive totals), low-quality video, duplicates — plus saved reports, scheduled delivery, CSV/NDJSON/XLSX exports. |
 | Saved searches | `saved-searches` | Persisted search definitions. |
 | Metadata | `metadata-profiles`, `custom-fields` | Extraction profiles and user-defined fields. |

@@ -44,6 +44,9 @@ class LibraryIn(BaseModel):
     # P3-T6 (R4): opt this library into the CPU-costly Tesseract OCR pass.
     # Global default OFF; per-library toggle, default false.
     ocr_enabled: bool = False
+    # LLM/RAG M2: opt this library into passage chunking (doc_chunks store +
+    # retrieve_passages RAG). Default false — the chunk+embed pass is real cost.
+    chunking_enabled: bool = False
     # P3-T11 (R5, CWE-1230): expose extracted GPS/location metadata for this
     # library. Default false = GPS stripped from projection + API (privacy-safe).
     expose_gps: bool = False
@@ -74,6 +77,7 @@ class LibraryUpdate(BaseModel):
     native_prefix: str | None = None
     share_prefix: str | None = None
     ocr_enabled: bool | None = None
+    chunking_enabled: bool | None = None
     expose_gps: bool | None = None
     count_pruned_files: bool | None = None
     enabled: bool | None = None

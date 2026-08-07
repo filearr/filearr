@@ -130,6 +130,15 @@ export type ItemRecord = Record<string, unknown> & {
 /** Fetch one item with every stored field. Powers the Raw detail view. */
 export const getItem = (id: string) => request<ItemRecord>(`/items/${id}`);
 
+/** Frecency use ping (fire-and-forget; 204 with no body). Callers swallow errors. */
+export async function touchItem(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/items/${id}/touch`, {
+    method: "POST",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
 /** P10-T3: ask the owning agent to re-verify an agent-hosted item's existence
  *  (``stat``) or integrity (``rehash``). Returns the created agent_commands row;
  *  the result lands later via a normal item refresh once the agent completes it. */
@@ -347,6 +356,7 @@ export interface Library {
   hash_policy: HashPolicy;
   hash_full_max_bytes: number | null;
   ocr_enabled: boolean;
+  chunking_enabled: boolean;
   expose_gps: boolean;
   /** Opt-in: also enumerate PRUNED subtrees (cheap count, no ingest) so
    *  seen + excluded + pruned_files reconciles with the on-disk file count.
@@ -606,6 +616,7 @@ export const createLibrary = (body: {
   hash_policy?: HashPolicy;
   hash_full_max_bytes?: number | null;
   ocr_enabled?: boolean;
+  chunking_enabled?: boolean;
   expose_gps?: boolean;
   count_pruned_files?: boolean;
 }) => request<Library>("/libraries", { method: "POST", body: JSON.stringify(body) });
@@ -630,6 +641,7 @@ export const updateLibrary = (
     hash_policy: HashPolicy;
     hash_full_max_bytes: number | null;
     ocr_enabled: boolean;
+  chunking_enabled: boolean;
     expose_gps: boolean;
     count_pruned_files: boolean;
     enabled: boolean;
@@ -2277,6 +2289,23 @@ export function previewValidationErrors(e: unknown): QueryPreviewError[] | null 
 
 export const queryKeys = () => request<QueryKeys>("/query/keys");
 
+export interface AssistResponse {
+  dsl: string;
+  source: "heuristic" | "ollama";
+  filters: string[];
+  terms: string[];
+  notes: string[];
+  llm_available: boolean;
+}
+
+/** Natural-language → filter-DSL translation. The returned dsl is always
+ *  grammar-valid (server re-parses before returning). */
+export const assistQuery = (text: string) =>
+  request<AssistResponse>("/query/assist", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+
 
 // --------------------------------------------------------------------------- //
 // P5-T1 — distributed-agent enrollment (admin scope). Mint single-use tokens,  //
@@ -2711,6 +2740,9 @@ export interface LlmKey {
   expires_at: string | null;
   last_used_at: string | null;
   created_at: string | null;
+  /** M3 usage dashboard: audited tool calls (list endpoint only). */
+  tool_calls?: number;
+  last_call_at?: string | null;
   /** present ONLY in the mint response — shown once. */
   key?: string;
 }

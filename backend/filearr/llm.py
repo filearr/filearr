@@ -42,6 +42,16 @@ _READ_TOOLS = (
     "catalog_overview",
 )
 
+#: Tools that read extracted document text — additionally gated per key by
+#: ``content_access`` (a role granting them can still be narrowed at mint time).
+CONTENT_TOOLS = frozenset({"read_content", "retrieve_passages"})
+
+#: Tools that WRITE (M3): PATCH-only user-metadata edits, never deletes.
+#: Granted exclusively through the ``curator`` role.
+WRITE_TOOLS = frozenset({"tag_files", "annotate"})
+
+_ANALYST_TOOLS = _READ_TOOLS + ("read_content", "retrieve_passages")
+
 LLM_ROLES: dict[str, LlmRole] = {
     r.name: r
     for r in (
@@ -53,7 +63,7 @@ LLM_ROLES: dict[str, LlmRole] = {
         LlmRole(
             name="analyst",
             description="Librarian plus document-content retrieval (RAG).",
-            tools=_READ_TOOLS + ("read_content",),
+            tools=_ANALYST_TOOLS,
             content_access=True,
         ),
         LlmRole(
@@ -70,6 +80,15 @@ LLM_ROLES: dict[str, LlmRole] = {
             name="auditor",
             description="Reports and aggregates only — for scheduled digest bots.",
             tools=("run_report", "aggregate", "catalog_overview"),
+        ),
+        LlmRole(
+            name="curator",
+            description=(
+                "Analyst plus bounded writes: add/remove tags and set notes "
+                "(PATCH user_metadata only — never deletes, always audited)."
+            ),
+            tools=_ANALYST_TOOLS + ("tag_files", "annotate"),
+            content_access=True,
         ),
     )
 }
@@ -89,7 +108,7 @@ class LlmPrincipal:
     rate_limit: int
 
     def allows(self, tool: str) -> bool:
-        if tool == "read_content":
+        if tool in CONTENT_TOOLS:
             return tool in self.role.tools and self.content_access
         return tool in self.role.tools
 
@@ -251,6 +270,54 @@ TOOL_SPECS: dict[str, dict] = {
         "description": "Orientation: libraries, item/byte counts, agents, top categories.",
         "parameters": {"type": "object", "properties": {}},
     },
+    "retrieve_passages": {
+        "description": (
+            "RAG retrieval: ranked text passages from inside documents matching "
+            "a question. Each passage carries its file citation. Prefer this "
+            "over read_content when answering FROM document content."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": _STR,
+                "k": {"type": "integer", "maximum": 12},
+                "dsl": {
+                    "type": "string",
+                    "description": "optional narrowing filter (query grammar)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    "tag_files": {
+        "description": (
+            "Add and/or remove tags on up to 50 files by citation. "
+            "PATCH-only: existing tags you don't name are untouched."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "citations": {"type": "array", "items": _STR, "maxItems": 50},
+                "add": {"type": "array", "items": _STR, "maxItems": 20},
+                "remove": {"type": "array", "items": _STR, "maxItems": 20},
+            },
+            "required": ["citations"],
+        },
+    },
+    "annotate": {
+        "description": (
+            "Set (or clear with an empty string) the 'note' field on one file. "
+            "Overwrites the previous note; shown in the item's metadata."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "citation": _STR,
+                "note": {"type": "string", "maxLength": 2000},
+            },
+            "required": ["citation", "note"],
+        },
+    },
 }
 
 
@@ -287,12 +354,19 @@ def render_system_prompt(
     """The role-accurate system prompt (design §6). Rendered server-side so the
     stated capabilities can never drift from what the handlers enforce."""
     allowed = [t for t in TOOL_SPECS if principal.allows(t)]
+    can_write = any(t in allowed for t in WRITE_TOOLS)
     denied: list[str] = []
     if not principal.allows("read_content"):
         denied.append("read file contents")
     if "filter_files" not in allowed:
         denied.append("run structured filters or reports")
-    denied.append("modify, tag, move, or delete anything (this role is read-only)")
+    if can_write:
+        denied.append(
+            "move, rename, or delete anything — your only writes are tags and "
+            "notes (user metadata)"
+        )
+    else:
+        denied.append("modify, tag, move, or delete anything (this role is read-only)")
 
     if principal.reveal_paths:
         libs = ", ".join(library_names) if library_names else "none yet"
@@ -327,6 +401,17 @@ def render_system_prompt(
         lines.append(
             "You may read extracted text with read_content. Quote at most 3 "
             "short passages per answer and always cite."
+        )
+    if principal.allows("retrieve_passages"):
+        lines.append(
+            "To answer FROM document content, call retrieve_passages first "
+            "(ranked passages with citations) and read_content only to expand "
+            "a specific hit."
+        )
+    if can_write:
+        lines.append(
+            "You may organize with tag_files/annotate ONLY when the user "
+            "explicitly asks for tagging or notes; state what you changed."
         )
     if "run_report" in allowed and report_ids:
         lines.append(f"Available reports for run_report: {', '.join(report_ids)}.")

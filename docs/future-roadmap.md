@@ -119,9 +119,13 @@ configured:
 > detail-panel section was upgraded 2026-08-06 to a clickable thumbnail grid,
 > hidden entirely when semantic search is off). P2 shipped (timeline, EXIF/GPS
 > gate, tag type-ahead, archive member indexing) except **email indexing
-> (mbox/PST)** and **natural-language query assist** (the LLM facade is the
-> natural host). P3 (provenance download-URL, central frecency profiles)
-> still open — agent-side frecency exists locally.
+> (mbox/PST)**. Natural-language query assist SHIPPED 2026-08-06
+> (`POST /query/assist`: deterministic heuristic translator, optional local
+> Ollama via FILEARR_NL_OLLAMA_URL with automatic fallback; Filter Builder
+> "describe it" box). P3 central frecency SHIPPED 2026-08-06 (item_frecency
+> per-principal store mirroring the agent's zoxide-style scoring; detail-open
+> touches + bounded page-local search re-rank, FILEARR_FRECENCY_ENABLED).
+> P3 provenance download-URL still open.
 
 Priority-ordered from prior-art research (Everything, Recoll, sist2, Spotlight,
 Paperless-ngx, Immich, 2024-26 local-AI tools):
@@ -159,11 +163,11 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
   endpoint, v1.3+) once tag cardinality grows.
 - **Archive/email indexing** (zip/7z member listings; mbox/PST later —
   Recoll precedent).
-- **Natural-language query assist** (query→filter translation, local LLM optional).
+- **Natural-language query assist** (query→filter translation, local LLM optional). *(SHIPPED 2026-08-06)*
 
 **P3**
 - File provenance (download source URL, originating agent/machine).
-- Frecency (frequency+recency) personal ranking profiles.
+- Frecency (frequency+recency) personal ranking profiles. *(SHIPPED 2026-08-06 — central per-principal store + search re-rank)*
 
 ## 6. Alerting
 
@@ -704,7 +708,7 @@ scoped enough to ship independently.
   capabilities advertisement so central's fleet console can show which agents
   lack it.
 
-## 21. LLM / RAG integration (M1 SHIPPED 2026-07-28; M2/M3 open)
+## 21. LLM / RAG integration (SHIPPED: M1 2026-07-28; M2+M3 2026-08-06)
 
 Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool
 backend and analyze retrieved content RAG-style. Full design in
@@ -715,4 +719,9 @@ existing Bearer/RBAC substrate; a server-rendered capability handshake and
 system prompt so the model always knows the system and its assigned role;
 two RAG tiers (metadata-RAG over existing search/extract now; doc_chunks +
 Meili vector chunk index later). Phases M1 (read tools) / M2 (content
-chunks) / M3 (curator writes).
+chunks) / M3 (curator writes) — ALL SHIPPED: M2 (2026-08-06) added
+doc_chunks + persisted chunk vectors + the `<index>_chunks` projection +
+retrieve_passages behind the per-library chunking_enabled opt-in; M3
+(2026-08-06) added the curator role (tag_files/annotate, PATCH-only,
+ItemVersion-attributed) + the per-key tool-call dashboard (and fixed M1's
+silently-dropped facade audit events — ApiKey uuid vs principals FK).

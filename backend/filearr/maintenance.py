@@ -331,6 +331,32 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         timestamp_arg=False,
     ),
     MaintTaskSpec(
+        key="chunk_missing",
+        task_name="filearr.tasks.chunks.chunk_missing",
+        title="Chunk documents for RAG",
+        description=(
+            "Queues passage-chunking jobs (LLM retrieve_passages, M2) for "
+            "text-bearing items in chunking-enabled libraries that have no "
+            "current chunk set. Bounded per run — re-run until it defers 0. "
+            "No-op while no library has chunking enabled."
+        ),
+        category="ondemand", default_cron=None, queue="embed",
+        timestamp_arg=False,
+    ),
+    MaintTaskSpec(
+        key="rebuild_chunks_index",
+        task_name="filearr.tasks.chunks.rebuild_chunks_index",
+        title="Rebuild the passages search index",
+        description=(
+            "Re-projects the Meili chunks index from the doc_chunks table "
+            "(disposable-projection invariant). Persisted chunk embeddings "
+            "mean a rebuild never re-embeds."
+        ),
+        category="ondemand", default_cron=None, queue="embed",
+        lock="rebuild-chunks-index",
+        timestamp_arg=False,
+    ),
+    MaintTaskSpec(
         key="content_sniff",
         task_name="filearr.worker.content_sniff",
         title="Content-sniff extensionless files",
@@ -368,7 +394,7 @@ def _deferrer(spec: MaintTaskSpec):
         kwargs["queueing_lock"] = spec.lock
     if spec.key == "rebuild_index":
         kwargs["priority"] = get_settings().index_priority
-    elif spec.key == "embed_missing":
+    elif spec.key in ("embed_missing", "chunk_missing", "rebuild_chunks_index"):
         kwargs["priority"] = get_settings().embed_priority
         kwargs["queue"] = get_settings().queue_embed
     return proc_app.configure_task(spec.task_name, **kwargs)

@@ -189,6 +189,14 @@ export const HELP: Record<string, string> = {
     "than this fall back to the quick hash even under a full policy. Blank = use the " +
     "global default (FILEARR_SCAN_HASH_FULL_MAX_BYTES).",
 
+  chunking_enabled:
+    "Split this library's extracted document text (PDF/DOCX/TXT/MD bodies, OCR results) " +
+    "into ~1,000-character passages for LLM retrieval (the retrieve_passages tool — " +
+    "answers questions FROM inside your documents). OFF by default: the pass embeds " +
+    "each passage with the local model, which is real CPU/storage cost, and only " +
+    "text-bearing libraries benefit. After enabling, run 'Chunk documents for RAG' " +
+    "on the Jobs page to backfill; new scans keep chunks current automatically.",
+
   ocr_enabled:
     "Run OCR (Tesseract) on this library's images and scanned (image-only) PDFs to " +
     "make the text inside them searchable. OFF by default because OCR is CPU-heavy: " +
@@ -301,6 +309,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     title: "Privacy & OCR",
     items: [
       ["ocr_enabled", "OCR"],
+      ["chunking_enabled", "RAG chunking"],
       ["expose_gps", "Expose GPS / location"],
     ],
   },

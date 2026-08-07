@@ -11,13 +11,13 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit
 from filearr.db import get_session
 from filearr.llm import DEFAULT_RATE_LIMIT, LLM_ROLES
-from filearr.models import ApiKey
+from filearr.models import ApiKey, SecurityEvent
 from filearr.security import generate_key, require_scope
 
 router = APIRouter()
@@ -77,6 +77,8 @@ async def list_roles() -> dict:
 
 @router.get("", dependencies=[Depends(require_scope("admin"))])
 async def list_llm_keys(session: AsyncSession = Depends(get_session)) -> dict:
+    """List LLM keys, each annotated with its audited tool-call usage (M3:
+    total calls + last call time from the LLM_TOOL_CALL security events)."""
     rows = (
         (
             await session.execute(
@@ -88,7 +90,25 @@ async def list_llm_keys(session: AsyncSession = Depends(get_session)) -> dict:
         .scalars()
         .all()
     )
-    return {"keys": [_key_row(k) for k in rows]}
+    key_col = SecurityEvent.details["key_id"].astext
+    usage = {
+        kid: (int(n), last)
+        for kid, n, last in (
+            await session.execute(
+                select(key_col, func.count(), func.max(SecurityEvent.ts))
+                .where(SecurityEvent.event_type == audit.LLM_TOOL_CALL)
+                .group_by(key_col)
+            )
+        ).all()
+    }
+    out = []
+    for k in rows:
+        d = _key_row(k)
+        calls, last = usage.get(str(k.id), (0, None))
+        d["tool_calls"] = calls
+        d["last_call_at"] = last.isoformat() if last else None
+        out.append(d)
+    return {"keys": out}
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_scope("admin"))])
@@ -123,7 +143,7 @@ async def mint_llm_key(
     await session.commit()
     await session.refresh(row)
     await audit.emit(
-        "LLM_KEY_MINTED",
+        audit.LLM_KEY_MINTED,
         request=request,
         details={"key_id": str(row.id), "name": row.name, "role": body.role},
     )
@@ -145,5 +165,5 @@ async def revoke_llm_key(
     if result.rowcount == 0:
         raise HTTPException(404, "no such LLM key")
     await audit.emit(
-        "LLM_KEY_REVOKED", request=request, details={"key_id": str(key_id)}
+        audit.LLM_KEY_REVOKED, request=request, details={"key_id": str(key_id)}
     )

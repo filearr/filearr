@@ -29,6 +29,9 @@ proc_app = procrastinate.App(
         # P3-T8 local embedding pipeline (embed queue, lowest priority). Inert
         # until FILEARR_SEMANTIC_ENABLED=true.
         "filearr.tasks.embed",
+        # LLM/RAG M2 passage chunking (embed queue). Inert until a library
+        # opts in via chunking_enabled.
+        "filearr.tasks.chunks",
         # S12/P12 thumbnails: the thumbs-queue ride-along job + the daily orphan
         # GC periodic. Inert until FILEARR_THUMBS_ENABLED (default true).
         "filearr.tasks.thumbs",

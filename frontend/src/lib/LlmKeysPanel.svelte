@@ -163,6 +163,7 @@
             <th class="px-3 py-2">Content</th>
             <th class="px-3 py-2">Rate/min</th>
             <th class="px-3 py-2">Expires</th>
+            <th class="px-3 py-2 text-right">Calls</th>
             <th class="px-3 py-2">Last used</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -179,6 +180,9 @@
               <td class="px-3 py-2">{k.content_access ? "yes" : "no"}</td>
               <td class="px-3 py-2">{k.rate_limit}</td>
               <td class="px-3 py-2">{fmt(k.expires_at)}</td>
+              <td class="px-3 py-2 text-right tabular-nums" title={k.last_call_at ? `last tool call ${fmt(k.last_call_at)}` : "audited tool calls"}>
+                {(k.tool_calls ?? 0).toLocaleString()}
+              </td>
               <td class="px-3 py-2">{fmt(k.last_used_at)}</td>
               <td class="px-3 py-2 text-right">
                 <button class="rounded border border-red-300 px-2 py-0.5 text-xs text-red-700 dark:border-red-800 dark:text-red-400" onclick={() => revoke(k)}>Revoke</button>

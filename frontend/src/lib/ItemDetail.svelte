@@ -19,6 +19,7 @@
     friendlyError,
     getItem,
     itemCopies,
+    touchItem,
     similarItems,
     type ItemRecord,
     type CopiesResponse,
@@ -192,6 +193,10 @@
     itemCopies(id)
       .then((r) => (copies = r))
       .catch(() => (copies = null));
+    // Frecency (roadmap §5 P3): opening the detail view counts as one use for
+    // the caller's personal ranking profile. Fire-and-forget: errors (older
+    // backend, feature off, rate budget) are deliberately invisible.
+    touchItem(id).catch(() => {});
   });
 
   function onKey(e: KeyboardEvent) {

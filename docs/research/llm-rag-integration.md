@@ -1,8 +1,16 @@
 # LLM / RAG integration — design brief
 
 Status: M1 SHIPPED 2026-07-28 (facade + keys + handshake + docs; MCP
-adapter deferred to a follow-up). M2 (doc_chunks passage retrieval) and
-M3 (curator writes) open. Written 2026-07-28.
+adapter deferred to a follow-up). M2 SHIPPED 2026-08-06 (doc_chunks +
+persisted chunk embeddings + `<index>_chunks` Meili projection +
+retrieve_passages; per-library `chunking_enabled` opt-in per §10.2, with
+chunk_missing / rebuild_chunks_index maintenance actions). M3 SHIPPED
+2026-08-06 (curator role + tag_files/annotate PATCH-only writes with
+ItemVersion attribution, per-key tool-call dashboard on the key list —
+which also surfaced and fixed an M1 bug: facade audit events passed the
+ApiKey uuid into security_events.principal_id, an FK to principals, so
+every LLM_TOOL_CALL emit had been silently dropped; key ids now ride in
+details). Written 2026-07-28.
 
 Goal: let an LLM answer questions like *"where are my 4K copies of X, and
 which one is on the NAS?"*, *"what did we scan last week that looks like

@@ -16,7 +16,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "e7a4c2d9b168"
+HEAD = "b8d4e6f2a157"
+# doc_chunks (LLM M2) revision's predecessor = the item_frecency revision.
+CHUNKS_PRED = "a3f1c7e2d940"
+# item_frecency revision's predecessor (self_update command kind).
+FRECENCY_PRED = "e7a4c2d9b168"
 # W8-B media_type CUTOVER: drops items.media_type + the enum, renames
 # libraries.enabled_types -> enabled_categories (+ adds enabled_groups), and
 # metadata_profiles.media_type -> file_category.
@@ -112,6 +116,27 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # LLM M2 (doc_chunks): passage store + the per-library chunking opt-in
+        # at head; a one-step downgrade drops both, leaving item_frecency.
+        assert "doc_chunks" in _tables(engine)
+        assert {"item_id", "chunk_no", "text", "sha256", "embedding"} <= _columns(
+            engine, "doc_chunks"
+        )
+        assert "chunking_enabled" in _columns(engine, "libraries")
+        command.downgrade(cfg, CHUNKS_PRED)
+        assert "doc_chunks" not in _tables(engine)
+        assert "chunking_enabled" not in _columns(engine, "libraries")
+        assert "item_frecency" in _tables(engine)  # predecessor intact
+        command.upgrade(cfg, "head")
+        # Frecency (roadmap §5 P3): item_frecency exists at head with the
+        # (owner, item_id) PK; a one-step downgrade drops it cleanly.
+        assert "item_frecency" in _tables(engine)
+        assert {"owner", "item_id", "rank", "last_used"} <= _columns(
+            engine, "item_frecency"
+        )
+        command.downgrade(cfg, FRECENCY_PRED)
+        assert "item_frecency" not in _tables(engine)
+        command.upgrade(cfg, "head")
         # W8-B CUTOVER: at head, items.media_type + the media_type enum are GONE;
         # libraries carries enabled_categories + enabled_groups (not enabled_types);
         # metadata_profiles is keyed by file_category (not media_type).

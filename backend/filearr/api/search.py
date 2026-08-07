@@ -363,8 +363,28 @@ async def search(
                 "total": total,
             },
         )
+    hits = [_shape_hit(h) for h in result.hits]
+
+    # Frecency (roadmap §5 P3): bounded, page-local personal re-rank. Only on
+    # the default relevance ordering and only on the FIRST page (an explicit
+    # sort or a paged-through offset must stay stable), and strictly fail-open
+    # — a frecency error never degrades search itself.
+    if s.frecency_enabled and hits and sort is None and offset == 0:
+        try:
+            from filearr import frecency
+            from filearr.db import SessionLocal
+
+            owner = frecency.owner_from_actor(getattr(request.state, "actor", None))
+            async with SessionLocal() as fsession:
+                fscores = await frecency.scores_for(
+                    fsession, owner, [str(h.get("id", "")) for h in hits]
+                )
+            hits = frecency.rerank(hits, fscores)
+        except Exception:  # noqa: BLE001 - personalization must never break search
+            log.debug("frecency re-rank skipped", exc_info=True)
+
     return SearchResponse(
-        hits=[_shape_hit(h) for h in result.hits],
+        hits=hits,
         total=total,
         facets=result.facet_distribution or {},
         facet_stats=facet_stats,

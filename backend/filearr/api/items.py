@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit
+from filearr import audit, frecency
 from filearr import thumbs as th
 from filearr.config import get_settings
 from filearr.custom_fields import (
@@ -25,6 +25,7 @@ from filearr.custom_fields import (
 from filearr.db import get_session
 from filearr.embed import has_current_embedding, strip_embedding
 from filearr.exif import strip_gps
+from filearr.llm import RateLimiter
 from filearr.meili_ops import DEFAULT_EMBEDDER_NAME
 from filearr.models import (
     AgentCommand,
@@ -207,6 +208,38 @@ async def get_item(
     ).scalar_one_or_none()
     share_url, share_source = await _resolve_item_share(session, item, library)
     return _with_native_path(item, library, share_url, share_source)
+
+
+# Frecency touches are fire-and-forget UI pings; bound them so a stuck client
+# loop can't write-amplify (reuses the LLM facade's in-process token bucket).
+_TOUCH_LIMITER = RateLimiter()
+_TOUCH_PER_MINUTE = 120
+
+
+@router.post("/{item_id}/touch", status_code=204)
+async def touch_item(
+    item_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    ctx: PermissionContext = Depends(require_permission("search_metadata")),
+):
+    """Record one frecency use of an item for the calling principal.
+
+    Fired by the UI when an item's detail view opens (roadmap §5 P3). Cheap,
+    idempotent-ish (each call = one use), silently a no-op when the feature is
+    disabled or the caller is over the touch budget — the client treats it as
+    fire-and-forget and never surfaces an error for it."""
+    settings = get_settings()
+    if not settings.frecency_enabled:
+        return Response(status_code=204)
+    owner = frecency.owner_from_actor(getattr(request.state, "actor", None))
+    if not _TOUCH_LIMITER.allow(owner, _TOUCH_PER_MINUTE):
+        return Response(status_code=204)
+    item = await _get_item(session, item_id)
+    ctx.authorize_item(item)  # scope check: can't build a profile of unseen items
+    await frecency.record_touch(session, owner, item.id)
+    await session.commit()
+    return Response(status_code=204)
 
 
 # --------------------------------------------------------------------------- #

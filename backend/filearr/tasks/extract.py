@@ -695,6 +695,9 @@ async def _extract_item_impl(
         library = (
             await session.execute(select(Library).where(Library.id == item.library_id))
         ).scalar_one_or_none()
+        # Captured pre-expiry like item_file_category: gates the M2 chunk-pass
+        # ride-along defer after the session closes.
+        library_chunking_enabled = bool(library is not None and library.chunking_enabled)
         resolved = resolve_hash_policy(
             declared=library.hash_policy if library else "auto",
             root_path=library.root_path if library else "",
@@ -1007,6 +1010,17 @@ async def _extract_item_impl(
     if settings.semantic_enabled and not extract_failed:
         await proc_app.configure_task(
             "filearr.tasks.embed.embed_item",
+            queue=settings.queue_embed,
+            priority=settings.embed_priority,
+        ).defer_async(item_id=item_id)
+
+    # LLM/RAG M2: chunk the extracted text for passage retrieval, same
+    # after-commit discipline. The task itself re-checks the library opt-in
+    # and the fingerprint stamp, so this defer is cheap and safe; gating on
+    # chunking_enabled here just avoids queue noise for the common case.
+    if not extract_failed and library_chunking_enabled:
+        await proc_app.configure_task(
+            "filearr.tasks.chunks.chunk_item",
             queue=settings.queue_embed,
             priority=settings.embed_priority,
         ).defer_async(item_id=item_id)

@@ -160,6 +160,28 @@ path scope for tenant filtering. GPS is excluded unless a library opts in. The
 index is **disposable**: every field is rebuildable from Postgres, and it is never
 a store of record.
 
+## Usage signals: frecency profiles {#frecency}
+
+With `FILEARR_FRECENCY_ENABLED` (default on), opening an item's detail view
+records one row per (user, item): a use counter and a last-used timestamp —
+nothing else (no dwell time, no query text, no history log). It exists solely
+to nudge your habitually-opened files up within a search page. Profiles are
+**per principal** (one user's habits never affect another's results; with
+auth disabled, the single shared profile is keyed `anonymous`), rows older
+than 90 days are pruned automatically, and everything lives in Postgres —
+nothing leaves your infrastructure. Setting the flag to `false` stops both
+recording and ranking use.
+
+## Document passages (RAG chunking) {#doc-chunks}
+
+Libraries opted into **RAG chunking** get their already-extracted text
+(document bodies, OCR results) additionally stored as ~1,000-character
+passages in Postgres (`doc_chunks`) and projected into a local search index
+for the LLM `retrieve_passages` tool. This duplicates text Filearr already
+holds — no new reading of your files happens — and both copies stay local.
+Disabling the library toggle stops new chunking; passages are removed when
+their item is deleted.
+
 ## What audit logs record
 
 The security-events log records login/logout/session lifecycle, grant changes,

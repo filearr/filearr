@@ -35,13 +35,14 @@ from filearr.llm import (
     tools_openai,
 )
 from filearr.meili_ops import DEFAULT_EMBEDDER_NAME
-from filearr.models import Agent, ApiKey, Item, Library
+from filearr.models import Agent, ApiKey, Item, ItemVersion, Library
 from filearr.query_sql import QueryTranslationError, ast_to_where
 from filearr.rbac import PathGrant
 from filearr.rbac_sql import _covers, path_scope_uses_ltree
 from filearr.reports import ReportParams, get_report, list_reports
 from filearr.search import client as meili_client
 from filearr.tenant_tokens import compile_scope_filter
+from filearr.worker import defer_index_sync
 
 llm_app = FastAPI(
     title="Filearr LLM tools",
@@ -84,6 +85,13 @@ async def llm_principal(
         raise HTTPException(
             429, "rate limit exceeded", headers={"Retry-After": "5"}
         )
+    # Keep the admin panel's "last used" honest: the facade never rode the main
+    # app's key auth (which is what stamps last_used_at), so stamp it here —
+    # throttled to once a minute per key to avoid a write per tool call.
+    now = datetime.now(UTC)
+    if row.last_used_at is None or (now - row.last_used_at).total_seconds() > 60:
+        row.last_used_at = now
+        await session.commit()
     return principal
 
 
@@ -98,11 +106,19 @@ def _require(principal: LlmPrincipal, tool: str) -> None:
 async def _audit_tool(
     request: Request, principal: LlmPrincipal, tool: str, rows: int
 ) -> None:
+    # The key id rides in ``details``, NOT ``principal_id``: that column is an
+    # FK to principals, and an ApiKey uuid violates it — the M1 code passed it
+    # anyway, so every facade audit event was silently dropped by emit()'s
+    # swallow-all (found 2026-08-06 building the per-key usage dashboard).
     await audit.emit(
-        "LLM_TOOL_CALL",
+        audit.LLM_TOOL_CALL,
         request=request,
-        principal_id=principal.key_id,
-        details={"tool": tool, "role": principal.role.name, "rows": rows},
+        details={
+            "key_id": principal.key_id,
+            "tool": tool,
+            "role": principal.role.name,
+            "rows": rows,
+        },
     )
 
 
@@ -212,6 +228,23 @@ class AggregateArgs(BaseModel):
     group_by: str = Field(pattern="^(kind|group|library|extension|year)$")
     metric: str = Field(default="count", pattern="^(count|bytes)$")
     dsl: str | None = None
+
+
+class RetrieveArgs(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    k: int | None = None
+    dsl: str | None = None
+
+
+class TagFilesArgs(BaseModel):
+    citations: list[str] = Field(min_length=1, max_length=50)
+    add: list[str] = Field(default_factory=list, max_length=20)
+    remove: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AnnotateArgs(BaseModel):
+    citation: str
+    note: str = Field(max_length=2000)
 
 
 # --------------------------------------------------------------------------- #
@@ -602,6 +635,216 @@ async def catalog_overview(
         "total_bytes": sum(x["bytes"] for x in libraries),
         "role": principal.role.name,
     }
+
+
+@llm_app.post("/retrieve_passages", operation_id="retrieve_passages")
+async def retrieve_passages(
+    args: RetrieveArgs,
+    request: Request,
+    principal: LlmPrincipal = Depends(llm_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """M2 content-RAG: ranked passages from the chunks index (design §4 tier 2).
+
+    Semantic (hybrid) when the local embedder is enabled, keyword otherwise.
+    An optional ``dsl`` narrows to matching items first (SQL, capped) so a
+    question can be scoped like 'kind:document tag:project-x'."""
+    _require(principal, "retrieve_passages")
+    s = get_settings()
+    k = _cap(args.k, 6, 12)
+
+    filters = list(_meili_scope(principal))
+    if args.dsl:
+        try:
+            where = ast_to_where(querydsl.parse(args.dsl))
+        except (querydsl.ParseError, QueryTranslationError) as exc:
+            raise HTTPException(422, f"filter error: {exc}") from exc
+        stmt = select(Item.id).where(where, Item.status == "active").limit(_DSL_SCOPE_CAP)
+        for p in await _sql_scope(principal, session):
+            stmt = stmt.where(p)
+        ids = [str(i) for (i,) in (await session.execute(stmt)).all()]
+        if not ids:
+            await _audit_tool(request, principal, "retrieve_passages", 0)
+            return {"passages": [], "note": "the dsl filter matched no visible items"}
+        joined = ", ".join(f'"{i}"' for i in ids)
+        filters.append(f"item_id IN [{joined}]")
+
+    hybrid = None
+    vector = None
+    if s.semantic_enabled:
+        vector = embed_query(args.query)
+        hybrid = Hybrid(semantic_ratio=0.7, embedder=DEFAULT_EMBEDDER_NAME)
+
+    from meilisearch_python_sdk.errors import MeilisearchApiError
+
+    from filearr.chunking import chunks_index_uid
+
+    try:
+        async with meili_client() as c:
+            result = await c.index(chunks_index_uid(s)).search(
+                args.query,
+                filter=" AND ".join(f"({f})" for f in filters) if filters else None,
+                limit=k,
+                hybrid=hybrid,
+                vector=vector,
+            )
+    except MeilisearchApiError as err:
+        # No chunks index yet = nothing has ever been chunked. A friendly note
+        # beats a 500: chunking is a per-library opt-in the operator may not
+        # have made.
+        if getattr(err, "code", "") == "index_not_found":
+            await _audit_tool(request, principal, "retrieve_passages", 0)
+            return {
+                "passages": [],
+                "note": (
+                    "passage retrieval is not initialized — chunking is a "
+                    "per-library opt-in (enable it and run the chunk backfill)"
+                ),
+            }
+        raise
+
+    passages = []
+    for hit in result.hits:
+        row = {
+            "citation": hit.get("item_id"),
+            "chunk_no": hit.get("chunk_no"),
+            "filename": hit.get("filename"),
+            "text": (hit.get("text") or "")[:2000],
+        }
+        if principal.reveal_paths:
+            row["rel_path"] = hit.get("rel_path")
+        passages.append(row)
+    await _audit_tool(request, principal, "retrieve_passages", len(passages))
+    if not passages:
+        return {
+            "passages": [],
+            "note": (
+                "no indexed passages matched — chunking is a per-library opt-in "
+                "(the operator enables it and runs the chunk backfill)"
+            ),
+        }
+    return {"passages": passages, "role": principal.role.name}
+
+
+#: Max item ids a retrieve_passages dsl pre-filter resolves (a Meili filter
+#: expression has practical size limits; a narrower dsl beats a bigger cap).
+_DSL_SCOPE_CAP = 500
+
+#: Hard ceiling on tags per item via the facade (an LLM in a loop must not
+#: grow an unbounded tag list).
+_MAX_TAGS_PER_ITEM = 100
+
+
+def _clean_tags(raw: list[str]) -> list[str]:
+    out: list[str] = []
+    for t in raw:
+        t = t.strip()
+        if t and len(t) <= 100 and t not in out:
+            out.append(t)
+    return out
+
+
+async def _audit_write(
+    request: Request, principal: LlmPrincipal, tool: str, item_ids: list[str], detail: dict
+) -> None:
+    await audit.emit(
+        audit.LLM_TOOL_WRITE,
+        request=request,
+        details={
+            "key_id": principal.key_id,
+            "tool": tool,
+            "role": principal.role.name,
+            "items": item_ids,
+            **detail,
+        },
+    )
+
+
+@llm_app.post("/tag_files", operation_id="tag_files")
+async def tag_files(
+    args: TagFilesArgs,
+    request: Request,
+    principal: LlmPrincipal = Depends(llm_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """M3 curator write: add/remove tags on up to 50 cited files.
+
+    PATCH-only merge on the ``tags`` column (union add, difference remove) —
+    unnamed tags are untouched, nothing is deleted, every change lands an
+    ItemVersion row attributed to the key and an LLM_TOOL_WRITE audit event."""
+    _require(principal, "tag_files")
+    add = _clean_tags(args.add)
+    remove = _clean_tags(args.remove)
+    if not add and not remove:
+        raise HTTPException(422, "provide at least one tag in add or remove")
+
+    changed: list[str] = []
+    unchanged = 0
+    for citation in dict.fromkeys(args.citations):
+        it = await _get_item(citation, principal, session)
+        current = list(it.tags or [])
+        merged = [t for t in current if t not in remove]
+        merged += [t for t in add if t not in merged]
+        if len(merged) > _MAX_TAGS_PER_ITEM:
+            raise HTTPException(
+                422, f"item {citation} would exceed {_MAX_TAGS_PER_ITEM} tags"
+            )
+        if merged == current:
+            unchanged += 1
+            continue
+        it.tags = merged
+        session.add(
+            ItemVersion(
+                item_id=it.id,
+                actor=f"llm:{principal.key_name}",
+                patch={"tags": merged},
+            )
+        )
+        changed.append(str(it.id))
+    await session.commit()
+    if changed:
+        await defer_index_sync(changed)
+        await _audit_write(
+            request, principal, "tag_files", changed, {"add": add, "remove": remove}
+        )
+    await _audit_tool(request, principal, "tag_files", len(changed))
+    return {"changed": len(changed), "unchanged": unchanged, "add": add, "remove": remove}
+
+
+@llm_app.post("/annotate", operation_id="annotate")
+async def annotate(
+    args: AnnotateArgs,
+    request: Request,
+    principal: LlmPrincipal = Depends(llm_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """M3 curator write: set (or clear with '') the ``note`` user-metadata field.
+
+    A plain overwrite of ONE well-known key in ``user_metadata`` (the edit
+    overlay, invariant 2) — extracted metadata is never touched."""
+    _require(principal, "annotate")
+    it = await _get_item(args.citation, principal, session)
+    note = args.note.strip()
+    merged = dict(it.user_metadata or {})
+    if note:
+        merged["note"] = note
+    else:
+        merged.pop("note", None)
+    it.user_metadata = merged
+    session.add(
+        ItemVersion(
+            item_id=it.id,
+            actor=f"llm:{principal.key_name}",
+            patch={"user_metadata": {"note": note or None}},
+        )
+    )
+    await session.commit()
+    await defer_index_sync([str(it.id)])
+    await _audit_write(
+        request, principal, "annotate", [str(it.id)], {"cleared": not note}
+    )
+    await _audit_tool(request, principal, "annotate", 1)
+    return {"citation": str(it.id), "note": note or None, "cleared": not note}
 
 
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,7 @@
   import { encodeSearchHash } from "./searchparams";
   import { setReportPrefill, takeBuilderPrefill } from "./handoff";
   import {
+    assistQuery,
     previewQuery,
     previewValidationErrors,
     queryKeys,
@@ -228,6 +229,54 @@
     rawQuery = "";
     advancedBanner = false;
     unmappedWarn = [];
+    nlText = "";
+    nlNotes = [];
+    nlSource = "";
+    nlError = "";
+  }
+
+  // ------------------------------------------------------------------ //
+  // Natural-language assist: describe the query in plain English; the   //
+  // server translates to a guaranteed-valid DSL string (heuristic, or a //
+  // configured local Ollama with heuristic fallback). Applied exactly   //
+  // like a prefill: rows when representable, raw mode otherwise.        //
+  // ------------------------------------------------------------------ //
+  let nlText = $state("");
+  let nlBusy = $state(false);
+  let nlNotes = $state<string[]>([]);
+  let nlSource = $state("");
+  let nlError = $state("");
+
+  async function runAssist() {
+    const text = nlText.trim();
+    if (!text || nlBusy) return;
+    nlBusy = true;
+    nlError = "";
+    nlNotes = [];
+    nlSource = "";
+    try {
+      const r = await assistQuery(text);
+      if (!r.dsl) {
+        nlError = "Couldn't derive any filters from that — try naming kinds, sizes, or dates.";
+        return;
+      }
+      nlNotes = r.notes;
+      nlSource = r.source;
+      const res = dslToRows(r.dsl);
+      if (res.advanced) {
+        rawMode = true;
+        rawQuery = r.dsl;
+        advancedBanner = true;
+      } else {
+        conditions = res.rows.length ? res.rows : [newCondition("kind")];
+        rawMode = false;
+        advancedBanner = false;
+      }
+    } catch (e) {
+      nlError = String(e);
+    } finally {
+      nlBusy = false;
+    }
   }
 
   function toggleRaw() {
@@ -301,6 +350,33 @@
       This query contains advanced syntax the visual builder can't represent — editing raw. Your query is preserved.
     </p>
   {/if}
+
+  <!-- NL assist: plain English in, DSL out (server-validated) -->
+  <form
+    class="mb-4 flex flex-wrap items-center gap-2"
+    onsubmit={(e) => { e.preventDefault(); runAssist(); }}>
+    <input
+      class="min-w-64 grow rounded-lg border border-slate-300 bg-transparent px-3 py-1.5 text-sm dark:border-slate-700"
+      bind:value={nlText}
+      placeholder='Describe it: "videos over 2 GB modified last week, not tagged archived"' />
+    <button
+      type="submit"
+      class="rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent)] disabled:opacity-50"
+      disabled={nlBusy || !nlText.trim()}>
+      {nlBusy ? "Translating…" : "Translate"}
+    </button>
+    {#if nlSource}
+      <span class="text-xs text-slate-400" title="Which engine produced the filters — the deterministic pattern translator, or the configured local model.">
+        via {nlSource === "ollama" ? "local model" : "pattern rules"}
+      </span>
+    {/if}
+  </form>
+  {#if nlError}
+    <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">{nlError}</p>
+  {/if}
+  {#each nlNotes as note (note)}
+    <p class="mb-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">{note}</p>
+  {/each}
 
   <div class="grid gap-4 lg:grid-cols-2">
     <!-- LEFT: builder -->
