@@ -194,6 +194,40 @@ from the host on a schedule — `scripts/backup.sh` is `pct exec`-friendly and
 wraps a `pg_dump -Fc` with retention; everything else in the CT is
 disposable/rebuilt by redeploy.
 
+## Changing a configuration setting (`.env`) {#changing-configuration}
+
+Every `FILEARR_*` setting (see the [configuration
+reference](../reference/configuration.md)) lives in **`/opt/filearr/.env`
+inside the container**. The deploy script created that file and **preserves it
+across redeploys** — your overrides are never lost to an upgrade.
+
+From the Proxmox host shell, the duplicate-safe pattern is remove-then-append,
+then recreate the stack (compose only recreates services whose environment
+actually changed):
+
+```bash
+# example: accept a larger thumbnail cache — 50 GiB advisory budget
+pct exec <vmid> -- bash -c "cd /opt/filearr \
+  && grep -v '^FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES=' .env > .env.new \
+  && echo 'FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES=53687091200' >> .env.new \
+  && mv .env.new .env \
+  && docker compose up -d"
+```
+
+Verify what the running container actually sees:
+
+```bash
+pct exec <vmid> -- bash -c "cd /opt/filearr && docker compose exec -T app env | grep FILEARR_THUMB"
+```
+
+Handy byte values for size-type settings: `0` disables where documented,
+`5368709120` = 5 GiB, `21474836480` = 20 GiB, `53687091200` = 50 GiB
+(`$((N * 1024**3))` computes any GiB count in bash). The same edit-then-
+`docker compose up -d` procedure applies to every variable in the reference —
+only `FILEARR_SECRET_KEY` and `FILEARR_PROXY_SHARED_SECRET` should never be
+changed after first use (rotating them orphans encrypted alert-channel
+secrets / breaks the agent mTLS proxy trust).
+
 ## Shell access — where's the container password?
 
 Nowhere: the wizard deliberately never sets a root password inside the CT, so
