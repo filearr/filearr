@@ -108,6 +108,38 @@ offline box degrades to a "could not reach GitHub" note. Commits newer than
 the running build are marked with a dot; click a subject to read the full
 message. The API is `GET`/`POST /api/v1/system/update-check`.
 
+## "Task exception was never retrieved … AppNotOpen" from the worker {#appnotopen}
+
+**Symptom.** The worker's container log (not the Logs panel — this prints on
+stderr, outside the logging system) shows:
+
+```text
+Task exception was never retrieved
+future: <Task finished name='process job …' … exception=AppNotOpen('App was not open. …')>
+```
+
+**What it means.** The worker process hit a **primary error** that ended its
+run loop — the lines *above* this message name it; a transient database
+connection failure is the usual one — and Procrastinate (3.9) closes its app
+before in-flight job tasks have finished winding down. Those tasks then fail
+late with `AppNotOpen`, and asyncio prints each as an unretrieved exception.
+The noise is the *echo*, not the fault.
+
+**Impact: none lasting.** The interrupted jobs keep status `doing`; the
+reaper requeues them within its 5-minute tick (FIX-6), and Docker's
+`restart: unless-stopped` brings the worker straight back. Verify and find
+the primary error with:
+
+```bash
+docker inspect --format '{{.RestartCount}} {{.State.StartedAt}}' filearr-worker-1
+docker compose logs --tail=200 worker | grep -B 25 "Task exception was never retrieved" | head -60
+```
+
+If the restart count climbs steadily, chase the primary error it reports —
+that is the actual problem. Isolated occurrences around redeploys are
+expected: recreating containers interrupts whatever was mid-flight, by
+design, and the reaper cleans up.
+
 ## Scan-scheduling storms / stalled jobs / the reaper
 
 **Symptom.** A library's scheduled scan fires every scheduler tick instead of on
