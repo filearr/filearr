@@ -85,9 +85,14 @@ def _version(root: Path) -> str:
 
 
 def _base_url(request: Request) -> str:
-    """The central URL the scripts phone back to — same derivation the installer-
-    config endpoint uses (reverse proxies covered by uvicorn's proxy-headers)."""
-    return str(request.base_url).rstrip("/")
+    """The central URL the scripts phone back to and the manifest links carry —
+    the shared derivation in :func:`filearr.urls.public_base_url`
+    (FILEARR_PUBLIC_BASE_URL -> X-Forwarded-* -> request.base_url; the raw
+    request said http:// behind the TLS proxy and baked dead URLs into
+    install.ps1 — live 2026-08-08)."""
+    from filearr.urls import public_base_url
+
+    return public_base_url(request)
 
 
 @router.get(

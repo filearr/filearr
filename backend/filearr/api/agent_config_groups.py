@@ -418,10 +418,16 @@ async def issue_installer_config(
             )
         group_name = group.name
 
+    from filearr.urls import public_base_url
+
     central_url = (
         body.central_url_override.rstrip("/")
         if body.central_url_override
-        else str(request.base_url).rstrip("/")
+        # Shared outward-URL derivation (FILEARR_PUBLIC_BASE_URL ->
+        # X-Forwarded-* -> request.base_url): the raw request.base_url said
+        # http:// behind the TLS proxy, minting sidecars that dialed a dead
+        # scheme/port (same class as the 2026-08-08 install.ps1 failure).
+        else public_base_url(request)
     )
 
     ttl_seconds = body.ttl_seconds or (settings.enrollment_token_ttl_minutes * 60)
