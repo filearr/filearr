@@ -390,6 +390,49 @@ Jobs page (or let the serve path regenerate them lazily).
 `FILEARR_DISK_GC_TARGET_FREE_GB > 0` so the emergency GC LRU-evicts to a target,
 grow the volume, and enable a low-space alert.
 
+### Disk fills after repeated deploys (Docker layers, not thumbnails) {#deploy-disk-fill}
+
+**Symptom.** `disk warn/critical` on the *temp (app disk)* / *database* rows
+right after redeploying — especially after several rebuilds in a row (a failed
+build retried, `FORCE_REBUILD=1`). The emergency thumbnail GC logs that it
+found **nothing to reclaim**: it frees the *thumbnail* filesystem, and the
+pressure here is on the disk holding Docker and Postgres. (Live example: a
+rebuild storm took a 125 GB CT from 74 GB free to **0.6% free** in one
+evening.)
+
+**Diagnosis** — run *inside the container* (`pct enter <vmid>` from the
+Proxmox host), or prefix each command with `pct exec <vmid> --` from the host:
+
+```bash
+df -h /                    # how bad is it
+docker system df           # images vs containers vs build cache vs volumes
+docker system df -v        # ...itemized (which image/volume is the pig)
+du -x -d1 -h / | sort -h   # non-Docker consumers on the root fs (logs, etc.)
+```
+
+**Recovery, in order of safety:**
+
+```bash
+docker image prune -f                        # dangling layers from old rebuilds — always safe
+docker builder prune -f --keep-storage 6GB   # trim BuildKit cache (next deploy stays incremental)
+journalctl --vacuum-size=200M                # if du shows the journal grew large
+```
+
+Interpret the prune output honestly: if it reclaims little (hundreds of MB)
+the space went somewhere else — `docker system df -v` tells you whether it's
+the Postgres volume growing with your catalog (legitimate; grow the disk) or
+the build cache, and `du` catches everything outside Docker.
+
+**Prevent recurrence.** Deploys from 2026-08-08 on prune dangling images
+automatically after every build (alongside the existing BuildKit cache trim),
+so rebuild storms no longer accrete layers.
+
+!!! tip "Proxmox web-console paste eats the first character"
+    Pasting into the noVNC console frequently drops the leading keystroke —
+    `pct exec …` arriving as `ct exec …` (`-bash: ct: command not found`) is
+    the classic symptom. Retype the first letter, or use SSH to the host
+    instead of the web console for anything copy-pasted.
+
 ## Migration failures / Alembic state / stamping
 
 **Symptom.** After an upgrade or restore the app errors on schema mismatch, or a
