@@ -470,7 +470,7 @@ manifest it cannot verify — but see §8.4 for the dist channel it CAN use.
 
 Central also tracks the **published central console version**: the agent-dist
 bake inside the Docker image (`/app/agent-dist`, the same binaries the
-first-install scripts serve, stamped e.g. `main-1a2b3c4`). When an agent's
+first-install scripts serve, stamped e.g. `1.5.0-1a2b3c4` — see §8.4.1). When an agent's
 update-manifest poll finds **no covering signed release** but the dist version
 *differs* from what the agent runs, central serves an **UNSIGNED** manifest
 derived from the dist bake (artifacts ride the same per-release download path
@@ -487,10 +487,33 @@ Trust model split, enforced on both ends:
   advertise `key_pinned=true` on the poll so central never offers them the
   dist channel — they update only via the signed §8.2 flow.
 
-Because decorated build stamps (`main-1a2b3c4`) have no defined ordering, the
-dist channel uses **string inequality** ("track the exact published central
-build"), while clean release tags keep semver ordering (never downgrade) —
-`update.ShouldApply` / central's `_should_offer`, kept in sync.
+Because decorated build stamps (`1.5.0-3303638`, or legacy `main-1a2b3c4`)
+have no defined ordering against each other, the dist channel uses **string
+inequality** ("track the exact published central build"), while clean release
+tags keep semver ordering (never downgrade) — `update.ShouldApply` / central's
+`_should_offer`, kept in sync.
+
+### 8.4.1 Version stamping: `agent/VERSION` is the single source of truth (2026-08-07)
+
+Every build path stamps `main.Version` from the **`agent/VERSION`** file plus a
+build discriminator — bump that one file to move the whole ecosystem:
+
+| Build path | Stamp shape | Example |
+|---|---|---|
+| CI (both Docker images) | `<VERSION>-<sha7>` | `1.5.0-1a2b3c4` |
+| Proxmox deploy (agent-dist bake) | `<VERSION>-<hash7>` (source content hash) | `1.5.0-3303638` |
+| `build_windows_agent.ps1` (local) | `<VERSION>-<sha7>` | `1.5.0-1a2b3c4` |
+| Signed releases (`filearr-release sign`) | operator-chosen clean tag | `1.5.0` |
+
+Before this, the three paths disagreed wildly (live fleet showed `main`,
+`1.4.0` and `0.0.0-dev` simultaneously): the deploy never passed the build
+arg (dist bake = `0.0.0-dev`), CI stamped the **branch name**, the agent
+image appended a space + date that `_SAFE_VERSION` rejects, and the Windows
+script had `v1.4.0` **hardcoded** — a rebuilt binary re-reported 1.4.0
+forever. Note the Windows script's output is **key-pinned** (it bakes the
+release public key), so it updates ONLY via signed §8.2 releases — cutting a
+new signed release with a version above the fleet's is what actually moves
+those agents; central image redeploys never will.
 
 ### 8.5 Gating + staged rollout: the `auto_update` policy
 

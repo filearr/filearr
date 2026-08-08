@@ -14,8 +14,8 @@
 # UPDATE_PUBLIC_KEY unless you know you want in-container self-updates (then
 # your restart policy must relaunch on exit code 20 to complete a swap).
 #
-# Build (from the repo root):
-#   docker build -t filearr-agent --build-arg VERSION=v1.4.0 ./agent
+# Build (from the repo root; agent/VERSION is the canonical version):
+#   docker build -t filearr-agent --build-arg VERSION="$(cat agent/VERSION)" ./agent
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
@@ -24,11 +24,15 @@ RUN go mod download
 COPY . .
 ARG VERSION=0.0.0-docker
 ARG UPDATE_PUBLIC_KEY=""
-# CI passes VERSION=<ref>@<full-sha>; shorten the sha to 7 chars and stamp the
-# UTC build date so the web UI Status screen shows a traceable version
-# (e.g. "main@1a2b3c4 (2026-07-27)") instead of a bare branch name.
-RUN V="${VERSION}"; case "$V" in *@*) V="${V%@*}@$(echo "${V#*@}" | cut -c1-7)";; esac; \
-    V="$V ($(date -u +%Y-%m-%d))"; \
+# CI passes VERSION=<agent/VERSION>@<full-sha>; shorten the sha to 7 chars and
+# join with '-' (e.g. "1.5.0-1a2b3c4") — the SAME stamp shape as the root
+# Dockerfile's agentdist stage and build_windows_agent.ps1, so every build
+# path reports comparably. The old "<ref>@<sha7> (<date>)" stamp contained a
+# space + '@' that central's _SAFE_VERSION rejects, and a branch name that
+# orders against nothing (fleet showed "main" / "1.4.0" / "0.0.0-dev"
+# simultaneously — live report 2026-08-07). Build date lives in the OCI image
+# labels (docker inspect), not the version string.
+RUN V="${VERSION}"; case "$V" in *@*) V="${V%%@*}-$(echo "${V#*@}" | cut -c1-7)";; esac; \
     CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X \"main.Version=${V}\" -X github.com/filearr/filearr/agent/internal/update.PublicKeyBase64=${UPDATE_PUBLIC_KEY}" \
     -o /out/filearr-agent ./cmd/filearr-agent

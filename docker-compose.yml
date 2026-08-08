@@ -2,7 +2,13 @@ name: filearr
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # Agent-binaries version stamp (agentdist stage). The Proxmox deploy
+        # writes AGENT_VERSION=<agent/VERSION>@<content-hash> into .env; a
+        # bare `docker compose build` falls back to the dev default.
+        VERSION: "${AGENT_VERSION:-0.0.0-dev}"
     image: filearr:local
     restart: unless-stopped
     ports:
@@ -80,7 +86,10 @@ services:
       - app
 
   worker:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: "${AGENT_VERSION:-0.0.0-dev}"  # same stamp as app (shared image)
     image: filearr:local
     restart: unless-stopped
     # T8 throughput knobs (env-driven, defaults baked in):

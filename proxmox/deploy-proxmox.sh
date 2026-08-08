@@ -881,6 +881,12 @@ push_source() {
   # and verified after the stack starts (see deploy_stack).
   BUILD_STAMP="$(sha256sum "$tarball" | cut -c1-12)-$(date -u +%Y%m%dT%H%M%SZ)"
   echo "    source stamp: $BUILD_STAMP"
+  # Agent-binaries version: agent/VERSION (canonical, shared with CI and the
+  # Windows build script) + the source content hash, so the dist bake central
+  # serves is traceable AND orderable. Without this the image built with the
+  # Dockerfile default and central offered "0.0.0-dev" (live 2026-08-07).
+  AGENT_VERSION="$(tr -d ' \r\n' < "$PROJECT_DIR/agent/VERSION" 2>/dev/null || echo 0.0.0)@${BUILD_STAMP%%-*}"
+  echo "    agent version: $AGENT_VERSION"
   pct exec "$VMID" -- mkdir -p "$CT_APP_DIR"
   pct push "$VMID" "$tarball" /tmp/filearr-src.tar.gz
   # CLEAN extract: stale files from previous pushes must not survive
@@ -943,6 +949,11 @@ grep -q '^RENDER_GID=' .env && sed -i \"s/^RENDER_GID=.*/RENDER_GID=\$RGID/\" .e
 grep -v '^FILEARR_PUBLIC_BASE_URL=' .env > .env.pburl 2>/dev/null || true
 echo \"FILEARR_PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}\" >> .env.pburl
 mv .env.pburl .env
+# Agent-binaries version stamp for the compose build args (agentdist stage).
+# Re-applied every deploy: compose interpolates \${AGENT_VERSION} from .env.
+grep -v '^AGENT_VERSION=' .env > .env.agv 2>/dev/null || true
+echo \"AGENT_VERSION=${AGENT_VERSION:-0.0.0-dev}\" >> .env.agv
+mv .env.agv .env
 # FILEARR_SECRET_KEY: required for alert-channel secret encryption (AES-GCM;
 # channels cannot be created without it). Generated ONCE, in-CT, and NEVER
 # rotated automatically — rotating would orphan already-encrypted channel

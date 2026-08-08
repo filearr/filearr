@@ -68,6 +68,12 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
+      # Canonical agent version: agent/VERSION is the single source of truth
+      # (also read by build_windows_agent.ps1 and the Proxmox deploy). The old
+      # ref_name stamp made every main-branch build report "main-<sha>" — not
+      # orderable, and disagreeing with every other build path.
+      - id: agentver
+        run: echo "version=$(tr -d ' \r\n' < agent/VERSION)" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: push
         with:
@@ -79,7 +85,7 @@ jobs:
           # Stamps the agentdist stage's cross-compiled first-install binaries
           # (served by /api/v1/agent-dist) — same VERSION scheme as agent-image.
           build-args: |
-            VERSION=${{ github.ref_name }}@${{ github.sha }}
+            VERSION=${{ steps.agentver.outputs.version }}@${{ github.sha }}
           # The ci call's validation build just wrote amd64 layers to the GHA
           # cache at this same ref — reuse them so gating doesn't double the
           # wall time; mode=max also caches arm64 for the next release.
@@ -126,6 +132,9 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
+      # Same canonical agent/VERSION stamp as the main image job above.
+      - id: agentver
+        run: echo "version=$(tr -d ' \r\n' < agent/VERSION)" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: push
         with:
@@ -133,7 +142,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ github.ref_name }}@${{ github.sha }}
+            VERSION=${{ steps.agentver.outputs.version }}@${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Separate cache scope: the default scope belongs to the main image
