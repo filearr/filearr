@@ -292,7 +292,17 @@
     // Deactivate the sliders so pendingRange drives the filter until one moves.
     if (sizeBounds) { sizeLo = sizeBounds.min; sizeHi = sizeBounds.max; }
     if (mtimeBounds) { mtimeLo = mtimeBounds.min; mtimeHi = mtimeBounds.max; }
-    runFresh();
+    // Auto-run ONLY when the params actually FILTER something. Display-only
+    // leftovers (view / sort / semantic ride the hash after any search) used
+    // to count as "params present" and re-ran a match-all on the next visit —
+    // results appearing before any query, the exact roadmap-§20 blank-slate
+    // regression (live report 2026-08-08). Restoring the display prefs while
+    // staying blank is correct for those.
+    const displayOnly = new Set(["view", "sort", "semantic"]);
+    const searchable = Object.entries(p).some(
+      ([k, v]) => !displayOnly.has(k) && v !== "",
+    );
+    if (searchable) runFresh();
   }
 
   function onHashChange() {
