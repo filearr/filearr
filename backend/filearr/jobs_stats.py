@@ -390,6 +390,41 @@ async def jobs_summary(session: AsyncSession) -> dict:
 
     disk, resources = await run_in_threadpool(_disk_and_resources)
 
+    # Low-space ALERTING state (live 2026-08-08: a disk hit 0.6% free and the
+    # operator only found out from the logs). The seeded "System: low disk
+    # space" rule ships DISABLED until an admin attaches a channel — surface
+    # rule/channel state next to the disk banner so "why didn't I get an
+    # alert?" is answered exactly where the operator is looking. Null on any
+    # failure (projection stays total).
+    try:
+        from filearr.alerts.ops import LOW_SPACE_RULE_NAME
+        from filearr.models import AlertRule, AlertRuleChannel
+
+        rule = (
+            await session.execute(
+                select(AlertRule).where(
+                    AlertRule.is_system.is_(True),
+                    AlertRule.name == LOW_SPACE_RULE_NAME,
+                )
+            )
+        ).scalars().first()
+        if rule is None:
+            disk["alerting"] = {"enabled": False, "channels": 0}
+        else:
+            n_channels = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(AlertRuleChannel)
+                    .where(AlertRuleChannel.rule_id == rule.id)
+                )
+            ).scalar() or 0
+            disk["alerting"] = {
+                "enabled": bool(rule.enabled),
+                "channels": int(n_channels),
+            }
+    except Exception:  # noqa: BLE001
+        disk["alerting"] = None
+
     # Cheap Postgres health tile from the SAME session (a few catalog reads); the
     # queue backlog reuses the already-fetched snapshot (no extra query). Wrapped so
     # ANY failure (permissions / odd PG) degrades to null rather than breaking the

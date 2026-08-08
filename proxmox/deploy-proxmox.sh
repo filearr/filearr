@@ -7,7 +7,7 @@
 #     bash proxmox/deploy-proxmox.sh                first run -> wizard, then deploy;
 #                                                   later runs -> redeploy with saved defaults
 #     bash proxmox/deploy-proxmox.sh --reconfigure  re-run the wizard
-#     bash proxmox/deploy-proxmox.sh --storages     re-run only the storage definitions
+#     bash proxmox/deploy-proxmox.sh --storages     add/remove/redefine the storage definitions
 #     bash proxmox/deploy-proxmox.sh --status       CT + mounts + stack status
 #     bash proxmox/deploy-proxmox.sh --destroy      stop & delete the container
 #
@@ -526,15 +526,79 @@ ensure_template() {
 storages_need_privileged() { grep -qs '|nfs|' "$STORAGES_ENV" 2>/dev/null; }
 storages_have_local() { grep -qs '|local|' "$STORAGES_ENV" 2>/dev/null; }
 
+# Libraries defined on a path prefix inside the CT ("name -> root_path" lines,
+# one per library). Queries the running stack's Postgres through the CT; prints
+# the sentinel __UNAVAILABLE__ when that isn't possible (no CT yet / stack
+# down) so callers can say "couldn't check" instead of a false "none".
+libraries_under_path() {
+  local p="$1" out
+  [[ -n "${VMID:-}" ]] || { echo "__UNAVAILABLE__"; return 0; }
+  out=$(pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && docker compose exec -T postgres \
+    psql -U filearr -d filearr -Atc \
+    \"SELECT name || ' -> ' || root_path FROM libraries WHERE root_path = '$p' OR root_path LIKE '$p/%'\"" \
+    2>/dev/null) || { echo "__UNAVAILABLE__"; return 0; }
+  printf '%s\n' "$out"
+}
+
+# Shared guard for destructive storage edits: warn (and confirm) when defined
+# libraries live under $1; returns nonzero when the operator backs out.
+_confirm_despite_libraries() {
+  local prefix="$1" what="$2" used
+  used=$(libraries_under_path "$prefix")
+  if [[ "$used" == "__UNAVAILABLE__" ]]; then
+    echo "  (could not check for libraries using this storage — stack not reachable;"
+    echo "   any library rooted under $prefix will tombstone its items at next scan)"
+    return 0
+  fi
+  [[ -n "$used" ]] || return 0
+  echo "  !! libraries are defined on $what:"
+  echo "$used" | sed 's/^/     /'
+  echo "     Their files become unreachable: the next scan tombstones every item"
+  echo "     (recoverable from the recycle bin until retention purges) — nothing"
+  echo "     is hard-deleted, but search/results lose them. Delete or repoint the"
+  echo "     libraries in Admin first if that is not what you want."
+  ask "Proceed anyway? (yes/no)" "no"
+  [[ "$REPLY" == "yes" ]]
+}
+
 wizard_storages() {
   mkdir -p "$CONF_DIR"
   echo "── storage definitions (each mounts read-only at ${CT_MEDIA_ROOT}/<name> inside the CT) ──"
   if [[ -s "$STORAGES_ENV" ]]; then
     echo "current storages:"; awk -F'|' '{printf "  - %s (%s) %s/%s\n",$1,$2,$3,$4}' "$STORAGES_ENV"
-    ask "Keep these and add more (add) / redefine from scratch (new) / keep as-is (keep)" "keep"
+    ask "Keep these and add more (add) / remove some (remove) / redefine from scratch (new) / keep as-is (keep)" "keep"
     case "$REPLY" in
-      new) : > "$STORAGES_ENV" ;;
+      new)
+        # Wiping the definitions strands EVERY library on these mounts — same
+        # guard as per-storage removal, over the whole media root.
+        if ! _confirm_despite_libraries "$CT_MEDIA_ROOT" "the storages being wiped"; then
+          echo "  keeping existing definitions"; return 0
+        fi
+        : > "$STORAGES_ENV" ;;
       keep) return 0 ;;
+      remove)
+        # Drop definitions by name; the CT-side unmount/unit/fstab cleanup is
+        # the reconciliation pass at the top of setup_storages (runs on this
+        # same invocation for --storages, or on the next redeploy). A `local`
+        # bind is pct-level, so its host binding fully disappears only when
+        # the CT is recreated. Libraries that pointed at a removed storage
+        # tombstone their items on the next scan (nothing is hard-deleted).
+        while true; do
+          [[ -s "$STORAGES_ENV" ]] || { echo "  (no storages left)"; break; }
+          ask "Storage NAME to remove (empty = done removing)" ""
+          local rm_name=$REPLY
+          [[ -n "$rm_name" ]] || break
+          if ! grep -q "^${rm_name}|" "$STORAGES_ENV"; then
+            echo "  no storage named '$rm_name'"; continue
+          fi
+          if ! _confirm_despite_libraries "${CT_MEDIA_ROOT}/${rm_name}" "storage '$rm_name'"; then
+            echo "  kept: $rm_name"; continue
+          fi
+          grep -v "^${rm_name}|" "$STORAGES_ENV" > "${STORAGES_ENV}.tmp" \
+            && mv "${STORAGES_ENV}.tmp" "$STORAGES_ENV"
+          echo "  removed: $rm_name (unmounted when storage config is next applied)"
+        done
+        ;;
     esac
   else
     : > "$STORAGES_ENV"
@@ -775,6 +839,39 @@ write_share_map() {
 # ---------- storage mounts inside the CT ----------
 setup_storages() {
   echo "==> configuring storage mounts inside CT (systemd units, Before=docker.service)"
+  # Reconcile REMOVALS first: any filearr-mount-<name> unit (or NFS fstab
+  # line) on the CT whose storage is no longer defined gets stopped, deleted,
+  # and its mountpoint unmounted+removed. `local` binds are pct-level
+  # (create-time) and fully disappear only when the CT is recreated. Never
+  # touches anything outside the filearr-mount-* namespace.
+  local defined_names
+  defined_names=$(awk -F'|' 'NF {printf " %s", $1}' "$STORAGES_ENV")
+  pct exec "$VMID" -- bash -c "defined=' ${defined_names} '
+for unit in /etc/systemd/system/filearr-mount-*.service; do
+  [ -e \"\$unit\" ] || continue
+  n=\$(basename \"\$unit\"); n=\${n#filearr-mount-}; n=\${n%.service}
+  case \"\$defined\" in *\" \$n \"*) continue ;; esac
+  echo \"    removing stale storage mount: \$n\"
+  systemctl disable --now \"filearr-mount-\$n.service\" 2>/dev/null || true
+  rm -f \"\$unit\"
+  fusermount3 -uz \"${CT_MEDIA_ROOT}/\$n\" 2>/dev/null || umount -l \"${CT_MEDIA_ROOT}/\$n\" 2>/dev/null || true
+  rmdir \"${CT_MEDIA_ROOT}/\$n\" 2>/dev/null || true
+done
+# NFS entries live in fstab, not units: drop lines for undefined mountpoints.
+if [ -f /etc/fstab ] && grep -qs \" ${CT_MEDIA_ROOT}/\" /etc/fstab; then
+  while read -r line; do
+    mnt=\$(printf '%s' \"\$line\" | awk '{print \$2}')
+    case \"\$mnt\" in ${CT_MEDIA_ROOT}/*) ;; *) printf '%s\n' \"\$line\"; continue ;; esac
+    n=\${mnt#${CT_MEDIA_ROOT}/}
+    case \"\$defined\" in
+      *\" \$n \"*) printf '%s\n' \"\$line\" ;;
+      *) echo \"    removing stale NFS fstab entry: \$n\" >&2
+         umount -l \"\$mnt\" 2>/dev/null || true
+         rmdir \"\$mnt\" 2>/dev/null || true ;;
+    esac
+  done < /etc/fstab > /etc/fstab.new && mv /etc/fstab.new /etc/fstab
+fi
+systemctl daemon-reload"
   while IFS='|' read -r -u3 name type host share user pass port domain; do
     [[ -n "$name" ]] || continue
     local mnt="${CT_MEDIA_ROOT}/${name}"
@@ -1037,7 +1134,13 @@ docker compose ${profile_args} up -d --remove-orphans || {
 # retains — the next redeploy stays incremental. NEVER a full prune: that
 # would force every redeploy into a cold multi-minute rebuild. || true: cache
 # hygiene must not fail a deploy.
-docker builder prune -f --keep-storage 6GB 2>/dev/null | tail -n1 || true"
+docker builder prune -f --keep-storage 6GB 2>/dev/null | tail -n1 || true
+# Dangling IMAGES are a separate pool from the buildkit cache: every rebuild
+# unttags the previous filearr:local layers, and repeated (esp. FORCE_REBUILD)
+# deploys accreted tens of GB of them — the CT hit 0.6% free during the
+# 2026-08-07 rebuild storm. Prune is safe: dangling = untagged AND unused by
+# any container; the running stack's tagged images are never touched.
+docker image prune -f 2>/dev/null | tail -n1 || true"
   configure_agents
   echo "==> bootstrap DB / queue / index (idempotent)"
   pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && docker compose run --rm app python scripts/init_db.py"
@@ -1415,7 +1518,7 @@ echo "     then watch results appear in the web UI search."
 echo
 echo "  Management:"
 echo "    status                bash proxmox/deploy-proxmox.sh --status"
-echo "    add/change storages   bash proxmox/deploy-proxmox.sh --storages  (then redeploy)"
+echo "    add/remove storages   bash proxmox/deploy-proxmox.sh --storages  (add/remove/redefine; then redeploy)"
 echo "    change settings       bash proxmox/deploy-proxmox.sh --reconfigure"
 echo "    redeploy after edits  bash proxmox/deploy-proxmox.sh"
 echo "    remove everything     bash proxmox/deploy-proxmox.sh --destroy"

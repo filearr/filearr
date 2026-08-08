@@ -112,8 +112,13 @@ async def run_disk_monitor(
                 # Always log the current low state (throttled by level; ops alert
                 # is the user-facing signal).
                 log.warning(
-                    "disk %s on %s: free=%d (%.1f%%) — %s",
-                    status, path, st["free"], st["pct_free"], st["reason"],
+                    "disk %s on %s: %.1f GiB free of %.1f GiB (%.1f%%) — %s",
+                    status,
+                    path,
+                    st["free"] / diskguard.GB,
+                    st["total"] / diskguard.GB,
+                    st["pct_free"],
+                    st["reason"],
                 )
             elif prev in (diskguard.WARN, diskguard.CRITICAL) and status == diskguard.OK:
                 # Recovery: emit a clear (hourly-deduped) once per path.
@@ -147,7 +152,23 @@ async def run_disk_monitor(
         target = int(settings.disk_gc_target_free_gb * diskguard.GB)
         try:
             gc_result = await run_thumbnail_gc(aggressive=True, target_free_bytes=target)
-            log.warning("emergency thumbnail GC (disk critical) reclaimed %s", gc_result)
+            if gc_result.get("bytes_reclaimed", 0) > 0:
+                log.warning(
+                    "emergency thumbnail GC (disk critical) reclaimed %.2f GiB "
+                    "(%d orphaned files removed, %d valid thumbnails evicted)",
+                    gc_result["bytes_reclaimed"] / diskguard.GB,
+                    gc_result.get("files_removed", 0),
+                    gc_result.get("evicted", 0),
+                )
+            else:
+                log.warning(
+                    "emergency thumbnail GC (disk critical) found nothing to "
+                    "reclaim — the GC frees the THUMBNAIL filesystem only, so "
+                    "when the critical disk is a different filesystem (e.g. "
+                    "the app/database disk) it cannot help; free space there "
+                    "directly (old Docker images/build cache are the usual "
+                    "culprits after repeated deploys)."
+                )
         except Exception:  # noqa: BLE001 - GC must not break the monitor
             log.warning("emergency thumbnail GC failed", exc_info=True)
 

@@ -1105,6 +1105,10 @@ export interface DiskSummary {
     /** Device-dedupe: the watch roles sharing this physical device (tooltip). */
     members?: { label: string; path: string }[];
   })[];
+  /** Whether low-space events would actually be DELIVERED: the "System: low
+   *  disk space" rule's enabled state + attached channel count. Null when the
+   *  lookup failed. */
+  alerting?: { enabled: boolean; channels: number } | null;
 }
 
 /** FIX-11 — full /system/disk payload (every path, not just the low ones). */

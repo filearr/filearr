@@ -77,6 +77,23 @@ For SMB, credentials are collected once per host and reused across every share o
 that host. AD domain goes in the separate domain field; use a **bare** username
 (no domain prefix).
 
+### Adding, removing, and redefining storages
+
+`bash proxmox/deploy-proxmox.sh --storages` re-opens the storage wizard against
+the saved definitions: **add** more, **remove** some by name, **redefine from
+scratch**, or keep as-is. Applying the config reconciles the CT — mount units,
+NFS fstab entries, and mountpoints for storages that are no longer defined are
+stopped and removed (a `local` bind is a `pct`-level mapping and fully
+disappears only when the CT is recreated).
+
+Before a removal or a from-scratch redefine, the wizard **checks the running
+stack for libraries rooted on the affected storage** and asks for explicit
+confirmation if any exist — their files become unreachable, so the next scan
+tombstones every item (recoverable from the recycle bin until retention purges;
+nothing is hard-deleted). Delete or repoint such libraries in Admin first if
+that isn't what you want. When the stack isn't reachable the wizard says it
+could not check instead of pretending nothing is affected.
+
 ### The credential-free share map
 
 Because the deploy alone knows the real share URL behind each mount, it writes a

@@ -431,7 +431,14 @@ async def run_thumbnail_gc(
         "bytes_reclaimed": bytes_reclaimed,
         "evicted": evicted,
     }
-    log.info("gc_thumbnails reclaimed %s", result)
+    log.info(
+        "gc_thumbnails: reclaimed %.2f GiB (%d orphaned files removed, "
+        "%d stale manifest rows dropped, %d valid thumbnails evicted)",
+        bytes_reclaimed / (1024**3),
+        files_removed,
+        rows_removed,
+        evicted,
+    )
     return result
 
 

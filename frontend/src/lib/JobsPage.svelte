@@ -666,6 +666,14 @@
           </li>
         {/each}
       </ul>
+      {#if summary.disk.alerting && (!summary.disk.alerting.enabled || summary.disk.alerting.channels === 0)}
+        <p class="mt-1.5 text-xs font-medium"
+          title="The disk monitor records hourly-deduped warn/critical/recovery events, but delivery needs the 'System: low disk space' rule ENABLED with at least one channel (webhook/SMTP) attached — it ships disabled so nothing sends without your say-so. Set it up under the Alerts tab.">
+          ⚠ No alert will be sent for this:
+          {#if !summary.disk.alerting.enabled}the "System: low disk space" alert rule is disabled{:else}the rule has no channels attached{/if}
+          — configure it in the Alerts tab.
+        </p>
+      {/if}
     </div>
   {/if}
 

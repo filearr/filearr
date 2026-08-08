@@ -92,6 +92,12 @@ services:
         VERSION: "${AGENT_VERSION:-0.0.0-dev}"  # same stamp as app (shared image)
     image: filearr:local
     restart: unless-stopped
+    # Give in-flight jobs time to finish on SIGTERM before the kill. The
+    # default 10s regularly cut running jobs off mid-transaction during
+    # redeploys — procrastinate's worker then raced its own closing app and
+    # spat "Task exception was never retrieved ... AppNotOpen" to stderr
+    # (benign — the reaper requeues the job — but alarming to read).
+    stop_grace_period: 60s
     # T8 throughput knobs (env-driven, defaults baked in):
     #   FILEARR_WORKER_CONCURRENCY  parallel jobs per worker process (default 4)
     #   FILEARR_WORKER_QUEUES       comma-separated queues to serve
