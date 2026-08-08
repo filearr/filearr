@@ -1636,6 +1636,17 @@ class Agent(Base):
     # reads it to offer only the collectors an agent actually supports — so a new
     # inventory COMPOSITION never needs an agent redeploy, only a capable agent.
     capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 2026-08-08 fleet health: the compact self-reported snapshot the agent
+    # attaches to its command poll (uptime, outbox backlog, index size, scan
+    # state) — stored VERBATIM like ``capabilities``, size-capped at the API.
+    health: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    health_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # CENTRAL's observation of the auth path the agent's last authenticated
+    # request used ('bearer' | 'mtls') — ground truth for "is this agent
+    # actually on mTLS", which the agent itself cannot assert.
+    last_auth_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

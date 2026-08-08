@@ -178,6 +178,13 @@ class AgentOut(BaseModel):
     # ({inventory_collectors, inventory_version}; NULL until the agent's first
     # post-W6 poll). The console offers only collectors an agent supports.
     capabilities: dict | None = None
+    # 2026-08-08 fleet health: the agent's self-reported snapshot (uptime,
+    # outbox backlog, index size, scan state) + when it arrived, and CENTRAL's
+    # observation of the transport its last authenticated request used
+    # ('bearer' | 'mtls') — the honest answer to "is this agent on mTLS".
+    health: dict | None = None
+    health_at: datetime | None = None
+    last_auth_mode: str | None = None
     # 2026-08-05 update surfacing (populated by the LIST endpoint only —
     # mutation endpoints return the defaults): the version this agent would be
     # offered (signed release or the central-baked dist version), whether that
@@ -245,6 +252,9 @@ def _agent_out(a: Agent) -> AgentOut:
         created_at=a.created_at,
         config_group_id=a.config_group_id,
         capabilities=a.capabilities,
+        health=a.health,
+        health_at=a.health_at,
+        last_auth_mode=a.last_auth_mode,
     )
 
 

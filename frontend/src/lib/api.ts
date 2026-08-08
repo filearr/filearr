@@ -2441,6 +2441,13 @@ export interface AgentOut {
   config_group_id: string | null;
   // W6-D3: capability advertisement persisted from the agent's command poll.
   capabilities: Record<string, unknown> | null;
+  /** Self-reported health snapshot from the agent's command poll (uptime,
+   *  outbox backlog, index size, scan state) + when it arrived. */
+  health: Record<string, unknown> | null;
+  health_at: string | null;
+  /** CENTRAL's observation of the last authenticated request's transport
+   *  ('bearer' | 'mtls') — the honest answer to "is this agent on mTLS". */
+  last_auth_mode: "bearer" | "mtls" | null;
   // 2026-08-05 update surfacing (list endpoint only): the version this agent
   // would be offered, whether that makes an update available, and whether a
   // self_update command is already in flight. Drives the badge + button.

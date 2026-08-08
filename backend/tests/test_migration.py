@@ -16,7 +16,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "d4b8e1f6c290"
+HEAD = "e5c7a9d1f483"
+# agent health/transport revision's predecessor = app_logs.
+AGENT_HEALTH_PRED = "d4b8e1f6c290"
 # app_logs (console Logs panel) revision's predecessor = doc_chunks.
 APP_LOGS_PRED = "b8d4e6f2a157"
 # doc_chunks (LLM M2) revision's predecessor = the item_frecency revision.
@@ -118,6 +120,14 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # Agent health/transport (2026-08-08): the three agents columns exist
+        # at head; a one-step downgrade drops them and leaves app_logs intact.
+        assert {"health", "health_at", "last_auth_mode"} <= _columns(engine, "agents")
+        command.downgrade(cfg, AGENT_HEALTH_PRED)
+        agents_cols = _columns(engine, "agents")
+        assert not ({"health", "health_at", "last_auth_mode"} & agents_cols)
+        assert "app_logs" in _tables(engine)  # predecessor intact
+        command.upgrade(cfg, "head")
         # Console Logs panel: app_logs exists at head; a one-step downgrade
         # drops it cleanly and leaves the doc_chunks predecessor intact.
         assert "app_logs" in _tables(engine)

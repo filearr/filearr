@@ -15,6 +15,7 @@ import (
 	"github.com/filearr/filearr/agent/internal/enroll"
 	"github.com/filearr/filearr/agent/internal/index"
 	"github.com/filearr/filearr/agent/internal/inventory"
+	"github.com/filearr/filearr/agent/internal/outbox"
 	"github.com/filearr/filearr/agent/internal/pathspec"
 )
 
@@ -44,6 +45,9 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		// agent supports.
 		Inventory:    inventory.NewRunner(nil, nil),
 		Capabilities: inventory.Capabilities(),
+		// 2026-08-08 fleet health: the compact self-reported snapshot central
+		// stores on the agent row and the console renders per agent.
+		Health:       agentHealthProvider(idx, envOr(envDataDir, defaultDataDir()), time.Now()),
 		MaxCommands:  envInt(envCommandPollMax, 10),
 		Interval:     envDuration(envCommandPollInterval, 60*time.Second),
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),
@@ -68,6 +72,46 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		}
 	}()
 	return done
+}
+
+// agentHealthProvider assembles the compact self-reported health snapshot the
+// poller attaches to every command poll: uptime, replication backlog (outbox
+// unsent count), local index size, and the live/last scan state the scan
+// PROCESS crosses over via scan-status.json / scan-roots.json (the same files
+// the local web UI Status panel reads). Every piece is best-effort — a failed
+// read simply omits its key; the poll must never depend on health assembly.
+// Central stores the map VERBATIM (size-capped) with an arrival stamp; the
+// fleet console renders it per agent.
+func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time) func(ctx context.Context) map[string]any {
+	readJSON := func(name string) map[string]any {
+		b, err := os.ReadFile(filepath.Join(dataDir, name))
+		if err != nil {
+			return nil
+		}
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			return nil
+		}
+		return m
+	}
+	return func(ctx context.Context) map[string]any {
+		h := map[string]any{
+			"uptime_s": int(time.Since(startedAt).Seconds()),
+		}
+		if n, err := outbox.New(idx.DB()).CountUnsent(ctx); err == nil {
+			h["outbox_pending"] = n
+		}
+		if n, err := countActiveItems(ctx, idx); err == nil {
+			h["index_items"] = n
+		}
+		if st := readJSON("scan-status.json"); st != nil {
+			h["scan"] = st
+		}
+		if roots := readJSON("scan-roots.json"); roots != nil {
+			h["scan_roots"] = roots
+		}
+		return h
+	}
 }
 
 // consumeScanRootSeam reads the cached group policy, expands its scan_selections

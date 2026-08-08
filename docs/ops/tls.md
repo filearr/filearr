@@ -185,7 +185,11 @@ fingerprint rotates on cert renewal, so central can 401 a renewed agent. mTLS
    on a machine without the agent the same command provisions straight onto
    mTLS.
 3. Once every agent is on mTLS, set `FILEARR_AGENT_AUTH_MODE=mtls-header`. The
-   weaker bearer path is now shut off.
+   weaker bearer path is now shut off. **Verify before flipping:** the Agents
+   page shows a per-agent transport badge (`mTLS` / `bearer`) fed by
+   `agents.last_auth_mode` — CENTRAL's observation of each agent's last
+   authenticated request (2026-08-08), not self-reported. Flip only when every
+   active agent shows `mTLS`.
 
 ### Agent client (Go)
 

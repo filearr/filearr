@@ -187,3 +187,45 @@ func TestInventoryUploadCompletion(t *testing.T) {
 		t.Fatalf("decompressed blob not NDJSON: %q", nd[:min(80, len(nd))])
 	}
 }
+
+// The 2026-08-08 self-reported health snapshot rides the poll body under the
+// same additive contract as capabilities; a nil provider omits the field.
+func TestPollBodyCarriesHealthSnapshot(t *testing.T) {
+	m := newInvMock()
+	srv := httptest.NewServer(m.handler())
+	defer srv.Close()
+
+	p := NewPoller(Config{
+		BaseURL:      srv.URL,
+		AgentID:      "agent-1",
+		AuthFn:       func() string { return "fp" },
+		HTTP:         srv.Client(),
+		LeaseSeconds: 300,
+		Health: func(ctx context.Context) map[string]any {
+			return map[string]any{"uptime_s": 42, "outbox_pending": 3}
+		},
+	})
+	if _, err := p.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	m.mu.Lock()
+	h, _ := m.lastPollBody["health"].(map[string]any)
+	m.mu.Unlock()
+	if h == nil || h["outbox_pending"] == nil {
+		t.Fatalf("health not attached to poll body: %+v", m.lastPollBody)
+	}
+
+	// nil provider (older wiring) omits the field entirely.
+	m2 := newInvMock()
+	srv2 := httptest.NewServer(m2.handler())
+	defer srv2.Close()
+	if _, err := newInvPoller(srv2).PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	m2.mu.Lock()
+	_, present := m2.lastPollBody["health"]
+	m2.mu.Unlock()
+	if present {
+		t.Fatalf("health must be omitted when no provider is wired: %+v", m2.lastPollBody)
+	}
+}

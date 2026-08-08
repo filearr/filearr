@@ -130,6 +130,11 @@ async def test_mtls_mode_san_identity_ok(client):
     r = await _poll(c, agent_id, _mtls(agent_id))  # san==agent_id, no fp header
     assert r.status_code == 200, r.text
     assert r.json() == []
+    # 2026-08-08: the observed transport is stamped on the row — the console's
+    # mTLS badge is central-verified truth, never agent-asserted.
+    async with maker() as s:
+        agent = await s.get(Agent, agent_id)
+        assert agent.last_auth_mode == "mtls"
 
 
 async def test_mtls_mode_bad_shared_secret(client):

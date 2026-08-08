@@ -140,6 +140,10 @@ file:
 - a `moved` event carries the old path (delete+create pair)
 - an optional, best-effort `share_hint` (a network-share URL/UNC/host, so the
   central UI can offer an "open on the network" link)
+- a compact **health snapshot** on each command poll: uptime, replication
+  backlog count, local index size, and scan status/counters — operational
+  numbers only, never paths beyond the scan roots you configured and never
+  file contents
 
 **What never leaves the agent machine:**
 

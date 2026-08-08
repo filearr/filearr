@@ -123,6 +123,33 @@
     if (h < 24) return `${h}h ago`;
     return `${Math.floor(h / 24)}d ago`;
   }
+  // Compact tooltip from the agent's self-reported health snapshot (rides its
+  // command poll; stored verbatim on the agent row). Pre-2026-08 agent builds
+  // send none — the tooltip degrades to the last-seen timestamp alone.
+  function healthTitle(a: AgentOut): string {
+    const lines: string[] = [
+      a.last_seen_at ? `last seen ${new Date(a.last_seen_at).toLocaleString()}` : "never seen",
+    ];
+    const h = a.health;
+    if (h) {
+      if (typeof h.uptime_s === "number") {
+        const s = h.uptime_s;
+        const up = s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`
+          : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+          : `${Math.floor(s / 60)}m`;
+        lines.push(`uptime ${up}`);
+      }
+      if (typeof h.outbox_pending === "number") lines.push(`replication backlog ${h.outbox_pending} event${h.outbox_pending === 1 ? "" : "s"}`);
+      if (typeof h.index_items === "number") lines.push(`local index ${h.index_items.toLocaleString()} items`);
+      const scan = h.scan as Record<string, unknown> | undefined;
+      if (scan && typeof scan.status === "string") {
+        lines.push(`scan: ${scan.status}${typeof scan.seen === "number" ? ` (${scan.seen} seen)` : ""}`);
+      }
+      if (a.health_at) lines.push(`health as of ${new Date(a.health_at).toLocaleString()}`);
+    }
+    return lines.join("\n");
+  }
+
   function isOnline(a: AgentOut): boolean {
     if (a.status !== "active" || !a.last_seen_at) return false;
     return Date.now() - new Date(a.last_seen_at).getTime() <= ONLINE_WINDOW_MS;
@@ -597,13 +624,20 @@ ${detail}
               </td>
               <td class="py-2 pr-3">
                 {#if isOnline(a)}
-                  <span class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <span class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400" title={healthTitle(a)}>
                     <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>online
                   </span>
                 {:else}
-                  <span class="inline-flex items-center gap-1 text-xs text-slate-500" title={a.last_seen_at ?? "never seen"}>
+                  <span class="inline-flex items-center gap-1 text-xs text-slate-500" title={healthTitle(a)}>
                     <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>{relTime(a.last_seen_at)}
                   </span>
+                {/if}
+                {#if a.last_auth_mode === "mtls"}
+                  <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                    title="Central verified this agent's last authenticated request via the mTLS proxy path (client-certificate SAN identity) — observed server-side, not self-reported.">mTLS</span>
+                {:else if a.last_auth_mode === "bearer"}
+                  <span class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                    title="This agent's last authenticated request used the interim bearer (fingerprint) path — it has not been switched to the mTLS endpoint yet. See the mode-flip runbook (docs: TLS).">bearer</span>
                 {/if}
               </td>
               <td class="py-2 pr-3">

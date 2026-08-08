@@ -318,3 +318,41 @@ async def test_inventory_command_enqueue_poll_complete_inline(client):
     assert done.status_code == 200, done.text
     assert done.json()["status"] == "done"
     assert done.json()["result"]["summary"]["entries"] == 2
+
+
+async def test_poll_persists_health_and_stamps_auth_mode(client):
+    """2026-08-08 fleet health: a poll's ``health`` snapshot is stored VERBATIM
+    with an arrival stamp (same additive contract as capabilities — absent
+    leaves the stored value untouched), and authenticating the poll records
+    the observed transport ('bearer' here — the honest source for the console's
+    mTLS badge)."""
+    c, maker, _, _ = client
+    agent_id, _, fp = await _seed(maker)
+    health = {
+        "uptime_s": 4242,
+        "outbox_pending": 17,
+        "index_items": 120_345,
+        "scan": {"status": "finished", "seen": 120_345},
+    }
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/poll",
+        json={"max": 5, "health": health},
+        headers=_auth(fp),
+    )
+    assert r.status_code == 200, r.text
+    async with maker() as s:
+        agent = await s.get(Agent, agent_id)
+        assert agent.health == health
+        assert agent.health_at is not None
+        assert agent.last_auth_mode == "bearer"
+        first_at = agent.health_at
+
+    # Absent health leaves the stored snapshot (and its stamp) untouched.
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/poll", json={"max": 5}, headers=_auth(fp)
+    )
+    assert r.status_code == 200
+    async with maker() as s:
+        agent = await s.get(Agent, agent_id)
+        assert agent.health == health
+        assert agent.health_at == first_at

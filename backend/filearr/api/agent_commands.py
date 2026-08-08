@@ -116,6 +116,10 @@ class PollIn(BaseModel):
     # unchanged. Stored VERBATIM on the agent row (size-capped) so the UI can offer
     # only the collectors an agent supports.
     capabilities: dict[str, Any] | None = None
+    # 2026-08-08: the compact self-reported health snapshot (uptime, outbox
+    # backlog, index size, scan state). Same contract as capabilities: absent
+    # on older builds → stored value untouched; stored VERBATIM, size-capped.
+    health: dict[str, Any] | None = None
 
 
 class CompleteIn(BaseModel):
@@ -184,6 +188,10 @@ async def _authenticate_agent_bearer(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "agent not active")
     if not secrets.compare_digest(token, agent.cert_fingerprint):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credential")
+    # Central-observed transport truth for the fleet console ("is this agent
+    # actually on mTLS?"). Write only on change — rides the caller's commit.
+    if agent.last_auth_mode != "bearer":
+        agent.last_auth_mode = "bearer"
     return agent
 
 
@@ -230,6 +238,10 @@ async def _authenticate_agent_mtls(
     if agent.cert_fingerprint and fp and not secrets.compare_digest(fp, agent.cert_fingerprint):
         agent.cert_fingerprint = fp
         await session.commit()
+    # Central-observed transport truth for the fleet console ("is this agent
+    # actually on mTLS?"). Write only on change — rides the caller's commit.
+    if agent.last_auth_mode != "mtls":
+        agent.last_auth_mode = "mtls"
     return agent
 
 
@@ -427,6 +439,14 @@ async def poll_commands(
         and _json_len(body.capabilities) <= settings.agent_capabilities_max_bytes
     ):
         agent.capabilities = body.capabilities
+    # Self-reported health rides the same poll under the same size cap; the
+    # arrival stamp lets the console show "as of Xm ago" honestly.
+    if (
+        body.health is not None
+        and _json_len(body.health) <= settings.agent_capabilities_max_bytes
+    ):
+        agent.health = body.health
+        agent.health_at = now
     rows = (
         await session.execute(
             select(AgentCommand)

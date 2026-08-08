@@ -54,6 +54,13 @@ type Config struct {
 	// row so the UI can offer only composable collectors. Nil => omitted.
 	Capabilities map[string]any
 
+	// Health, when non-nil, produces the compact self-reported health snapshot
+	// (uptime, outbox backlog, index size, scan state) attached to every poll
+	// body under the same contract as Capabilities: stored VERBATIM on the
+	// agent row (size-capped centrally), older centrals ignore it. Must be
+	// cheap and never block long — a nil/empty return omits the field.
+	Health func(ctx context.Context) map[string]any
+
 	// MaxCommands drained per poll (default 10); Interval between polls (default
 	// 60s); LeaseSeconds is the picked_up lease whose third is the ack-heartbeat
 	// cadence during a slow content hash (default 300 -> heartbeat every ~100s).
@@ -91,6 +98,7 @@ type Poller struct {
 	rateProvider func() int64
 	inv          *inventory.Runner
 	caps         map[string]any
+	health       func(ctx context.Context) map[string]any
 	maxCmds      int
 	interval     time.Duration
 	leaseSecs    int
@@ -112,6 +120,7 @@ func NewPoller(cfg Config) *Poller {
 		rateProvider: cfg.RateProvider,
 		inv:          cfg.Inventory,
 		caps:         cfg.Capabilities,
+		health:       cfg.Health,
 		maxCmds:      cfg.MaxCommands,
 		interval:     cfg.Interval,
 		leaseSecs:    cfg.LeaseSeconds,
@@ -280,6 +289,12 @@ func (p *Poller) poll(ctx context.Context) ([]commandOut, error) {
 		// Additive capability advertisement — central persists it on the agent row.
 		// An older central that ignores the field is unaffected.
 		reqBody["capabilities"] = p.caps
+	}
+	if p.health != nil {
+		// Self-reported health snapshot: same additive contract as capabilities.
+		if h := p.health(ctx); len(h) > 0 {
+			reqBody["health"] = h
+		}
 	}
 	status, body, err := p.post(ctx, url, reqBody)
 	if err != nil {

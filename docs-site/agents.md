@@ -309,6 +309,23 @@ channel. Results return inline for small runs or as a compressed upload for
 large ones, always with a summary (roots expanded, entries, access-denied
 count, placeholders skipped, per-collector errors).
 
+## Fleet health and transport {#fleet-health}
+
+Each agent attaches a compact **self-reported health snapshot** to its
+command poll (every ~60 s): uptime, replication backlog (outbox events not
+yet sent), local index size, and the live/last scan state. Central stores it
+verbatim (size-capped) with an arrival stamp, and the Agents page shows it in
+the online/last-seen tooltip — so "is that agent actually doing anything?" is
+answerable without shelling into the machine. Older agent builds simply send
+none; nothing breaks.
+
+Next to it, a **transport badge** shows `mTLS` or `bearer` per agent. This is
+*central's* observation of which authentication path the agent's last
+request actually used — deliberately not self-reported, so it's the honest
+signal for the [mTLS migration](security.md): flip
+`FILEARR_AGENT_AUTH_MODE` to `mtls-header` only once every active agent wears
+the `mTLS` badge.
+
 ## Enrollment walkthrough
 
 Enrollment follows a **register-first** trust model: registration precedes
