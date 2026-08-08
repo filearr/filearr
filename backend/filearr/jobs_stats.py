@@ -698,6 +698,19 @@ FROM pg_stat_database
 WHERE datname = current_database()
 """
 
+_DB_SIZE_SQL = "SELECT pg_database_size(current_database())"
+
+# Top user tables by TOTAL on-disk size (heap + indexes + toast). Catalog-only
+# (pg_class + size functions over ~dozens of relations) — no table scans.
+_DB_LARGEST_SQL = """
+SELECT c.relname AS name, pg_total_relation_size(c.oid) AS bytes
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r' AND n.nspname = 'public'
+ORDER BY pg_total_relation_size(c.oid) DESC
+LIMIT 3
+"""
+
 
 async def _db_health(session: AsyncSession, queue_backlog: int) -> dict | None:
     """Cheap Postgres health snapshot for the Jobs dashboard's DB tile.
@@ -710,6 +723,8 @@ async def _db_health(session: AsyncSession, queue_backlog: int) -> dict | None:
     try:
         act = (await session.execute(text(_DB_ACTIVITY_SQL))).mappings().first()
         dbs = (await session.execute(text(_DB_STATS_SQL))).mappings().first()
+        size = (await session.execute(text(_DB_SIZE_SQL))).scalar()
+        largest = (await session.execute(text(_DB_LARGEST_SQL))).mappings().all()
     except Exception:  # noqa: BLE001 - a monitoring tile must never break the poll
         return None
     if act is None or dbs is None:
@@ -719,6 +734,10 @@ async def _db_health(session: AsyncSession, queue_backlog: int) -> dict | None:
     denom = hit + read
     cache_hit_ratio = round(hit / denom, 4) if denom > 0 else None
     return {
+        "db_size_bytes": int(size or 0),
+        "largest_tables": [
+            {"name": r["name"], "bytes": int(r["bytes"] or 0)} for r in largest
+        ],
         "backends": int(act["backends"] or 0),
         "active": int(act["active"] or 0),
         "idle_in_tx": int(act["idle_in_tx"] or 0),

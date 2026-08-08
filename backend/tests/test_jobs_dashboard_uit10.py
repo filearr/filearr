@@ -532,7 +532,15 @@ async def test_jobs_summary_monitoring_sections(proc_connector, monkeypatch):
         "backends", "active", "idle_in_tx", "waiting", "longest_query_s",
         "longest_idle_in_tx_s", "cache_hit_ratio", "deadlocks", "temp_files",
         "temp_bytes", "xact_commit", "xact_rollback", "queue_backlog",
+        "db_size_bytes", "largest_tables",
     } == set(db)
+    # Simple storage stats (2026-08-08): whole-DB on-disk size + the top tables
+    # by total relation size — real values against the test Postgres.
+    assert db["db_size_bytes"] > 0
+    assert 1 <= len(db["largest_tables"]) <= 3
+    assert all(
+        set(t) == {"name", "bytes"} and t["bytes"] > 0 for t in db["largest_tables"]
+    )
     # queue_backlog reuses the queue snapshot: the seeded thumbs 'todo' row counts.
     assert db["queue_backlog"] >= 1
 

@@ -831,10 +831,12 @@
         <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex items-center justify-between gap-2">
             <span class="font-medium">Database</span>
-            <span
-              class="tabular-nums text-xs text-slate-500"
-              title="Live backends from pg_stat_activity for this database (active / idle-in-transaction breakdown).">
-              {db.backends} conn
+            <span class="tabular-nums text-xs text-slate-500">
+              {#if db.db_size_bytes}
+                <span title="Whole-database size on disk (pg_database_size): every table, index, and TOAST segment. Grows with the catalog — a steadily growing value is normal; plan disk headroom from it.">{fmtBytes(db.db_size_bytes)}</span>
+                ·
+              {/if}
+              <span title="Live backends from pg_stat_activity for this database (active / idle-in-transaction breakdown).">{db.backends} conn</span>
             </span>
           </div>
           <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
@@ -863,6 +865,15 @@
             <span title="Temporary files spilled to disk since the stats were last reset (a sign of work_mem pressure).">temp files <b class="tabular-nums">{db.temp_files}</b></span>
             <span title="Total procrastinate 'todo' backlog across all queues.">queue backlog <b class="tabular-nums">{db.queue_backlog}</b></span>
           </div>
+          {#if db.largest_tables?.length}
+            <div class="mt-1 text-xs text-slate-500"
+              title="Largest tables by TOTAL on-disk size (table + its indexes + TOAST). 'items' dominating is normal — it IS the catalog; a runaway procrastinate/app_logs/doc_chunks table here is the early signal of a retention problem.">
+              largest:
+              {#each db.largest_tables as t, i (t.name)}
+                {i > 0 ? ", " : ""}<span class="whitespace-nowrap">{t.name} <b class="tabular-nums">{fmtBytes(t.bytes)}</b></span>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
     </div>

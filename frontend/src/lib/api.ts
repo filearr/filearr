@@ -995,6 +995,10 @@ export interface DbHealth {
   xact_rollback: number;
   /** Total procrastinate `todo` backlog across queues. */
   queue_backlog: number;
+  /** Whole-database on-disk size (pg_database_size). */
+  db_size_bytes?: number;
+  /** Top tables by total relation size (heap + indexes + toast). */
+  largest_tables?: { name: string; bytes: number }[];
 }
 
 /** Resource-load section of the Jobs summary. `io`/`net`/`db` are null when
