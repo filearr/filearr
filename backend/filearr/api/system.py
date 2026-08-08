@@ -321,6 +321,39 @@ async def failed_jobs_view(
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
+@router.get(
+    "/system/update-check",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def update_check_view() -> dict:
+    """The cached update-check result. Never contacts GitHub itself — unless
+    ``FILEARR_UPDATE_CHECK_AUTO`` is on, in which case a stale (>6h) or absent
+    cache is refreshed. ``checked_at: null`` means no check has run yet."""
+    from filearr import updatecheck
+
+    if get_settings().update_check_auto:
+        return await updatecheck.check()
+    return updatecheck.cached() or {
+        "checked_at": None,
+        "source": get_settings().source_url,
+        "components": [],
+        "changelog": [],
+    }
+
+
+@router.post(
+    "/system/update-check",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def update_check_run() -> dict:
+    """Operator-initiated check: contact GitHub NOW (admin). The only network
+    peers are api.github.com / raw.githubusercontent.com; nothing is sent
+    beyond the requests themselves. Degrades to an ``error`` field offline."""
+    from filearr import updatecheck
+
+    return await updatecheck.check(force=True)
+
+
 _LOG_LEVELNO = {"info": 20, "warning": 30, "error": 40, "critical": 50}
 
 

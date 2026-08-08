@@ -17,6 +17,7 @@
     type ScanRunning,
   } from "./api";
   import LogsPanel from "./LogsPanel.svelte";
+  import UpdatesPanel from "./UpdatesPanel.svelte";
   import { help } from "./help";
 
   // UI-T10 — live job-system dashboard. Polls ONE composite endpoint
@@ -1372,6 +1373,10 @@
       </tbody>
     </table>
   {/if}
+
+  <div class="mt-6">
+    <UpdatesPanel />
+  </div>
 
   <div class="mt-6">
     <LogsPanel />

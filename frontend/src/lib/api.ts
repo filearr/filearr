@@ -1191,6 +1191,42 @@ export const updateMaintenance = (
     body: JSON.stringify(body),
   });
 
+/** One component row of the GitHub update check (Jobs page Updates card). */
+export type UpdateComponent = {
+  component: string;
+  running: string;
+  latest: string;
+  /** null = not determinable on this install (e.g. stampless dev checkout). */
+  update_available: boolean | null;
+  detail: string;
+};
+
+export type UpdateChangelogEntry = {
+  sha: string;
+  date: string | null;
+  subject: string;
+  body: string;
+  /** True when the commit postdates the running build; null when unknown. */
+  is_new: boolean | null;
+};
+
+export type UpdateCheck = {
+  /** null = no check has run yet (the GET never contacts GitHub by itself). */
+  checked_at: string | null;
+  source: string;
+  error?: string;
+  components: UpdateComponent[];
+  changelog: UpdateChangelogEntry[];
+};
+
+/** Cached update-check state (admin). Contacts GitHub only under the
+ *  FILEARR_UPDATE_CHECK_AUTO opt-in when the cache is stale. */
+export const getUpdateCheck = () => request<UpdateCheck>("/system/update-check");
+
+/** Operator-initiated "Check now" (admin) — contacts GitHub immediately. */
+export const runUpdateCheck = () =>
+  request<UpdateCheck>("/system/update-check", { method: "POST" });
+
 /** One row of the unified app+worker log stream (Jobs page Logs panel). */
 export type LogRow = {
   id: number;

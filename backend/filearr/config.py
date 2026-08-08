@@ -368,6 +368,16 @@ class Settings(BaseSettings):
     log_retention_days: int = 7          # FILEARR_LOG_RETENTION_DAYS
     log_max_rows: int = 200_000          # storm backstop (purge trims to this)
 
+    # --- Update check (console "Check for updates") ------------------------
+    # Contacts GitHub — and nothing else — to compare the running build + the
+    # agent-dist bake against the repository head and pull recent commit
+    # messages (the changelog) for review in the console. Default false =
+    # operator-initiated ONLY (the console button); true additionally lets a
+    # console page load refresh a stale (>6h) cached result. This is the only
+    # optional outbound check in the product; the no-phone-home posture in
+    # the docs depends on the default staying false.
+    update_check_auto: bool = False
+
     # --- P4-T9: ItemVersion audit retention -------------------------------
     # Attributed extractor-sourced audit rows (source='scan'/'extract:<type>')
     # are purged past this window by the daily ``purge_item_versions`` task so

@@ -87,6 +87,27 @@ For *why a background job failed*, the *failed jobs* list (with per-job error
 text) remains the sharper tool; the Logs panel is the wider net — warnings
 that never failed a job, app-side request errors, startup messages.
 
+## Checking for updates (Jobs page) {#update-check}
+
+The **Updates** card compares this install against the source repository and
+shows the recent commit messages — the project's changelog — so you can review
+what a redeploy would bring, per component:
+
+- **central** — a source-deployed instance's build stamp embeds its build
+  time, so the card reports whether the repository has newer commits;
+  container-image installs compare the git commit their agent bake was built
+  from against the repository head.
+- **agent binaries** — the baked agent version vs the canonical
+  `agent/VERSION` at the repository head.
+
+Clicking **Check now** (admin) contacts GitHub — that is the entire network
+footprint, nothing about your instance is sent, and *nothing runs
+automatically* unless you opt in with `FILEARR_UPDATE_CHECK_AUTO=true`
+(stale-cache refresh on console loads). Results are cached for 6 hours; an
+offline box degrades to a "could not reach GitHub" note. Commits newer than
+the running build are marked with a dot; click a subject to read the full
+message. The API is `GET`/`POST /api/v1/system/update-check`.
+
 ## Scan-scheduling storms / stalled jobs / the reaper
 
 **Symptom.** A library's scheduled scan fires every scheduler tick instead of on

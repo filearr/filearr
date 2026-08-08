@@ -87,6 +87,18 @@ records rather than blocking the application.
 | `FILEARR_LOG_RETENTION_DAYS` | `7` | Daily purge window for log rows. |
 | `FILEARR_LOG_MAX_ROWS` | `200000` | Hard row cap (log-storm backstop). |
 
+### Update check (Jobs page Updates card)
+
+Compares the running build and the baked agent binaries against the source
+repository's head and pulls recent commit messages (the changelog) for review
+in the console. **Contacts GitHub only** — nothing about your instance or
+catalog is sent. By default it runs solely when an operator clicks *Check
+now*; results are cached for 6 hours.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_UPDATE_CHECK_AUTO` | `false` | Opt-in: also refresh a stale cache on console loads (the only automatic outbound check in the product). |
+
 ## Search reconciliation & rebuild
 
 | Variable | Default | Purpose |

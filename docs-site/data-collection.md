@@ -10,8 +10,12 @@ stores, and transmits** — and, just as importantly, what it does **not**.
     Meilisearch analytics are disabled in the shipped configuration. The only
     outbound network calls Filearr makes are ones you explicitly turn on: an
     OIDC/LDAP provider you configure, alert webhooks/SMTP you create, an optional
-    one-time embedding-model download, and (for the agent CA) Let's Encrypt /
-    Cloudflare DNS if you choose the ACME TLS mode.
+    one-time embedding-model download, (for the agent CA) Let's Encrypt /
+    Cloudflare DNS if you choose the ACME TLS mode, and the **operator-initiated
+    update check** — clicking *Check now* on the Jobs page asks GitHub for the
+    repository head and recent commit messages (nothing about your instance or
+    catalog is sent; `FILEARR_UPDATE_CHECK_AUTO=true` is the explicit opt-in for
+    automatic stale-cache refreshes, default off).
 
 ## What a scan reads
 
