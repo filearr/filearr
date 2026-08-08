@@ -625,6 +625,11 @@ ${detail}
                     class="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
                     title={`Updating to ${a.update_target ?? "the current central version"} at its next check-in`}
                     >update queued</span>
+                {:else if a.update_available && a.capabilities?.container}
+                  <span
+                    class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title={`A newer agent build exists (${a.update_target}). This agent runs in a container, which updates by pulling the new agent image on its host — central never swaps binaries inside a container.`}
+                    >newer image available</span>
                 {:else if a.update_available}
                   <span
                     class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
@@ -633,7 +638,7 @@ ${detail}
               </td>
               <td class="py-2 text-right whitespace-nowrap">
                 {#if a.status !== "revoked"}
-                  {#if a.update_available && !a.update_pending}
+                  {#if a.update_available && !a.update_pending && !a.capabilities?.container}
                     <button
                       class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
                       disabled={updating[a.id]}

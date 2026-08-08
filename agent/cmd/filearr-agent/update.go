@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/enroll"
+	"github.com/filearr/filearr/agent/internal/inventory"
 	"github.com/filearr/filearr/agent/internal/update"
 )
 
@@ -63,6 +64,10 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 		// re-exec (and could end up running two instances). Interactive `run` keeps
 		// the historic self-re-exec path.
 		ServiceManaged: serviceManaged,
+		// Containerized agents (Docker/Unraid) update by image pull: never
+		// swap the binary in place — central also suppresses the offer once
+		// it has seen the `container` capability on a command poll.
+		InContainer: inventory.InContainer(),
 	})
 }
 

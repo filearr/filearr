@@ -561,6 +561,14 @@ async def get_update_manifest(
     agent.last_seen_at = now
     await session.commit()
 
+    # Containerized agents (the `container` capability from the command poll)
+    # update by image pull: the console FLAGS the newer build, but central
+    # never offers them a manifest — a binary swapped inside a container dies
+    # on the next recreate. (The shipped agent image also disables its updater
+    # via FILEARR_AGENT_SELF_UPDATE=false; this is the server-side half.)
+    if (agent.capabilities or {}).get("container"):
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     _, _, effective = await policy_mod.resolve_effective_policy(session, agent)
     auto = effective.get("auto_update")
     if auto is False and not await _pending_self_update(session, agent_id):
@@ -676,6 +684,12 @@ async def trigger_self_update(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
     if agent.revoked_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "agent revoked")
+    if (agent.capabilities or {}).get("container"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "containerized agent — it updates by pulling a new agent image, "
+            "not via self-update",
+        )
     target = await resolve_update_target(session, settings, agent)
     if target is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "agent is already up to date")

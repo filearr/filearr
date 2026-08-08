@@ -98,7 +98,24 @@ func Capabilities() map[string]any {
 		"inventory_collectors": sorted,
 		"inventory_version":    CapabilityVersion,
 		"ffmpeg":               HasFFmpeg(),
+		// Containerized agents update by image pull — central flags a newer
+		// build in the console but never offers them the self-update channel.
+		"container": InContainer(),
 	}
+}
+
+// InContainer reports whether the agent runs inside a container. The shipped
+// agent image sets FILEARR_AGENT_CONTAINER=1 explicitly ("0"/"false" opt back
+// out for someone who genuinely wants in-container self-update swaps);
+// /.dockerenv catches hand-rolled containers.
+func InContainer() bool {
+	if v := os.Getenv("FILEARR_AGENT_CONTAINER"); v != "" {
+		return v != "0" && v != "false"
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	return false
 }
 
 // HasFFmpeg reports whether an ffmpeg binary is resolvable, mirroring exactly

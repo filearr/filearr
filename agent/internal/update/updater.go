@@ -75,6 +75,13 @@ type Config struct {
 	// binary. A self-re-exec would race the manager and can leave two instances.
 	ServiceManaged bool
 
+	// InContainer marks a containerized agent (inventory.InContainer): its
+	// update mechanism is pulling a new image, so a received manifest is
+	// logged as "update available" and never applied. Central mirrors this
+	// (the stored `container` capability suppresses the offer entirely) —
+	// this is the agent-side belt to that suspender.
+	InContainer bool
+
 	Logger *slog.Logger
 	Clock  func() time.Time
 	Rand   *rand.Rand
@@ -177,6 +184,13 @@ func (u *Updater) CheckForUpdate(ctx context.Context) (*Manifest, *Artifact, boo
 	}
 	if m == nil {
 		return nil, nil, false, nil // central says up to date (204)
+	}
+	if u.cfg.InContainer {
+		// Still worth logging: the poll doubles as the version-confirmation
+		// signal, and the operator's fix is a `docker pull`, not a swap.
+		u.log.Warn("update available but this agent runs in a container — update by pulling the new agent image",
+			"offered", m.Version, "running", u.cfg.CurrentVersion)
+		return m, nil, false, nil
 	}
 	if err := VerifyAny(*m, u.keys); err != nil {
 		if errors.Is(err, ErrNoPinnedKey) {

@@ -263,3 +263,49 @@ async def test_signed_release_beats_dist_fallback(client):
     r = await _poll(c, aid, fp, "1.0.0")
     assert r.status_code == 200
     assert r.json()["version"] == "9.9.9"  # signed channel wins over dist
+
+
+# --------------------------------------------------------------------------- #
+# Containerized agents: flagged, never offered (2026-08-07)                    #
+# --------------------------------------------------------------------------- #
+async def _mark_container(maker, aid):
+    async with maker() as s:
+        agent = await s.get(Agent, aid)
+        agent.capabilities = {"container": True, "inventory_version": 1}
+        await s.commit()
+
+
+async def test_container_agent_poll_204_but_version_recorded(client):
+    """An agent whose stored capabilities carry ``container: true`` is NEVER
+    served a manifest (its update mechanism is an image pull), even when the
+    dist version differs — but the poll still records the confirmed running
+    version + liveness."""
+    c, maker, _ = client
+    aid, fp = await _seed_agent(maker)
+    await _mark_container(maker, aid)
+    r = await _poll(c, aid, fp, "main-0000000")  # differs -> would offer dist
+    assert r.status_code == 204
+    async with maker() as s:
+        agent = await s.get(Agent, aid)
+        assert agent.agent_version == "main-0000000"
+        assert agent.last_seen_at is not None
+
+
+async def test_container_agent_trigger_409_but_list_still_flags(client):
+    """The operator trigger refuses container agents with a pull-the-image
+    message, while the agents list still FLAGS the newer build
+    (update_available + target) so the console can badge it."""
+    c, maker, _ = client
+    aid, _fp = await _seed_agent(maker, version="main-0000000")
+    await _mark_container(maker, aid)
+
+    r = await c.post(f"/api/v1/agents/{aid}/self-update")
+    assert r.status_code == 409
+    assert "pulling a new agent image" in r.json()["detail"]
+
+    r = await c.get("/api/v1/agents")
+    row = {a["id"]: a for a in r.json()["items"]}[str(aid)]
+    assert row["update_available"] is True
+    assert row["update_target"] == DIST_VERSION
+    assert row["update_pending"] is False
+    assert row["capabilities"]["container"] is True

@@ -545,6 +545,18 @@ is the authorization), so the button works on gated fleets too. While one is
 queued the console shows **"update queued"** and hides the button; agents with
 no update available show no button at all.
 
+**Containerized agents (Docker/Unraid) are flagged, never offered**
+(2026-08-07): the agent image advertises `container: true` in its capability
+poll (`FILEARR_AGENT_CONTAINER=1`, `/.dockerenv` as fallback for hand-rolled
+containers), because an image updates by **pulling a new image** — a binary
+swapped inside a container dies on the next recreate. For such agents the
+console shows a **"newer image available"** badge (no update button), the
+trigger endpoint returns 409 with a pull-the-image message, the manifest poll
+always answers 204, and the agent itself refuses to apply as a final
+belt-and-braces (it logs the offered version instead). Deliberate in-container
+swaps remain possible: set `FILEARR_AGENT_CONTAINER=0` +
+`FILEARR_AGENT_SELF_UPDATE=true` (restart policy must relaunch on exit 20).
+
 ### 8.7 Key rotation without a fleet rebuild (dual-pin)
 
 `PublicKeyBase64` accepts **multiple comma-separated keys** — a manifest

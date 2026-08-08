@@ -55,6 +55,11 @@ ENV FILEARR_AGENT_DATA_DIR=/config
 # warning, which is correct-but-alarming in a container). Override at runtime
 # if you truly pinned a key at build time.
 ENV FILEARR_AGENT_SELF_UPDATE=false
+# Advertised to central as the `container` capability: the console then FLAGS
+# a newer build ("pull the new image") instead of offering the self-update
+# swap. Set =0 (with SELF_UPDATE=true) if you deliberately want in-container
+# binary swaps — your restart policy must relaunch on exit code 20.
+ENV FILEARR_AGENT_CONTAINER=1
 # Shared log dir: every agent process (daemon, scans, entrypoint) writes its
 # own rotating file here, and the web UI Logs tab merges them — that is the
 # only way scan-process lines reach the browser (the in-process ring can't
