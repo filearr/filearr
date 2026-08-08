@@ -36,6 +36,14 @@ trap 'rc=$?; echo; echo "✗ DEPLOY FAILED (exit $rc) at line $LINENO: $BASH_COM
 
 step() { echo; echo "═══ STEP: $* ═══"; }
 
+# The Proxmox web UI's node Shell (termproxy) does not export HOME the way an
+# SSH login does, and under `set -u` that used to abort right here with
+# "HOME: unbound variable" (live report 2026-08-07). Derive it from passwd,
+# falling back to /root — this script must run as root on the PVE host anyway.
+HOME="${HOME:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)}"
+HOME="${HOME:-/root}"
+export HOME
+
 CONF_DIR="${HOME}/.config/filearr"
 CONF="${CONF_DIR}/deploy.conf"
 # set -u hardening: the Cloudflare token is only ever read interactively (and
