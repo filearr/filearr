@@ -270,17 +270,25 @@ async def test_jobs_summary_composition(proc_connector, monkeypatch):
     assert summary["priorities"]["thumbs"] == -15
     assert summary["priorities"]["exports"] == -20
     # disk keeps the untouched {status, low} banner contract AND gains the full
-    # per-path detail for the always-on space indicator.
-    assert set(summary["disk"]) == {"status", "low", "paths"}
+    # per-path detail for the always-on space indicator, plus the low-space
+    # ALERT-DELIVERY state (2026-08-08: rule enabled? channels attached?) the
+    # banner uses to say "no alert will be sent for this".
+    assert set(summary["disk"]) == {"status", "low", "paths", "alerting"}
+    alerting = summary["disk"]["alerting"]
+    assert alerting is None or set(alerting) == {"enabled", "channels"}
     # resources.cpu is always present (all-null on a host without getloadavg).
     assert set(summary["resources"]["cpu"]) == {
         "load1", "load5", "load15", "cores", "percent"
     }
-    # thumbs monitor: whole-cache totals + the re-exposed thumbs queue snapshot.
-    assert set(summary["thumbs"]) == {"generated", "bytes", "failed_jobs", "queue"}
+    # thumbs monitor: whole-cache totals + the re-exposed thumbs queue snapshot
+    # + the advisory storage budget the card's over-budget note renders.
+    assert set(summary["thumbs"]) == {
+        "generated", "bytes", "budget_bytes", "over_budget", "failed_jobs", "queue",
+    }
     # No thumbnail_manifest rows were seeded -> zero totals, never a KeyError.
     assert summary["thumbs"]["generated"] == 0
     assert summary["thumbs"]["bytes"] == 0
+    assert summary["thumbs"]["over_budget"] is False
     # The seeded doing extract job has a NULL worker_id (no worker row), so the
     # reaper's heartbeat net flags it stalled — surfaced in the summary rollup.
     assert summary["stalled"] == {"total": 1, "by_queue": {"extract": 1}}
