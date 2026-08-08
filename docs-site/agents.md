@@ -93,6 +93,13 @@ Repeat `-ScanRoot` per location; the roots land in the service's `scan.json`
 service restarts to apply. `-Name` (defaults to the computer name),
 `-RolloutGroup`, and `-TokenTtlMinutes` cover the rest of the mint surface.
 
+On an **mTLS deployment** (`FILEARR_AGENT_AUTH_MODE=mtls-header`/`both`), add
+`-MtlsUrl https://agents.example.com`: enrollment still runs against
+`-CentralUrl` (the mTLS site refuses clients that have no certificate yet),
+and once the install has enrolled, the agent's `central_url` is switched to
+the mTLS site and the service restarted — it presents its freshly-issued
+client certificate automatically from then on.
+
 **`update-windows-agent.ps1`** — updates an installed agent to whatever build
 central currently serves: compares `filearr-agent --version` against the
 `/api/v1/agent-dist` manifest, downloads + verifies, swaps the binary under a
@@ -103,7 +110,17 @@ binary is kept as `filearr-agent.exe.old` for manual rollback):
 .\update-windows-agent.ps1 -CentralUrl https://filearr.example.com          # either auth mode
 .\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -ApiKey <key>  # behind an authenticating proxy
 .\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -Force   # reinstall same version
+.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com `
+    -MtlsUrl https://agents.example.com   # migrate this machine to mTLS (± update)
 ```
+
+`-MtlsUrl` is the per-machine half of the [mTLS mode-flip
+runbook](security.md): it rewrites `central_url` in the installed sidecar
+(every other key preserved) during the same stopped-service window as the
+binary swap — or standalone when the binary is already current — and the
+enrolled agent presents its client certificate automatically. Downloads
+always use `-CentralUrl`: agent-dist stays on the main site, and the mTLS
+proxy would refuse a cert-less operator shell anyway.
 
 Downloads come from `agent-dist`, the deliberately-unauthenticated
 first-install surface, so the update script never *requires* a key — the

@@ -31,12 +31,21 @@
   (-ScanRoot D:\media -ScanRoot E:\photos). Written to scan.json in the
   service data dir; omit to configure scanning later from the agent's local
   web UI or by editing scan.json.
+
+.PARAMETER MtlsUrl
+  The mTLS agent-plane URL (e.g. https://agents.example.com) for deployments
+  running FILEARR_AGENT_AUTH_MODE=mtls-header/both. Enrollment always happens
+  against -CentralUrl (the mTLS site refuses clients that have no cert yet);
+  once the install has enrolled, the agent's central_url is switched to this
+  URL and the service restarted — it presents its freshly-issued client cert
+  automatically from then on.
 #>
 param(
   [Parameter(Mandatory = $true)] [string]$CentralUrl,
   [string]$ApiKey,
   [string]$Name = $env:COMPUTERNAME,
   [string[]]$ScanRoot,
+  [string]$MtlsUrl,
   [string]$RolloutGroup = "default",
   [ValidateRange(1, 1440)] [int]$TokenTtlMinutes = 60
 )
@@ -81,26 +90,45 @@ $sidecar = Join-Path $env:TEMP "filearr-agent.json"
 if ($LASTEXITCODE -ne 0) { throw "service install failed (exit $LASTEXITCODE)" }
 Remove-Item $sidecar, $staged -ErrorAction SilentlyContinue
 
-# --- 5. scan locations -> scan.json in the service data dir -----------------
+# --- 5. post-install config: scan locations + optional mTLS switch ----------
+# JSON-merge helper: preserves every existing key, changes only what we set.
+function Merge-JsonFile([string]$path, [hashtable]$updates) {
+  $obj = [ordered]@{}
+  if (Test-Path $path) {
+    (Get-Content $path -Raw | ConvertFrom-Json).PSObject.Properties |
+      ForEach-Object { $obj[$_.Name] = $_.Value }
+  }
+  foreach ($k in $updates.Keys) { $obj[$k] = $updates[$k] }
+  $obj | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $path
+}
+
+$dataDir = Join-Path $env:ProgramData "Filearr Agent"
+$needRestart = $false
+
 if ($ScanRoot) {
   foreach ($r in $ScanRoot) {
     if (-not (Test-Path $r)) { Write-Warning "scan root does not exist (yet): $r" }
   }
-  $dataDir = Join-Path $env:ProgramData "Filearr Agent"
-  $scanPath = Join-Path $dataDir "scan.json"
   # Merge into an existing scan.json (re-provisioning must not drop
   # presets/globs/category filters someone configured) — only roots change.
-  $scan = [ordered]@{}
-  if (Test-Path $scanPath) {
-    (Get-Content $scanPath -Raw | ConvertFrom-Json).PSObject.Properties |
-      ForEach-Object { $scan[$_.Name] = $_.Value }
-  }
-  $scan["roots"] = @($ScanRoot)
-  $scan | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $scanPath
+  Merge-JsonFile (Join-Path $dataDir "scan.json") @{ roots = @($ScanRoot) }
+  $needRestart = $true
+  Write-Host "scan roots configured: $($ScanRoot -join ', ')"
+}
+
+if ($MtlsUrl) {
+  # Enrollment (during install, against -CentralUrl) is done — switch the
+  # data plane to the mTLS site; the agent presents its client cert per-
+  # handshake automatically. All other sidecar keys are preserved.
+  Merge-JsonFile (Join-Path $dataDir "filearr-agent.json") @{ central_url = $MtlsUrl.TrimEnd("/") }
+  $needRestart = $true
+  Write-Host "central_url switched to mTLS endpoint: $($MtlsUrl.TrimEnd('/'))"
+}
+
+if ($needRestart) {
   $bin = Join-Path $env:ProgramFiles "Filearr Agent\filearr-agent.exe"
   & $bin service restart
   if ($LASTEXITCODE -ne 0) { throw "service restart failed (exit $LASTEXITCODE)" }
-  Write-Host "scan roots configured: $($ScanRoot -join ', ')"
 }
 
 Write-Host "done: agent '$Name' enrolled against $base, running as service 'filearr-agent'"
