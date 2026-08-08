@@ -26,7 +26,12 @@ from filearr.schemas import (
 )
 from filearr.search import delete_docs
 from filearr.security import PermissionContext, require_permission, require_scope
-from filearr.worker import defer_extract, defer_scan, proc_app, scan_job_pending
+from filearr.worker import (
+    defer_extract,
+    defer_scan,
+    open_pool_if_needed,
+    scan_job_pending,
+)
 
 logger = logging.getLogger("filearr.libraries")
 
@@ -702,7 +707,7 @@ async def trigger_scan(
     # if procrastinate is unreachable we do NOT block an explicit manual trigger
     # (worst case one duplicate, vs. blocking a legitimate operator action).
     try:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             pending = await scan_job_pending(str(library_id), None)
     except Exception:  # noqa: BLE001 - fail open on any queue-connectivity error
         pending = False

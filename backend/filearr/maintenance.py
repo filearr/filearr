@@ -425,12 +425,12 @@ async def run_now(key: str) -> int | None:
     the task's queueing lock reports a queued/executing run."""
     import procrastinate
 
-    from filearr.worker import proc_app
+    from filearr.worker import open_pool_if_needed
 
     spec = MAINT_TASKS[key]
     kwargs = {"timestamp": int(datetime.now(UTC).timestamp())} if spec.timestamp_arg else {}
     try:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             return await _deferrer(spec).defer_async(**kwargs)
     except procrastinate.exceptions.AlreadyEnqueued as exc:
         raise AlreadyQueued(str(exc)) from exc

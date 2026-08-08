@@ -26,7 +26,7 @@ from filearr.config import get_settings
 from filearr.db import SessionLocal
 from filearr.models import ReportExport, ReportSchedule
 from filearr.schedule import due_occurrence
-from filearr.worker import proc_app
+from filearr.worker import open_pool_if_needed, proc_app
 
 
 @proc_app.task(
@@ -56,7 +56,7 @@ async def defer_export_job(export_id: str | uuid.UUID) -> int | None:
     try:
         return await _deferrer().defer_async(export_id=str(export_id))
     except procrastinate.exceptions.AppNotOpen:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             return await _deferrer().defer_async(export_id=str(export_id))
 
 

@@ -118,27 +118,30 @@ Task exception was never retrieved
 future: <Task finished name='process job …' … exception=AppNotOpen('App was not open. …')>
 ```
 
-**What it means.** The worker process hit a **primary error** that ended its
-run loop — the lines *above* this message name it; a transient database
-connection failure is the usual one — and Procrastinate (3.9) closes its app
-before in-flight job tasks have finished winding down. Those tasks then fail
-late with `AppNotOpen`, and asyncio prints each as an unretrieved exception.
-The noise is the *echo*, not the fault.
+**Root cause (fixed 2026-08-08).** Filearr's defer helpers wrapped every
+defer in `async with proc_app.open_async():`. In the API process that was
+correct — but the same helpers also run **inside worker tasks**, where the
+worker already owns an open Procrastinate app: there the enter was a no-op
+while the context **exit closed the worker's shared connection pool**
+(Procrastinate's close is unconditional, not reference-counted). Every
+*concurrently running* job then failed with `AppNotOpen` — printed lazily by
+asyncio whenever the failed task got garbage-collected, which is why the
+message appears amid otherwise-healthy log lines — until the next defer
+incidentally reopened the pool. Current builds route every such site through
+a guard that never closes a pool it did not open (regression-tested,
+including a sweep that fails if a raw `open_async()` context reappears), and
+the API process now opens its pool once for its lifetime instead of per
+call.
 
-**Impact: none lasting.** The interrupted jobs keep status `doing`; the
-reaper requeues them within its 5-minute tick (FIX-6), and Docker's
-`restart: unless-stopped` brings the worker straight back. Verify and find
-the primary error with:
+**Impact: none lasting, even on affected builds.** The interrupted jobs keep
+status `doing`; the reaper requeues them within its 5-minute tick (FIX-6).
+If you still see this on a current build, find what actually failed around
+it:
 
 ```bash
 docker inspect --format '{{.RestartCount}} {{.State.StartedAt}}' filearr-worker-1
 docker compose logs --tail=200 worker | grep -B 25 "Task exception was never retrieved" | head -60
 ```
-
-If the restart count climbs steadily, chase the primary error it reports —
-that is the actual problem. Isolated occurrences around redeploys are
-expected: recreating containers interrupts whatever was mid-flight, by
-design, and the reaper cleans up.
 
 ## Scan-scheduling storms / stalled jobs / the reaper
 

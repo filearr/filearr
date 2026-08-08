@@ -492,9 +492,9 @@ async def reap_stalled_jobs_endpoint() -> dict:
     ``queueing_lock`` (collision), in which case the orphan is FAILED instead.
 
     Returns ``{reaped, retried, failed, pruned_workers}``."""
-    from filearr.worker import proc_app, reap_stalled_jobs_now
+    from filearr.worker import open_pool_if_needed, reap_stalled_jobs_now
 
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         return await reap_stalled_jobs_now()
 
 

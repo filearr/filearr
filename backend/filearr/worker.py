@@ -4,6 +4,7 @@ Run worker:  procrastinate --app=filearr.worker.proc_app worker
 Queues: scan (walk/diff), extract (per-file metadata), index (Meili sync), maintenance.
 """
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 
 import procrastinate
@@ -14,6 +15,29 @@ from procrastinate.jobs import Status
 from filearr.config import get_settings
 from filearr.db import SessionLocal as SessionLocal  # noqa: PLC0414 (re-export for periodics)
 from filearr.joberrors import capture_job_errors
+
+
+@contextlib.asynccontextmanager
+async def open_pool_if_needed():
+    """``proc_app`` usable inside the block — WITHOUT closing a pool we did
+    not open.
+
+    Every defer helper used to wrap ``async with proc_app.open_async():``.
+    Correct in the API process (nothing had opened the app)… but the SAME
+    helpers run inside worker tasks, where the worker CLI owns an open app —
+    there the enter was a no-op while the EXIT closed the worker's shared
+    connection pool, killing every concurrently running job with AppNotOpen
+    until the next defer incidentally reopened it (the live "Task exception
+    was never retrieved … AppNotOpen" incident, 2026-08-08). procrastinate
+    3.9 has no public is-open probe, so this reads the connector's
+    ``_async_pool`` (pinned by a regression test so an upgrade that renames
+    it fails loudly instead of silently reintroducing the pool-yank)."""
+    if getattr(proc_app.connector, "_async_pool", None) is not None:
+        yield  # already open (worker CLI / app lifespan owns it) — never close
+        return
+    async with proc_app.open_async():
+        yield
+
 
 proc_app = procrastinate.App(
     connector=PsycopgConnector(conninfo=get_settings().procrastinate_dsn),
@@ -543,7 +567,7 @@ async def defer_scan(
     # Roadmap §19: the operator's explicit consent to an N->0 walk rides the job.
     if force_empty:
         kwargs["force_empty"] = True
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         if not force and await scan_job_pending(library_id, rel_path):
             return None  # an unfinished scan for this scope already exists
         try:
@@ -559,7 +583,7 @@ async def defer_scan(
 
 
 async def defer_index_sync(item_ids: list[str]) -> None:
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         await proc_app.configure_task(
             "filearr.tasks.index_sync.sync_items",
             queue="index",
@@ -576,7 +600,7 @@ async def defer_agent_associate(library_ids: list[str]) -> None:
     if not library_ids:
         return
     delay = get_settings().agent_associate_debounce_seconds
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         for lid in library_ids:
             try:
                 await proc_app.configure_task(
@@ -633,7 +657,7 @@ async def associate_agent_sidecars(timestamp: int) -> dict:
             ).scalars()
         ]
     deferred = 0
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         for lid in lib_ids:
             try:
                 await proc_app.configure_task(
@@ -693,7 +717,7 @@ async def defer_thumb_item(item_id: str, tier: int) -> None:
     try:
         await _deferrer().defer_async(item_id=item_id, tier=tier)
     except procrastinate.exceptions.AppNotOpen:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             await _deferrer().defer_async(item_id=item_id, tier=tier)
 
 
@@ -702,7 +726,7 @@ async def defer_rebuild_index() -> int | None:
     the Procrastinate job id (P9-T5). Used by ``POST /api/v1/system/rebuild-index``
     so an operator can trigger a rebuild/settings-migration rollout on demand
     instead of deferring the task by hand."""
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         job = await proc_app.configure_task(
             "filearr.tasks.index_sync.rebuild_index",
             queue="index",
@@ -722,7 +746,7 @@ async def defer_extract(item_ids: list[str]) -> None:
         return
     from filearr.tasks.scan import _defer_extract_batch
 
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         await _defer_extract_batch(item_ids)
 
 
@@ -735,7 +759,7 @@ async def defer_embed(item_ids: list[str]) -> None:
     settings = get_settings()
     if not settings.semantic_enabled:
         return
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         deferrer = proc_app.configure_task(
             "filearr.tasks.embed.embed_item",
             queue=settings.queue_embed,
@@ -748,7 +772,7 @@ async def defer_embed(item_ids: list[str]) -> None:
 async def defer_embed_missing() -> int | None:
     """Defer the ``embed_missing`` backfill on the ``embed`` queue and return its
     Procrastinate job id (P3-T8). Backs ``POST /api/v1/system/embed-backfill``."""
-    async with proc_app.open_async():
+    async with open_pool_if_needed():
         job = await proc_app.configure_task(
             "filearr.tasks.embed.embed_missing",
             queue=get_settings().queue_embed,
@@ -1165,7 +1189,7 @@ async def rehash_small_files_now() -> dict:
         ids = [str(i) for (i,) in rows]
     if ids:
         # _defer_extract_batch assumes the proc app is open; mirror defer_extract.
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             await _defer_extract_batch(ids)
     return {"requeued": len(ids)}
 

@@ -120,11 +120,11 @@ async def stop_scan(scan_id: uuid.UUID, session: AsyncSession = Depends(get_sess
     # terminal 'stopped' now, honoring the stop intent in one step. Any error
     # reaching the queue falls SAFE to the graceful path (never mark a possibly-live
     # scan stopped) -- the maintenance reconciler is the backstop either way.
-    from filearr.worker import proc_app, scan_job_active
+    from filearr.worker import open_pool_if_needed, scan_job_active
 
     active: bool | None = True
     try:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             active = await scan_job_active(str(run.library_id), run.rel_path)
     except Exception:  # noqa: BLE001 - fall safe to the graceful (stopping) path
         active = True
@@ -186,11 +186,11 @@ async def force_clear_scan(
     # Refuse only a genuinely-active run (live worker draining it). Fail SAFE to
     # 'not active' when the queue is unreachable: this is an explicit operator
     # repair action, so an unreachable/queue-less DB must not block the clear.
-    from filearr.worker import proc_app, scan_job_active
+    from filearr.worker import open_pool_if_needed, scan_job_active
 
     active: bool | None = False
     try:
-        async with proc_app.open_async():
+        async with open_pool_if_needed():
             active = await scan_job_active(str(run.library_id), run.rel_path)
     except Exception:  # noqa: BLE001 - fail open: allow the manual repair
         active = False

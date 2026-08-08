@@ -24,7 +24,16 @@ async def lifespan(app: FastAPI):
     # P4-T1: register the code-shipped metadata profiles (idempotent upsert).
     await seed_profiles_to_db()
     await ensure_index()
+    # Open the procrastinate pool ONCE for the app's lifetime. The defer
+    # helpers used to open/close per call, which not only churned pools but
+    # let concurrent requests close the pool under each other (same class as
+    # the worker-side AppNotOpen incident, 2026-08-08). With the pool owned
+    # here, every open_pool_if_needed() site becomes a no-op passthrough.
+    from filearr.worker import proc_app
+
+    await proc_app.open_async()
     yield
+    await proc_app.close_async()
 
 
 def create_app() -> FastAPI:
