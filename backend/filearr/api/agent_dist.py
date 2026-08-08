@@ -277,6 +277,43 @@ async def install_ps1(request: Request) -> PlainTextResponse:
     )
 
 
+# The unified Windows lifecycle script (provision / update / reconfigure — it
+# auto-detects). Shipped as a FILE (image: /app/agentscripts; dev checkouts
+# fall back to the repo scripts/ dir) so the repo copy stays the single source
+# of truth; serving bakes THIS central's URL into the -CentralUrl default.
+# Registered BEFORE the {filename} catch-all below or it would never match.
+_MANAGE_SCRIPT = "manage-windows-agent.ps1"
+
+
+def _manage_script_path() -> Path | None:
+    for cand in (
+        Path("/app/agentscripts") / _MANAGE_SCRIPT,
+        Path(__file__).resolve().parents[3] / "scripts" / _MANAGE_SCRIPT,
+    ):
+        if cand.is_file():
+            return cand
+    return None
+
+
+@router.get(
+    "/agent-dist/manage-windows-agent.ps1",
+    dependencies=[Depends(require_agents_enabled)],
+    response_class=PlainTextResponse,
+)
+async def manage_windows_agent_ps1(request: Request) -> PlainTextResponse:
+    """The one-script Windows agent lifecycle tool (provision + update +
+    reconfigure), templated with THIS central's URL."""
+    path = _manage_script_path()
+    if path is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "management script not shipped on this install"
+        )
+    return PlainTextResponse(
+        path.read_text(encoding="utf-8").replace("__CENTRAL_URL__", _base_url(request)),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
 @router.get(
     "/agent-dist/{filename}",
     dependencies=[Depends(require_agents_enabled)],

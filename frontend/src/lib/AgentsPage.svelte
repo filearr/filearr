@@ -681,6 +681,12 @@ ${detail}
       sidecar (<code class="font-mono">filearr-agent.json</code>) the console agent
       consumes directly. Tokens are shown once and never stored in the clear.
     </p>
+    <p class="mt-2 text-xs text-slate-500"
+      title="One script for the whole Windows agent lifecycle, pre-configured with this central's URL: on a machine without the agent it provisions (mints its own token via the API, installs the service, sets scan roots); on a machine with the agent it updates the binary and applies config changes (-ScanRoot, -MtlsUrl). Requires an elevated PowerShell; pass -ApiKey <admin key> when authentication is enabled.">
+      <b>Windows one-script lifecycle:</b>
+      <code class="font-mono break-all select-all">irm {location.origin}/api/v1/agent-dist/manage-windows-agent.ps1 -OutFile manage-windows-agent.ps1</code>
+      — then <code class="font-mono">.\manage-windows-agent.ps1 -ScanRoot D:\media</code> (elevated); the same script updates and reconfigures on later runs.
+    </p>
 
     <!-- Simple token mint -->
     <div class="mt-3 flex flex-wrap items-end gap-2">

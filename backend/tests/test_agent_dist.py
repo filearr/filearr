@@ -115,3 +115,22 @@ async def test_install_scripts_templated_with_central_url(client):
     assert '$base = "http://t"' in r.text
     assert "__CENTRAL_URL__" not in r.text
     assert "Get-FileHash" in r.text
+
+
+async def test_manage_windows_agent_script_served_templated(client):
+    """The unified Windows lifecycle script is served with THIS central's URL
+    baked into the -CentralUrl default; the split-placeholder runtime guard
+    survives templating untouched (so a repo copy still demands -CentralUrl).
+    Registered before the {filename} catch-all — a 404 here would mean route
+    ordering regressed."""
+    c, _, _ = client
+    r = await c.get("/api/v1/agent-dist/manage-windows-agent.ps1")
+    assert r.status_code == 200, r.text
+    assert '[string]$CentralUrl = "http://t"' in r.text
+    assert "__CENTRAL_URL__" not in r.text
+    # The guard's split halves are untouched by templating.
+    assert '"__CENTRAL" + "_URL__"' in r.text
+    # Both lifecycle halves present: provisioning and update markers.
+    assert "enrollment-tokens" in r.text
+    assert "Stop-Service filearr-agent" in r.text
+    assert "Get-FileHash" in r.text

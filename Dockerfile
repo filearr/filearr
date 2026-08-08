@@ -65,6 +65,9 @@ COPY --from=frontend /build/dist ./static
 # First-install agent binaries served by /api/v1/agent-dist (FILEARR_AGENT_DIST_DIR
 # overrides; the API 404s gracefully when the directory is absent in dev).
 COPY --from=agentdist /out ./agent-dist
+# Operator lifecycle script served templated by /api/v1/agent-dist/
+# manage-windows-agent.ps1 (dev checkouts fall back to the repo scripts/ dir).
+COPY scripts/manage-windows-agent.ps1 ./agentscripts/manage-windows-agent.ps1
 
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
 EXPOSE 8000

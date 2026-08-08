@@ -65,67 +65,60 @@ The scripts detect OS/arch, download the matching binary, verify its sha256
 against the manifest, and hand off to the installer below. (`-d` /
 `-DownloadOnly` fetches the binary without installing the service.)
 
-### Fully scripted Windows provisioning and updates {#windows-scripts}
+### One-script Windows lifecycle (provision / update / reconfigure) {#windows-scripts}
 
 The install script above still needs a token minted in the console first. For
-zero-console automation (fleet rollout, config management), the repository
-ships two operator scripts under
-[`scripts/`](https://github.com/pwsh/filearr/tree/main/scripts) that drive
-the **API** end to end:
-
-**`provision-windows-agent.ps1`** — mints the enrollment token via
-`POST /api/v1/agents/enrollment-tokens`, downloads + sha256-verifies the
-binary, installs the `filearr-agent` service, and configures the scan
-location(s) in one elevated command:
+zero-console automation, **your central serves a single lifecycle script,
+pre-configured with its own URL** (also shown on the Agents page's installer
+card; the repository copy at
+[`scripts/manage-windows-agent.ps1`](https://github.com/pwsh/filearr/blob/main/scripts/manage-windows-agent.ps1)
+is identical but needs `-CentralUrl`):
 
 ```powershell
-# unauthenticated central (FILEARR_AUTH_ENABLED=false) — no key needed
-.\provision-windows-agent.ps1 -CentralUrl https://filearr.example.com `
-    -ScanRoot D:\media
-
-# authenticated central — minting is an admin operation, pass an admin API key
-.\provision-windows-agent.ps1 -CentralUrl https://filearr.example.com `
-    -ApiKey <admin key> -ScanRoot D:\media -ScanRoot E:\photos
+irm https://filearr.example.com/api/v1/agent-dist/manage-windows-agent.ps1 `
+    -OutFile manage-windows-agent.ps1
 ```
 
-Repeat `-ScanRoot` per location; the roots land in the service's `scan.json`
-(merged, so re-provisioning keeps any presets/globs you added) and the
-service restarts to apply. `-Name` (defaults to the computer name),
-`-RolloutGroup`, and `-TokenTtlMinutes` cover the rest of the mint surface.
+Run it from an **elevated** PowerShell; it auto-detects what the machine
+needs:
 
-On an **mTLS deployment** (`FILEARR_AGENT_AUTH_MODE=mtls-header`/`both`), add
-`-MtlsUrl https://agents.example.com`: enrollment still runs against
-`-CentralUrl` (the mTLS site refuses clients that have no certificate yet),
-and once the install has enrolled, the agent's `central_url` is switched to
-the mTLS site and the service restarted — it presents its freshly-issued
-client certificate automatically from then on.
-
-**`update-windows-agent.ps1`** — updates an installed agent to whatever build
-central currently serves: compares `filearr-agent --version` against the
-`/api/v1/agent-dist` manifest, downloads + verifies, swaps the binary under a
-stopped service, restarts, and re-checks the reported version (the previous
-binary is kept as `filearr-agent.exe.old` for manual rollback):
+- **Agent not installed → provision.** Mints an enrollment token through
+  `POST /api/v1/agents/enrollment-tokens`, downloads + sha256-verifies the
+  binary from agent-dist, installs the auto-start `filearr-agent` service
+  (enrolls non-interactively), and applies the configuration switches.
+- **Agent installed → update + reconfigure.** Compares `filearr-agent
+  --version` against the agent-dist manifest and swaps the binary under a
+  stopped service when they differ (previous binary kept as `.old` for manual
+  rollback; `-Force` reinstalls regardless), applying configuration changes
+  in the same window. With nothing to do, it says so and exits.
 
 ```powershell
-.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com          # either auth mode
-.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -ApiKey <key>  # behind an authenticating proxy
-.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -Force   # reinstall same version
-.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com `
-    -MtlsUrl https://agents.example.com   # migrate this machine to mTLS (± update)
+# fresh machine: provision with scan locations (auth-off central — no key)
+.\manage-windows-agent.ps1 -ScanRoot D:\media -ScanRoot E:\photos
+
+# authenticated central: minting is an admin operation
+.\manage-windows-agent.ps1 -ApiKey <admin key> -ScanRoot D:\media
+
+# later, same machine: update to whatever central serves now
+.\manage-windows-agent.ps1
+
+# migrate to mTLS (± an update in the same run) — the per-machine half of
+# the mode-flip runbook
+.\manage-windows-agent.ps1 -MtlsUrl https://agents.example.com
 ```
 
-`-MtlsUrl` is the per-machine half of the [mTLS mode-flip
-runbook](security.md): it rewrites `central_url` in the installed sidecar
-(every other key preserved) during the same stopped-service window as the
-binary swap — or standalone when the binary is already current — and the
-enrolled agent presents its client certificate automatically. Downloads
-always use `-CentralUrl`: agent-dist stays on the main site, and the mTLS
-proxy would refuse a cert-less operator shell anyway.
+Switches work on both paths: `-ScanRoot` (repeatable) merges into the
+service's `scan.json` (presets/globs you added survive) and `-MtlsUrl`
+rewrites the sidecar's `central_url` to the mTLS site — enrollment always
+runs against the main URL (the mTLS site refuses clients without a
+certificate yet), and the enrolled agent presents its client certificate
+automatically after the switch. `-Name`, `-RolloutGroup`, and
+`-TokenTtlMinutes` cover the rest of the mint surface.
 
-Downloads come from `agent-dist`, the deliberately-unauthenticated
-first-install surface, so the update script never *requires* a key — the
-`-ApiKey` variant exists for deployments that put an authenticating proxy in
-front of central. This is the operator-driven complement to the built-in
+Downloads always ride `agent-dist`, the deliberately-unauthenticated
+first-install surface, so updates never *require* a key — `-ApiKey` is sent
+on every request for deployments that front central with an authenticating
+proxy. As an updater this is the operator-driven complement to the built-in
 [self-update channel](#self-update-with-signed-releases): use it for
 key-pinned builds central won't offer unsigned bits to, machines with
 self-update disabled, or an immediate "update now" from a shell.
