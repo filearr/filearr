@@ -197,22 +197,39 @@ disposable/rebuilt by redeploy.
 ## Changing a configuration setting (`.env`) {#changing-configuration}
 
 Every `FILEARR_*` setting (see the [configuration
-reference](../reference/configuration.md)) lives in **`/opt/filearr/.env`
-inside the container**. The deploy script created that file and **preserves it
-across redeploys** — your overrides are never lost to an upgrade.
+reference](../reference/configuration.md)) ends up in **`/opt/filearr/.env`
+inside the container**, which the deploy preserves across redeploys. There are
+two ways to manage settings — prefer the first:
 
-From the Proxmox host shell, the duplicate-safe pattern is remove-then-append,
-then recreate the stack (compose only recreates services whose environment
-actually changed):
+**Host-side (recommended): the overrides file.** Put `KEY=VALUE` lines in
+`~/.config/filearr/env.overrides` on the **Proxmox host** (next to
+`deploy.conf`); every deploy upserts them into the CT's `.env`, last, so they
+always win. Settings managed this way survive redeploys *and even a CT
+recreation* — the host file is the source of truth. Only `FILEARR_*` keys are
+applied (secrets and DB/Meili plumbing stay container-managed); other lines
+are ignored.
 
 ```bash
 # example: accept a larger thumbnail cache — 50 GiB advisory budget
+mkdir -p ~/.config/filearr
+echo 'FILEARR_THUMBNAIL_BUDGET_GB=50' >> ~/.config/filearr/env.overrides
+bash proxmox/deploy-proxmox.sh        # applied on this and every future deploy
+```
+
+**In-CT (immediate, no redeploy needed):** edit `.env` directly with the
+duplicate-safe remove-then-append pattern, then recreate the stack (compose
+only recreates services whose environment actually changed):
+
+```bash
 pct exec <vmid> -- bash -c "cd /opt/filearr \
-  && grep -v '^FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES=' .env > .env.new \
-  && echo 'FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES=53687091200' >> .env.new \
+  && grep -v '^FILEARR_THUMBNAIL_BUDGET_GB=' .env > .env.new \
+  && echo 'FILEARR_THUMBNAIL_BUDGET_GB=50' >> .env.new \
   && mv .env.new .env \
   && docker compose up -d"
 ```
+
+If you use both, mirror the value into the overrides file — otherwise the next
+deploy re-asserts whatever the host file says.
 
 Verify what the running container actually sees:
 
@@ -220,13 +237,11 @@ Verify what the running container actually sees:
 pct exec <vmid> -- bash -c "cd /opt/filearr && docker compose exec -T app env | grep FILEARR_THUMB"
 ```
 
-Handy byte values for size-type settings: `0` disables where documented,
-`5368709120` = 5 GiB, `21474836480` = 20 GiB, `53687091200` = 50 GiB
-(`$((N * 1024**3))` computes any GiB count in bash). The same edit-then-
-`docker compose up -d` procedure applies to every variable in the reference —
-only `FILEARR_SECRET_KEY` and `FILEARR_PROXY_SHARED_SECRET` should never be
+The same procedure applies to every variable in the reference — only
+`FILEARR_SECRET_KEY` and `FILEARR_PROXY_SHARED_SECRET` should never be
 changed after first use (rotating them orphans encrypted alert-channel
-secrets / breaks the agent mTLS proxy trust).
+secrets / breaks the agent mTLS proxy trust); neither belongs in the
+overrides file.
 
 ## Shell access — where's the container password?
 

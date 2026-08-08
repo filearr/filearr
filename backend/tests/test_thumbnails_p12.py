@@ -1054,7 +1054,7 @@ async def test_budget_warning_is_actionable_and_rate_limited(monkeypatch, caplog
     assert len(warns) == 1  # rate-limited: one reminder, not one per poll
     msg = warns[0].getMessage()
     assert "31.4 GiB" in msg and "5.0 GiB" in msg  # human units, not raw bytes
-    assert "FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES" in msg  # names the knob
+    assert "FILEARR_THUMBNAIL_BUDGET_GB" in msg  # names the (GB) knob
     assert "largest source: video" in msg
     assert "Thumbnail cache GC" in msg  # actionable remedy
     assert "nothing is deleted" in msg  # states the (non-)consequence

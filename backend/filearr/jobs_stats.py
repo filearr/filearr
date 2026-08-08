@@ -442,7 +442,7 @@ async def jobs_summary(session: AsyncSession) -> dict:
     # Advisory storage budget alongside the totals so the Jobs card can render
     # an actionable over-budget note (the /stats log line is rate-limited to
     # hourly; the card is the always-current surface).
-    thumb_budget = settings.thumbnail_total_budget_bytes
+    thumb_budget = settings.thumbnail_budget_bytes_effective()
     thumbs = {
         "generated": thumb_totals["count"],
         "bytes": thumb_totals["bytes"],

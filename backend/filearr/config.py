@@ -821,10 +821,19 @@ class Settings(BaseSettings):
     # sources, so a tonemap failure transparently retries the plain scale (a
     # washed-out poster beats no poster). Disable to always take the plain path.
     thumb_hdr_tonemap: bool = True
-    # P12-T12 storage-budget soft alarm: /stats logs a WARNING when the total
-    # thumbnail_manifest byte sum exceeds this. Advisory only -- never blocks
-    # generation (the per-file byte caps are the hard guard).
-    thumbnail_total_budget_bytes: int = 5_368_709_120  # 5 GiB
+    # P12-T12 storage-budget advisory alarm, in GiB to match the disk floors
+    # (FILEARR_THUMBNAIL_BUDGET_GB; 0 disables). Advisory only -- never blocks
+    # generation (the per-file byte caps are the hard guard). The legacy
+    # FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES is honored when explicitly set (an
+    # existing .env keeps working); the GB knob wins the docs and UI strings.
+    thumbnail_budget_gb: float = 5.0
+    thumbnail_total_budget_bytes: int | None = None  # legacy override (bytes)
+
+    def thumbnail_budget_bytes_effective(self) -> int:
+        """The advisory budget in bytes: legacy bytes var when set, else GB."""
+        if self.thumbnail_total_budget_bytes is not None:
+            return self.thumbnail_total_budget_bytes
+        return int(self.thumbnail_budget_gb * 1024**3)
 
     # --- FIX-11: filesystem-full guardrails + low-space alerting -------------
     # A LIVE INCIDENT (thumbnail generation filled /config and crashed Postgres)

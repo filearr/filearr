@@ -76,6 +76,10 @@ warn_dirty_tree() {
   fi
 }
 STORAGES_ENV="${CONF_DIR}/storages.env"   # NAME|TYPE|HOST|SHARE_OR_PATH|USER|PASS|PORT|DOMAIN
+# Host-side FILEARR_* setting overrides (one KEY=VALUE per line). Upserted into
+# the CT's /opt/filearr/.env on EVERY deploy, so app settings can be managed on
+# the Proxmox host next to deploy.conf — and survive even a CT recreation.
+ENV_OVERRIDES="${CONF_DIR}/env.overrides"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CT_APP_DIR="/opt/filearr"
 CT_MEDIA_ROOT="/data/media"
@@ -1022,6 +1026,15 @@ deploy_stack() {
   if [[ "${AGENTS_ENABLED:-no}" == "yes" && -z "$profile_args" ]]; then
     profile_args="--profile agents"
   fi
+  # Stage the host-side env overrides for the in-CT upsert further down (the
+  # .env may not exist yet on a first deploy, so application happens inside
+  # the big block after .env creation, right before the stack builds).
+  if [[ -s "$ENV_OVERRIDES" ]]; then
+    pct push "$VMID" "$ENV_OVERRIDES" /tmp/filearr-env.overrides
+    echo "    host env overrides staged ($(grep -c '^FILEARR_' "$ENV_OVERRIDES" 2>/dev/null || echo 0) FILEARR_* lines)"
+  else
+    pct exec "$VMID" -- rm -f /tmp/filearr-env.overrides
+  fi
   pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && if [[ ! -f .env ]]; then
     PG_PW=\$(openssl rand -hex 16); MEILI_KEY=\$(openssl rand -hex 16)
     {
@@ -1059,6 +1072,24 @@ mv .env.pburl .env
 grep -v '^AGENT_VERSION=' .env > .env.agv 2>/dev/null || true
 echo \"AGENT_VERSION=${AGENT_VERSION:-0.0.0-dev}\" >> .env.agv
 mv .env.agv .env
+# Host-managed setting overrides (~/.config/filearr/env.overrides on the PVE
+# host): FILEARR_* keys ONLY (secrets/DB/Meili plumbing stays CT-managed),
+# upserted last so they win over anything above. Comments and other lines are
+# ignored. Applied on every deploy — the file on the host is the source of
+# truth, so settings survive even a CT recreation.
+if [ -f /tmp/filearr-env.overrides ]; then
+  applied=0
+  while IFS= read -r line || [ -n \"\$line\" ]; do
+    case \"\$line\" in FILEARR_*=*) ;; *) continue ;; esac
+    k=\${line%%=*}
+    grep -v \"^\$k=\" .env > .env.ovr 2>/dev/null || true
+    printf '%s\n' \"\$line\" >> .env.ovr
+    mv .env.ovr .env
+    applied=\$((applied+1))
+  done < /tmp/filearr-env.overrides
+  rm -f /tmp/filearr-env.overrides
+  echo \"[deploy] applied \$applied host-side FILEARR_* override(s) to .env\"
+fi
 # FILEARR_SECRET_KEY: required for alert-channel secret encryption (AES-GCM;
 # channels cannot be created without it). Generated ONCE, in-CT, and NEVER
 # rotated automatically — rotating would orphan already-encrypted channel

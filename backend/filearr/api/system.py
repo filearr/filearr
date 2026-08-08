@@ -88,15 +88,15 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
     grouped aggregate itself comes from :func:`filearr.jobs_stats.thumbnail_totals`
     (single source of truth, shared with the Jobs ``thumbs`` monitor); this layer
     adds the advisory-budget check. A WARNING is logged (at most hourly, never
-    blocking anything) while the total exceeds
-    ``thumbnail_total_budget_bytes``; the actionable surface is the Jobs page
+    blocking anything) while the total exceeds the configured budget
+    (``FILEARR_THUMBNAIL_BUDGET_GB``); the actionable surface is the Jobs page
     thumbs card, which renders the same ``over_budget`` flag."""
     global _budget_warned_at
     totals = await thumbnail_totals(session)
     total_count = totals["count"]
     total_bytes = totals["bytes"]
 
-    budget = get_settings().thumbnail_total_budget_bytes
+    budget = get_settings().thumbnail_budget_bytes_effective()
     over_budget = budget > 0 and total_bytes > budget
     if over_budget:
         import time as _time
@@ -116,7 +116,7 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
             )
             log.warning(
                 "thumbnail cache is %s — over the %s advisory budget "
-                "(FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES%s). This is a planning "
+                "(FILEARR_THUMBNAIL_BUDGET_GB%s). This is a planning "
                 "signal only: generation continues and nothing is deleted "
                 "automatically (the disk-space floors drive emergency LRU "
                 "eviction independently). To act: raise the budget (or set it "
