@@ -928,10 +928,21 @@
             generated <b class="tabular-nums text-slate-700 dark:text-slate-200">{summary.thumbs.generated}</b>
             · {fmtBytes(summary.thumbs.bytes)}
           </div>
-          {#if summary.thumbs.over_budget && summary.thumbs.budget_bytes}
-            <div class="mt-1 text-xs text-amber-600 dark:text-amber-400"
-              title="The cache exceeds its ADVISORY storage budget (FILEARR_THUMBNAIL_BUDGET_GB). Nothing stops and nothing is deleted automatically — the disk-space floors drive emergency eviction independently. Options: raise the budget (or set 0 to accept the size), run 'Thumbnail cache GC' in Scheduled maintenance below to drop orphaned files, or turn off thumbnailing for libraries that don't need it. The cache is disposable: anything removed regenerates on demand.">
-              ⚠ over the {fmtBytes(summary.thumbs.budget_bytes)} advisory budget
+          {#if summary.thumbs.budget_bytes}
+            {@const budgetPct = (summary.thumbs.bytes / summary.thumbs.budget_bytes) * 100}
+            {@const overB = summary.thumbs.over_budget}
+            <div class="mt-1 text-xs {overB ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500'}"
+              title="How full the ADVISORY thumbnail storage budget is (cache size ÷ budget). Passing 100% stops nothing and deletes nothing — the disk-space floors drive emergency eviction independently; to shrink the cache itself, run 'Thumbnail cache GC' in Scheduled maintenance below or disable thumbnailing for libraries that don't need it (anything removed regenerates on demand). Change the budget with FILEARR_THUMBNAIL_BUDGET_GB (0 disables): on a Proxmox deploy add e.g. FILEARR_THUMBNAIL_BUDGET_GB=50 to ~/.config/filearr/env.overrides on the host (applied every deploy), or edit /opt/filearr/.env in the CT and run 'docker compose up -d'. On Docker/Unraid set the variable on the app and worker containers.">
+              budget <b class="tabular-nums">{budgetPct.toFixed(0)}%</b> of {fmtBytes(summary.thumbs.budget_bytes)}{overB ? " — over" : ""}
+            </div>
+            <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+              <div
+                class="h-full rounded-full {budgetPct > 100
+                  ? 'bg-red-500'
+                  : budgetPct > 80
+                    ? 'bg-amber-500'
+                    : 'bg-emerald-500'}"
+                style="width: {Math.min(100, budgetPct)}%"></div>
             </div>
           {/if}
         {/if}
