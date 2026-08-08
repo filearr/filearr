@@ -115,7 +115,19 @@ def disk_status(path: str) -> dict:
         dev = os.stat(target).st_dev
     except OSError:
         pass
-    return {"total": total, "free": free, "used": used, "pct_free": pct_free, "dev": dev}
+    # Filesystem identity for cross-mount alias detection (dedupe_by_device
+    # pass 2): overlay/bind mounts carry their own st_dev yet statvfs the same
+    # backing filesystem; f_fsid is forwarded from it. 0/absent on some
+    # filesystems — callers must treat it as best-effort.
+    fsid = getattr(st, "f_fsid", 0) or 0
+    return {
+        "total": total,
+        "free": free,
+        "used": used,
+        "pct_free": pct_free,
+        "dev": dev,
+        "fsid": fsid,
+    }
 
 
 # --- policy ----------------------------------------------------------------- #
@@ -184,6 +196,7 @@ def status_for_path(path: str, settings) -> dict:
             "used": 0,
             "pct_free": 0.0,
             "dev": None,
+            "fsid": 0,
             "status": OK,
             "reason": "unstatable",
         }
@@ -258,6 +271,12 @@ def overall_status(statuses: list[dict]) -> str:
     return worst
 
 
+# Geometry-alias floor (dedupe pass 2): only filesystems at least this large
+# may merge on identical (total, free, used) alone — small/synthetic mounts
+# (tmpfs, test fixtures) can collide on geometry by chance.
+ALIAS_MIN_TOTAL = 10 * GB
+
+
 def dedupe_by_device(statuses: list[dict]) -> list[dict]:
     """Collapse per-watch-path status dicts to one row per PHYSICAL device.
 
@@ -278,6 +297,11 @@ def dedupe_by_device(statuses: list[dict]) -> list[dict]:
     "0 byte drives listed as duplicates" live report, 2026-07-24.) Input order
     is preserved (first-seen device first).
 
+    A second pass then merges device-groups that are ALIASES of one filesystem
+    despite distinct ``st_dev`` (container overlayfs root vs a bind-mounted
+    volume on the same backing disk): equal nonzero ``fsid``, or byte-identical
+    geometry at >= :data:`ALIAS_MIN_TOTAL` — see the inline comment.
+
     NOTE: this is deliberately NOT applied to the low-space banner list, which is
     per watch-role (an operator wants to know WHICH role hit its floor). The
     device-dedupe alert collapse in ``tasks.diskmon`` is a separate concern.
@@ -294,6 +318,39 @@ def dedupe_by_device(statuses: list[dict]) -> list[dict]:
             groups[key] = []
             order.append(key)
         groups[key].append(st)
+
+    # Pass 2 (live 2026-08-07: "temp" and "database" showed the same 125 GiB
+    # twice): DIFFERENT st_dev can still be the SAME filesystem — the app
+    # container's temp dir sits on the overlayfs root while the bind-mounted
+    # pgdata volume carries its own device id, yet both statvfs the identical
+    # backing disk. Merge device-groups that are provably aliases: equal
+    # nonzero ``f_fsid`` (forwarded from the backing fs), or — where fsid is
+    # unavailable — byte-identical (total, free, used) sampled in this same
+    # pass, gated to >=10 GiB so tiny/synthetic filesystems never
+    # false-merge. A write landing between two statvfs calls skews ``free``
+    # for one poll and simply defers the geometry merge to the next tick.
+    def _alias_sig(grp: list[dict]) -> tuple | None:
+        first = grp[0]
+        if first.get("fsid"):
+            return ("fsid", first["fsid"])
+        if first.get("dev") and first.get("total", 0) >= ALIAS_MIN_TOTAL:
+            return ("geom", first["total"], first["free"], first["used"])
+        return None
+
+    merged_order: list[tuple] = []
+    merged: dict[tuple, list[dict]] = {}
+    sig_owner: dict[tuple, tuple] = {}
+    for key in order:
+        sig = _alias_sig(groups[key])
+        target = sig_owner.get(sig) if sig is not None else None
+        if target is None:
+            if sig is not None:
+                sig_owner[sig] = key
+            merged[key] = list(groups[key])
+            merged_order.append(key)
+        else:
+            merged[target].extend(groups[key])
+    order, groups = merged_order, merged
 
     out: list[dict] = []
     for key in order:

@@ -153,17 +153,24 @@
   // ("tmp" = the app container's temp dir, which sits on the app's own disk);
   // spelled out here so "tmp" doesn't read as "only a scratch mount" when it is
   // in fact the free space of the filesystem the app itself runs on. Merged
-  // rows arrive comma-joined ("thumbnails, postgres"), hence the per-part map.
+  // rows arrive comma-joined ("tmp, postgres" = roles sharing one filesystem);
+  // those use the SHORT names so a shared-disk row stays one readable line —
+  // the parenthetical detail lives in the row tooltip's member list.
   const DISK_ROLE_NAMES: Record<string, string> = {
     thumbnails: "thumbnails",
     tmp: "temp (app disk)",
     postgres: "database (postgres)",
   };
+  const DISK_ROLE_SHORT: Record<string, string> = {
+    thumbnails: "thumbnails",
+    tmp: "temp",
+    postgres: "database",
+  };
   function diskLabel(label: string): string {
-    return label
-      .split(", ")
-      .map((part) => DISK_ROLE_NAMES[part] ?? part)
-      .join(", ");
+    const parts = label.split(", ");
+    if (parts.length > 1)
+      return parts.map((p) => DISK_ROLE_SHORT[p] ?? p).join(" + ");
+    return DISK_ROLE_NAMES[label] ?? label;
   }
 
   // Maintenance panel — the registry of periodic housekeeping tasks with
@@ -699,8 +706,10 @@
                     title={d.members && d.members.length > 1
                       ? d.members.map((m) => `${diskLabel(m.label)}: ${m.path}`).join("\n")
                       : d.path}>{diskLabel(d.label)}</span>
-                  <span class="tabular-nums text-slate-500">
-                    {fmtBytes(d.free)} free of {fmtBytes(d.total)} ({d.pct_free.toFixed(0)}%)
+                  <span
+                    class="tabular-nums text-slate-500"
+                    title="{fmtBytes(used)} used of {fmtBytes(d.total)} — {fmtBytes(d.free)} ({d.pct_free.toFixed(0)}%) free">
+                    {fmtBytes(d.free)} free · {usedPct.toFixed(0)}% used
                   </span>
                 </div>
                 <div

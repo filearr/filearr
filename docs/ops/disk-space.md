@@ -21,13 +21,17 @@ Override the whole list with `FILEARR_DISK_WATCH_PATHS` (JSON).
 > filesystem actually holding the database — the Jobs tile gains a
 > `database (postgres)` row and the extract PG-pause below is active out of the
 > box. Unset the variable to drop the watch. On single-filesystem deploys (the
-> Proxmox LXC) the row simply merges with whichever other watch roles share that
-> device.
+> Proxmox LXC) the row merges with whichever other watch roles share that
+> filesystem — shown as one row labelled e.g. `temp + database`.
 >
 > The `temp (app disk)` row is the app **container's** temp dir — i.e. the free
 > space of the filesystem the app itself runs on (under Docker, the writable
 > layer on the host's Docker data-root). On a single-disk host that is the same
-> physical disk as the database volumes even when the device IDs differ.
+> physical disk as the database volumes even though the device IDs differ (the
+> overlayfs root vs a bind mount): the display detects such aliases by
+> filesystem id — falling back to byte-identical geometry on ≥10 GiB
+> filesystems — and renders them as one row (fixed 2026-08-07; they previously
+> showed as duplicate rows with identical numbers).
 
 ## Thresholds (whichever floor is more conservative wins)
 

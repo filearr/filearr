@@ -613,6 +613,62 @@ def test_disk_dedupe_same_dead_path_merges():
     assert [m["label"] for m in rows[0]["members"]] == ["media", "thumbnails"]
 
 
+def test_disk_dedupe_fsid_alias_merges_across_devices():
+    """Pass 2 (live 2026-08-07): the container's overlayfs temp dir and a
+    bind-mounted volume carry DIFFERENT st_dev but statvfs the same backing
+    filesystem — equal nonzero ``fsid`` merges them ("temp" and "database"
+    showed the identical 125 GiB twice)."""
+    from filearr import diskguard as dg
+
+    base = {"is_pg": False, "total": 125 * dg.GB, "free": 47 * dg.GB,
+            "used": 78 * dg.GB, "pct_free": 37.6, "status": dg.OK, "reason": "ok"}
+    rows = dg.dedupe_by_device([
+        {**base, "path": "/tmp", "label": "tmp", "dev": 71, "fsid": 987654},
+        {**base, "path": "/pgdata", "label": "postgres", "dev": 72,
+         "fsid": 987654, "is_pg": True},
+    ])
+    assert len(rows) == 1
+    assert rows[0]["label"] == "tmp, postgres"
+    assert rows[0]["is_pg"] is True
+
+
+def test_disk_dedupe_geometry_alias_needs_size_and_exact_match():
+    """Without fsid, byte-identical (total, free, used) merges — but ONLY at
+    >= ALIAS_MIN_TOTAL, and any byte of difference keeps rows apart (the
+    distinct-devices test above already pins tiny identical geometry apart)."""
+    from filearr import diskguard as dg
+
+    big = {"is_pg": False, "total": 125 * dg.GB, "free": 47 * dg.GB,
+           "used": 78 * dg.GB, "pct_free": 37.6, "fsid": 0, "status": dg.OK,
+           "reason": "ok"}
+    rows = dg.dedupe_by_device([
+        {**big, "path": "/tmp", "label": "tmp", "dev": 71},
+        {**big, "path": "/pgdata", "label": "postgres", "dev": 72},
+    ])
+    assert [r["label"] for r in rows] == ["tmp, postgres"]
+
+    rows = dg.dedupe_by_device([
+        {**big, "path": "/tmp", "label": "tmp", "dev": 71},
+        {**big, "path": "/pgdata", "label": "postgres", "dev": 72,
+         "free": 47 * dg.GB - 1},  # one byte apart -> not provably aliases
+    ])
+    assert [r["label"] for r in rows] == ["tmp", "postgres"]
+
+
+def test_disk_dedupe_distinct_fsids_stay_separate():
+    """Two real filesystems with identical geometry but DIFFERENT fsids never
+    merge — fsid identity outranks the geometry heuristic."""
+    from filearr import diskguard as dg
+
+    base = {"is_pg": False, "total": 125 * dg.GB, "free": 47 * dg.GB,
+            "used": 78 * dg.GB, "pct_free": 37.6, "status": dg.OK, "reason": "ok"}
+    rows = dg.dedupe_by_device([
+        {**base, "path": "/a", "label": "a", "dev": 71, "fsid": 111},
+        {**base, "path": "/b", "label": "b", "dev": 72, "fsid": 222},
+    ])
+    assert [r["label"] for r in rows] == ["a", "b"]
+
+
 def test_cpu_percent_is_busy_delta_between_polls(monkeypatch):
     """Fix 2026-07-24: `percent` is a real utilization sample (busy/total
     jiffies delta from /proc/stat), not the old `100*load1/cores` run-queue
