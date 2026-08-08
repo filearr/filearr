@@ -89,6 +89,21 @@ admin scope). The raw token is shown **once** and never stored — only its
 sha256 is persisted. Hand it to the new machine out-of-band (copy/paste into the
 agent installer, or a QR/deep-link).
 
+**Zero-console Windows provisioning (2026-08-07):**
+`scripts/provision-windows-agent.ps1` drives the whole flow from an elevated
+shell on the target machine — mints the token via the API, downloads +
+sha256-verifies the binary from agent-dist, runs the service install, and
+writes the scan location(s) into the service's `scan.json`
+(`-ScanRoot D:\media -ScanRoot E:\photos`, merged so re-provisioning keeps
+presets/globs). Auth-off centrals need no key; auth-on centrals pass
+`-ApiKey <admin key>` (minting is admin scope — the script maps a 401/403
+into that exact hint). Companion `scripts/update-windows-agent.ps1` updates
+an installed agent from the agent-dist manifest (stop service → verified
+binary swap → start → re-check reported version; previous binary kept as
+`.old`) — the operator-driven complement to §8 for key-pinned or
+self-update-disabled machines. Both are documented for users in
+docs-site/agents.md §"Fully scripted Windows provisioning".
+
 The enrollment handshake (R3 — **register precedes cert**):
 
 1. **Agent → `POST /api/v1/agents/register`** `{token, hostname, platform,

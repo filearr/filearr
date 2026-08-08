@@ -65,6 +65,54 @@ The scripts detect OS/arch, download the matching binary, verify its sha256
 against the manifest, and hand off to the installer below. (`-d` /
 `-DownloadOnly` fetches the binary without installing the service.)
 
+### Fully scripted Windows provisioning and updates {#windows-scripts}
+
+The install script above still needs a token minted in the console first. For
+zero-console automation (fleet rollout, config management), the repository
+ships two operator scripts under
+[`scripts/`](https://github.com/pwsh/filearr/tree/main/scripts) that drive
+the **API** end to end:
+
+**`provision-windows-agent.ps1`** — mints the enrollment token via
+`POST /api/v1/agents/enrollment-tokens`, downloads + sha256-verifies the
+binary, installs the `filearr-agent` service, and configures the scan
+location(s) in one elevated command:
+
+```powershell
+# unauthenticated central (FILEARR_AUTH_ENABLED=false) — no key needed
+.\provision-windows-agent.ps1 -CentralUrl https://filearr.example.com `
+    -ScanRoot D:\media
+
+# authenticated central — minting is an admin operation, pass an admin API key
+.\provision-windows-agent.ps1 -CentralUrl https://filearr.example.com `
+    -ApiKey <admin key> -ScanRoot D:\media -ScanRoot E:\photos
+```
+
+Repeat `-ScanRoot` per location; the roots land in the service's `scan.json`
+(merged, so re-provisioning keeps any presets/globs you added) and the
+service restarts to apply. `-Name` (defaults to the computer name),
+`-RolloutGroup`, and `-TokenTtlMinutes` cover the rest of the mint surface.
+
+**`update-windows-agent.ps1`** — updates an installed agent to whatever build
+central currently serves: compares `filearr-agent --version` against the
+`/api/v1/agent-dist` manifest, downloads + verifies, swaps the binary under a
+stopped service, restarts, and re-checks the reported version (the previous
+binary is kept as `filearr-agent.exe.old` for manual rollback):
+
+```powershell
+.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com          # either auth mode
+.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -ApiKey <key>  # behind an authenticating proxy
+.\update-windows-agent.ps1 -CentralUrl https://filearr.example.com -Force   # reinstall same version
+```
+
+Downloads come from `agent-dist`, the deliberately-unauthenticated
+first-install surface, so the update script never *requires* a key — the
+`-ApiKey` variant exists for deployments that put an authenticating proxy in
+front of central. This is the operator-driven complement to the built-in
+[self-update channel](#self-update-with-signed-releases): use it for
+key-pinned builds central won't offer unsigned bits to, machines with
+self-update disabled, or an immediate "update now" from a shell.
+
 **Manual install:** download the platform binary from
 `<central>/api/v1/agent-dist` (the manifest lists every platform with its
 sha256) and put it beside the sidecar in one folder, then (as admin/root):
