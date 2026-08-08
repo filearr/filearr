@@ -68,6 +68,17 @@ def _read_stamp() -> str | None:
     return None
 
 
+# Rate limit for the over-budget WARNING: /stats is polled by the UI, and the
+# old per-call log line repeated the identical fact every poll (and, since the
+# Logs panel exists, filled it with duplicates). One reminder per hour.
+_BUDGET_WARN_INTERVAL_S = 3600.0
+_budget_warned_at: float = 0.0
+
+
+def _gib(n: int) -> str:
+    return f"{n / 1024**3:.1f} GiB"
+
+
 async def _thumbnail_stats(session: AsyncSession) -> dict:
     """Cheap thumbnail-cache aggregates from ``thumbnail_manifest`` (P12-T12).
 
@@ -76,8 +87,11 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
     operator can see, e.g., how much of the store is video poster-frames. The
     grouped aggregate itself comes from :func:`filearr.jobs_stats.thumbnail_totals`
     (single source of truth, shared with the Jobs ``thumbs`` monitor); this layer
-    adds the soft-budget check. A WARNING is logged (never blocks) when the total
-    exceeds the configured ``thumbnail_total_budget_bytes`` budget."""
+    adds the advisory-budget check. A WARNING is logged (at most hourly, never
+    blocking anything) while the total exceeds
+    ``thumbnail_total_budget_bytes``; the actionable surface is the Jobs page
+    thumbs card, which renders the same ``over_budget`` flag."""
+    global _budget_warned_at
     totals = await thumbnail_totals(session)
     total_count = totals["count"]
     total_bytes = totals["bytes"]
@@ -85,11 +99,35 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
     budget = get_settings().thumbnail_total_budget_bytes
     over_budget = budget > 0 and total_bytes > budget
     if over_budget:
-        log.warning(
-            "thumbnail cache %s bytes exceeds soft budget %s bytes",
-            total_bytes,
-            budget,
-        )
+        import time as _time
+
+        now = _time.monotonic()
+        if now - _budget_warned_at >= _BUDGET_WARN_INTERVAL_S or _budget_warned_at == 0.0:
+            _budget_warned_at = now
+            largest = max(
+                totals["by_source"].items(),
+                key=lambda kv: kv[1]["bytes"],
+                default=(None, None),
+            )
+            largest_note = (
+                f"; largest source: {largest[0]} at {_gib(largest[1]['bytes'])}"
+                if largest[0] is not None
+                else ""
+            )
+            log.warning(
+                "thumbnail cache is %s — over the %s advisory budget "
+                "(FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES%s). This is a planning "
+                "signal only: generation continues and nothing is deleted "
+                "automatically (the disk-space floors drive emergency LRU "
+                "eviction independently). To act: raise the budget (or set it "
+                "to 0 to accept the size and silence this), run 'Thumbnail "
+                "cache GC' on the Jobs page to drop orphaned files, or turn "
+                "off thumbnailing for libraries that don't need it. Reminder "
+                "logs at most hourly.",
+                _gib(total_bytes),
+                _gib(budget),
+                largest_note,
+            )
     return {
         "count": total_count,
         "bytes": total_bytes,

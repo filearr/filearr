@@ -920,6 +920,12 @@
             generated <b class="tabular-nums text-slate-700 dark:text-slate-200">{summary.thumbs.generated}</b>
             · {fmtBytes(summary.thumbs.bytes)}
           </div>
+          {#if summary.thumbs.over_budget && summary.thumbs.budget_bytes}
+            <div class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+              title="The cache exceeds its ADVISORY storage budget (FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES). Nothing stops and nothing is deleted automatically — the disk-space floors drive emergency eviction independently. Options: raise the budget (or set 0 to accept the size), run 'Thumbnail cache GC' in Scheduled maintenance below to drop orphaned files, or turn off thumbnailing for libraries that don't need it. The cache is disposable: anything removed regenerates on demand.">
+              ⚠ over the {fmtBytes(summary.thumbs.budget_bytes)} advisory budget
+            </div>
+          {/if}
         {/if}
         {#if q === "scan" && summary?.scan_throughput}
           <!-- Aggregate walk throughput across recent FINISHED scans. Weighted

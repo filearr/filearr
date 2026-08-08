@@ -1019,6 +1019,10 @@ export interface UpcomingJob {
 export interface ThumbsSummary {
   generated: number;
   bytes: number;
+  /** Advisory storage budget (FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES; 0 = none). */
+  budget_bytes?: number;
+  /** True while `bytes` exceeds the advisory budget — informational only. */
+  over_budget?: boolean;
   failed_jobs: number;
   queue: Record<string, number>;
 }

@@ -404,9 +404,15 @@ async def jobs_summary(session: AsyncSession) -> dict:
     # whole-cache generated/bytes aggregate (single source of truth with /stats) and
     # the queue's failed count from the same snapshot. One cheap SELECT.
     thumbs_queue = queues["queues"].get(settings.queue_thumbnail, {})
+    # Advisory storage budget alongside the totals so the Jobs card can render
+    # an actionable over-budget note (the /stats log line is rate-limited to
+    # hourly; the card is the always-current surface).
+    thumb_budget = settings.thumbnail_total_budget_bytes
     thumbs = {
         "generated": thumb_totals["count"],
         "bytes": thumb_totals["bytes"],
+        "budget_bytes": thumb_budget,
+        "over_budget": thumb_budget > 0 and thumb_totals["bytes"] > thumb_budget,
         "failed_jobs": int(thumbs_queue.get("failed", 0)),
         "queue": thumbs_queue,
     }

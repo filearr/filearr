@@ -1022,3 +1022,40 @@ async def test_gc_reclaims_pdf_thumb_like_any_other(env, tmp_path):
     res = await run_thumbnail_gc()
     assert res["files_removed"] >= 1 or res["rows_removed"] >= 1
     assert not os.path.exists(path)
+
+
+async def test_budget_warning_is_actionable_and_rate_limited(monkeypatch, caplog):
+    """Live report 2026-08-08: 'thumbnail cache 33730161148 bytes exceeds soft
+    budget 5368709120 bytes' — raw bytes, no guidance, and re-logged on every
+    /stats poll (spamming the Logs panel). The message now uses GiB, names the
+    knob, says what (doesn't) happen, lists the remedies, and logs at most
+    hourly; the always-current surface is the Jobs card's over_budget flag."""
+    import logging as _logging
+
+    from filearr.api import system as system_mod
+
+    async def fake_totals(session):
+        return {
+            "count": 10,
+            "bytes": 33_730_161_148,
+            "by_source": {
+                "video": {"count": 9, "bytes": 30 * 1024**3},
+                "image": {"count": 1, "bytes": 1},
+            },
+        }
+
+    monkeypatch.setattr(system_mod, "thumbnail_totals", fake_totals)
+    monkeypatch.setattr(system_mod, "_budget_warned_at", 0.0)
+    with caplog.at_level(_logging.WARNING, logger="filearr.system"):
+        r1 = await system_mod._thumbnail_stats(None)
+        r2 = await system_mod._thumbnail_stats(None)  # would have re-logged before
+
+    warns = [r for r in caplog.records if "advisory budget" in r.getMessage()]
+    assert len(warns) == 1  # rate-limited: one reminder, not one per poll
+    msg = warns[0].getMessage()
+    assert "31.4 GiB" in msg and "5.0 GiB" in msg  # human units, not raw bytes
+    assert "FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES" in msg  # names the knob
+    assert "largest source: video" in msg
+    assert "Thumbnail cache GC" in msg  # actionable remedy
+    assert "nothing is deleted" in msg  # states the (non-)consequence
+    assert r1["over_budget"] is True and r2["over_budget"] is True
