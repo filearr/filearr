@@ -16,7 +16,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "e5c7a9d1f483"
+HEAD = "a9c4e7f2b581"
+# maintenance-mode revision's predecessor = agent health/transport.
+MAINT_MODE_PRED = "e5c7a9d1f483"
 # agent health/transport revision's predecessor = app_logs.
 AGENT_HEALTH_PRED = "d4b8e1f6c290"
 # app_logs (console Logs panel) revision's predecessor = doc_chunks.

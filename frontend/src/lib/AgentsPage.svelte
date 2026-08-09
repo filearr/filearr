@@ -10,6 +10,8 @@
     listEnrollmentTokens,
     mintEnrollmentToken,
     revokeAgent,
+    runAgentMaintenance,
+    suspendAgent,
     triggerAgentUpdate,
     deleteAgent,
     revokeEnrollmentToken,
@@ -247,6 +249,43 @@
       await refresh();
     } finally {
       updating[id] = false;
+    }
+  }
+
+  // Suspend/resume + local maintenance (2026-08-09): queue agent-scoped
+  // commands, applied at the next check-in; `health.suspended` is the applied
+  // truth the badge renders (so a just-clicked suspend shows after ~1 min).
+  let suspending: Record<string, boolean> = $state({});
+  async function toggleSuspend(a: AgentOut) {
+    const want = !a.health?.suspended;
+    if (
+      want &&
+      !confirm(
+        `Suspend agent "${a.name}"? It stops scanning and replicating until resumed (it keeps checking in for commands, so you can resume it from here).`,
+      )
+    )
+      return;
+    suspending[a.id] = true;
+    try {
+      await suspendAgent(a.id, want);
+      await refresh();
+    } catch (e) {
+      error = `suspend ${a.name}: ${errDetail(e)}`;
+    } finally {
+      suspending[a.id] = false;
+    }
+  }
+
+  let maintaining: Record<string, boolean> = $state({});
+  async function maintainAgent(a: AgentOut) {
+    maintaining[a.id] = true;
+    try {
+      await runAgentMaintenance(a.id);
+      await refresh();
+    } catch (e) {
+      error = `maintenance ${a.name}: ${errDetail(e)}`;
+    } finally {
+      maintaining[a.id] = false;
     }
   }
 
@@ -633,6 +672,14 @@ ${detail}
                     <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>{relTime(a.last_seen_at)}
                   </span>
                 {/if}
+                {#if a.health?.suspended}
+                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title="Operator-suspended: this agent is not scanning or replicating (self-reported at its last check-in). It still polls for commands — resume it with the actions on the right.">suspended</span>
+                {/if}
+                {#if a.health?.central_maintenance}
+                  <span class="ml-1 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                    title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends.">backing off</span>
+                {/if}
                 {#if a.last_auth_mode === "mtls"}
                   <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                     title="Central verified this agent's last authenticated request via the mTLS proxy path (client-certificate SAN identity) — observed server-side, not self-reported.">mTLS</span>
@@ -680,6 +727,18 @@ ${detail}
                       title={`Queue an update to ${a.update_target} — applied at the agent's next check-in (~1 min)`}
                       onclick={() => updateAgentNow(a.id, a.name)}>update</button>
                   {/if}
+                  <button
+                    class="ml-3 text-amber-600 disabled:opacity-50 dark:text-amber-400"
+                    disabled={suspending[a.id]}
+                    title={a.health?.suspended
+                      ? "Queue a resume — the agent restarts scanning + replication at its next check-in (~1 min)"
+                      : "Queue a suspend — the agent stops scanning + replicating at its next check-in (~1 min); it keeps checking in so it can be resumed"}
+                    onclick={() => toggleSuspend(a)}>{a.health?.suspended ? "resume" : "suspend"}</button>
+                  <button
+                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
+                    disabled={maintaining[a.id]}
+                    title="Queue a local maintenance pass: compact the agent's index (VACUUM), prune already-replicated outbox rows, sweep stale temp files. Runs at its next check-in; the result appears in the command history."
+                    onclick={() => maintainAgent(a)}>maintain</button>
                   <button class="ml-3 text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
                 {/if}
                 <button

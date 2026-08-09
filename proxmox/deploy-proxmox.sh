@@ -984,6 +984,7 @@ push_source() {
   tar -C "$PROJECT_DIR" -czf "$tarball" \
     --exclude .git --exclude node_modules --exclude .venv \
     --exclude __pycache__ --exclude ./config --exclude ./frontend/dist \
+    --exclude ./site \
     --exclude '*.bundle*' --exclude 'RECOVERY-*' .
   # Content stamp: proves WHICH source this deploy pushed, end to end. The
   # stamp is baked into the image (backend/.build-stamp -> /app/.build-stamp)

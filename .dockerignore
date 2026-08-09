@@ -6,6 +6,7 @@ agent/filearr-agent.exe
 frontend/node_modules
 frontend/dist
 backend/.venv*
+site/
 backend/__pycache__
 **/*.pyc
 archive/

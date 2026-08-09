@@ -213,7 +213,7 @@
   {:else if page === "filter-builder"}
     <FilterBuilderPage />
   {:else if page === "help"}
-    <HelpPage />
+    <HelpPage {sourceUrl} />
   {:else}
     <SearchPage />
   {/if}
@@ -225,10 +225,14 @@
       {/if}
     </span>
     <span class="px-1">·</span>
-    <button
-      type="button"
+    <a class="underline hover:text-[var(--accent)]" href="#/help">Help</a>
+    <span class="px-1">·</span>
+    <!-- Bundled mkdocs manual served by this instance (main.py /docs mount). -->
+    <a
       class="underline hover:text-[var(--accent)]"
-      onclick={() => goto("help")}>Help</button>
+      href="/docs/"
+      target="_blank"
+      rel="noopener noreferrer">Docs</a>
     <span class="px-1">·</span>
     <a
       class="underline hover:text-[var(--accent)]"

@@ -214,21 +214,25 @@ func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enrol
 	onAuthError := func() { go rebinder.Trigger(ctx) }
 	go rebinder.Trigger(ctx)
 
+	// Operational gates (2026-08-09): operator suspend (persisted) + central
+	// maintenance advertisement. Created before the subsystems they gate.
+	ops := newOpState(p.cfg.DataDir, p.log)
+
 	sup, supDone := startSupervisor(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
-	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, onAuthError)
+	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, onAuthError, ops.ReplicationPaused)
 	pollDone := startPoller(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, sup, httpClient)
 	localDone := startLocalAPI(ctx, p.cfg.DataDir, p.socket, idx, hist)
 	webDone := startWebUI(ctx, p.cfg.DataDir, p.webAddr, idx, hist)
 	// The updater starts BEFORE the command poller so its TriggerNow seam can be
 	// handed to the self_update command handler (console "update now" button).
 	updTrigger, updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
-	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError, updTrigger)
+	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError, updTrigger, ops)
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	// Policy-driven scan scheduling (2026-08-03): the daemon runs scans itself
 	// so a service-only install needs no external cron/Task Scheduler. Off
 	// until policy (scan_cron/scan_interval_seconds/scan_on_start) or the
 	// FILEARR_AGENT_SCAN_CRON/_EVERY/_ON_BOOT envs arm it.
-	schedDone := startScanScheduler(ctx, p.cfg, p.log)
+	schedDone := startScanScheduler(ctx, p.cfg, p.log, ops.Suspended)
 
 	// slog (timestamped) — these used to be bare Printf lines, leaving the
 	// container log's most important banner without a timestamp or level.

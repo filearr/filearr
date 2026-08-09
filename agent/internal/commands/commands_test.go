@@ -29,6 +29,7 @@ type mockCentral struct {
 	acks      map[string]int
 	completes map[string]completeRecord
 	failPoll  bool // return 500 on poll (central-error path)
+	maint     bool // advertise maintenance mode on poll responses
 }
 
 func newMockCentral() *mockCentral {
@@ -43,6 +44,7 @@ func (m *mockCentral) handler() http.Handler {
 			m.mu.Lock()
 			m.polls++
 			fail := m.failPoll
+			maint := m.maint
 			out := m.queued
 			m.queued = nil
 			m.mu.Unlock()
@@ -50,6 +52,9 @@ func (m *mockCentral) handler() http.Handler {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(`{"detail":"boom"}`))
 				return
+			}
+			if maint {
+				w.Header().Set("X-Filearr-Maintenance", "1")
 			}
 			_ = json.NewEncoder(w).Encode(out)
 		case strings.HasSuffix(p, "/ack"):

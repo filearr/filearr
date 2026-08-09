@@ -1083,7 +1083,28 @@ export interface JobsSummary {
   /** Per-queue upcoming scheduled work (≤3 soonest each). Absent/empty queues
    *  render no "Upcoming" block. */
   upcoming: Record<string, UpcomingJob[]>;
+  /** Global maintenance mode (2026-08-09): the operator switch that suspends
+   *  scan/maintenance/report scheduling and tells agents to back off. */
+  maintenance: MaintenanceMode;
 }
+
+/** Global maintenance-mode state (GET/POST /system/maintenance-mode). */
+export interface MaintenanceMode {
+  active: boolean;
+  reason: string | null;
+  started_at: string | null;
+}
+
+export const maintenanceMode = () =>
+  request<MaintenanceMode>("/system/maintenance-mode");
+
+/** Flip global maintenance mode (admin). While active: schedulers idle, manual
+ *  scans 409, agents pause their replication push (local scanning continues). */
+export const setMaintenanceMode = (active: boolean, reason?: string) =>
+  request<MaintenanceMode>("/system/maintenance-mode", {
+    method: "POST",
+    body: JSON.stringify({ active, reason: reason || null }),
+  });
 
 /** FIX-11 — one monitored filesystem's headroom + policy verdict. */
 export interface DiskPathStatus {
@@ -2536,6 +2557,20 @@ export interface SelfUpdateOut {
 export const triggerAgentUpdate = (id: string) =>
   request<SelfUpdateOut>(`/agents/${id}/self-update`, { method: "POST" });
 
+/** Queue a `suspend` command: pause (or resume) the agent's own scan
+ *  scheduling + replication push. Applied at its next command poll; the
+ *  applied truth then shows up in `health.suspended`. */
+export const suspendAgent = (id: string, suspended: boolean) =>
+  request<AgentCommandOut>(`/agents/${id}/suspend`, {
+    method: "POST",
+    body: JSON.stringify({ suspended }),
+  });
+
+/** Queue an `agent_maintenance` command: local index VACUUM, outbox prune,
+ *  temp-file sweep on the agent. 409 while one is already queued/running. */
+export const runAgentMaintenance = (id: string) =>
+  request<AgentCommandOut>(`/agents/${id}/maintenance`, { method: "POST" });
+
 /** HARD delete an agent row — the cleanup path for failed enrollments and
  *  data-free decommissions. 409 while any library/item references the agent. */
 /** Hard-delete an agent. `deleteLibraries` also removes every library it
@@ -2559,13 +2594,21 @@ export type AgentCommandStatus =
   | "failed"
   | "expired"
   | "cancelled";
-export type AgentCommandKind = "stat_check" | "rehash_check" | "stage_upload";
+export type AgentCommandKind =
+  | "stat_check"
+  | "rehash_check"
+  | "stage_upload"
+  | "inventory"
+  | "self_update"
+  | "suspend"
+  | "agent_maintenance";
 
 export interface AgentCommandOut {
   id: string;
   agent_id: string;
   kind: AgentCommandKind;
-  item_id: string;
+  /** Null for agent-scoped kinds (self_update / suspend / agent_maintenance). */
+  item_id: string | null;
   payload: Record<string, unknown>;
   status: AgentCommandStatus;
   attempts: number;

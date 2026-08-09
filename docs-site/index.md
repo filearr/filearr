@@ -33,6 +33,9 @@ index other machines and replicate their catalogs to a central server.
 - **A real API.** The public REST surface supports search, item updates, batch
   edits, saved searches, custom reports, exports, and an interactive
   OpenAPI/Swagger UI at `/api/docs`.
+- **Self-contained documentation.** Every instance serves this manual itself at
+  `/docs/` and the API reference at `/api/docs` (Swagger assets included) — both
+  work offline / LAN-only, no CDN or internet required.
 - **Filter builder + query DSL.** Build structured queries visually, preview them
   live, and save them as custom reports.
 - **Identity & access when you need it.** API keys with read/write/admin scopes,

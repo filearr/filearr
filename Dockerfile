@@ -37,6 +37,19 @@ RUN set -eu; \
     done; \
     printf '%s\n' "$V" > /out/VERSION
 
+# ---- documentation site build ----
+# The mkdocs manual is baked into the image so every instance serves its own
+# documentation at /docs (offline/LAN-capable). Output is arch-independent ->
+# build-platform pinned, same rationale as agentdist. Base image matches the
+# runtime stage so no extra base pull; mkdocs-material mirrors what the Pages
+# workflow installs, and --strict mirrors its validation.
+FROM --platform=$BUILDPLATFORM python:3.14.6-slim AS docs
+WORKDIR /docs
+RUN pip install --no-cache-dir mkdocs-material
+COPY mkdocs.yml ./
+COPY docs-site/ ./docs-site/
+RUN python -m mkdocs build --strict
+
 # ---- backend runtime ----
 # python:3.14.6-slim: every pinned C-extension dep ships cp314 wheels
 # (verified against PyPI 2026-07-27); patch-pinned like the rest of the stack.
@@ -62,6 +75,8 @@ COPY backend/pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml
 COPY backend/ .
 COPY --from=frontend /build/dist ./static
+# Bundled documentation served by the /docs StaticFiles mount in main.py.
+COPY --from=docs /docs/site ./docs-site-html
 # First-install agent binaries served by /api/v1/agent-dist (FILEARR_AGENT_DIST_DIR
 # overrides; the API 404s gracefully when the directory is absent in dev).
 COPY --from=agentdist /out ./agent-dist

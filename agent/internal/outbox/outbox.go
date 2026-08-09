@@ -312,6 +312,33 @@ func (o *Outbox) IsEmpty(ctx context.Context) (bool, error) {
 	return n == 0, nil
 }
 
+// PruneSent deletes replicated-and-acknowledged rows (sent_at stamped by a
+// central 200) older than the retention cutoff — the agent_maintenance
+// cleanup action (2026-08-09). Two invariants are preserved:
+//
+//   - the newest row is NEVER deleted (even if sent+old), so IsEmpty keeps
+//     meaning "this outbox was (re)created and never written" — the P5-T5
+//     rebuilt-index signal;
+//   - unsent rows are untouched (block-don't-drop).
+//
+// A central restored from a backup older than the retention window can no
+// longer replay from pruned rows; its rewind lands on the cursor dead-end and
+// escalates to the full-manifest reconcile — the designed recovery path for
+// exactly that scenario. RFC3339Nano UTC strings compare lexicographically ==
+// chronologically, so the cutoff is a plain string comparison.
+func (o *Outbox) PruneSent(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339Nano)
+	res, err := o.db.ExecContext(ctx,
+		`DELETE FROM outbox
+		  WHERE sent_at IS NOT NULL AND sent_at < ?
+		    AND seq_no < (SELECT MAX(seq_no) FROM outbox)`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("outbox: prune sent: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 func parseTS(s string) time.Time {

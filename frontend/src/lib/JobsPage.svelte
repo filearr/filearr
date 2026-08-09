@@ -9,6 +9,7 @@
     reapStalledJobs,
     runMaintenance,
     setJobPriority,
+    setMaintenanceMode,
     updateMaintenance,
     type FailedJob,
     type JobsSummary,
@@ -342,6 +343,32 @@
     }
   }
 
+  // Global maintenance MODE (2026-08-09): toggle + banner state. (Distinct
+  // from `maintBusy` above, which is the per-task busy map of the maintenance
+  // SCHEDULES panel.)
+  let modeBusy = $state(false);
+  async function toggleMaintenance() {
+    if (modeBusy) return;
+    const active = summary?.maintenance?.active ?? false;
+    let reason: string | undefined;
+    if (!active) {
+      const input = prompt(
+        "Enter maintenance mode?\n\nSuspends scan/maintenance/report scheduling and tells agents to pause replication (they keep scanning locally). Safety reapers and alerts keep running.\n\nOptional note shown while active (leave blank for none):",
+      );
+      if (input === null) return; // cancelled
+      reason = input.trim() || undefined;
+    }
+    modeBusy = true;
+    try {
+      await setMaintenanceMode(!active, reason);
+      await refresh();
+    } catch (e) {
+      error = `Maintenance mode: ${String(e)}`;
+    } finally {
+      modeBusy = false;
+    }
+  }
+
   async function reap() {
     if (reaping) return;
     reaping = true;
@@ -621,6 +648,14 @@
     {/if}
     <div class="grow"></div>
     {#if reapMsg}<span class="text-xs text-slate-500">{reapMsg}</span>{/if}
+    {#if summary && !summary.maintenance?.active}
+      <button
+        class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+        onclick={toggleMaintenance}
+        disabled={modeBusy}
+        title="Suspend all regular background processing (scan scheduling, nightly maintenance, report exports) and tell agents to pause replication — for long-running operator work like database maintenance. Safety reapers and alerts keep running.">
+        {modeBusy ? "Switching…" : "Enter maintenance mode"}</button>
+    {/if}
     <button
       class="rounded-lg border border-amber-400 px-3 py-1 text-sm text-amber-700 disabled:opacity-50 dark:border-amber-600 dark:text-amber-400"
       onclick={reap}
@@ -634,6 +669,40 @@
   </div>
 
   {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
+
+  <!-- Global maintenance-mode banner (2026-08-09): shown while the operator
+       switch is active. Data piggybacks the jobs-summary poll. -->
+  {#if summary?.maintenance?.active}
+    <div
+      class="mt-3 rounded-xl border border-sky-300 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200"
+      role="status"
+    >
+      <div class="flex items-center gap-3">
+        <div>
+          <span class="font-semibold">Maintenance mode is active</span>
+          {#if summary.maintenance.reason}
+            <span class="text-current/80">— {summary.maintenance.reason}</span>
+          {/if}
+          {#if summary.maintenance.started_at}
+            <span class="text-xs text-current/70">
+              (since {new Date(summary.maintenance.started_at).toLocaleString()})</span>
+          {/if}
+          <p class="mt-0.5 text-xs">
+            Scan scheduling, nightly maintenance tasks and report exports are
+            suspended; manual scans are refused; agents pause replication (their
+            local scans continue and their backlog drains on exit). Stalled-job
+            reaping and alert delivery keep running.
+          </p>
+        </div>
+        <div class="grow"></div>
+        <button
+          class="shrink-0 rounded-lg border border-sky-400 px-3 py-1 text-sm font-medium text-sky-800 disabled:opacity-50 dark:border-sky-700 dark:text-sky-200"
+          onclick={toggleMaintenance}
+          disabled={modeBusy}>
+          {modeBusy ? "Switching…" : "Exit maintenance mode"}</button>
+      </div>
+    </div>
+  {/if}
 
   <!-- FIX-11 low-space banner: red at critical, amber at warn, hidden when ok.
        Data piggybacks the existing jobs-summary poll (summary.disk). -->

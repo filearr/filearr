@@ -1297,9 +1297,15 @@ async def _defer_due_scans(tick: datetime) -> list[str]:
     rows behaves exactly as T5 (regression guard)."""
     from sqlalchemy import select
 
+    from filearr import maintmode
     from filearr.db import SessionLocal
     from filearr.models import Library, ScanPath, ScanRun
     from filearr.schedule import due_occurrence
+
+    # Maintenance mode: skip the whole tick WITHOUT consuming occurrences —
+    # due scans fire (collapsed to the latest occurrence) once the mode lifts.
+    if await maintmode.is_active_standalone():
+        return []
 
     cap = get_settings().scan_schedule_max_catchup_minutes
     deferred: list[str] = []
@@ -1405,7 +1411,11 @@ async def _defer_due_scans(tick: datetime) -> list[str]:
 async def schedule_report_exports(timestamp: int) -> int:
     """Evaluate every enabled report schedule against this minute and enqueue an
     export for each due (un-consumed) occurrence (P11-T9)."""
+    from filearr import maintmode
     from filearr.tasks.reports import evaluate_report_schedules
+
+    if await maintmode.is_active_standalone():
+        return 0  # maintenance mode: occurrences stay due, fire when it lifts
 
     tick = datetime.fromtimestamp(timestamp, tz=UTC)
     return len(await evaluate_report_schedules(tick))
@@ -1512,8 +1522,14 @@ async def _defer_scan_if_idle(library_id: str, rel_path: str | None = None) -> i
     scan of the SAME subtree is already running."""
     from sqlalchemy import select
 
+    from filearr import maintmode
     from filearr.db import SessionLocal
     from filearr.models import ScanRun
+
+    # Maintenance mode: watcher events are dropped (the next event — or the
+    # next cron occurrence — re-triggers once the mode lifts).
+    if await maintmode.is_active_standalone():
+        return None
 
     async with SessionLocal() as session:
         running_scopes = list(

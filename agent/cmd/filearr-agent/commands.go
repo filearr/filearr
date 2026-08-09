@@ -32,7 +32,9 @@ const (
 // stat_check / rehash_check against local disk, reusing the shared bearer-auth +
 // mTLS HTTP client. It returns a done-channel so the daemon waits for a clean
 // stop, mirroring startReplication / startPoller.
-func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func(), updTrigger updateTriggerFn) <-chan struct{} {
+func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func(), updTrigger updateTriggerFn, ops *opState) <-chan struct{} {
+	dataDir := envOr(envDataDir, defaultDataDir())
+	log := newLogger()
 	poller := commands.NewPoller(commands.Config{
 		BaseURL:      centralURL,
 		AgentID:      agentID,
@@ -49,17 +51,25 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		// stores on the agent row and the console renders per agent — plus the
 		// running version, so central stays current even when the self-update
 		// subsystem (the historical version channel) is disabled.
-		Health:       agentHealthProvider(idx, envOr(envDataDir, defaultDataDir()), time.Now()),
+		Health:       agentHealthProvider(idx, dataDir, time.Now(), ops),
 		Version:      Version,
 		MaxCommands:  envInt(envCommandPollMax, 10),
 		Interval:     envDuration(envCommandPollInterval, 60*time.Second),
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),
-		Logger:       newLogger(),
+		Logger:       log,
 		OnAuthError:  onAuthError,
 		// Console "update now" button → self_update command → one immediate
 		// check-and-apply. Nil when self-update is disabled (the handler then
 		// completes ok=false with an explanatory result).
 		TriggerUpdate: updTrigger,
+		// 2026-08-09 maintenance: central's mode advertisement pauses the
+		// replication push; the suspend/agent_maintenance commands bridge onto
+		// the daemon's opState + local maintenance pass.
+		OnMaintenance: ops.SetCentralMaintenance,
+		SetSuspended:  ops.SetSuspended,
+		RunMaintenance: func(mctx context.Context) (map[string]any, error) {
+			return runLocalMaintenance(mctx, idx, dataDir, log)
+		},
 	})
 	done := make(chan struct{})
 	go func() {
@@ -85,7 +95,7 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 // read simply omits its key; the poll must never depend on health assembly.
 // Central stores the map VERBATIM (size-capped) with an arrival stamp; the
 // fleet console renders it per agent.
-func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time) func(ctx context.Context) map[string]any {
+func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, ops *opState) func(ctx context.Context) map[string]any {
 	readJSON := func(name string) map[string]any {
 		b, err := os.ReadFile(filepath.Join(dataDir, name))
 		if err != nil {
@@ -100,6 +110,16 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time) 
 	return func(ctx context.Context) map[string]any {
 		h := map[string]any{
 			"uptime_s": int(time.Since(startedAt).Seconds()),
+		}
+		// 2026-08-09: the console badges suspend/back-off from these (the agent
+		// is the only source of truth for its own applied processing state).
+		if ops != nil {
+			if ops.Suspended() {
+				h["suspended"] = true
+			}
+			if ops.CentralMaintenance() {
+				h["central_maintenance"] = true
+			}
 		}
 		if n, err := outbox.New(idx.DB()).CountUnsent(ctx); err == nil {
 			h["outbox_pending"] = n

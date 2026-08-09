@@ -103,11 +103,13 @@ func resolveScanSchedule(dataDir string, getenv func(string) string, log *slog.L
 
 // startScanScheduler launches the scheduler loop; the returned channel closes
 // when it unwinds. A no-op-cheap loop: one policy-cache read per tick.
-func startScanScheduler(ctx context.Context, cfg *config, log *slog.Logger) <-chan struct{} {
+// suspended (nil => never) gates firing: an operator-suspended agent skips
+// every trigger until resumed (2026-08-09), logged once per skip reason.
+func startScanScheduler(ctx context.Context, cfg *config, log *slog.Logger, suspended func() bool) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runScanScheduler(ctx, cfg, log, runScanChild)
+		runScanScheduler(ctx, cfg, log, runScanChild, suspended)
 	}()
 	return done
 }
@@ -139,6 +141,7 @@ func runScanScheduler(
 	cfg *config,
 	log *slog.Logger,
 	run func(context.Context, *config) error,
+	suspended func() bool,
 ) {
 	tick, onStartDelay := schedTick, schedOnStartDelay
 	var (
@@ -151,6 +154,10 @@ func runScanScheduler(
 	)
 
 	fire := func(reason string) {
+		if suspended != nil && suspended() {
+			log.Info("scan scheduler: agent is suspended; skipping", "reason", reason)
+			return
+		}
 		if !running.CompareAndSwap(false, true) {
 			log.Info("scan scheduler: previous scan still running; skipping", "reason", reason)
 			return

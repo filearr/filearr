@@ -76,6 +76,13 @@ type Config struct {
 	// drain loop on every rejected batch (the rebinder debounces).
 	OnAuthError func()
 
+	// Paused, if set, gates the drain loop (2026-08-09 maintenance): while it
+	// returns true the loop idles without reading or flushing — rows keep
+	// accumulating durably (block-don't-drop) and drain resumes the moment it
+	// returns false. Wired to agent-suspend and central-maintenance state.
+	// Must be cheap (called once per poll interval).
+	Paused func() bool
+
 	// Clock is injectable for age-trigger tests (nil => time.Now).
 	Clock func() time.Time
 }
@@ -98,6 +105,7 @@ type Replicator struct {
 	observer Observer
 
 	onAuthError func()
+	paused      func() bool
 }
 
 // NewReplicator wires a Replicator over ob.
@@ -118,6 +126,7 @@ func NewReplicator(ob *Outbox, cfg Config) *Replicator {
 		observer: cfg.Observer,
 
 		onAuthError: cfg.OnAuthError,
+		paused:      cfg.Paused,
 	}
 	if r.http == nil {
 		r.http = &http.Client{Timeout: defaultTimeout}
@@ -205,6 +214,14 @@ func (r *Replicator) Run(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Maintenance/suspend gate: idle without touching the outbox. Backoff
+		// state is untouched — resuming picks up exactly where it left off.
+		if r.paused != nil && r.paused() {
+			if !sleepCtx(ctx, r.poll) {
+				return ctx.Err()
+			}
+			continue
 		}
 		rows, err := r.ob.Unsent(ctx, r.maxRows)
 		if err != nil {

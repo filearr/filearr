@@ -34,13 +34,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agentsync, audit, verify
+from filearr import agentsync, audit, maintmode, verify
 from filearr.api.agents import require_agents_enabled
 from filearr.config import get_settings
 from filearr.db import get_session
@@ -50,11 +50,19 @@ from filearr.worker import defer_agent_associate, defer_index_sync
 
 router = APIRouter()
 
-CommandKind = Literal["stat_check", "rehash_check", "stage_upload", "inventory", "self_update"]
+CommandKind = Literal[
+    "stat_check",
+    "rehash_check",
+    "stage_upload",
+    "inventory",
+    "self_update",
+    "suspend",
+    "agent_maintenance",
+]
 
 # Kinds that target the AGENT itself rather than one of its items: item_id is
 # absent for these (nullable since the self_update migration).
-_AGENT_SCOPED_KINDS = {"self_update"}
+_AGENT_SCOPED_KINDS = {"self_update", "suspend", "agent_maintenance"}
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +343,139 @@ async def enqueue_command(
     return CommandOut.of(cmd)
 
 
+class SuspendIn(BaseModel):
+    suspended: bool
+
+
+async def _live_agent(session: AsyncSession, agent_id: uuid.UUID) -> Agent:
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
+    if agent.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "agent revoked")
+    return agent
+
+
+def _enqueue_agent_scoped(
+    agent_id: uuid.UUID, kind: str, payload: dict[str, Any], request: Request
+) -> AgentCommand:
+    settings = get_settings()
+    ttl = settings.agent_command_ttl_seconds
+    now = datetime.now(UTC)
+    return AgentCommand(
+        agent_id=agent_id,
+        kind=kind,
+        item_id=None,
+        payload=payload,
+        status="pending",
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=ttl),
+        requested_by=_actor_uuid(request),
+    )
+
+
+@router.post(
+    "/agents/{agent_id}/suspend",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def suspend_agent(
+    agent_id: uuid.UUID,
+    body: SuspendIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue a ``suspend`` command: the agent pauses (or resumes) its own scan
+    scheduling and replication push, persists the state across restarts, and
+    keeps polling commands + reporting health (``health.suspended`` is the
+    applied truth the console badges). A still-``pending`` suspend command is
+    COLLAPSED — its payload is overwritten with the latest desire, so rapid
+    toggling never queues a contradictory backlog."""
+    await _live_agent(session, agent_id)
+    now = datetime.now(UTC)
+    pending = (
+        await session.execute(
+            select(AgentCommand)
+            .where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "suspend",
+                AgentCommand.status == "pending",
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().first()
+    if pending is not None:
+        pending.payload = {"suspended": body.suspended}
+        pending.updated_at = now
+        cmd = pending
+    else:
+        cmd = _enqueue_agent_scoped(
+            agent_id, "suspend", {"suspended": body.suspended}, request
+        )
+        session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "suspend",
+            "suspended": body.suspended,
+        },
+    )
+    return CommandOut.of(cmd)
+
+
+@router.post(
+    "/agents/{agent_id}/maintenance",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def run_agent_maintenance(
+    agent_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue an ``agent_maintenance`` command: the agent compacts its local
+    SQLite index (VACUUM + WAL checkpoint), prunes replicated-and-acknowledged
+    outbox rows past retention, and sweeps stale temp/download files from its
+    data dir — reporting what it reclaimed in the command result. 409 while one
+    is already queued or running (it is a whole-agent operation)."""
+    await _live_agent(session, agent_id)
+    in_flight = (
+        await session.execute(
+            select(AgentCommand.id).where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "agent_maintenance",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+        )
+    ).first()
+    if in_flight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "agent maintenance already queued or running"
+        )
+    cmd = _enqueue_agent_scoped(agent_id, "agent_maintenance", {}, request)
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "agent_maintenance",
+        },
+    )
+    return CommandOut.of(cmd)
+
+
 @router.get(
     "/agent-commands",
     response_model=list[CommandOut],
@@ -423,15 +564,25 @@ async def poll_commands(
     agent_id: uuid.UUID,
     body: PollIn,
     request: Request,
+    response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> list[CommandOut]:
     """Drain up to ``max`` pending, not-yet-expired commands FIFO, delivering each
     (``pending`` → ``picked_up``; ``attempts`` incremented, lease clock started).
     ``FOR UPDATE SKIP LOCKED`` so concurrent polls/sweeps never block. A poll also
     refreshes ``agents.last_seen_at`` (the agent is demonstrably alive). Plain
-    poll — no long-poll hold-open yet (P5-T4)."""
+    poll — no long-poll hold-open yet (P5-T4).
+
+    Maintenance advertisement: the response body is a bare command array (frozen
+    wire shape), so global maintenance mode rides the ``X-Filearr-Maintenance``
+    response header instead — ``1`` while active, absent otherwise. Agents that
+    understand it pause their replication push (and keep scanning locally);
+    older builds ignore the header and are throttled by the replication
+    endpoint's 503 instead."""
     agent = await _authenticate_agent(session, agent_id, request)
     settings = get_settings()
+    if await maintmode.is_active(session):
+        response.headers["X-Filearr-Maintenance"] = "1"
     want = min(body.max, settings.agent_command_poll_max)
     now = datetime.now(UTC)
     # W6-D3: persist the agent's advertised capabilities (additive; a poll without
@@ -628,6 +779,18 @@ async def apply_replication_batch(
     # Never apply one agent's outbox under another's identity.
     if str(body.agent_id) != str(agent_id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "batch agent_id mismatch")
+    # Global maintenance mode: refuse the batch so the agent's outbox drain
+    # backs off (its existing flush-failure exponential backoff handles the
+    # cadence; new builds also pause proactively via the poll header). Nothing
+    # is lost — the outbox is durable and resends from the same seq_no.
+    if await maintmode.is_active(session):
+        agent.last_seen_at = datetime.now(UTC)
+        await session.commit()
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"reason": "maintenance"},
+            headers={"Retry-After": str(maintmode.RETRY_AFTER_SECONDS)},
+        )
     settings = get_settings()
     if len(body.entries) > settings.agent_replication_max_entries:
         raise HTTPException(413, "replication batch too large")

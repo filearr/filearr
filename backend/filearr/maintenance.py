@@ -452,8 +452,15 @@ async def run_maintenance_tick(tick: datetime, *, defer=_defer_spec) -> list[str
     skips — the occurrence was consumed; the running job covers it."""
     import procrastinate
 
+    from filearr import maintmode
     from filearr.db import SessionLocal
     from filearr.schedule import due_occurrence
+
+    # Global maintenance MODE (operator switch) suspends the editable
+    # maintenance TASKS too: occurrences are not consumed, so each task fires
+    # (collapsed to the latest occurrence) once the mode lifts.
+    if await maintmode.is_active_standalone():
+        return []
 
     cap = get_settings().scan_schedule_max_catchup_minutes
     fired: list[str] = []

@@ -132,7 +132,7 @@ func TestSchedulerLoopFiresAndSkipsOverlap(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runScanScheduler(ctx, &config{DataDir: dir}, discard(), run)
+		runScanScheduler(ctx, &config{DataDir: dir}, discard(), run, nil)
 	}()
 
 	// on-start fires after the (scaled) grace; then several more ticks pass

@@ -66,6 +66,39 @@ Each task row also shows **how long the last run took** (wall time of the
 latest attempt, derived from job history) — a purge that suddenly takes
 minutes instead of seconds is an early signal worth investigating.
 
+## Maintenance mode (Jobs page) {#maintenance-mode}
+
+**Enter maintenance mode** (Jobs page header, admin) suspends all *regular*
+work generation so long-running operator tasks — `pg_dump`, `VACUUM FULL`,
+reindexing, storage moves — run against a quiet system:
+
+- scheduled scans, the nightly maintenance tasks, and scheduled report
+  exports stop being deferred (their cron occurrences are **not consumed** —
+  each fires, collapsed to the latest occurrence, when the mode lifts);
+- watch-mode triggers idle; manual scan triggers are refused with 409;
+- distributed agents observe the mode on their next command poll and **pause
+  their replication push** (the Agents page shows a `backing off` badge) —
+  they keep scanning and collecting inventory locally, and their outbox
+  backlog drains when the mode ends. Agent builds predating the
+  advertisement are throttled by the replication endpoint itself
+  (503 + `Retry-After`), feeding their normal flush backoff — nothing is
+  lost either way.
+
+What deliberately **keeps running**: the stalled-job reaper, command TTL
+sweep, export reconciler, staging cleanup, and alert delivery — suspending
+crash-consistency machinery during exactly the window an operator restarts
+things would be self-defeating. Already-queued jobs drain normally; the mode
+stops new work *generation*, it does not pause the worker's consumers.
+
+The switch is a banner + toggle on the Jobs page (with an optional note shown
+while active, e.g. "pg_dump, back ~03:00") and survives restarts — it is one
+Postgres row, so app and worker both see it. API:
+`GET/POST /api/v1/system/maintenance-mode` (`{"active": true, "reason": "…"}`).
+Don't forget to exit it — nothing expires the mode automatically.
+
+For pausing or cleaning up an *individual agent* (rather than central), see
+[agent suspend & maintenance](agents.md#agent-suspend-maintenance).
+
 ## The Logs panel (Jobs page) {#logs-panel}
 
 Below the maintenance table, the **Logs** panel tails a unified log stream
@@ -107,6 +140,25 @@ automatically* unless you opt in with `FILEARR_UPDATE_CHECK_AUTO=true`
 offline box degrades to a "could not reach GitHub" note. Commits newer than
 the running build are marked with a dot; click a subject to read the full
 message. The API is `GET`/`POST /api/v1/system/update-check`.
+
+## The console is a PWA — stale UI after an upgrade {#pwa-service-worker}
+
+The web console installs a service worker (it is an installable PWA) that
+precaches the UI and auto-updates itself. Two practical consequences:
+
+- **After upgrading the server, reload the page once.** The new service worker
+  is picked up on the next visit and takes control immediately; until that
+  reload the tab may still render the previous UI build. The footer's
+  `build` stamp shows which build the page came from.
+- **Historical symptom** (fixed): opening `/api/docs` showed the search page
+  instead of the API reference. That was the pre-fix service worker answering
+  the navigation with the app shell. After upgrading, one reload installs the
+  corrected worker and `/api/docs` renders Swagger again. If a client is
+  somehow stuck, DevTools → Application → Service workers → *Unregister*, then
+  reload.
+
+Each instance serves its own copy of this manual at `/docs/` and the Swagger
+assets for `/api/docs` from its own origin — neither needs internet access.
 
 ## "Task exception was never retrieved … AppNotOpen" from the worker {#appnotopen}
 

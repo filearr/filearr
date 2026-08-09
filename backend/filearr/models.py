@@ -453,6 +453,25 @@ class FileGroupExtension(Base):
     )
 
 
+class MaintenanceMode(Base):
+    """The single-row (``id=1``) global maintenance-mode switch (2026-08-09,
+    ``taxonomy_state`` singleton pattern). While ``active``, the schedulers stop
+    generating new work and agents are advertised to back off — see
+    ``filearr.maintmode`` for the full contract."""
+
+    __tablename__ = "maintenance_mode"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=func.now()
+    )
+
+
 class TaxonomyState(Base):
     """The single-row (``id=1``) taxonomy version counter. ``version`` is bumped on
     every taxonomy CRUD edit; the runtime service caches keyed by it (reload when it
@@ -1922,7 +1941,8 @@ class AgentCommand(Base):
     __tablename__ = "agent_commands"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('stat_check','rehash_check','stage_upload','inventory','self_update')",
+            "kind IN ('stat_check','rehash_check','stage_upload','inventory',"
+            "'self_update','suspend','agent_maintenance')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(

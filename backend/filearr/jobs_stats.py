@@ -495,8 +495,18 @@ async def jobs_summary(session: AsyncSession) -> dict:
         except Exception:  # noqa: BLE001 — additive tile, never break the poll
             agent_replication = []
 
+    # Global maintenance mode (2026-08-09): the Jobs page banner + toggle read
+    # this. Fail-inactive like every other additive tile.
+    try:
+        from filearr import maintmode
+
+        maintenance = await maintmode.get_state(session)
+    except Exception:  # noqa: BLE001 — additive tile, never break the poll
+        maintenance = {"active": False, "reason": None, "started_at": None}
+
     return {
         "agent_replication": agent_replication,
+        "maintenance": maintenance,
         "queues": queues["queues"],
         "extract": queues["extract"],
         "running": running,

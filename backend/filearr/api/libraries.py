@@ -38,6 +38,23 @@ logger = logging.getLogger("filearr.libraries")
 router = APIRouter()
 
 
+async def _refuse_during_maintenance(session: AsyncSession) -> None:
+    """409 for manual scan triggers while global maintenance mode is active —
+    the whole point of the mode is a quiet system; an operator who really wants
+    the scan turns the mode off first (one console toggle)."""
+    from filearr import maintmode
+
+    state = await maintmode.get_state(session)
+    if state["active"]:
+        why = f" ({state['reason']})" if state["reason"] else ""
+        raise HTTPException(
+            409,
+            "maintenance mode is active"
+            f"{why} — scans are suspended; disable it on the Jobs page "
+            "(or POST /api/v1/system/maintenance-mode) to scan now",
+        )
+
+
 def _library_out(library: Library, last_scan: "LastScan | None" = None) -> LibraryOut:
     """Serialize a Library ORM row to LibraryOut, annotating the OPS-T7 effective
     share prefix (manual override wins; else the deploy mount map covering the
@@ -684,6 +701,7 @@ async def trigger_scan(
     force_empty: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
+    await _refuse_during_maintenance(session)
     library = (
         await session.execute(select(Library).where(Library.id == library_id))
     ).scalar_one_or_none()
@@ -761,6 +779,7 @@ async def trigger_targeted_scan(
     run streams over the existing scan SSE. 202 + the deferred job id (``scan_id``;
     null when coalesced) + the echoed scope/recursive/is_file. Audited (write scope).
     """
+    await _refuse_during_maintenance(session)
     library = (
         await session.execute(select(Library).where(Library.id == library_id))
     ).scalar_one_or_none()

@@ -94,6 +94,24 @@ type Config struct {
 	// process. Nil => the kind completes ok=false ("unavailable"), so an agent
 	// with self-update disabled degrades cleanly.
 	TriggerUpdate func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
+
+	// OnMaintenance, if set, receives central's maintenance-mode advertisement
+	// after every successful poll (the X-Filearr-Maintenance response header:
+	// present+"1" while active, absent otherwise). The daemon wires it to the
+	// replication pause gate so the agent stops pushing updates while central
+	// is under maintenance — local scanning/inventory continues. Called with
+	// the CURRENT value on every poll (not edge-triggered); must be cheap.
+	OnMaintenance func(active bool)
+
+	// SetSuspended applies a `suspend` command: persist the flag and gate the
+	// agent's own scan scheduling + replication push. Nil => the kind completes
+	// ok=false ("unavailable"). Must be idempotent.
+	SetSuspended func(ctx context.Context, suspended bool) error
+
+	// RunMaintenance applies an `agent_maintenance` command: local index
+	// VACUUM, outbox prune, temp-file sweep. Returns the result map posted to
+	// central (bytes reclaimed etc.). Nil => the kind completes ok=false.
+	RunMaintenance func(ctx context.Context) (map[string]any, error)
 }
 
 // Poller drains central's per-agent command queue and executes each command.
@@ -116,6 +134,9 @@ type Poller struct {
 	rnd           *rand.Rand
 	onAuthError   func()
 	updateTrigger func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
+	onMaintenance func(active bool)
+	setSuspended  func(ctx context.Context, suspended bool) error
+	runMaint      func(ctx context.Context) (map[string]any, error)
 }
 
 // NewPoller wires a Poller, applying defaults.
@@ -139,6 +160,9 @@ func NewPoller(cfg Config) *Poller {
 		rnd:          cfg.Rand,
 		onAuthError:  cfg.OnAuthError,
 		updateTrigger: cfg.TriggerUpdate,
+		onMaintenance: cfg.OnMaintenance,
+		setSuspended:  cfg.SetSuspended,
+		runMaint:      cfg.RunMaintenance,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -236,6 +260,10 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processInventory(ctx, cmd)
 	case KindSelfUpdate:
 		p.processSelfUpdate(ctx, cmd)
+	case KindSuspend:
+		p.processSuspend(ctx, cmd)
+	case KindAgentMaintenance:
+		p.processAgentMaintenance(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}
@@ -311,12 +339,19 @@ func (p *Poller) poll(ctx context.Context) ([]commandOut, error) {
 		// (self-update disabled, e.g. the container image).
 		reqBody["version"] = p.version
 	}
-	status, body, err := p.post(ctx, url, reqBody)
+	status, hdr, body, err := p.postHdr(ctx, url, reqBody)
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
 		return nil, p.statusError("poll", status, body)
+	}
+	// Central maintenance advertisement (2026-08-09): the response body is a
+	// frozen bare array, so the mode rides a response header. Level-triggered:
+	// the callback gets the CURRENT value every successful poll, so a missed
+	// deactivation self-heals on the next one.
+	if p.onMaintenance != nil {
+		p.onMaintenance(hdr.Get("X-Filearr-Maintenance") == "1")
 	}
 	var out []commandOut
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -353,17 +388,24 @@ func (p *Poller) complete(ctx context.Context, commandID string, ok bool, result
 }
 
 func (p *Poller) post(ctx context.Context, url string, body any) (int, []byte, error) {
+	status, _, respBody, err := p.postHdr(ctx, url, body)
+	return status, respBody, err
+}
+
+// postHdr is post with the response headers exposed (the poll needs the
+// X-Filearr-Maintenance advertisement).
+func (p *Poller) postHdr(ctx context.Context, url string, body any) (int, http.Header, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, fmt.Errorf("marshal body: %w", err)
+			return 0, nil, nil, fmt.Errorf("marshal body: %w", err)
 		}
 		reader = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reader)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -372,11 +414,11 @@ func (p *Poller) post(ctx context.Context, url string, body any) (int, []byte, e
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode, respBody, nil
+	return resp.StatusCode, resp.Header, respBody, nil
 }
 
 func (p *Poller) statusError(step string, status int, body []byte) error {

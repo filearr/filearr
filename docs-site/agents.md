@@ -340,6 +340,37 @@ signal for the [mTLS migration](security.md): flip
 `FILEARR_AGENT_AUTH_MODE` to `mtls-header` only once every active agent wears
 the `mTLS` badge.
 
+## Suspending an agent and agent-side maintenance {#agent-suspend-maintenance}
+
+Two agent-scoped commands ride the same command-poll channel (Agents page →
+per-row actions), applied at the agent's next check-in (~1 min):
+
+- **suspend / resume** (`suspend`) — the agent stops its own scan scheduling
+  and replication push until resumed. It keeps polling for commands, renewing
+  its certificate, and reporting health (otherwise it could never be resumed
+  remotely). The flag is persisted on the agent (`suspend.json` in its data
+  dir), so it survives restarts. The applied truth is self-reported back via
+  the health snapshot: the row wears a `suspended` badge once the agent
+  confirms. Rapid toggling is safe — a still-pending suspend command is
+  collapsed to the latest desire rather than queueing a contradictory backlog.
+- **maintain** (`agent_maintenance`) — one local cleanup pass on the agent:
+  compact the local index (`VACUUM` + WAL truncate), prune outbox rows already
+  replicated *and acknowledged* past a 7-day retention (unsent rows and the
+  newest row are never touched, so replication and the rebuilt-index signal
+  are unaffected), and sweep stale temp files (atomic-write leftovers, aborted
+  update downloads) older than a day. The result — bytes reclaimed, rows
+  pruned, per-pass errors — lands in the command history. 409 while one is
+  already queued or running.
+
+Separately, when **central** enters [maintenance mode](operations.md#maintenance-mode),
+every agent observes it on its next command poll and pauses its replication
+push on its own (`backing off` badge) — local scanning and inventory continue,
+and the outbox backlog drains as soon as the mode lifts. Older agent builds
+that don't understand the advertisement are throttled by the replication
+endpoint instead (503 + Retry-After feeding their normal flush backoff);
+either way nothing is lost — the outbox is durable and resends from the same
+sequence number.
+
 ## Enrollment walkthrough
 
 Enrollment follows a **register-first** trust model: registration precedes

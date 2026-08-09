@@ -1,9 +1,11 @@
 """FastAPI application factory."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 
 from filearr import __version__
@@ -38,13 +40,41 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    # docs_url/redoc_url are None because /api/docs is registered manually
+    # below (self-hosted Swagger assets), which also keeps FastAPI from
+    # claiming /docs/oauth2-redirect — the /docs prefix belongs to the bundled
+    # documentation site mount.
     app = FastAPI(
         title="Filearr",
         version=__version__,
         lifespan=lifespan,
         openapi_url="/api/openapi.json",
-        docs_url="/api/docs",
+        docs_url=None,
+        redoc_url=None,
     )
+    # The frontend build vendors swagger-ui-dist into static/swagger-ui/ and
+    # the SPA mount serves it; a dev checkout without a built frontend falls
+    # back to FastAPI's default CDN URLs. Checked once — the image is
+    # immutable.
+    swagger_local = Path("static/swagger-ui/swagger-ui-bundle.js").is_file()
+
+    @app.get("/api/docs", include_in_schema=False)
+    async def api_docs():
+        asset_kwargs = (
+            {
+                "swagger_js_url": "/swagger-ui/swagger-ui-bundle.js",
+                "swagger_css_url": "/swagger-ui/swagger-ui.css",
+                "swagger_favicon_url": "/favicon.ico",
+            }
+            if swagger_local
+            else {}
+        )
+        return get_swagger_ui_html(
+            openapi_url="/api/openapi.json",
+            title=f"{app.title} - API docs",
+            oauth2_redirect_url=None,
+            **asset_kwargs,
+        )
     if settings.environment == "development":
         app.add_middleware(
             CORSMiddleware,
@@ -59,6 +89,15 @@ def create_app() -> FastAPI:
     from filearr.api.llm import llm_app
 
     app.mount("/api/llm/v1", llm_app)
+    # Bundled documentation site (mkdocs build baked into the image at
+    # /app/docs-site-html) — the console Help links here so the manual works
+    # offline / on-LAN. Must be mounted before the "/" SPA catch-all.
+    try:
+        app.mount(
+            "/docs", StaticFiles(directory="docs-site-html", html=True), name="docs"
+        )
+    except RuntimeError:
+        pass  # dev mode: no bundled docs
     # Built SPA is copied to /app/static in the Docker image
     try:
         app.mount("/", StaticFiles(directory="static", html=True), name="spa")

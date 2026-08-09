@@ -359,6 +359,45 @@ async def failed_jobs_view(
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
+class MaintenanceModeIn(BaseModel):
+    active: bool
+    # Free-text operator note shown in the console banner and to API readers
+    # while the mode is active (e.g. "pg_dump + VACUUM FULL, back ~03:00").
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.get(
+    "/system/maintenance-mode",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def maintenance_mode_view(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The global maintenance-mode state (see ``filearr.maintmode``)."""
+    from filearr import maintmode
+
+    return await maintmode.get_state(session)
+
+
+@router.post(
+    "/system/maintenance-mode",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def maintenance_mode_set(
+    body: MaintenanceModeIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Flip global maintenance mode (admin). While active: scan/maintenance/
+    report scheduling is suspended, manual scan triggers 409, and agents are
+    advertised to pause their replication push (they keep scanning locally).
+    Safety reapers and the alert pump keep running. Idempotent."""
+    from filearr import maintmode
+
+    return await maintmode.set_state(
+        session, active=body.active, reason=body.reason
+    )
+
+
 @router.get(
     "/system/update-check",
     dependencies=[Depends(require_scope("admin"))],
