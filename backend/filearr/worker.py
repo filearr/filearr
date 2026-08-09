@@ -93,8 +93,12 @@ def log_startup_disk_status() -> str:
         worst = _dg.overall_status(statuses)
         for st in statuses:
             logger.info(
-                "startup disk %s: %s free=%d (%.1f%%)",
-                st["status"], st["path"], st["free"], st["pct_free"],
+                "startup disk %s: %s %.1f GiB free of %.1f GiB (%.1f%%)",
+                st["status"],
+                st["path"],
+                st["free"] / _dg.GB,
+                st["total"] / _dg.GB,
+                st["pct_free"],
             )
         if worst == _dg.CRITICAL:
             logger.warning(
