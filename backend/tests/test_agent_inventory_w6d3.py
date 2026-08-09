@@ -336,7 +336,7 @@ async def test_poll_persists_health_and_stamps_auth_mode(client):
     }
     r = await c.post(
         f"/api/v1/agents/{agent_id}/commands/poll",
-        json={"max": 5, "health": health},
+        json={"max": 5, "health": health, "version": "1.5.0-6f9b984"},
         headers=_auth(fp),
     )
     assert r.status_code == 200, r.text
@@ -345,6 +345,10 @@ async def test_poll_persists_health_and_stamps_auth_mode(client):
         assert agent.health == health
         assert agent.health_at is not None
         assert agent.last_auth_mode == "bearer"
+        # Version confirmation rides the poll too (container images disable
+        # the updater — the historical version channel — so central showed
+        # their enrollment-era version forever; live 2026-08-08).
+        assert agent.agent_version == "1.5.0-6f9b984"
         first_at = agent.health_at
 
     # Absent health leaves the stored snapshot (and its stamp) untouched.

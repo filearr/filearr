@@ -61,6 +61,14 @@ type Config struct {
 	// cheap and never block long — a nil/empty return omits the field.
 	Health func(ctx context.Context) map[string]any
 
+	// Version is this binary's running version (main.Version), attached to
+	// every poll body so central's ``agents.agent_version`` stays current for
+	// agents whose self-update subsystem is OFF (the container image disables
+	// it, so the update-manifest poll — the historical version-confirmation
+	// channel — never runs there and central showed the enrollment-era
+	// version forever; live 2026-08-08). Empty => omitted.
+	Version string
+
 	// MaxCommands drained per poll (default 10); Interval between polls (default
 	// 60s); LeaseSeconds is the picked_up lease whose third is the ack-heartbeat
 	// cadence during a slow content hash (default 300 -> heartbeat every ~100s).
@@ -99,6 +107,7 @@ type Poller struct {
 	inv          *inventory.Runner
 	caps         map[string]any
 	health       func(ctx context.Context) map[string]any
+	version      string
 	maxCmds      int
 	interval     time.Duration
 	leaseSecs    int
@@ -121,6 +130,7 @@ func NewPoller(cfg Config) *Poller {
 		inv:          cfg.Inventory,
 		caps:         cfg.Capabilities,
 		health:       cfg.Health,
+		version:      cfg.Version,
 		maxCmds:      cfg.MaxCommands,
 		interval:     cfg.Interval,
 		leaseSecs:    cfg.LeaseSeconds,
@@ -295,6 +305,11 @@ func (p *Poller) poll(ctx context.Context) ([]commandOut, error) {
 		if h := p.health(ctx); len(h) > 0 {
 			reqBody["health"] = h
 		}
+	}
+	if p.version != "" {
+		// Version confirmation for agents whose update poll never runs
+		// (self-update disabled, e.g. the container image).
+		reqBody["version"] = p.version
 	}
 	status, body, err := p.post(ctx, url, reqBody)
 	if err != nil {

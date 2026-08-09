@@ -327,6 +327,12 @@ the online/last-seen tooltip — so "is that agent actually doing anything?" is
 answerable without shelling into the machine. Older agent builds simply send
 none; nothing breaks.
 
+The poll also carries the agent's **running version**, so the console stays
+current even for agents whose self-update subsystem is off — the container
+image disables it by design, and before this the update poll was the only
+version-confirmation channel, leaving container agents' console version
+frozen at whatever they enrolled with.
+
 Next to it, a **transport badge** shows `mTLS` or `bearer` per agent. This is
 *central's* observation of which authentication path the agent's last
 request actually used — deliberately not self-reported, so it's the honest

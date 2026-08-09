@@ -46,8 +46,11 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		Inventory:    inventory.NewRunner(nil, nil),
 		Capabilities: inventory.Capabilities(),
 		// 2026-08-08 fleet health: the compact self-reported snapshot central
-		// stores on the agent row and the console renders per agent.
+		// stores on the agent row and the console renders per agent — plus the
+		// running version, so central stays current even when the self-update
+		// subsystem (the historical version channel) is disabled.
 		Health:       agentHealthProvider(idx, envOr(envDataDir, defaultDataDir()), time.Now()),
+		Version:      Version,
 		MaxCommands:  envInt(envCommandPollMax, 10),
 		Interval:     envDuration(envCommandPollInterval, 60*time.Second),
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),

@@ -120,6 +120,10 @@ class PollIn(BaseModel):
     # backlog, index size, scan state). Same contract as capabilities: absent
     # on older builds → stored value untouched; stored VERBATIM, size-capped.
     health: dict[str, Any] | None = None
+    # 2026-08-08: the running binary's version. The update-manifest poll was
+    # the ONLY version-confirmation channel, and container images disable the
+    # updater — central showed those agents' enrollment-era version forever.
+    version: str | None = Field(default=None, max_length=256)
 
 
 class CompleteIn(BaseModel):
@@ -447,6 +451,11 @@ async def poll_commands(
     ):
         agent.health = body.health
         agent.health_at = now
+    # Version confirmation for updater-disabled agents (container image): the
+    # same stamp the update-manifest poll performs, on the channel every
+    # agent build actually uses.
+    if body.version:
+        agent.agent_version = body.version
     rows = (
         await session.execute(
             select(AgentCommand)

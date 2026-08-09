@@ -204,6 +204,7 @@ func TestPollBodyCarriesHealthSnapshot(t *testing.T) {
 		Health: func(ctx context.Context) map[string]any {
 			return map[string]any{"uptime_s": 42, "outbox_pending": 3}
 		},
+		Version: "1.5.0-abcdef0",
 	})
 	if _, err := p.PollOnce(context.Background()); err != nil {
 		t.Fatalf("PollOnce: %v", err)
@@ -213,6 +214,12 @@ func TestPollBodyCarriesHealthSnapshot(t *testing.T) {
 	m.mu.Unlock()
 	if h == nil || h["outbox_pending"] == nil {
 		t.Fatalf("health not attached to poll body: %+v", m.lastPollBody)
+	}
+	m.mu.Lock()
+	v, _ := m.lastPollBody["version"].(string)
+	m.mu.Unlock()
+	if v != "1.5.0-abcdef0" {
+		t.Fatalf("version not attached to poll body: %+v", m.lastPollBody)
 	}
 
 	// nil provider (older wiring) omits the field entirely.
