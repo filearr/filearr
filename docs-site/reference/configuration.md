@@ -11,6 +11,41 @@ internal knob. Defaults shown are the built-in defaults.
     Meili connection strings, the two passwords, `MEDIA_PATH`, and (if you use
     alerts) `FILEARR_SECRET_KEY`. Everything else is tuning.
 
+## Optional features
+
+These are the product's opt-in (and one opt-out) feature switches. They are the
+knobs most people want to find, so every deployment surface now declares them
+**explicitly with their default** rather than leaving them to be inferred from
+the code: the bundled `docker-compose.yml` sets them on `app` **and** `worker`,
+`.env.example` lists them, the Unraid templates expose them as advanced
+variables, and the Proxmox deploy writes each one into the container's `.env`
+(only when the key is absent, so your edits are never overwritten).
+
+| Variable | Default | What turning it on does |
+|---|---|---|
+| `FILEARR_SEMANTIC_ENABLED` | `false` | Semantic / hybrid search. The **worker** downloads and loads a local ONNX embedding model and embeds items in the background. Off = the model is never loaded, zero cost. Details: [Semantic search](#semantic-search-opt-in). |
+| `FILEARR_CONTENT_SNIFF_ENABLED` | `false` | Unlocks the on-demand "Content-sniff extensionless files" maintenance action: libmagic MIME sniffing over a bounded prefix read, reclassifying files whose extension tells you nothing. Details: [Content sniffing](#content-sniffing-opt-in). |
+| `FILEARR_UPDATE_CHECK_AUTO` | `false` | Lets the Jobs-page Updates card refresh a stale GitHub release cache by itself. This is the only automatic outbound request the product makes; with it off, the check is manual only. Details: [Update check](#update-check-jobs-page-updates-card). |
+| `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory thumbnail-cache budget in GiB. Over budget you get an hourly log reminder and an amber note on the Jobs thumbs card — generation continues and **nothing is deleted**. `0` disables the advisory. Details: [Thumbnails](#thumbnails). |
+| `FILEARR_LOG_DB_ENABLED` | `true` | *(on by default)* Records the log stream into Postgres so the console's Logs panel has content. Set `false` to keep logs in the container output only. Details: [Console log stream](#console-log-stream-jobs-page-logs-panel). |
+| `FILEARR_AGENTS_ENABLED` | `false` | Master switch for the distributed agent fleet surface (enrollment, agent API, fleet monitoring). Needs a CA and further setup. Details: [Distributed agents](#distributed-agents-all-off-unless-enabled). |
+
+!!! note "Set the feature flags on the worker too"
+    `app` and `worker` must agree. The worker is what actually loads the semantic
+    embedder and runs the content-sniff pass; the app only serves the flags to
+    the console. The bundled compose file keeps both in sync automatically — on
+    Unraid, set the same value on the `filearr` and `filearr-worker` containers.
+
+**Not env vars:** OCR and RAG passage chunking are **per-library** toggles you
+flip in the console's library settings (their `FILEARR_OCR_*` /
+`FILEARR_CHUNK_*` variables only tune the behaviour once a library opts in) —
+see [OCR](#ocr-per-library-opt-in) and
+[RAG passage chunking](#rag-passage-chunking-per-library-opt-in).
+
+The console's **Jobs page** carries an "Optional features" card showing the live
+state of each of these switches in the running process, which is the fastest way
+to confirm a change actually reached the containers.
+
 ## Core / connections
 
 | Variable | Default | Purpose |

@@ -25,6 +25,13 @@
 # Persistence: answers -> ~/.config/filearr/deploy.conf ; storage definitions
 # (incl. credentials) -> ~/.config/filearr/storages.env (chmod 600). Both are
 # re-applied on every redeploy, so the CT is fully disposable.
+#
+# App settings: deploy.conf may ALSO carry plain `FILEARR_*=VALUE` setting lines
+# (single-file management — wizard answers and app settings in one place); the
+# dedicated ~/.config/filearr/env.overrides file still works and WINS on a
+# duplicate key. Both are upserted into the CT's /opt/filearr/.env last, so they
+# outrank everything the deploy writes. Secrets are container-managed and are
+# refused from deploy.conf (see the SECRETS note at ENV_OVERRIDES below).
 
 set -euo pipefail
 set -E  # ERR trap inherits into functions/subshells
@@ -79,6 +86,13 @@ STORAGES_ENV="${CONF_DIR}/storages.env"   # NAME|TYPE|HOST|SHARE_OR_PATH|USER|PA
 # Host-side FILEARR_* setting overrides (one KEY=VALUE per line). Upserted into
 # the CT's /opt/filearr/.env on EVERY deploy, so app settings can be managed on
 # the Proxmox host next to deploy.conf — and survive even a CT recreation.
+# deploy.conf itself may hold FILEARR_* lines too (merged FIRST, so a duplicate
+# key in this file wins) — see stage_env_overrides().
+# SECRETS never come from either host file: FILEARR_SECRET_KEY,
+# FILEARR_PROXY_SHARED_SECRET, FILEARR_CA_PROVISIONER_JWK and the DB/Meili
+# plumbing (FILEARR_MEILI_MASTER_KEY / FILEARR_DATABASE_URL /
+# FILEARR_PROCRASTINATE_DSN) are generated + kept in the CT .env only. Such keys
+# found in deploy.conf are warned about and skipped.
 ENV_OVERRIDES="${CONF_DIR}/env.overrides"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CT_APP_DIR="/opt/filearr"
@@ -1030,12 +1044,49 @@ deploy_stack() {
   # Stage the host-side env overrides for the in-CT upsert further down (the
   # .env may not exist yet on a first deploy, so application happens inside
   # the big block after .env creation, right before the stack builds).
+  #
+  # TWO host-side sources are merged into ONE staged file:
+  #   1. deploy.conf   — any plain FILEARR_*=VALUE line, so a single file can
+  #                      hold both the wizard answers and the app settings.
+  #   2. env.overrides — the dedicated file; appended SECOND so it WINS on a
+  #                      duplicate key (the in-CT loop upserts line by line, so
+  #                      the last occurrence of a key is the one that survives).
+  # Secrets / DB / Meili plumbing are container-managed: if they appear in
+  # deploy.conf they are warned about and NOT applied.
+  local staged_conf=0 staged_ovr=0 combined line key val
+  combined="$(mktemp)"
+  if [[ -f "$CONF" ]]; then
+    while IFS= read -r line; do
+      key="${line%%=*}"; val="${line#*=}"
+      case "$key" in
+        FILEARR_SECRET_KEY|FILEARR_PROXY_SHARED_SECRET|FILEARR_CA_PROVISIONER_JWK|FILEARR_MEILI_MASTER_KEY|FILEARR_DATABASE_URL|FILEARR_PROCRASTINATE_DSN)
+          echo "    ⚠ ignoring ${key} found in deploy.conf — secrets and DB/Meili plumbing are container-managed (.env only)"
+          continue ;;
+      esac
+      # deploy.conf is `source`d, so values may be shell-quoted; .env is not a
+      # shell file — strip one matching pair of surrounding quotes.
+      case "$val" in
+        '"'*'"') val="${val#\"}"; val="${val%\"}" ;;
+        "'"*"'") val="${val#\'}"; val="${val%\'}" ;;
+      esac
+      printf '%s=%s\n' "$key" "$val" >> "$combined"
+      staged_conf=$((staged_conf+1))
+    done < <(grep -E '^FILEARR_[A-Z0-9_]+=' "$CONF" 2>/dev/null || true)
+  fi
   if [[ -s "$ENV_OVERRIDES" ]]; then
-    pct push "$VMID" "$ENV_OVERRIDES" /tmp/filearr-env.overrides
-    echo "    host env overrides staged ($(grep -c '^FILEARR_' "$ENV_OVERRIDES" 2>/dev/null || echo 0) FILEARR_* lines)"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in FILEARR_*=*) ;; *) continue ;; esac
+      printf '%s\n' "$line" >> "$combined"
+      staged_ovr=$((staged_ovr+1))
+    done < "$ENV_OVERRIDES"
+  fi
+  if [[ -s "$combined" ]]; then
+    pct push "$VMID" "$combined" /tmp/filearr-env.overrides
+    echo "    host env overrides staged (${staged_conf} from deploy.conf + ${staged_ovr} from env.overrides)"
   else
     pct exec "$VMID" -- rm -f /tmp/filearr-env.overrides
   fi
+  rm -f "$combined"
   pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && if [[ ! -f .env ]]; then
     PG_PW=\$(openssl rand -hex 16); MEILI_KEY=\$(openssl rand -hex 16)
     {
@@ -1073,7 +1124,16 @@ mv .env.pburl .env
 grep -v '^AGENT_VERSION=' .env > .env.agv 2>/dev/null || true
 echo \"AGENT_VERSION=${AGENT_VERSION:-0.0.0-dev}\" >> .env.agv
 mv .env.agv .env
-# Host-managed setting overrides (~/.config/filearr/env.overrides on the PVE
+# Optional feature knobs — EXPLICIT instead of inferred. Every optional feature
+# is visible in .env with its default value, so an operator can see (and flip)
+# what exists without reading config.py. Written ONLY when the key is absent:
+# an operator's own edit, configure_agents' FILEARR_AGENTS_ENABLED=true, and the
+# host-side deploy.conf / env.overrides lines (applied below, LAST) all win.
+for kv in FILEARR_SEMANTIC_ENABLED=false FILEARR_CONTENT_SNIFF_ENABLED=false FILEARR_UPDATE_CHECK_AUTO=false FILEARR_THUMBNAIL_BUDGET_GB=5 FILEARR_LOG_DB_ENABLED=true FILEARR_AGENTS_ENABLED=false; do
+  grep -q \"^\${kv%%=*}=\" .env || printf '%s\n' \"\$kv\" >> .env
+done
+# Host-managed setting overrides (~/.config/filearr/env.overrides + any
+# FILEARR_* lines in ~/.config/filearr/deploy.conf, merged host-side on the PVE
 # host): FILEARR_* keys ONLY (secrets/DB/Meili plumbing stays CT-managed),
 # upserted last so they win over anything above. Comments and other lines are
 # ignored. Applied on every deploy — the file on the host is the source of

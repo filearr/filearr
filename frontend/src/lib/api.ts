@@ -1199,6 +1199,12 @@ export type MaintenanceTask = {
     /** Wall time of the last completed attempt (started → succeeded/failed). */
     duration_seconds?: number | null;
   } | null;
+  /** Present ONLY when the task's optional feature is currently OFF, i.e. a
+   *  run would immediately no-op (semantic search disabled, no library has
+   *  RAG chunking, …). Absent when the task would really do work — the queue
+   *  stores no task result, so this pre-flight gate state is the only honest
+   *  explanation the UI can give for a 0-second run. */
+  gate?: { enabled: boolean; reason: string } | null;
 };
 
 /** Every registered maintenance task (read scope), registry order. */
@@ -1259,6 +1265,29 @@ export const getUpdateCheck = () => request<UpdateCheck>("/system/update-check")
 /** Operator-initiated "Check now" (admin) — contacts GitHub immediately. */
 export const runUpdateCheck = () =>
   request<UpdateCheck>("/system/update-check", { method: "POST" });
+
+/** One optional feature's gate state (Jobs page "Optional features" card).
+ *  `scope` says WHERE it is controlled: `"env"` = a process-level variable
+ *  (`env`, needs a restart), `"libraries"` = a per-library opt-in, in which
+ *  case `count`/`total` report how many libraries have it on. */
+export type SystemFeature = {
+  key: string;
+  title: string;
+  enabled: boolean;
+  scope: "env" | "libraries";
+  env: string | null;
+  detail: string;
+  /** libraries scope only: libraries with the toggle on / libraries total. */
+  count?: number;
+  total?: number;
+  /** thumbnail_budget only: the effective advisory budget, in GB. */
+  value_gb?: number;
+};
+
+/** Read-only visibility into which optional features are on (read scope).
+ *  Deliberately has no mutating counterpart: env-backed gates need a restart. */
+export const systemFeatures = () =>
+  request<{ features: SystemFeature[] }>("/system/features");
 
 /** One row of the unified app+worker log stream (Jobs page Logs panel). */
 export type LogRow = {

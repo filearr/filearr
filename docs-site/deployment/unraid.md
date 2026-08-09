@@ -53,6 +53,15 @@ Until they are published to Community Applications, install them manually.
   Meilisearch data in appdata.
 - **Ports 5432 / 7700 stay unmapped** by default — the stack talks over the
   `filearr` network internally. Only the app's 8484 needs to be reachable.
+- **Optional features are declared explicitly.** Both the `filearr` and
+  `filearr-worker` templates expose every [optional feature
+  knob](../reference/configuration.md#optional-features) —
+  `FILEARR_SEMANTIC_ENABLED`, `FILEARR_CONTENT_SNIFF_ENABLED`,
+  `FILEARR_UPDATE_CHECK_AUTO`, `FILEARR_THUMBNAIL_BUDGET_GB`,
+  `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED` — as **Advanced View**
+  variables pre-filled with their safe defaults, so you can see what exists
+  without editing files. Set the same value on **both** containers: the worker
+  is what loads the semantic model and runs the content-sniff pass.
 
 ## HTTPS on Unraid
 

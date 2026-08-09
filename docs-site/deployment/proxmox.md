@@ -45,6 +45,14 @@ Answers persist to `~/.config/filearr/deploy.conf`; storage definitions
 Both are re-applied on every redeploy, so **the container is fully disposable** —
 destroy and rebuild it and your configuration returns.
 
+The three host-side files, and what each is for:
+
+| File (`~/.config/filearr/`) | Holds | Applied |
+|---|---|---|
+| `deploy.conf` | Wizard answers (VMID, bridge, ports, TLS mode …) **plus, optionally, any `FILEARR_*=VALUE` app-setting lines** — so one file can describe the whole deployment. | Every deploy. `FILEARR_*` lines are upserted into the container's `.env`. |
+| `env.overrides` | `FILEARR_*=VALUE` app settings only (the dedicated file). | Every deploy, **after** the `deploy.conf` lines — so it **wins** on a duplicate key. |
+| `storages.env` | Storage definitions incl. share credentials (mode 0600). | Every deploy (mount units rebuilt). |
+
 !!! danger "Secrets never go in `deploy.conf`"
     `deploy.conf` holds only non-secret settings. The Cloudflare API token, the
     auto-generated proxy shared secret, the auto-generated `FILEARR_SECRET_KEY`,
@@ -52,6 +60,12 @@ destroy and rebuild it and your configuration returns.
     container's `.env` **only** — never in `deploy.conf`, never echoed to the
     terminal. On a redeploy, a blank token answer means "keep the container's
     existing one".
+
+    The deploy enforces this: `FILEARR_SECRET_KEY`,
+    `FILEARR_PROXY_SHARED_SECRET`, `FILEARR_CA_PROVISIONER_JWK`,
+    `FILEARR_MEILI_MASTER_KEY`, `FILEARR_DATABASE_URL` and
+    `FILEARR_PROCRASTINATE_DSN` found in `deploy.conf` are **skipped with a ⚠
+    warning**, not applied. Those six are container-managed.
 
 ## Storage: rclone/NFS mounts inside the container
 
@@ -201,20 +215,40 @@ reference](../reference/configuration.md)) ends up in **`/opt/filearr/.env`
 inside the container**, which the deploy preserves across redeploys. There are
 two ways to manage settings — prefer the first:
 
-**Host-side (recommended): the overrides file.** Put `KEY=VALUE` lines in
-`~/.config/filearr/env.overrides` on the **Proxmox host** (next to
-`deploy.conf`); every deploy upserts them into the CT's `.env`, last, so they
-always win. Settings managed this way survive redeploys *and even a CT
-recreation* — the host file is the source of truth. Only `FILEARR_*` keys are
-applied (secrets and DB/Meili plumbing stay container-managed); other lines
-are ignored.
+**Host-side (recommended): `deploy.conf` or the overrides file.** Put
+`KEY=VALUE` lines either straight into `~/.config/filearr/deploy.conf` (keeps
+the whole deployment in **one file**) or into
+`~/.config/filearr/env.overrides` next to it; every deploy upserts them into
+the CT's `.env`, last, so they always win over anything the deploy writes.
+Settings managed this way survive redeploys *and even a CT recreation* — the
+host file is the source of truth. Only `FILEARR_*` keys are applied (other
+lines are ignored), and the six container-managed secret/plumbing keys listed
+above are refused from `deploy.conf` with a ⚠ warning.
+
+If the same key appears in both files, **`env.overrides` wins** — its lines are
+merged after `deploy.conf`'s. The deploy prints what it staged, e.g.
+`host env overrides staged (2 from deploy.conf + 1 from env.overrides)`.
 
 ```bash
 # example: accept a larger thumbnail cache — 50 GiB advisory budget
 mkdir -p ~/.config/filearr
 echo 'FILEARR_THUMBNAIL_BUDGET_GB=50' >> ~/.config/filearr/env.overrides
+# ...or, single-file style, the same line in deploy.conf:
+echo 'FILEARR_THUMBNAIL_BUDGET_GB=50' >> ~/.config/filearr/deploy.conf
 bash proxmox/deploy-proxmox.sh        # applied on this and every future deploy
 ```
+
+!!! tip "Every optional feature is already written into `.env`"
+    The deploy writes each [optional feature
+    knob](../reference/configuration.md#optional-features) —
+    `FILEARR_SEMANTIC_ENABLED`, `FILEARR_CONTENT_SNIFF_ENABLED`,
+    `FILEARR_UPDATE_CHECK_AUTO`, `FILEARR_THUMBNAIL_BUDGET_GB`,
+    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED` — into the CT's `.env`
+    with its default value, so `cat /opt/filearr/.env` shows what exists
+    instead of leaving it implicit. This happens **only when the key is
+    absent**: your in-CT edits, the agents wizard's
+    `FILEARR_AGENTS_ENABLED=true`, and your host-side lines are never
+    overwritten.
 
 **In-CT (immediate, no redeploy needed):** edit `.env` directly with the
 duplicate-safe remove-then-append pattern, then recreate the stack (compose

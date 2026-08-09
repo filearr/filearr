@@ -17,6 +17,7 @@
     type ReapResult,
     type ScanRunning,
   } from "./api";
+  import FeaturesPanel from "./FeaturesPanel.svelte";
   import LogsPanel from "./LogsPanel.svelte";
   import UpdatesPanel from "./UpdatesPanel.svelte";
   import { help } from "./help";
@@ -1378,6 +1379,15 @@
               <tr class={t.enabled ? "" : "opacity-60"}>
                 <td class="py-2 pr-3">
                   <span class="cursor-help font-medium underline decoration-dotted decoration-slate-400 underline-offset-2" title={t.description}>{t.title}</span>
+                  {#if t.gate}
+                    <!-- The task's optional feature is off, so a run returns
+                         immediately. The queue keeps no task result, so this
+                         pre-flight gate state is the only explanation
+                         available for the 0-second run. -->
+                    <span
+                      class="ml-1 cursor-help rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                      title={t.gate.reason}>will no-op</span>
+                  {/if}
                   {#if maintMsg[t.key]}
                     <span class="ml-2 text-[10px] text-slate-500">{maintMsg[t.key]}</span>
                   {/if}
@@ -1478,6 +1488,10 @@
       </tbody>
     </table>
   {/if}
+
+  <div class="mt-6">
+    <FeaturesPanel />
+  </div>
 
   <div class="mt-6">
     <UpdatesPanel />

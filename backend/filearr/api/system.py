@@ -17,7 +17,7 @@ from filearr.errors import (
 )
 from filearr.jobs_stats import jobs_summary, running_jobs, thumbnail_totals
 from filearr.meili_stats import meili_snapshot
-from filearr.models import AppLog, Item, ItemStatus
+from filearr.models import AppLog, Item, ItemStatus, Library
 from filearr.queue_stats import queue_snapshot
 from filearr.schemas import FailedJobPage
 from filearr.security import require_scope
@@ -535,6 +535,168 @@ async def reap_stalled_jobs_endpoint() -> dict:
 
     async with open_pool_if_needed():
         return await reap_stalled_jobs_now()
+
+
+# --- Optional-feature gate visibility (Jobs page "Optional features" card) --
+#
+# WHY this exists (live 2026-08-09): operators ran the on-demand maintenance
+# tasks "Semantic-embedding backfill", "Chunk documents for RAG" and "Rebuild
+# the passages search index", each finished in 0 s, and nothing explained why —
+# the underlying optional features were simply off. Procrastinate stores no
+# task RESULT (no result column), so a per-run "skipped because…" cannot be
+# replayed from history. Instead we publish the DETERMINISTIC gate state,
+# derived from live config + DB, so the UI can say up front which features are
+# off and where to turn them on. Read-only by design: env-backed gates need a
+# process restart, so offering a toggle here would lie.
+
+
+@router.get(
+    "/system/features",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def features_view(session: AsyncSession = Depends(get_session)) -> dict:
+    """Every optional feature's current gate state (read scope).
+
+    Each entry carries ``key``, ``title``, ``enabled``, ``scope`` (``"env"``
+    for a process-level setting, ``"libraries"`` for a per-library opt-in),
+    the ``env`` variable name (null for per-library gates) and an
+    operator-facing ``detail``. Per-library gates add ``count``/``total``;
+    the thumbnail budget adds ``value_gb``."""
+    s = get_settings()
+
+    # One grouped pass for both per-library opt-ins (they mirror each other).
+    total, chunking_n, ocr_n = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(Library.chunking_enabled.is_(True)),
+                func.count().filter(Library.ocr_enabled.is_(True)),
+            ).select_from(Library)
+        )
+    ).one()
+
+    budget_gb = round(s.thumbnail_budget_bytes_effective() / 1024**3, 2)
+
+    features = [
+        {
+            "key": "semantic",
+            "title": "Semantic / hybrid search",
+            "enabled": s.semantic_enabled,
+            "scope": "env",
+            "env": "FILEARR_SEMANTIC_ENABLED",
+            "detail": (
+                "Vector embeddings + hybrid ranking on top of keyword search. "
+                "Enabling loads a local ONNX embedding model in the worker "
+                "(~490 MB RSS); run 'Semantic-embedding backfill' afterwards to "
+                "embed the existing catalog."
+            ),
+        },
+        {
+            "key": "chunking",
+            "title": "RAG document chunking",
+            "enabled": chunking_n > 0,
+            "scope": "libraries",
+            "env": None,
+            "count": chunking_n,
+            "total": total,
+            "detail": (
+                "Splits text-bearing documents into retrievable passages. "
+                "Per-library toggle in each library's settings (Admin -> edit "
+                "library); it feeds 'Chunk documents for RAG' and the passages "
+                "search index, both of which no-op while no library opts in."
+            ),
+        },
+        {
+            "key": "ocr",
+            "title": "OCR for scanned documents",
+            "enabled": ocr_n > 0,
+            "scope": "libraries",
+            "env": None,
+            "count": ocr_n,
+            "total": total,
+            "detail": (
+                "Extracts text from image-only PDFs and scanned pages so they "
+                "become searchable. Per-library opt-in (Admin -> edit library), "
+                "mirroring the chunking toggle; needs tesseract, which is "
+                "bundled in the container image."
+            ),
+        },
+        {
+            "key": "content_sniff",
+            "title": "Content sniffing (extensionless files)",
+            "enabled": s.content_sniff_enabled,
+            "scope": "env",
+            "env": "FILEARR_CONTENT_SNIFF_ENABLED",
+            "detail": (
+                "Magic-sniffs extensionless files still classified 'other' and "
+                "reclassifies them by detected content type (libmagic). "
+                "Enabling makes the 'Content-sniff extensionless files' task do "
+                "real work, one bounded batch per run."
+            ),
+        },
+        {
+            "key": "agents",
+            "title": "Distributed agents",
+            "enabled": s.agents_enabled,
+            "scope": "env",
+            "env": "FILEARR_AGENTS_ENABLED",
+            "detail": (
+                "Remote scanner agents that index storage this server cannot "
+                "reach, reporting back over mTLS. Enabling exposes the agent "
+                "enrollment/poll API and the Admin -> Agents panel."
+            ),
+        },
+        {
+            "key": "auth",
+            "title": "API authentication",
+            "enabled": s.auth_enabled,
+            "scope": "env",
+            "env": "FILEARR_AUTH_ENABLED",
+            "detail": (
+                "Bearer API keys with read/write/admin scopes on every endpoint. "
+                "Disabling leaves the whole API open to anyone who can reach it "
+                "— intended for local development only."
+            ),
+        },
+        {
+            "key": "update_check_auto",
+            "title": "Automatic update checks",
+            "enabled": s.update_check_auto,
+            "scope": "env",
+            "env": "FILEARR_UPDATE_CHECK_AUTO",
+            "detail": (
+                "Lets the Updates card refresh a stale cache by contacting "
+                "GitHub on its own. The manual 'Check now' button always works; "
+                "this only controls the automatic refresh."
+            ),
+        },
+        {
+            "key": "log_db",
+            "title": "Log recording to the database",
+            "enabled": s.log_db_enabled,
+            "scope": "env",
+            "env": "FILEARR_LOG_DB_ENABLED",
+            "detail": (
+                "Persists application log records to Postgres so the console's "
+                "Logs panel can show them. Disabling leaves logs on stdout only "
+                "(container logs) and empties that panel."
+            ),
+        },
+        {
+            "key": "thumbnail_budget",
+            "title": "Thumbnail cache budget",
+            "enabled": True,
+            "scope": "env",
+            "env": "FILEARR_THUMBNAIL_BUDGET_GB",
+            "value_gb": budget_gb,
+            "detail": (
+                "Advisory storage ceiling for the generated-thumbnail cache; "
+                "crossing it warns rather than blocking generation (the "
+                "per-file byte caps are the hard guard). 0 disables the alarm."
+            ),
+        },
+    ]
+    return {"features": features}
 
 
 # --- Jobs-page maintenance schedules (registry: filearr.maintenance) --------

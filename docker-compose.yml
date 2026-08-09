@@ -20,6 +20,16 @@ services:
       # Jobs-page tile gains a "postgres" row and the extract-guard's PG
       # low-space check becomes active. Override/unset to drop the watch.
       FILEARR_DISK_PG_PATH: /pgdata
+      # Optional features, explicit with defaults — see docs reference/configuration.
+      # Declared here so every optional knob is visible in the deployment file
+      # instead of being inferred from the code defaults. The `:-` fallback only
+      # applies when the var is UNSET, so a value in .env still wins.
+      FILEARR_SEMANTIC_ENABLED: ${FILEARR_SEMANTIC_ENABLED:-false}
+      FILEARR_CONTENT_SNIFF_ENABLED: ${FILEARR_CONTENT_SNIFF_ENABLED:-false}
+      FILEARR_UPDATE_CHECK_AUTO: ${FILEARR_UPDATE_CHECK_AUTO:-false}
+      FILEARR_THUMBNAIL_BUDGET_GB: ${FILEARR_THUMBNAIL_BUDGET_GB:-5}
+      FILEARR_LOG_DB_ENABLED: ${FILEARR_LOG_DB_ENABLED:-true}
+      FILEARR_AGENTS_ENABLED: ${FILEARR_AGENTS_ENABLED:-false}
     volumes:
       - ./config:/config
       - pgdata:/pgdata:ro
@@ -152,6 +162,16 @@ services:
       # Same PG-volume disk watch as `app` — the guards (extract refuses writes
       # when the DB filesystem is critical) run in the worker.
       FILEARR_DISK_PG_PATH: /pgdata
+      # Optional features, explicit with defaults — see docs reference/configuration.
+      # Same set as `app`, and it must match: the worker is what actually loads
+      # the semantic ONNX embedder and runs the content-sniff pass. The `:-`
+      # fallback only applies when the var is UNSET, so .env still wins.
+      FILEARR_SEMANTIC_ENABLED: ${FILEARR_SEMANTIC_ENABLED:-false}
+      FILEARR_CONTENT_SNIFF_ENABLED: ${FILEARR_CONTENT_SNIFF_ENABLED:-false}
+      FILEARR_UPDATE_CHECK_AUTO: ${FILEARR_UPDATE_CHECK_AUTO:-false}
+      FILEARR_THUMBNAIL_BUDGET_GB: ${FILEARR_THUMBNAIL_BUDGET_GB:-5}
+      FILEARR_LOG_DB_ENABLED: ${FILEARR_LOG_DB_ENABLED:-true}
+      FILEARR_AGENTS_ENABLED: ${FILEARR_AGENTS_ENABLED:-false}
     volumes:
       - ./config:/config
       - pgdata:/pgdata:ro

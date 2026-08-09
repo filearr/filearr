@@ -105,6 +105,18 @@ A few more you will likely want:
 
 The full, grouped list is in the [Configuration reference](../reference/configuration.md).
 
+!!! info "Optional features are declared explicitly"
+    The bundled `docker-compose.yml` sets every [optional feature
+    knob](../reference/configuration.md#optional-features) —
+    `FILEARR_SEMANTIC_ENABLED`, `FILEARR_CONTENT_SNIFF_ENABLED`,
+    `FILEARR_UPDATE_CHECK_AUTO`, `FILEARR_THUMBNAIL_BUDGET_GB`,
+    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED` — in the `environment:`
+    map of **both** `app` and `worker`, with its safe default, written as
+    `${VAR:-default}`. So they are visible in the deployment file rather than
+    inferred, and because the fallback only applies when the variable is
+    **unset**, a value you put in `.env` still wins. `.env.example` lists the
+    same six.
+
 !!! danger "Secrets never belong in a committed file"
     `FILEARR_SECRET_KEY`, `MEILI_MASTER_KEY`, `POSTGRES_PASSWORD`, and (for the
     agent CA) `FILEARR_CA_PROVISIONER_JWK` / `FILEARR_PROXY_SHARED_SECRET` are

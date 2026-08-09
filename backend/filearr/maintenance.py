@@ -553,12 +553,65 @@ async def _last_runs(session: AsyncSession, names: list[str]) -> dict[str, dict]
     return out
 
 
+#: Tasks whose real work is gated behind an optional feature. Value = the gate
+#: name resolved by :func:`_gates` (see /system/features for the full picture).
+_GATED_TASKS: dict[str, str] = {
+    "embed_missing": "semantic",
+    "chunk_missing": "chunking",
+    "rebuild_chunks_index": "chunking",
+    "content_sniff": "content_sniff",
+}
+
+#: Operator-facing reason per OFF gate, surfaced as a "will no-op" chip.
+_GATE_REASONS: dict[str, str] = {
+    "semantic": (
+        "semantic search is disabled (FILEARR_SEMANTIC_ENABLED) — this task "
+        "will no-op"
+    ),
+    "chunking": (
+        "no library has RAG chunking enabled — this task will no-op"
+    ),
+    "content_sniff": (
+        "content sniffing is disabled (FILEARR_CONTENT_SNIFF_ENABLED) — this "
+        "task will no-op"
+    ),
+}
+
+
+async def _gates(session: AsyncSession) -> dict[str, bool]:
+    """Current on/off state of every feature gate referenced by _GATED_TASKS.
+
+    Deliberately cheap: two settings reads plus ONE existence probe for a
+    chunking-enabled library (EXISTS, not COUNT — the Jobs page polls this).
+    Procrastinate persists no task return value, so a run's own "skipped"
+    reason can never be replayed; this deterministic pre-flight is what the UI
+    shows instead."""
+    from filearr.models import Library
+
+    settings = get_settings()
+    chunking = (
+        await session.execute(
+            select(Library.id).where(Library.chunking_enabled.is_(True)).limit(1)
+        )
+    ).first() is not None
+    return {
+        "semantic": settings.semantic_enabled,
+        "chunking": chunking,
+        "content_sniff": settings.content_sniff_enabled,
+    }
+
+
 async def maintenance_status(session: AsyncSession) -> list[dict]:
     """The full registry joined with overrides + last-run history, in registry
-    order — one row per task, ready for the Jobs page."""
+    order — one row per task, ready for the Jobs page.
+
+    Tasks whose optional feature is currently OFF also carry a ``gate``
+    ``{"enabled": False, "reason": ...}``; the key is ABSENT when the task
+    would really do work, so the UI can render the warning unconditionally."""
     from filearr import schedule
 
     now = datetime.now(UTC)
+    gates = await _gates(session)
     rows: dict[str, MaintenanceSchedule] = {}
     if await _table_exists(session):
         rows = {
@@ -576,6 +629,8 @@ async def maintenance_status(session: AsyncSession) -> list[dict]:
             if cron and enabled
             else None
         )
+        gate = _GATED_TASKS.get(spec.key)
+        gate_off = gate is not None and not gates.get(gate, True)
         out.append(
             {
                 "key": spec.key,
@@ -591,6 +646,11 @@ async def maintenance_status(session: AsyncSession) -> list[dict]:
                 "runnable": spec.runnable,
                 "next_run_at": next_at.isoformat() if next_at else None,
                 "last_run": last.get(spec.task_name),
+                **(
+                    {"gate": {"enabled": False, "reason": _GATE_REASONS[gate]}}
+                    if gate_off
+                    else {}
+                ),
             }
         )
     return out
