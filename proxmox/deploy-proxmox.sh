@@ -1146,7 +1146,13 @@ docker compose pull postgres meilisearch --quiet || true
 # build used to sail on — up -d restarted the OLD image, init_db bootstrapped
 # against it, and the deploy only died at the final stamp check with the real
 # error scrolled far off-screen. Abort HERE instead, at the point of failure.
-docker compose ${profile_args} build --pull ${FORCE_REBUILD:+--no-cache} || {
+# VERSION rides an EXPLICIT --build-arg (live 2026-08-08: the compose-file
+# \${AGENT_VERSION} interpolation from .env demonstrably did not reach the
+# build on the deployed CT — .env carried 1.5.0@<hash> while the image baked
+# the 0.0.0-dev default; the command line cannot be lost the same way).
+# Services whose Dockerfile lacks the ARG (caddy) just log an unconsumed-arg
+# warning. The compose-file args stay as the fallback for manual builds.
+docker compose ${profile_args} build --pull ${FORCE_REBUILD:+--no-cache} --build-arg VERSION=\"${AGENT_VERSION:-0.0.0-dev}\" || {
   echo
   echo '✗ image build FAILED — the running stack was NOT touched; it still runs the previous build.'
   echo '  Common causes: CT disk full (df -h /), Docker Hub unreachable (build uses --pull),'
