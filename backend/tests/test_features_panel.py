@@ -169,11 +169,11 @@ async def test_library_gate_counts(client):
     assert feats["ocr"]["total"] == 2
 
 
-async def test_legacy_thumbnail_bytes_override_wins(client, settings, monkeypatch):
-    """The deprecated bytes knob still decides the effective budget, so the
-    card must not report the ignored GB value."""
+async def test_thumbnail_budget_reports_configured_gb(client, settings, monkeypatch):
+    """The card reports the configured GB knob (the only budget source since
+    the legacy bytes override was removed 2026-08-09)."""
     c, _ = client
-    monkeypatch.setattr(settings, "thumbnail_total_budget_bytes", 50 * 1024**3)
+    monkeypatch.setattr(settings, "thumbnail_budget_gb", 50.0)
     feats = await _features(c)
     assert feats["thumbnail_budget"]["value_gb"] == pytest.approx(50.0)
 

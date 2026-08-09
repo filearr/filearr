@@ -127,7 +127,7 @@ to sist2's own per-thumb rate at one size, far below Nextcloud's "previews excee
 failure mode. **Recommendation: hard per-file byte caps** (not size-ladder discipline alone):
 `thumbnail_grid_max_bytes` (20,000), `thumbnail_preview_max_bytes` (60,000); over-cap at even a
 quality floor (50) → store nothing, record `_thumbnail_error`. A soft global-total alarm
-(`thumbnail_total_budget_bytes`) surfaces via `/api/system`, not enforced per file.
+(`thumbnail_budget_gb`) surfaces via `/api/system`, not enforced per file.
 
 ---
 

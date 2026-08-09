@@ -216,7 +216,7 @@ now*; results are cached for 6 hours.
 | `FILEARR_THUMBNAIL_GRID_PX` | `320` | Grid tier longest edge. |
 | `FILEARR_THUMBNAIL_PREVIEW_PX` | `800` | Preview tier longest edge. |
 | `FILEARR_THUMB_ACCEL` | `auto` | `auto` (QSV if `/dev/dri` present) / `off`. |
-| `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory cache-size budget in GiB (`0` disables). Over it: an hourly log reminder + an amber note on the Jobs thumbs card — generation continues, nothing is deleted (disk-floor GC is separate). The legacy `FILEARR_THUMBNAIL_TOTAL_BUDGET_BYTES` is still honored when set. |
+| `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory cache-size budget in GiB (`0` disables). Over it: an hourly log reminder + an amber note on the Jobs thumbs card — generation continues, nothing is deleted (disk-floor GC is separate). |
 
 ## Disk guardrails
 
