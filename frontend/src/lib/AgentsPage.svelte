@@ -626,6 +626,7 @@ ${detail}
                 {#if isOnline(a)}
                   <span class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400" title={healthTitle(a)}>
                     <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>online
+                    <span class="tabular-nums text-slate-400" title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">· {relTime(a.last_seen_at)}</span>
                   </span>
                 {:else}
                   <span class="inline-flex items-center gap-1 text-xs text-slate-500" title={healthTitle(a)}>

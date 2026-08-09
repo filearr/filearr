@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/kardianos/service"
 
@@ -124,10 +125,36 @@ func (p *daemonProgram) failStart(s service.Service, err error) {
 	os.Exit(1)
 }
 
+// adoptConfiguredCentralURL makes the RESOLVED config (flag > env > sidecar)
+// authoritative over the enrollment-time state.json copy of central_url.
+// Every daemon loop historically ran off id.State.CentralURL alone, so the
+// documented mTLS-migration step — repoint the agent at agents.<domain> via
+// sidecar/env/flag and restart — silently did NOTHING for an enrolled agent
+// (live 2026-08-08: the sidecar said agents.<domain>, the daemon logged
+// central=filearr.<domain>). A configured URL that differs from state is
+// operator intent: persist it (best-effort) and run with it.
+func adoptConfiguredCentralURL(cfg *config, store *enroll.CertStore, id *enroll.Identity, log *slog.Logger) {
+	configured := strings.TrimRight(cfg.CentralURL, "/")
+	if configured == "" || configured == strings.TrimRight(id.State.CentralURL, "/") {
+		return
+	}
+	old := id.State.CentralURL
+	id.State.CentralURL = configured
+	if err := store.SaveState(id.State); err != nil {
+		log.Warn("central URL switched by config but persisting state.json failed (in-memory switch still applies; will retry next start)",
+			"err", err)
+	}
+	log.Info("central URL switched by config", "from", old, "to", configured)
+}
+
 // run performs the heavy initialization and hosts every daemon loop until the
 // context is cancelled; its return closes p.done (what Stop waits on).
 func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enroll.CertStore, id *enroll.Identity) {
 	defer close(p.done)
+
+	// The operator's configured central URL (sidecar/env/flag) outranks the
+	// enrollment-time copy — the seam the mTLS migration switches through.
+	adoptConfiguredCentralURL(p.cfg, store, id, p.log)
 
 	// The local index is opened even absent a prior scan (an empty outbox simply
 	// drains to nothing). First start after an upgrade may apply schema/index

@@ -115,6 +115,14 @@ certificate yet), and the enrolled agent presents its client certificate
 automatically after the switch. `-Name`, `-RolloutGroup`, and
 `-TokenTtlMinutes` cover the rest of the mint surface.
 
+!!! warning "mTLS switch needs an agent build from 2026-08-08 or later"
+    Older daemons pinned the enrollment-time URL inside `state.json` and
+    ignored a changed sidecar/env/flag entirely. Current builds adopt the
+    configured URL at startup (the log shows *"central URL switched by
+    config"*). Running the script with `-MtlsUrl` against an older install
+    still works in **one run** — the binary updates first, and the new binary
+    reads the switched sidecar when the service starts.
+
 Downloads always ride `agent-dist`, the deliberately-unauthenticated
 first-install surface, so updates never *require* a key — `-ApiKey` is sent
 on every request for deployments that front central with an authenticating

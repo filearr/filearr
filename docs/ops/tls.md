@@ -175,15 +175,26 @@ fingerprint rotates on cert renewal, so central can 401 a renewed agent. mTLS
 
 1. Set `FILEARR_AGENT_AUTH_MODE=both`, redeploy. Existing agents keep working on
    the bearer; migrated agents are accepted via mTLS.
-2. Point each agent at `https://agents.<domain>` (Go agent: `-central …` or
-   `FILEARR_AGENT_CENTRAL_URL`; it presents its enrolled client cert
-   automatically — see below). Optionally `FILEARR_AGENT_CA_BUNDLE` for a custom
-   server root. **Windows service installs:** the central-served
-   `manage-windows-agent.ps1` (…/api/v1/agent-dist/manage-windows-agent.ps1)
-   with `-MtlsUrl https://agents.<domain>` performs this step per machine
+2. Point each agent at `https://agents.<domain>` (Go agent: `-central …`,
+   `FILEARR_AGENT_CENTRAL_URL`, or the sidecar's `central_url`; it presents
+   its enrolled client cert automatically — see below). Optionally
+   `FILEARR_AGENT_CA_BUNDLE` for a custom server root. **Windows service
+   installs:** the central-served `manage-windows-agent.ps1`
+   (…/api/v1/agent-dist/manage-windows-agent.ps1) with
+   `-MtlsUrl https://agents.<domain>` performs this step per machine
    (sidecar rewrite + service restart, ± a binary update in the same window);
    on a machine without the agent the same command provisions straight onto
    mTLS.
+
+   > **Agent build requirement (bug fixed 2026-08-08):** daemons ran every
+   > loop off the ENROLLMENT-TIME `state.json` copy of `central_url` and
+   > ignored a changed sidecar/env/flag entirely — the repoint silently did
+   > nothing on enrolled agents. Builds from 2026-08-08 adopt a differing
+   > configured URL into `state.json` at startup (logged as "central URL
+   > switched by config"). On an OLDER build, either update the agent first
+   > (the manage script's update+switch happens in one run — the new binary
+   > reads the switched sidecar on start), or edit `central_url` in
+   > `<data-dir>/state.json` directly and restart the service.
 3. Once every agent is on mTLS, set `FILEARR_AGENT_AUTH_MODE=mtls-header`. The
    weaker bearer path is now shut off. **Verify before flipping:** the Agents
    page shows a per-agent transport badge (`mTLS` / `bearer`) fed by
