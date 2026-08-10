@@ -25,6 +25,31 @@ to the central server over mTLS.
 The agent is a single static Go binary (no cgo), cross-compiled for Windows,
 macOS and Linux, using a pure-Go SQLite/FTS5 store.
 
+!!! warning "What agent-owned libraries cannot do (yet)"
+    Replication carries **identity only** — path, size, mtime, hashes, plus a
+    filename-derived title. The file contents never leave the agent's machine,
+    and central cannot open a path on a remote host, so **no central-side text
+    extraction runs for agent-owned items**. Consequences worth knowing before
+    you plan around them:
+
+    - **OCR and RAG chunking do nothing** for an agent library. Both consume
+      extracted document text, which is never produced, so the passage
+      chunker selects zero items. The console disables both toggles on
+      agent-owned libraries and says why.
+    - **Semantic search is shallow, not absent.** Agent items *are* embedded,
+      but only from filename / title / tags — there is no document body to
+      embed, so a match is name-like, not content-like.
+    - **What does work**: filename/path/size/date search and facets, hashes and
+      duplicate detection, move detection, on-demand stat/rehash verification,
+      file retrieval (the agent streams the bytes on request), and thumbnails —
+      which the agent generates itself and pushes to central, precisely because
+      central cannot read the source.
+
+    Full content indexing of remote files would need retrieve-then-extract (pull
+    each file into staging, extract, discard) or an agent-side extractor; today
+    neither is wired. For libraries where document text matters, host them on
+    central (or mount the storage on the central host) rather than via an agent.
+
 ## Installing the agent (service + sidecar config)
 
 The recommended install path starts from the **Agents page** in the central
@@ -303,6 +328,69 @@ files, thumbnails, caches, and other junk by default. Cloud-placeholder
 files (e.g. OneDrive online-only) are detected from attributes and **never
 opened**, so an inventory can't accidentally hydrate a user's cloud drive.
 
+### Group settings schema
+
+Unlike a policy document, a group's `settings` object **rejects unknown
+top-level keys** (422) — a typo can never silently no-op.
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | unset | Intended agent log level. **Not enforced yet** — see below. |
+| `scan_selections` | list of selections (max 100) | unset | The folder sets the agent should walk. **Not enforced yet.** |
+| `inventory` | object | unset | Inventory-collector configuration. **Not enforced yet.** |
+| `scan_schedule_cron` | 5-field cron (agent-local time) | unset | Scan schedule for the group's members. |
+| `web_ui_enabled` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
+| `local_access_enabled` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
+| `auth_required` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
+
+**`scan_selections[]`** — `preset` (one of `user-documents`, `user-media`,
+`user-profiles-full`, `downloads`, `server-data`, `custom`, or null), `paths`
+(path specs, max 200, ≤4096 chars, glob brackets/braces balance-checked),
+`include_regex` / `exclude_regex` (max 200 each; compiled with Python `re` as a
+typo gate — the agent's RE2 engine is the authority), and `enabled` (default
+true). An all-empty selection is allowed so an operator can stage a disabled
+scaffold.
+
+**`inventory`** — `enabled` (bool, default false), `collectors` (free strings,
+max 64 × 128 chars; central deliberately does not hard-code the vocabulary), and
+the optional typed `permissions` block.
+
+**`inventory.permissions`** (W7) — only takes effect when `"permissions"` is
+*also* named in `collectors`; an admin must both name the collector and configure
+it. Defaults make a first run highlight only explicit, non-baseline grants:
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Opt-in. |
+| `resolve_names` | bool | `true` | Best-effort SID/uid → display name. |
+| `include_inherited` | bool | `false` | Off = explicit (non-inherited) ACEs only. |
+| `include_effective_access` | bool | `false` | **Reserved for v2** — the agent no-ops on it until shipped. |
+| `exclude_well_known` | bool | `true` | SYSTEM, Administrators, root, Everyone, CREATOR OWNER. |
+| `exclude_principals` | list[str] | `[]` | Canonical ids, max 64 × 128 chars. |
+| `collect_share_acls` | bool | `false` | Windows-only share-level ACLs. |
+| `audit` | object \| null | null | Change-audit block, below. |
+
+**`inventory.permissions.audit`** — `enabled` (bool, default false),
+`retain_snapshots` (int 1..1000, default 10), `alert_on_change` (bool, default
+false), `watch_paths` (path specs, max 200). Central validates and stores this
+ahead of the collector; the snapshot-diff and alert routing are agent-side
+scaffold.
+
+The console's group dialog covers all of the above; the permissions and audit
+blocks sit behind an **Advanced** disclosure and are omitted from the saved
+document entirely unless you tick "include" — so "never configured" stays
+distinguishable from "configured, all off".
+
+!!! warning "Stored and delivered, but not acted on yet"
+    `log_level`, `scan_selections` and everything under `inventory` are
+    validated, versioned, and pushed to the agent, but **no shipped agent build
+    reads them yet** — the collectors and the selection-driven scan are agent-side
+    scaffold, and the agent's log level still comes only from its sidecar config,
+    `FILEARR_AGENT_LOG_LEVEL`, or the `-log-level` flag. The console marks these
+    fields with a *not enforced yet* chip. Authoring them now is safe and
+    forward-looking; it changes nothing on the fleet today. `scan_schedule_cron`
+    and the three local-access gates **are** live.
+
 ## Inventory commands (extensible, no redeploy)
 
 Beyond media scanning, agents accept generic **inventory commands**: a
@@ -464,6 +552,89 @@ integrity layer on this channel; there is no separate payload signing (a single
 operator is the sole policy author). Policy is **advisory-by-asymmetry**: central
 can *disable* a local capability and the agent honors it on next poll, but
 central cannot reach into the agent to read local-only data.
+
+### Scopes, and why they replace rather than merge {#policy-scopes}
+
+A policy document is written at one of three scopes:
+
+| Scope string | Applies to |
+| --- | --- |
+| `global` | every agent |
+| `group:<rollout_group>` | agents whose enrollment put them in that **rollout group** (not the same thing as a *configuration group*) |
+| `agent:<uuid>` | one agent |
+
+Resolution is **most-specific-wins**: `agent:` beats `group:` beats `global`.
+
+!!! danger "The winning scope supplies the WHOLE document"
+    There is **no key merging**. If an agent has an `agent:` document, that
+    document *is* its policy — every key the `global` document was providing
+    simply stops applying, and the agent falls back to its **built-in default**
+    for those keys, not to the broader scope. A narrower document must therefore
+    carry every key it needs. This is the single most surprising property of the
+    channel; the console shows exactly which keys a save would stop applying
+    before you confirm it.
+
+Writes are **append-only versions** — a `PUT` inserts a new row at
+`version = prior max + 1` and never mutates history.
+
+### Every policy key
+
+All keys are optional; **absent means "inherit-or-default"**, which is not the
+same as `false`. "Enforced by" says who actually acts on the value.
+
+| Key | Type | Absent = | Enforced by | What it controls |
+| --- | --- | --- | --- | --- |
+| `presets` | list[str] | agent's built-in preset defaults | agent | Named exclusion bundles applied while walking. Validated against central's preset catalogue (`GET /api/v1/presets`). |
+| `include_globs` | list[str] | no include filter | agent | Only matching paths are cataloged. |
+| `exclude_globs` | list[str] | presets only | agent | Extra excludes on top of the preset bundles. |
+| `content_hash_max_bytes` | int ≥ 0 | agent's built-in cap | agent | Files larger than this are cataloged unhashed; `0` disables content hashing. |
+| `watch_mode` | bool | off (polling) | agent | Filesystem-event watching. Local disks only — inotify is unreliable over SMB/NFS. |
+| `scan_cron` | 5-field cron | no cron schedule | agent | In-daemon scan schedule in **agent-local time**. Wins over `scan_interval_seconds`. |
+| `scan_interval_seconds` | int ≥ 300 | no interval schedule | agent | Fixed-interval scanning; ignored when `scan_cron` is set. |
+| `scan_on_start` | bool | off | agent | One scan ~30 s after the daemon starts. |
+| `poll_interval_seconds` | int 60..86400 | agent's built-in interval | agent | How often the agent polls central. Longer intervals delay every setting here. |
+| `reconcile_interval_seconds` | int ≥ 300 | 24 h | agent | Full-manifest reconciliation cadence. |
+| `upload_rate_bytes_per_sec` | int ≥ 0 | unlimited | agent | Token-bucket ceiling for staged uploads; `0` = unlimited. Read at upload **start**, so a change applies to the next upload, not one in flight. |
+| `local_access_enabled` | bool | **on** | agent | The on-device `filearr query` CLI socket. An explicit `false` persists through offline periods (the policy is cached). |
+| `web_ui_enabled` | bool | **off** | agent | The local read-only web UI. A never-contacted agent serves nothing. |
+| `auth_required` | bool | **on** | agent | Whether the local web UI demands its bootstrap token. Never affects the CLI peer-credential check. |
+| `offline_grace_seconds` | int ≥ 0 | 86400 (24 h) | agent | How long a cached policy stays trusted offline. Past it the web UI fails closed; the CLI keeps answering. |
+| `path_scope` | list[str], max 1000 | unrestricted | agent | OR-combined `rel_path` GLOB allow-list applied to every **local** result set. |
+| `read_only` | bool | true | agent | **Always `true`.** The local surface is read-only by invariant; a `false` is rejected with a 422 rather than normalised. Not editable in the console. |
+| `auto_update` | bool | on | **central** | Whether central *offers* an update on this agent's update-manifest poll (the poll answers `204` when off), so it gates every agent build uniformly — including old ones. An operator-triggered update from the agents table bypasses it: the click *is* the authorization. |
+
+Two more keys appear in a delivered document but are **not operator-settable**:
+
+- `taxonomy_version` — injected by central per response so a taxonomy edit
+  invalidates the agent's cache. Writing it has no effect.
+- `group` — where the assigned *configuration group*'s settings ride. An
+  operator-authored top-level `group` key **suppresses the config-group fold
+  entirely** (it is never clobbered), so don't author one unless you mean it.
+
+Unknown keys are **preserved verbatim**: the schema is `extra="allow"` and the
+row stores the submitted body as-is, so an older central can never strip a newer
+agent's key. The console re-emits keys it does not model rather than dropping
+them, and lists them for you.
+
+### Editing policy in the console
+
+The Agents page carries a full **Agent policy** editor:
+
+- a **scope selector** (Global / Rollout group / Specific agent) that loads that
+  scope's stored document, or tells you it has none and what it inherits today;
+- a grouped, **tri-state** form for every key above — *Inherit (not set)* versus
+  an explicit value — so you never accidentally write `false` where you meant
+  "say nothing";
+- a **replacement warning** on any non-global scope, naming the exact keys a save
+  would stop applying;
+- an **"effective now"** column when a specific agent is selected, showing the
+  value that agent actually has and which document supplied it (agent policy /
+  rollout-group policy / global policy / config group / agent default), from
+  `GET /api/v1/agent-policies/effective/{agent_id}` (admin scope). That endpoint
+  mirrors the agent-plane resolution exactly, minus the injected
+  `taxonomy_version`, and never stamps the agent's `last_seen_at`;
+- a **raw JSON** escape hatch that round-trips forward-compat keys;
+- a read-only **recent versions** list per scope.
 
 ### Scan scheduling from policy (service installs)
 

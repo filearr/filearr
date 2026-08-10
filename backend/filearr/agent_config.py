@@ -71,6 +71,17 @@ MAX_WATCH_PATHS = MAX_PATHS_PER_SELECTION
 MAX_RETAIN_SNAPSHOTS = 1000
 
 
+#: The config-group keys :func:`merge_group_into_policy` LIFTS to top-level policy
+#: keys on delivery (so agent binaries need no change to honour a per-group gate).
+#: Single source of truth — the admin effective-policy view derives per-key
+#: provenance from the same tuple, so the two can never drift.
+LIFTED_LOCAL_KEYS: tuple[str, ...] = (
+    "web_ui_enabled",
+    "local_access_enabled",
+    "auth_required",
+)
+
+
 class GroupSettingsValidationError(ValueError):
     """A config group ``settings`` object that fails v1 validation (→ 422)."""
 
@@ -404,12 +415,30 @@ def merge_group_into_policy(
         return policy
     settings = group.settings or {}
     merged = {**policy, "group": settings}
-    narrow_scope = policy_scope.startswith(("agent:", "group:"))
-    for key in ("web_ui_enabled", "local_access_enabled", "auth_required"):
-        value = settings.get(key)
-        if value is None:
-            continue
-        if narrow_scope and key in policy:
-            continue  # an explicit narrower policy row keeps its say
-        merged[key] = value
+    for key in lifted_local_keys(policy, group, policy_scope=policy_scope):
+        merged[key] = settings[key]
     return merged
+
+
+def lifted_local_keys(
+    policy: dict, group: Any | None, *, policy_scope: str = ""
+) -> list[str]:
+    """Which :data:`LIFTED_LOCAL_KEYS` the group actually contributes to the
+    delivered policy — i.e. the keys :func:`merge_group_into_policy` overwrites.
+
+    Factored out so the admin effective-policy view can attribute each key to
+    ``group-settings`` vs the winning policy document without re-deriving (and
+    slowly diverging from) the precedence rule. Returns ``[]`` when there is no
+    group, when the operator authored an explicit top-level ``group`` key (which
+    suppresses the whole fold), or when a narrower policy row outranks the group
+    for every key it sets."""
+    if group is None or "group" in policy:
+        return []
+    settings = group.settings or {}
+    narrow_scope = policy_scope.startswith(("agent:", "group:"))
+    return [
+        key
+        for key in LIFTED_LOCAL_KEYS
+        # None = "inherit"; a narrower explicit policy row keeps its say.
+        if settings.get(key) is not None and not (narrow_scope and key in policy)
+    ]

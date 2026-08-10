@@ -1,6 +1,12 @@
 // Thin client for the Filearr API (search goes through the backend, which
 // translates flat params into Meilisearch filter syntax).
 
+// The agent-policy document shape + its field metadata live in ./agentPolicyDoc
+// (a DOM-free module, so the unknown-key round-trip rules that guard against
+// silently discarding an operator's forward-compat key are unit-testable on
+// Node). Imported + re-exported here so callers keep one types import site.
+import type { AgentPolicyDoc } from "./agentPolicyDoc";
+
 // A single search hit is an untyped Meili document plus, for document results,
 // P3-T5 ``snippet`` (cropped body text with <em>…</em> match markers) and
 // ``highlight`` (title/filename markers). Both are rendered SAFELY on the client
@@ -2528,10 +2534,12 @@ export interface AgentPolicyRow {
   scope_type: string;
   scope_id: string | null;
   version: number;
-  policy: Record<string, unknown>;
+  policy: AgentPolicyDoc;
   actor: string | null;
   created_at: string;
 }
+
+export type { AgentPolicyDoc };
 
 export const listAgentPolicies = () =>
   request<AgentPolicyRow[]>("/agent-policies");
@@ -2541,6 +2549,44 @@ export const putAgentPolicy = (scope: string, policy: Record<string, unknown>) =
     method: "PUT",
     body: JSON.stringify({ policy }),
   });
+
+/** Version history for one scope, newest-first (keyset by version desc; `before`
+ *  = the last version of the previous page). Read-only; the console shows the
+ *  most recent handful. */
+export const listAgentPolicyHistory = (scope: string, limit = 10, before?: number) =>
+  request<AgentPolicyRow[]>(
+    `/agent-policies/${encodeURIComponent(scope)}/history?limit=${limit}` +
+      (before !== undefined ? `&before=${before}` : ""),
+  );
+
+/** Where one key of an agent's effective policy came from. `agent`/`group`/
+ *  `global` name the winning policy DOCUMENT's scope (the winner supplies the
+ *  whole document — there is no key merging); `group-settings` is the assigned
+ *  config group's lift; `default` means no document sets it. */
+export type PolicySourceKind =
+  | "agent"
+  | "group"
+  | "global"
+  | "group-settings"
+  | "default";
+
+/** GET /agent-policies/effective/{agent_id} (admin) — what this agent actually
+ *  receives on its next poll, with per-key provenance. Mirrors the agent-plane
+ *  resolution exactly; the server-injected `taxonomy_version` is deliberately
+ *  omitted (it is never operator-set). */
+export interface EffectivePolicyOut {
+  agent_id: string;
+  scope: string;
+  version: number;
+  policy: Record<string, unknown>;
+  group: { id: string; name: string } | null;
+  source_keys: Record<string, PolicySourceKind>;
+}
+
+export const getEffectivePolicy = (agentId: string) =>
+  request<EffectivePolicyOut>(
+    `/agent-policies/effective/${encodeURIComponent(agentId)}`,
+  );
 
 export const listEnrollmentTokens = () =>
   request<EnrollmentTokenOut[]>("/agents/enrollment-tokens");
@@ -2779,10 +2825,42 @@ export interface ScanSelection {
   enabled?: boolean;
 }
 
+/** Change-audit knobs for the `permissions` collector (W7). Validated + stored
+ *  by central ahead of the collector — nothing consumes it yet. */
+export interface AuditConfig {
+  enabled?: boolean;
+  /** Per-path snapshot-history depth, 1..1000. */
+  retain_snapshots?: number;
+  alert_on_change?: boolean;
+  /** Path specs (syntax-validated only), max 200. */
+  watch_paths?: string[];
+}
+
+/** Detailed config for the `permissions` collector (W7). Only takes effect when
+ *  "permissions" is ALSO named in `inventory.collectors` — an admin must both
+ *  name the collector and configure it. Agent-side consumption is scaffold. */
+export interface PermissionsConfig {
+  enabled?: boolean;
+  resolve_names?: boolean;
+  include_inherited?: boolean;
+  /** Reserved for v2 — the agent no-ops on it until shipped. */
+  include_effective_access?: boolean;
+  exclude_well_known?: boolean;
+  /** canonical_id strings, max 64. */
+  exclude_principals?: string[];
+  collect_share_acls?: boolean;
+  audit?: AuditConfig | null;
+}
+
 export interface InventoryConfig {
   enabled?: boolean;
   collectors?: string[];
+  permissions?: PermissionsConfig | null;
 }
+
+/** Field bounds mirrored from filearr.agent_config so the console can validate
+ *  before the server 422s. */
+export const MAX_RETAIN_SNAPSHOTS = 1000;
 
 /** The typed config-group settings object (v1). Unknown top-level keys are
  *  REJECTED by the backend (422) — keep this in lockstep with GroupSettings. */

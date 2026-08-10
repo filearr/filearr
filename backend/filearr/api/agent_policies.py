@@ -13,9 +13,11 @@ Two planes, both behind the ``FILEARR_AGENTS_ENABLED`` gate (404 when off):
 
 * **Admin plane** — ``PUT /agent-policies/{scope}`` (write a new version),
   ``GET /agent-policies`` (current row per scope), ``GET /agent-policies/{scope}/
-  history``. ``admin`` scope, audited (``agent_policy_updated`` — scope + version
-  only, never the body). Append-only: a write inserts a new row at
-  ``version = prior scope max + 1``; old rows are never mutated (§6.3).
+  history``, ``GET /agent-policies/effective/{agent_id}`` (what one agent would
+  actually receive, with per-key provenance). ``admin`` scope, audited
+  (``agent_policy_updated`` — scope + version only, never the body). Append-only:
+  a write inserts a new row at ``version = prior scope max + 1``; old rows are
+  never mutated (§6.3).
 
 mTLS is the only integrity layer for the config channel (R4 — no payload signing
 in v3; revisit trigger is phase-6 multi-author RBAC policy).
@@ -268,6 +270,91 @@ async def list_current_policies(
     )
     rows = (await session.execute(q)).scalars().all()
     return [PolicyRowOut.of(r) for r in rows]
+
+
+class EffectivePolicyOut(BaseModel):
+    """What one agent would actually receive on its next policy poll, plus the
+    per-key provenance the console renders next to each field."""
+
+    agent_id: uuid.UUID
+    scope: str
+    version: int
+    policy: dict[str, Any]
+    group: dict[str, Any] | None
+    source_keys: dict[str, str]
+
+
+@router.get(
+    "/agent-policies/effective/{agent_id}",
+    response_model=EffectivePolicyOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def effective_policy(
+    agent_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> EffectivePolicyOut:
+    """The ADMIN view of one agent's effective policy (2026-08-09).
+
+    Mirrors :func:`get_agent_policy` exactly — same
+    :func:`policy.resolve_effective_policy` (agent > group:<rollout_group> >
+    global, WHOLE-DOCUMENT wins, no key merging) and the same
+    :func:`agent_config.merge_group_into_policy` config-group fold/lift — but
+    behind ``admin`` scope instead of the agent credential, so an operator can
+    finally SEE what a given agent gets. Read-only: it never stamps
+    ``last_seen_at`` / ``policy_version_applied`` and emits no ETag.
+
+    **Deliberate divergence:** the server-injected ``taxonomy_version`` is NOT
+    added here. It is computed per-response from the taxonomy table, never
+    operator-authored, and is not part of the document the console edits —
+    including it would invite an operator to "set" a key that a PUT can never
+    control. Everything else is byte-identical to the agent-plane body.
+
+    ``source_keys`` maps every key of the returned document — plus every known
+    :class:`policy.PolicyModel` key that is ABSENT — to where its value came
+    from: ``"agent"`` / ``"group"`` / ``"global"`` (the winning policy document's
+    scope; remember the winner supplies the WHOLE document, so every one of its
+    keys carries that scope), ``"group-settings"`` (the config-group ``group``
+    section and the local-surface keys lifted out of it), or ``"default"`` (no
+    document sets it — the agent's built-in default applies)."""
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "agent not found")
+
+    scope, version, pol = await policy_mod.resolve_effective_policy(session, agent)
+    group = (
+        await session.get(AgentConfigGroup, agent.config_group_id)
+        if agent.config_group_id is not None
+        else None
+    )
+    merged = agent_config.merge_group_into_policy(pol, group, policy_scope=scope)
+
+    # The winning document's scope kind labels every key it supplied ("none" =
+    # no document anywhere, in which case `pol` is empty and nothing is labelled).
+    # The config-group fold contributes the `group` section plus whichever
+    # local-surface keys it actually won (agent_config owns that precedence rule).
+    origin = scope.split(":", 1)[0]
+    from_group = set(
+        agent_config.lifted_local_keys(pol, group, policy_scope=scope)
+    )
+    if group is not None and "group" in merged and "group" not in pol:
+        from_group.add("group")
+    source_keys: dict[str, str] = {}
+    for key in merged:
+        if key in from_group:
+            source_keys[key] = "group-settings"
+        else:
+            source_keys[key] = origin if key in pol else "group-settings"
+    for key in policy_mod.PolicyModel.model_fields:
+        source_keys.setdefault(key, "default")
+
+    return EffectivePolicyOut(
+        agent_id=agent.id,
+        scope=scope,
+        version=version,
+        policy=merged,
+        group={"id": str(group.id), "name": group.name} if group is not None else None,
+        source_keys=source_keys,
+    )
 
 
 @router.get(

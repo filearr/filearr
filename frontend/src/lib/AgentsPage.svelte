@@ -1,12 +1,11 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { copyText } from "./clipboard";
+  import AgentPolicyEditor from "./AgentPolicyEditor.svelte";
   import {
     ApiError,
     getAgentSummary,
     listAgents,
-    listAgentPolicies,
-    putAgentPolicy,
     listEnrollmentTokens,
     mintEnrollmentToken,
     revokeAgent,
@@ -23,6 +22,7 @@
     issueInstallerConfig,
     AGENT_LOG_LEVELS,
     SCAN_PRESET_NAMES,
+    MAX_RETAIN_SNAPSHOTS,
     type AgentOut,
     type AgentFleetSummary,
     type EnrollmentTokenOut,
@@ -30,6 +30,9 @@
     type ConfigGroupIn,
     type GroupSettings,
     type ScanSelection,
+    type InventoryConfig,
+    type PermissionsConfig,
+    type AuditConfig,
     type InstallerConfigOut,
   } from "./api";
 
@@ -99,7 +102,7 @@
       }
       tokens = toks;
       groups = grps;
-      await Promise.all([refreshSummary(), reloadPolicies()]);
+      await refreshSummary();
     } catch (e) {
       error = errDetail(e);
     }
@@ -190,47 +193,6 @@
       groups = await listConfigGroups();
     } catch {
       /* keep last-known */
-    }
-  }
-
-  // --- Local access policy (P7-T4 policy channel, GLOBAL scope) --------------
-  // web_ui_enabled / local_access_enabled / auth_required are POLICY keys, not
-  // config-group settings — they ride the append-only agent-policies channel
-  // with most-specific-wins (agent > rollout-group > global) and NO key
-  // merging. This card edits the GLOBAL document (fleet-wide defaults);
-  // narrower scopes are API-only and override it wholesale.
-  let globalPolicy = $state<Record<string, unknown> | null>(null);
-  let policyBusy = $state(false);
-  let policyError = $state("");
-
-  const policyWebUI = $derived((globalPolicy?.web_ui_enabled ?? false) === true);
-  const policyLocalAccess = $derived((globalPolicy?.local_access_enabled ?? true) === true);
-  const policyAuthRequired = $derived((globalPolicy?.auth_required ?? true) === true);
-
-  async function reloadPolicies() {
-    try {
-      const rows = await listAgentPolicies();
-      globalPolicy = rows.find((r) => r.scope === "global")?.policy ?? {};
-    } catch {
-      globalPolicy = null; // card renders a load-failure note
-    }
-  }
-
-  async function setPolicyKey(key: string, value: boolean) {
-    if (policyBusy) return;
-    policyBusy = true;
-    policyError = "";
-    try {
-      // No key merging across scopes AND append-only versions: always write
-      // the full current global document with just this key changed.
-      const next = { ...(globalPolicy ?? {}), [key]: value };
-      const row = await putAgentPolicy("global", next);
-      globalPolicy = row.policy;
-    } catch (e) {
-      policyError = errDetail(e);
-      await reloadPolicies(); // resync to server truth
-    } finally {
-      policyBusy = false;
     }
   }
 
@@ -440,7 +402,24 @@ ${detail}
     webUI: string;
     localAccess: string;
     authRequired: string;
+    // --- W7 permissions collector (advanced; omitted entirely unless
+    // `permsConfigured`, so a group that never touches it keeps a minimal doc) --
+    permsConfigured: boolean;
+    permsEnabled: boolean;
+    permsResolveNames: boolean;
+    permsIncludeInherited: boolean;
+    permsIncludeEffective: boolean;
+    permsExcludeWellKnown: boolean;
+    permsCollectShareAcls: boolean;
+    permsExcludePrincipalsText: string;
+    auditConfigured: boolean;
+    auditEnabled: boolean;
+    auditRetain: number;
+    auditAlertOnChange: boolean;
+    auditWatchPathsText: string;
   };
+  /** Advanced blocks stay collapsed until asked for. */
+  let advancedOpen = $state(false);
   let dialog = $state<GroupForm | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
@@ -449,8 +428,28 @@ ${detail}
     return { preset: "", pathsText: "", includeText: "", excludeText: "", enabled: true };
   }
 
+  /** Field defaults mirror filearr.agent_config.PermissionsConfig / AuditConfig
+   *  so an operator who ticks "configure" starts from the same posture the
+   *  backend would apply. */
+  const PERMS_DEFAULTS = {
+    permsConfigured: false,
+    permsEnabled: false,
+    permsResolveNames: true,
+    permsIncludeInherited: false,
+    permsIncludeEffective: false,
+    permsExcludeWellKnown: true,
+    permsCollectShareAcls: false,
+    permsExcludePrincipalsText: "",
+    auditConfigured: false,
+    auditEnabled: false,
+    auditRetain: 10,
+    auditAlertOnChange: false,
+    auditWatchPathsText: "",
+  };
+
   function openCreate() {
     dialogError = "";
+    advancedOpen = false;
     dialog = {
       id: null,
       name: "",
@@ -463,12 +462,16 @@ ${detail}
       webUI: "",
       localAccess: "",
       authRequired: "",
+      ...PERMS_DEFAULTS,
     };
   }
 
   function openEdit(g: ConfigGroupOut) {
     dialogError = "";
     const s = g.settings ?? {};
+    const p = s.inventory?.permissions ?? null;
+    const a = p?.audit ?? null;
+    advancedOpen = p !== null;
     dialog = {
       id: g.id,
       name: g.name,
@@ -487,6 +490,20 @@ ${detail}
       webUI: toTri(s.web_ui_enabled),
       localAccess: toTri(s.local_access_enabled),
       authRequired: toTri(s.auth_required),
+      permsConfigured: p !== null,
+      permsEnabled: p?.enabled ?? PERMS_DEFAULTS.permsEnabled,
+      permsResolveNames: p?.resolve_names ?? PERMS_DEFAULTS.permsResolveNames,
+      permsIncludeInherited: p?.include_inherited ?? PERMS_DEFAULTS.permsIncludeInherited,
+      permsIncludeEffective:
+        p?.include_effective_access ?? PERMS_DEFAULTS.permsIncludeEffective,
+      permsExcludeWellKnown: p?.exclude_well_known ?? PERMS_DEFAULTS.permsExcludeWellKnown,
+      permsCollectShareAcls: p?.collect_share_acls ?? PERMS_DEFAULTS.permsCollectShareAcls,
+      permsExcludePrincipalsText: (p?.exclude_principals ?? []).join(", "),
+      auditConfigured: a !== null,
+      auditEnabled: a?.enabled ?? PERMS_DEFAULTS.auditEnabled,
+      auditRetain: a?.retain_snapshots ?? PERMS_DEFAULTS.auditRetain,
+      auditAlertOnChange: a?.alert_on_change ?? PERMS_DEFAULTS.auditAlertOnChange,
+      auditWatchPathsText: (a?.watch_paths ?? []).join("\n"),
     };
   }
 
@@ -506,11 +523,38 @@ ${detail}
     if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
     if (f.authRequired) settings.auth_required = f.authRequired === "on";
     if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
-    if (f.inventoryEnabled || f.collectorsText.trim()) {
-      settings.inventory = {
+    if (f.inventoryEnabled || f.collectorsText.trim() || f.permsConfigured) {
+      const inventory: InventoryConfig = {
         enabled: f.inventoryEnabled,
         collectors: splitTags(f.collectorsText),
       };
+      // `settings` is extra="forbid" but every optional field accepts null;
+      // we still OMIT unconfigured blocks so a group's doc stays minimal (and
+      // so "never configured" reads differently from "configured, all off").
+      if (f.permsConfigured) {
+        const permissions: PermissionsConfig = {
+          enabled: f.permsEnabled,
+          resolve_names: f.permsResolveNames,
+          include_inherited: f.permsIncludeInherited,
+          include_effective_access: f.permsIncludeEffective,
+          exclude_well_known: f.permsExcludeWellKnown,
+          collect_share_acls: f.permsCollectShareAcls,
+        };
+        const principals = splitTags(f.permsExcludePrincipalsText);
+        if (principals.length) permissions.exclude_principals = principals;
+        if (f.auditConfigured) {
+          const audit: AuditConfig = {
+            enabled: f.auditEnabled,
+            retain_snapshots: f.auditRetain,
+            alert_on_change: f.auditAlertOnChange,
+          };
+          const watch = splitLines(f.auditWatchPathsText);
+          if (watch.length) audit.watch_paths = watch;
+          permissions.audit = audit;
+        }
+        inventory.permissions = permissions;
+      }
+      settings.inventory = inventory;
     }
     if (f.selections.length) {
       settings.scan_selections = f.selections.map((r): ScanSelection => {
@@ -532,6 +576,17 @@ ${detail}
     if (!dialog) return;
     if (!dialog.name.trim()) {
       dialogError = "Name is required.";
+      return;
+    }
+    // Mirror the server bound so a typo doesn't cost a round trip.
+    if (
+      dialog.permsConfigured &&
+      dialog.auditConfigured &&
+      (!Number.isInteger(dialog.auditRetain) ||
+        dialog.auditRetain < 1 ||
+        dialog.auditRetain > MAX_RETAIN_SNAPSHOTS)
+    ) {
+      dialogError = `Audit "retain snapshots" must be a whole number from 1 to ${MAX_RETAIN_SNAPSHOTS}.`;
       return;
     }
     dialogBusy = true;
@@ -957,68 +1012,22 @@ ${detail}
     {/if}
   </div>
 
-  <!-- Local access policy (fleet-wide, the P7-T4 policy channel) -->
-  <div class="mt-8 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
-    <div class="flex items-center gap-3">
-      <h3 class="font-medium">Local access policy</h3>
-      <span class="text-xs text-slate-500">fleet-wide defaults (global scope)</span>
-    </div>
-    <p class="mt-1 text-xs text-slate-500">
-      Gates every agent's on-device query surfaces. Delivered over the signed
-      policy channel on the agents' next poll; the web UI fails closed when an
-      agent's cached policy goes stale. Per-agent / per-rollout-group overrides
-      exist via <code class="font-mono">PUT /api/v1/agent-policies/&lt;scope&gt;</code>
-      and take precedence <em>wholesale</em> (no key merging).
-    </p>
-    {#if globalPolicy === null}
-      <p class="mt-2 text-sm text-amber-600">Could not load the current policy — refresh to retry.</p>
-    {:else}
-      {#if policyError}<p class="mt-2 text-sm text-red-600">{policyError}</p>{/if}
-      <div class="mt-3 flex flex-col gap-2 text-sm">
-        <label class="flex items-start gap-2">
-          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
-            checked={policyWebUI}
-            onchange={(e) => setPolicyKey("web_ui_enabled", (e.currentTarget as HTMLInputElement).checked)} />
-          <span>
-            <span class="font-medium">Local web UI</span>
-            <span class="block text-xs text-slate-500">
-              Read-only browser search on each agent (port 8686; containers also
-              need the template's remote-access toggle). Default off — a
-              never-contacted agent serves nothing.
-            </span>
-          </span>
-        </label>
-        <label class="flex items-start gap-2">
-          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
-            checked={policyAuthRequired}
-            onchange={(e) => setPolicyKey("auth_required", (e.currentTarget as HTMLInputElement).checked)} />
-          <span>
-            <span class="font-medium">Web UI requires auth token</span>
-            <span class="block text-xs text-slate-500">
-              The UI demands the agent's bootstrap token before serving. Turn
-              off only on a trusted LAN.
-            </span>
-          </span>
-        </label>
-        <label class="flex items-start gap-2">
-          <input type="checkbox" class="mt-0.5" disabled={policyBusy}
-            checked={policyLocalAccess}
-            onchange={(e) => setPolicyKey("local_access_enabled", (e.currentTarget as HTMLInputElement).checked)} />
-          <span>
-            <span class="font-medium">Local query API / CLI</span>
-            <span class="block text-xs text-slate-500">
-              The on-device <code class="font-mono">filearr query</code>
-              socket. Default on; an explicit off persists through offline
-              periods.
-            </span>
-          </span>
-        </label>
-      </div>
-    {/if}
-  </div>
+  <!-- Full policy editor (P7-T4 policy channel, every scope + every key). The
+       three local-access toggles that used to live in their own card are the
+       "Local access" section of this editor. -->
+  <AgentPolicyEditor {agents} />
 
   {@render registeredAgents()}
 </div>
+
+<!-- Honesty chip: the setting is validated, stored and delivered over the policy
+     channel, but no shipped agent build acts on it yet. Better to say so here
+     than to let an operator conclude the fleet is misbehaving. -->
+{#snippet notEnforced(why: string)}
+  <span
+    class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+    title={why}>not enforced yet</span>
+{/snippet}
 
 <!-- Config-group create/edit dialog -->
 {#if dialog}
@@ -1043,7 +1052,9 @@ ${detail}
         </label>
 
         <div class="flex flex-wrap gap-4">
-          <label class="text-xs text-slate-500">Log level
+          <label class="text-xs text-slate-500">
+            <span class="inline-flex items-center gap-1.5">Log level
+              {@render notEnforced("Delivered under the policy document's `group` section, but the agent's log level comes only from its sidecar config, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag today. Set it in the installer sidecar to actually change an agent's logging.")}</span>
             <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.logLevel}>
               <option value="">(unset)</option>
               {#each AGENT_LOG_LEVELS as lvl}
@@ -1053,6 +1064,7 @@ ${detail}
           </label>
           <label class="text-xs text-slate-500">Scan schedule (cron)
             <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700" placeholder="0 3 * * *" bind:value={dialog.cron} />
+            <span class="mt-0.5 block text-[11px] text-slate-400">5-field cron in the agent's local time.</span>
           </label>
         </div>
 
@@ -1094,18 +1106,115 @@ ${detail}
 
         <!-- Inventory -->
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <label class="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" bind:checked={dialog.inventoryEnabled} /> Inventory collection enabled
-          </label>
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="inline-flex items-center gap-2 text-sm">
+              <input type="checkbox" bind:checked={dialog.inventoryEnabled} /> Inventory collection enabled
+            </label>
+            {@render notEnforced("Central validates, stores and delivers these keys, but no shipped agent build reads them yet — the inventory collectors are agent-side scaffold. Authoring them now is safe and forward-looking; it changes nothing on the fleet today.")}
+          </div>
           <label class="mt-2 block text-xs text-slate-500">Collectors (comma or newline separated)
             <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" placeholder="os, hardware, packages" bind:value={dialog.collectorsText} />
           </label>
+
+          <!-- W7 permissions collector (advanced, collapsed by default) -->
+          <button
+            class="mt-3 text-xs text-[var(--accent)]"
+            onclick={() => (advancedOpen = !advancedOpen)}>
+            {advancedOpen ? "▾" : "▸"} Advanced: permissions collector
+            {dialog.permsConfigured ? "(configured)" : "(not configured)"}
+          </button>
+          {#if advancedOpen}
+            <div class="mt-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+              <p class="text-xs text-slate-500">
+                Detailed knobs for the <code class="font-mono">permissions</code>
+                collector. Only takes effect when <code class="font-mono">permissions</code>
+                is <em>also</em> named in Collectors above — an admin must both name
+                the collector and configure it.
+              </p>
+              <label class="mt-2 inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" bind:checked={dialog.permsConfigured} />
+                Include a permissions block in this group's settings
+              </label>
+              {#if dialog.permsConfigured}
+                <div class="mt-2 flex flex-col gap-1.5 text-sm">
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsEnabled} /> Enabled
+                  </label>
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsResolveNames} />
+                    Resolve principal names
+                    <span class="text-xs text-slate-500">(best-effort SID/uid → display name)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsIncludeInherited} />
+                    Include inherited ACEs
+                    <span class="text-xs text-slate-500">(off = explicit grants only)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsExcludeWellKnown} />
+                    Exclude well-known principals
+                    <span class="text-xs text-slate-500">(SYSTEM, Administrators, root, Everyone, CREATOR OWNER)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsCollectShareAcls} />
+                    Collect share-level ACLs
+                    <span class="text-xs text-slate-500">(Windows only)</span>
+                  </label>
+                  <label class="inline-flex items-center gap-2">
+                    <input type="checkbox" bind:checked={dialog.permsIncludeEffective} />
+                    Include effective access
+                    <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                      title="Reserved for v2 of the permissions brief. Central accepts and stores it; the agent no-ops on it until the feature ships.">reserved v2</span>
+                  </label>
+                </div>
+                <label class="mt-2 block text-xs text-slate-500">
+                  Exclude principals (comma or newline separated canonical ids; max 64)
+                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                    placeholder="S-1-5-18, DOMAIN\\svc_backup" bind:value={dialog.permsExcludePrincipalsText} />
+                </label>
+
+                <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <label class="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" bind:checked={dialog.auditConfigured} />
+                    Include a change-audit block
+                  </label>
+                  <p class="mt-0.5 text-xs text-slate-400">
+                    Snapshot-diff + alert routing for watched paths. Stored ahead of
+                    the collector; nothing consumes it yet.
+                  </p>
+                  {#if dialog.auditConfigured}
+                    <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
+                      <label class="inline-flex items-center gap-2">
+                        <input type="checkbox" bind:checked={dialog.auditEnabled} /> Enabled
+                      </label>
+                      <label class="inline-flex items-center gap-2">
+                        <input type="checkbox" bind:checked={dialog.auditAlertOnChange} /> Alert on change
+                      </label>
+                      <label class="text-xs text-slate-500">
+                        Retain snapshots (1–{MAX_RETAIN_SNAPSHOTS})
+                        <input type="number" min="1" max={MAX_RETAIN_SNAPSHOTS}
+                          class="ml-1 w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                          bind:value={dialog.auditRetain} />
+                      </label>
+                    </div>
+                    <label class="mt-2 block text-xs text-slate-500">
+                      Watch paths (one per line; max 200 — path specs, syntax-checked only)
+                      <textarea rows="2"
+                        class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                        bind:value={dialog.auditWatchPathsText}></textarea>
+                    </label>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <!-- Scan selections -->
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">Scan selections</span>
+            {@render notEnforced("Central validates, stores and delivers these, and the agent can expand them into scan roots — but no shipped build starts a scan from them yet. The agent's scan roots still come from its sidecar/CLI configuration.")}
             <div class="grow"></div>
             <button class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700"
               onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</button>

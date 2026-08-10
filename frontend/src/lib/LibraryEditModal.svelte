@@ -104,6 +104,13 @@
   let showPicker = $state(false);
   let showPatterns = $state<Record<string, boolean>>({});
 
+  // Agent-owned libraries hold their content on a remote machine central cannot
+  // open, so central-side text extraction never runs for them (agentsync
+  // replicates identity/stat only). OCR and RAG chunking both consume that
+  // extracted text, so both toggles are inert here — disable them rather than
+  // let an operator switch on something that silently does nothing.
+  const agentOwned = $derived(library.source_agent_id != null);
+
   const rootChanged = $derived(rootPath !== library.root_path);
 
   // Mirrors presets.resolve_effective_presets: a default-on bundle is active
@@ -332,12 +339,21 @@
       <!-- Content processing (OCR + privacy) -->
       <section>
         <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Content processing</h4>
+        {#if agentOwned}
+          <p class="mb-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600
+                    dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+            This library's files live on a remote agent, which replicates their
+            identity (path, size, times, hashes) but not their contents. Central
+            never opens the files, so it cannot extract document text — OCR and
+            RAG chunking have nothing to work on and are disabled here.
+          </p>
+        {/if}
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
           <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
             OCR text <Help text={HELP.ocr_enabled} label="OCR" />
           </label>
-          <label class="inline-flex items-start gap-2">
-            <input type="checkbox" class="mt-1" bind:checked={ocrEnabled} />
+          <label class="inline-flex items-start gap-2 {agentOwned ? 'opacity-50' : ''}">
+            <input type="checkbox" class="mt-1" bind:checked={ocrEnabled} disabled={agentOwned} />
             <span class="text-slate-500">
               OCR images &amp; scanned PDFs so their text is searchable (CPU-heavy; off by default).
             </span>
@@ -346,8 +362,8 @@
           <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
             RAG chunking <Help text={HELP.chunking_enabled} label="RAG chunking" />
           </label>
-          <label class="inline-flex items-start gap-2">
-            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} />
+          <label class="inline-flex items-start gap-2 {agentOwned ? 'opacity-50' : ''}">
+            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} disabled={agentOwned} />
             <span class="text-slate-500">
               Chunk extracted document text for LLM passage retrieval (retrieve_passages).
               Off by default; after enabling, run &ldquo;Chunk documents for RAG&rdquo; on the Jobs page.
