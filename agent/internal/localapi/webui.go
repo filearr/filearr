@@ -1,9 +1,15 @@
 package localapi
 
-// webui.go is the P7-T5 local web UI: a minimal, read-only browser search surface
-// served over loopback TCP (browsers cannot dial the P7-T2 unix socket / named
-// pipe). It is a SEPARATE listener from the socket/pipe query transport and shares
-// only the read-only query engine + the scope/policy logic (runQuery in server.go).
+// webui.go is the P7-T5 local web UI: a minimal browser search surface served
+// over loopback TCP (browsers cannot dial the P7-T2 unix socket / named pipe),
+// read-only over the CATALOG. It is a SEPARATE listener from the socket/pipe
+// query transport and shares only the read-only query engine + the scope/policy
+// logic (runQuery in server.go).
+//
+// 2026-08-10 addition: four POST endpoints for LOCAL SCAN CONTROL (pause/resume,
+// scan now, schedule, roots — webcontrol.go). They administer the AGENT, never
+// the catalog: the read-only invariant over items and metadata is unchanged, and
+// the method backstop is opened for those four paths ONLY.
 //
 // Security posture (research §2, CLAUDE.md priority order security > …):
 //   - Bound to 127.0.0.1 ONLY, never 0.0.0.0 (the "0.0.0.0-day" class, §2.1). The
@@ -12,8 +18,11 @@ package localapi
 //   - Host-header allow-list rejects anything but localhost / 127.0.0.1 / [::1]
 //     PRE-handler with 403 — the DNS-rebinding defence (Syncthing pattern, §2.2).
 //     No skip-check escape hatch.
-//   - GET/HEAD-only: method-scoped routes register no mutating handler, and a
-//     global backstop 405s any other verb (§3.4 layered read-only enforcement).
+//   - GET/HEAD-only, with a per-PATH exception: the backstop 405s every other
+//     verb, admitting POST solely on the four control paths (§3.4 layered
+//     read-only enforcement — adding a handler is not enough to accept a
+//     mutating verb, the path must also be named in the allow-list). Control
+//     actions additionally require a session cookie regardless of auth_required.
 //   - CSRF: net/http.CrossOriginProtection (stdlib) wraps the mux (§2.3).
 //   - Auth (when policy auth_required): a random per-listen bootstrap token is
 //     printed to the daemon log as a http://127.0.0.1:PORT/?token=… URL; a valid
@@ -114,6 +123,11 @@ type WebUIConfig struct {
 	// results can carry full paths for display/copy. Re-read per request
 	// (a handful of rows).
 	RootPaths func(ctx context.Context) (map[string]string, error)
+	// Controls (optional, 2026-08-10) wires the LOCAL SCAN CONTROL endpoints:
+	// pause/resume, scan now, schedule edits, scan-root edits. nil leaves the
+	// surface read-only exactly as before (the endpoints answer "unavailable").
+	// These administer the AGENT, never the catalog — see webcontrol.go.
+	Controls *ControlSeams
 	// GateInterval overrides the policy re-check cadence (test seam).
 	GateInterval time.Duration
 	Logger       *slog.Logger
@@ -293,23 +307,30 @@ func (ws *WebUIServer) Run(ctx context.Context) error {
 // container logs became the primary way these lines are read.
 func (ws *WebUIServer) announce(addr string, auth webAuth) {
 	base := "http://" + addr + "/"
+	full := base + "?token=" + auth.token
 	pv := ws.policy()
 	if pv.AuthRequired {
-		full := base + "?token=" + auth.token
 		ws.log.Info("local web UI listening (auth required) — open the tokenized URL below", "url", full)
-	} else {
-		ws.log.Info("local web UI listening (no auth required)", "url", base)
+		return
 	}
+	// Reads are open, but the local scan CONTROLS always require a session
+	// (mutationGate), so the tokenized URL is logged in this mode too — it is
+	// the only way to sign in and use them.
+	ws.log.Info("local web UI listening (reads need no auth; the tokenized URL signs in for the scan controls)",
+		"url", base, "control_url", full)
 }
 
 // buildHandler assembles the middleware chain (outermost first):
 //
-//	hostAllowList → methodBackstop → CrossOriginProtection → authGate → mux
+//	hostAllowList → webMethodBackstop → CrossOriginProtection → authGate → mux
 //
 // Host allow-list runs FIRST so a forged Host is 403'd before any handler (incl.
 // before auth), the DNS-rebinding defence. The method backstop 405s any non-GET/
-// HEAD verb. CrossOriginProtection is stdlib CSRF. authGate enforces the session
-// cookie (and performs the token exchange) when policy auth_required.
+// HEAD verb except a POST to one of the four local-control paths.
+// CrossOriginProtection is stdlib CSRF. authGate enforces the session cookie
+// (and performs the token exchange) when policy auth_required; each control
+// route additionally sits behind mutationGate, which requires a session
+// UNCONDITIONALLY.
 func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/query", http.HandlerFunc(ws.handleQuery))
@@ -318,12 +339,20 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	mux.Handle("GET /api/logs", http.HandlerFunc(ws.handleLogs))
 	mux.Handle("GET /api/reports", http.HandlerFunc(ws.handleReportList))
 	mux.Handle("GET /api/reports/{id}", http.HandlerFunc(ws.handleReport))
+	// Local scan controls (2026-08-10). The snapshot is an ordinary read; every
+	// action is a POST behind mutationGate. These change what the AGENT DOES —
+	// they never write to the catalog (webcontrol.go).
+	mux.Handle("GET "+pathControl, http.HandlerFunc(ws.handleControls))
+	mux.Handle("POST "+pathControlPause, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlPause)))
+	mux.Handle("POST "+pathControlScanNow, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlScanNow)))
+	mux.Handle("POST "+pathControlSchedule, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlSchedule)))
+	mux.Handle("POST "+pathControlRoots, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlRoots)))
 	mux.Handle("GET /", ws.staticHandler())
 
 	cop := http.NewCrossOriginProtection()
 	chain := ws.authGate(auth, mux)
 	chain = cop.Handler(chain)
-	chain = methodBackstop(chain)
+	chain = webMethodBackstop(chain)
 	if !ws.cfg.AllowRemote {
 		// The loopback Host allow-list is a DNS-rebinding defence and only
 		// coherent for a loopback bind; AllowRemote necessarily accepts the
@@ -331,6 +360,59 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 		chain = hostAllowList(chain)
 	}
 	return chain
+}
+
+// webMethodBackstop 405s every non-GET/HEAD verb BEFORE it can reach a handler,
+// with one deliberately narrow exception: a POST to one of the four local
+// control paths (controlMutationPaths, webcontrol.go).
+//
+// The opening is per-PATH rather than per-verb on purpose. The read-only surface
+// is enforced in layers (§3.4), and this is the layer that guarantees a future
+// route cannot silently start accepting a mutating verb: adding a handler is not
+// enough, the path must also be named here. Every other path — the query API,
+// the settings/logs/reports reads, the static assets, and anything added later —
+// keeps 405ing POST/PUT/PATCH/DELETE exactly as before, and the control paths
+// themselves still 405 every verb other than POST.
+func webMethodBackstop(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			next.ServeHTTP(w, r)
+		case http.MethodPost:
+			if controlMutationPaths[r.URL.Path] {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeError(w, http.StatusMethodNotAllowed, errorBody{Error: "method not allowed", Code: "method_not_allowed"})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, errorBody{Error: "method not allowed", Code: "method_not_allowed"})
+		}
+	})
+}
+
+// mutationGate requires a valid session cookie for a control action REGARDLESS
+// of the policy's auth_required value.
+//
+// auth_required:false is a legitimate posture for a loopback status page: an
+// operator may decide that reading what this machine has indexed needs no token.
+// That decision must not silently extend to changing what the machine DOES —
+// pausing its scanning, rewriting its schedule, removing a scan root. So the
+// bootstrap token is always exchangeable for a session (authGate performs the
+// exchange even when auth is not required), and an action without that session
+// is 401'd here, before the handler learns anything about this agent's
+// permissions.
+func (ws *WebUIServer) mutationGate(auth webAuth, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hasValidSession(r, auth.session) {
+			writeError(w, http.StatusUnauthorized, errorBody{
+				Error: "unauthorized: local control actions always require the agent's bootstrap token, " +
+					"even when reads are open (auth_required=false)",
+				Code: "unauthorized",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // hostAllowList rejects any request whose Host is not a loopback name/literal with
@@ -402,15 +484,15 @@ func validateLoopbackAddr(addr string) error {
 // auth is not required the gate is a pass-through (still loopback + Host-checked).
 func (ws *WebUIServer) authGate(auth webAuth, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ws.policy().AuthRequired {
-			next.ServeHTTP(w, r)
-			return
-		}
 		if hasValidSession(r, auth.session) {
 			next.ServeHTTP(w, r)
 			return
 		}
+		validToken := false
 		if tok := r.URL.Query().Get("token"); tok != "" && constantTimeEq(tok, auth.token) {
+			validToken = true
+		}
+		if validToken {
 			http.SetCookie(w, &http.Cookie{
 				Name:     webSessionCookie,
 				Value:    auth.session,
@@ -423,6 +505,15 @@ func (ws *WebUIServer) authGate(auth webAuth, next http.Handler) http.Handler {
 			// token in history / logs / Referer).
 			stripped := stripToken(r.URL)
 			http.Redirect(w, r, stripped, http.StatusSeeOther)
+			return
+		}
+		if !ws.policy().AuthRequired {
+			// Reads are open by policy. The token exchange above still runs in
+			// this mode — deliberately — because the local CONTROL actions
+			// require a session unconditionally (mutationGate), so an operator
+			// who opened reads to everyone on the box must still be able to
+			// sign in before pausing a scan.
+			next.ServeHTTP(w, r)
 			return
 		}
 		// No cookie, no valid token. For API routes answer JSON 401; for pages a

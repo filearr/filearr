@@ -222,7 +222,7 @@ func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enrol
 	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, onAuthError, ops.ReplicationPaused)
 	pollDone := startPoller(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, sup, httpClient)
 	localDone := startLocalAPI(ctx, p.cfg.DataDir, p.socket, idx, hist)
-	webDone := startWebUI(ctx, p.cfg.DataDir, p.webAddr, idx, hist)
+	webDone := startWebUI(ctx, p.cfg, p.webAddr, idx, hist, ops)
 	// The updater starts BEFORE the command poller so its TriggerNow seam can be
 	// handed to the self_update command handler (console "update now" button).
 	updTrigger, updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
@@ -232,7 +232,7 @@ func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enrol
 	// so a service-only install needs no external cron/Task Scheduler. Off
 	// until policy (scan_cron/scan_interval_seconds/scan_on_start) or the
 	// FILEARR_AGENT_SCAN_CRON/_EVERY/_ON_BOOT envs arm it.
-	schedDone := startScanScheduler(ctx, p.cfg, p.log, ops.Suspended)
+	schedDone := startScanScheduler(ctx, p.cfg, p.log, ops.ScanHold)
 
 	// slog (timestamped) — these used to be bare Printf lines, leaving the
 	// container log's most important banner without a timestamp or level.

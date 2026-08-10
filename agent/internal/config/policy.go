@@ -90,6 +90,18 @@ type Policy struct {
 	// exiftool", which would also cost them camera and lens.
 	ExtractEXIF *bool `json:"extract_exif"`
 
+	// Local self-administration permission gates (2026-08-10). These decide
+	// whether the agent's LOCAL web UI may change what this agent DOES — pause
+	// its own scanning, edit its own schedule, manage its own scan roots. They
+	// are deliberately NOT about the catalog: the local surface stays read-only
+	// over items and metadata by invariant (see ReadOnly above, research §3.4),
+	// and no permission here can make it writable. All three default FALSE when
+	// absent, matching the Extract* family: a fleet that has never been told to
+	// delegate anything keeps every scan decision central.
+	LocalScanControl     *bool `json:"local_scan_control"`
+	LocalScheduleControl *bool `json:"local_schedule_control"`
+	LocalRootsControl    *bool `json:"local_roots_control"`
+
 	// W8-E central File Extension Similarity Taxonomy version. Central injects this
 	// computed key into every policy doc; the daemon version-gates its compact
 	// taxonomy fetch off it (fetch when this exceeds the cached snapshot's
@@ -156,6 +168,48 @@ func (p Policy) ExtractMaxBytesOr(def int64) int64 {
 		return def
 	}
 	return *p.ExtractMaxBytes
+}
+
+// MinScanIntervalSeconds is the floor a scan interval may be set to, from EITHER
+// surface. It is central's own bound (filearr.policy.PolicyModel declares
+// scan_interval_seconds with ge=300), restated here so the LOCAL editing path
+// validates against the identical number — a local override that central would
+// have rejected with a 422 must not be accepted just because it was typed on the
+// machine instead of in the console.
+const MinScanIntervalSeconds = 300
+
+// LocalScanControlValue reports whether the local web UI may pause/resume this
+// agent's scanning and trigger a scan now. Absent default FALSE: the local
+// surface gains a power only when central hands it over.
+func (p Policy) LocalScanControlValue() bool {
+	if p.LocalScanControl == nil {
+		return false
+	}
+	return *p.LocalScanControl
+}
+
+// LocalScheduleControlValue reports whether the local web UI may edit the scan
+// schedule knobs (scan_cron / scan_interval_seconds / scan_on_start). Absent
+// default FALSE. Note this permission only allows filling in knobs central left
+// UNSET — a key central explicitly set is locked locally (see LocalSurface's
+// CentralKeys and the localapi control handlers for why).
+func (p Policy) LocalScheduleControlValue() bool {
+	if p.LocalScheduleControl == nil {
+		return false
+	}
+	return *p.LocalScheduleControl
+}
+
+// LocalRootsControlValue reports whether the local web UI may add/remove scan
+// roots. Absent default FALSE. Roots live in the agent's own scan.json, so this
+// is genuinely local configuration — but an agent whose roots are derived from a
+// config group's scan_selections is still locked, for the same
+// central-re-applies-and-reverts reason.
+func (p Policy) LocalRootsControlValue() bool {
+	if p.LocalRootsControl == nil {
+		return false
+	}
+	return *p.LocalRootsControl
 }
 
 // TaxonomyVersionValue reports the central taxonomy version the policy advertises,
@@ -409,7 +463,29 @@ type LocalSurface struct {
 	GraceExpiresAt time.Time
 	// Version is the cached policy version (for the health probe).
 	Version int
+	// Scope is the scope string of the winning policy document ("global",
+	// "group:x", "agent:<uuid>") — rendered next to a centrally-managed value so
+	// the local operator knows WHICH document to go edit.
+	Scope string
+
+	// --- local self-administration (2026-08-10) ---------------------------
+	// ScanControl / ScheduleControl / RootsControl are the three permission
+	// gates the local web UI's control endpoints consult. All default false.
+	ScanControl     bool
+	ScheduleControl bool
+	RootsControl    bool
+	// CentralKeys is the set of top-level keys the winning policy document
+	// EXPLICITLY set (from PolicyKeys, so unknown keys are included too). A key
+	// in here is LOCKED for local editing: central re-applies its value on every
+	// poll, so a local edit to the same key would silently revert within a poll
+	// interval — refusing the edit and saying who owns the key is strictly more
+	// honest than accepting one that will not survive.
+	CentralKeys map[string]bool
 }
+
+// CentrallySet reports whether the winning policy document explicitly set key —
+// the "managed by central, locked locally" test.
+func (s LocalSurface) CentrallySet(key string) bool { return s.CentralKeys[key] }
 
 // LocalSurface resolves the local-query-surface posture for now using def as the
 // offline-grace default. It is the authoritative agent-side interpretation of the
@@ -417,6 +493,10 @@ type LocalSurface struct {
 // applied verbatim (stale or fresh).
 func (d PolicyDoc) LocalSurface(now time.Time, def time.Duration) LocalSurface {
 	pol, _ := d.Parsed()
+	central := map[string]bool{}
+	for _, k := range d.PolicyKeys() {
+		central[k] = true
+	}
 	return LocalSurface{
 		LocalAccessEnabled: pol.LocalAccessAllowed(),
 		WebUIEnabled:       d.WebUIAllowed(now, def),
@@ -425,6 +505,11 @@ func (d PolicyDoc) LocalSurface(now time.Time, def time.Duration) LocalSurface {
 		Stale:              d.Stale(now, def),
 		GraceExpiresAt:     d.GraceExpiresAt(def),
 		Version:            d.Version,
+		Scope:              d.Scope,
+		ScanControl:        pol.LocalScanControlValue(),
+		ScheduleControl:    pol.LocalScheduleControlValue(),
+		RootsControl:       pol.LocalRootsControlValue(),
+		CentralKeys:        central,
 	}
 }
 

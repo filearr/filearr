@@ -76,10 +76,14 @@ def test_build_doc_without_defs_projects_no_cf_attributes():
 
 def test_filterable_settings_appends_cf_attributes_facet_enabled():
     filt = search_mod._filterable_settings(["cf_rating"])
-    patterns = {p for f in filt for p in f.attribute_patterns}
+    # R8: the reserved ``_geo`` travels as a plain string in the same payload, so
+    # the object-form entries are filtered out before reading attribute_patterns.
+    objs = [f for f in filt if not isinstance(f, str)]
+    patterns = {p for f in objs for p in f.attribute_patterns}
+    patterns |= {f for f in filt if isinstance(f, str)}
     assert "cf_rating" in patterns
     assert patterns == set(FILTERABLE_ATTRIBUTES) | {"cf_rating"}
-    cf = next(f for f in filt if f.attribute_patterns == ["cf_rating"])
+    cf = next(f for f in objs if f.attribute_patterns == ["cf_rating"])
     assert cf.features.facet_search is True
     assert "cf_rating" not in FACET_SEARCH_DISABLED
 
@@ -170,6 +174,9 @@ async def test_ensure_index_applies_cf_filterable_via_settings_path(maker, monke
     await search_mod.ensure_index()
 
     filt = index.update_filterable_attributes.call_args.args[0]
-    assert all(isinstance(f, FilterableAttributes) for f in filt)
-    patterns = {p for f in filt for p in f.attribute_patterns}
+    # Every ordinary attribute (including the dynamic cf_* ones) is object-form;
+    # R8's reserved ``_geo`` rides the same payload as a plain string.
+    objs = [f for f in filt if isinstance(f, FilterableAttributes)]
+    assert [f for f in filt if isinstance(f, str)] == ["_geo"]
+    patterns = {p for f in objs for p in f.attribute_patterns}
     assert "cf_rating" in patterns

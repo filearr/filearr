@@ -5,11 +5,15 @@ This module is **inert scaffolding** for Phase 2 (see
 (``PRESET_BUNDLES``, ``EXTENSION_GROUPS``) and the pure helpers that can be
 implemented and unit-tested today (``get_preset``, ``validate_preset_names``,
 ``build_exclusion_spec``, ``is_cachedir_tagged``). Anything that would touch the
-scan walk, the ORM models, the API, or the scheduler is a typed stub raising
-``NotImplementedError`` tagged with the task that will implement it.
+scan walk, the ORM models, the API, or the scheduler lives in those modules
+rather than here.
 
-No runtime module imports this file yet — only its tests do. Wiring it into
-``scan.py`` is P2-T1.
+**Correction (2026-08-10):** this header used to say "no runtime module imports
+this file yet — wiring it into scan.py is P2-T1", and to advertise
+``NotImplementedError`` stubs. P2-T1 shipped: the scan walk consumes these
+bundles, and ``GET /api/v1/presets`` serves the catalogue to agents. The stubs
+are gone. What remains here is the pure catalogue plus its helpers, which is a
+deliberate split, not unfinished work.
 
 Engine decision (brief §2): matching is delegated to ``pathspec.GitIgnoreSpec``
 (MPL-2.0), gitignore last-match-wins semantics. Directory-prune patterns are

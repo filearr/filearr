@@ -1,12 +1,16 @@
 """Central-side replication logic for the distributed agent architecture (Phase 5,
 roadmap §1 / ``docs/research/phase-5-distributed-agents.md``).
 
-**Inert scaffolding.** Nothing in the runtime imports this module yet — only its
-tests do. It ships the *pure*, unit-testable core of the agent→central
-replication contract (the pieces that need no Postgres, no network, no mTLS) plus
-typed ``NotImplementedError`` stubs for the stateful endpoints, each tagged with
-the Phase-5 task (``P5-Tk``) that will implement it. Wiring any of this into the
-API/worker is P5-T1/T4/T5 — see the tasks doc.
+**Phase 5 SHIPPED, and this module is now live.** The header claimed "inert
+scaffolding, nothing imports it" for a long time after the agent fleet went into
+production; corrected 2026-08-10. :func:`apply_batch` is what the replication
+endpoint calls on every agent push, and the sweep/state-machine helpers back the
+command plane.
+
+The pure/stateful split it describes is still real and still deliberate: the
+contract types, the seq-gap guard, the upsert planner and the manifest digest
+need no Postgres, no network and no mTLS, which is what makes them testable
+against hand-written batches.
 
 What is *pure and implemented here*:
 

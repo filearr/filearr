@@ -37,6 +37,7 @@ from filearr.alerts import crypto, render, webhook_formats
 from filearr.alerts.dispatch import (
     ChannelDeliveryError,
     send_email,
+    send_via_apprise,
     send_webhook_formatted,
 )
 from filearr.alerts.rules import DIGEST_WINDOWS, EVENT_TYPES, _compile_glob
@@ -482,9 +483,15 @@ async def test_channel(
             )
         elif row.type_ == "email":
             result = await send_email(runtime, rendered)
-        else:  # apprise — P8-T3
-            raise HTTPException(
-                501, "apprise dispatch not available; install filearr[apprise] (P8-T3)"
+        else:  # apprise (P8-T3) — the whole decrypted url IS the target
+            url = runtime.get("url")
+            if not url:
+                raise HTTPException(422, "apprise channel missing 'url'")
+            # A missing filearr[apprise] extra surfaces as a non-retryable
+            # ChannelDeliveryError below (ok=false + an actionable detail in the
+            # 200 body), which is what the Test button should show — not a 501.
+            result = await send_via_apprise(
+                url, rendered, timeout_s=settings.alert_apprise_timeout_s
             )
     except ChannelDeliveryError as exc:
         return TestFireResult(

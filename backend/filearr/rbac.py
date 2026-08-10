@@ -1,8 +1,10 @@
 """RBAC core — the pure permission-evaluation heart (Phase 6, roadmap §3 /
 ``docs/research/phase-6-identity-auth-rbac.md``).
 
-**Inert scaffolding.** Nothing in the runtime imports this module yet — only its
-tests do. It ships the *pure*, unit-testable core of the two-layer RBAC model
+**LIVE — this is the enforced RBAC core**, reached from the security layer, the
+search scope compiler, the API and the agent plane.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the *pure*, unit-testable core of the two-layer RBAC model
 (global roles that set a *ceiling* + path-scoped ACL grants that narrow within
 it) plus the ``ltree`` path-encoding function the whole permission hierarchy is
 keyed on. Wiring any of this into ``security.py`` / the API is P6-T4

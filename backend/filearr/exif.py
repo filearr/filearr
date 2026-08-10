@@ -1,6 +1,8 @@
 """EXIF/GPS extraction stub + the default-hidden GPS gate (Phase 3 — P3-T11).
 
-**Inert scaffolding.** Only tests import this module. It ships the implemented,
+**LIVE.** The extract pipeline calls into this module for every image.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the implemented,
 pure ``strip_gps`` gate (the security-tier default that keeps location metadata
 out of the Meili projection and public API unless a library explicitly opts in)
 plus the ``extract_exif`` stub that P3-T11 implements over an exiftool

@@ -1,6 +1,8 @@
 """OCR trigger policy + engine stub (Phase 3, roadmap §5 — P3-T6).
 
-**Inert scaffolding.** Only tests import this module. It ships the implemented,
+**LIVE.** The OCR task drives this policy + engine.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the implemented,
 pure trigger-threshold policy (``OcrPolicy`` + ``should_ocr``) synthesised from
 the brief §3 cross-tool analysis (ocrmypdf / Paperless / Docspell / Recoll), and
 a typed ``run_ocr`` stub that P3-T6 will implement against a Tesseract 5.5.2

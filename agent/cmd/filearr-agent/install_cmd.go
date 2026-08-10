@@ -132,18 +132,42 @@ func runInstall(args []string) error {
 // perfectly valid. Saying it here saves the operator a round trip through the
 // console's capability matrix to find out why a policy key looks inert.
 func printMissingExtractTools() {
-	missing := []struct{ tool, buys string }{}
-	add := func(present bool, tool, buys string) {
-		if !present {
-			missing = append(missing, struct{ tool, buys string }{tool, buys})
+	type toolInfo struct{ tool, buys string }
+	tools := []toolInfo{
+		{"ffprobe", "video/audio technical probe (codec, resolution, duration, bitrate)"},
+		{"exiftool", "deep EXIF (camera, lens, exposure, GPS)"},
+		{"pdfinfo", "PDF page count and document properties"},
+		{"pdftotext", "PDF body text (RAG chunking + content embeddings)"},
+		{"tesseract", "OCR of images and scanned pages"},
+		{"pdftoppm", "rasterising scanned PDFs for OCR"},
+	}
+	present := inventory.Tools()
+	versions := inventory.ToolVersions()
+
+	var found, missing []toolInfo
+	for _, t := range tools {
+		if present[t.tool] {
+			found = append(found, t)
+		} else {
+			missing = append(missing, t)
 		}
 	}
-	add(inventory.HasFFprobe(), "ffprobe", "video/audio technical probe (codec, resolution, duration, bitrate)")
-	add(inventory.HasExiftool(), "exiftool", "deep EXIF (camera, lens, exposure, GPS)")
-	add(inventory.HasPDFInfo(), "pdfinfo", "PDF page count and document properties")
-	add(inventory.HasPDFToText(), "pdftotext", "PDF body text (RAG chunking + content embeddings)")
-	add(inventory.HasTesseract(), "tesseract", "OCR of images and scanned pages")
-	add(inventory.HasPDFToPPM(), "pdftoppm", "rasterising scanned PDFs for OCR")
+
+	// Report what IS here, with versions, before what is not. An operator who
+	// just installed the tools wants confirmation that THIS binary found THEM —
+	// a version is the only proof that the PATH the service will run with is the
+	// one they configured, and it is the fastest way to spot an ancient build
+	// (a tesseract 4 reads scans materially worse than a 5.x).
+	if len(found) > 0 {
+		fmt.Println("  extract: content-extraction tools detected on PATH")
+		for _, t := range found {
+			if v := versions[t.tool]; v != "" {
+				fmt.Printf("           - %-10s %s\n", t.tool, v)
+			} else {
+				fmt.Printf("           - %-10s (installed; version not reported)\n", t.tool)
+			}
+		}
+	}
 	if len(missing) == 0 {
 		return
 	}

@@ -413,7 +413,81 @@ func writeScanConfig(path string, sc scanConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(buf, '\n'), 0o644)
+	buf = append(buf, '\n')
+	// Temp-then-rename: the daemon (web UI Status panel, local root controls)
+	// reads this file from a DIFFERENT process than the scan that writes it, so
+	// a reader must never observe a half-written document.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// --- local scan-root controls (2026-08-10) -----------------------------------
+// The agent's own web UI can add/remove scan roots when central's
+// `local_roots_control` permission is on. Roots live in scan.json — the scan
+// PROCESS's configuration — so these helpers are read-modify-write over that
+// file, not over the policy cache.
+
+// scanRoots returns the configured scan roots (empty when none/unreadable).
+func scanRoots(dataDir string) []string {
+	sc, err := readScanConfig(dataDir)
+	if err != nil {
+		return nil
+	}
+	return sc.Roots
+}
+
+// readScanConfig loads scan.json, treating a missing file as an empty config.
+func readScanConfig(dataDir string) (scanConfig, error) {
+	var sc scanConfig
+	buf, err := os.ReadFile(filepath.Join(dataDir, scanConfigName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sc, nil
+		}
+		return sc, err
+	}
+	if err := json.Unmarshal(buf, &sc); err != nil {
+		return scanConfig{}, fmt.Errorf("parse scan config: %w", err)
+	}
+	return sc, nil
+}
+
+// addScanRoot unions one absolute root into scan.json, preserving every other
+// key in the file (presets, globs, categories) — this is an edit, not a rewrite.
+func addScanRoot(dataDir, root string) error {
+	sc, err := readScanConfig(dataDir)
+	if err != nil {
+		return err
+	}
+	sc.Roots = mergeAbs(sc.Roots, []string{root})
+	return writeScanConfig(filepath.Join(dataDir, scanConfigName), sc)
+}
+
+// removeScanRoot drops one root from scan.json. It deliberately does NOT touch
+// the local index: the rows for that root are the agent's record of what it
+// saw, and deleting them here would replicate to central as a mass deletion.
+// Removing a root only stops FUTURE walks; tombstoning stays the scan's job.
+func removeScanRoot(dataDir, root string) error {
+	sc, err := readScanConfig(dataDir)
+	if err != nil {
+		return err
+	}
+	target := root
+	if abs, aerr := filepath.Abs(root); aerr == nil {
+		target = abs
+	}
+	kept := make([]string, 0, len(sc.Roots))
+	for _, p := range sc.Roots {
+		if p == root || p == target {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	sc.Roots = kept
+	return writeScanConfig(filepath.Join(dataDir, scanConfigName), sc)
 }
 
 // envHashTimeout bounds the wall clock spent hashing one file, in seconds

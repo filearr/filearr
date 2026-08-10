@@ -56,6 +56,42 @@ type PolicyView struct {
 	Predicates     []string
 	Stale          bool       // cached policy is past its offline-grace window (P7-T4)
 	GraceExpiresAt *time.Time // when the cache goes stale (P7-T4)
+
+	// --- local self-administration gates (2026-08-10) ----------------------
+	// The three central-authored permissions that decide whether the LOCAL web
+	// UI may change what this agent DOES. They never touch the catalog: the
+	// local surface remains read-only over items and metadata by invariant, and
+	// no value here can make it writable.
+	ScanControl     bool // pause/resume scanning, scan now
+	ScheduleControl bool // edit scan_cron / scan_interval_seconds / scan_on_start
+	RootsControl    bool // add/remove scan roots
+
+	// CentralKeys is the set of policy keys the winning document EXPLICITLY
+	// set. A key in here is LOCKED for local editing — central re-applies its
+	// value every poll, so a local edit would silently revert within a poll
+	// interval, which is worse than refusing it.
+	CentralKeys map[string]bool
+	// PolicySource is a human label for the document that set them, e.g.
+	// "central policy global v7". Rendered next to a locked value so the local
+	// operator knows which document to go edit. Empty when unknown.
+	PolicySource string
+	// RootsManagedByCentral is true when this agent's scan roots are DERIVED
+	// centrally (a config group's scan_selections). Roots have no top-level
+	// policy key, so they get their own flag rather than a CentralKeys entry.
+	RootsManagedByCentral bool
+}
+
+// Managed reports whether key is centrally set (and therefore locked for local
+// editing), along with the label of the document that set it.
+func (p PolicyView) Managed(key string) (bool, string) {
+	if p.CentralKeys[key] {
+		src := p.PolicySource
+		if src == "" {
+			src = "central policy"
+		}
+		return true, src
+	}
+	return false, ""
 }
 
 // Recorder records a successful query into the LOCAL-ONLY frecency store (P7-T6)

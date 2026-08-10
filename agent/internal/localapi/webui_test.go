@@ -112,7 +112,7 @@ func TestWebUIMethodBackstop(t *testing.T) {
 	auth, _ := newWebAuth()
 	h := ws.buildHandler(auth)
 
-	paths := []string{"/", "/api/query", "/api/status", "/app.js"}
+	paths := []string{"/", "/api/query", "/api/status", "/app.js", "/api/settings", "/api/logs", "/api/reports", pathControl}
 	verbs := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
 	for _, p := range paths {
 		for _, m := range verbs {
@@ -128,6 +128,18 @@ func TestWebUIMethodBackstop(t *testing.T) {
 	h.ServeHTTP(rec, webReq("HEAD", "/", "127.0.0.1"))
 	if rec.Code == http.StatusMethodNotAllowed {
 		t.Errorf("HEAD / must be allowed, got 405")
+	}
+	// 2026-08-10: the backstop is opened for POST on the FOUR local-control
+	// paths and nowhere else. Every path above (including the controls' own GET
+	// snapshot at /api/control) still 405s every mutating verb; the opened
+	// paths refuse for a policy reason instead, never with a 405. The full
+	// verb/path matrix lives in TestBackstopOpensOnlyPostOnControlPaths.
+	for _, p := range []string{pathControlPause, pathControlScanNow, pathControlSchedule, pathControlRoots} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, webReq(http.MethodPost, p, "127.0.0.1"))
+		if rec.Code == http.StatusMethodNotAllowed {
+			t.Errorf("POST %s = 405; the backstop must let the control paths through to their gates", p)
+		}
 	}
 }
 

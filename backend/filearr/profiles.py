@@ -1,7 +1,8 @@
 """Typed metadata profiles (Phase 4, roadmap §7 — P4-T1 / P4-T2).
 
-**Inert scaffolding.** Only tests import this module today; nothing in the
-runtime (``extract.py`` / ``search.py`` / ``api``) wires it in yet. It ships the
+**LIVE.** ``extract.py`` / ``search.py`` / the API all consume these profiles.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the
 *real* per-``MediaType`` field vocabularies (derived from what each extractor
 actually emits — see the module docstrings in ``filearr/tasks/*.py``) plus the
 *pure*, unit-testable validation logic that P4-T2 will call from

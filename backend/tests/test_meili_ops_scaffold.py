@@ -23,7 +23,6 @@ from filearr.meili_ops import (
     MeiliTaskNotification,
     TypoToleranceSpec,
     WebhookTarget,
-    compact_if_fragmented,
     ensure_webhook,
     fragmentation_ratio,
     is_shadow_uid,
@@ -291,6 +290,9 @@ def test_index_spec_search_cutoff_and_facet_optouts():
     # numeric/high-cardinality fields + the P6-T3 path_scope scope key + the
     # near-unique P3-T1 hash digests must be facet-search-disabled (path_scope is a
     # filter key, never a human facet; the hashes are opaque exact-match targets).
+    # R8's ``_geo`` is intentionally NOT here: it ships in the plain-string
+    # filterable form, which cannot carry a facet-search opt-out (harmless — a geo
+    # point has no string facet values). See meili_ops.STRING_FORM_FILTERABLE.
     assert set(FACET_SEARCH_DISABLED) == {
         "size", "mtime", "year", "path_scope", "quick_hash", "content_hash",
     }
@@ -307,8 +309,9 @@ def test_typo_tolerance_spec_render():
 # --------------------------------------------------------------------------- #
 # stubs raise NotImplementedError tagged with their task                        #
 # --------------------------------------------------------------------------- #
-# rebuild_via_swap is implemented (P9-T5); the remaining STUBS still raise.
-@pytest.mark.parametrize("coro", [compact_if_fragmented, ensure_webhook])
+# rebuild_via_swap (P9-T5) and compact_if_fragmented (P9-T4, see
+# test_meili_compaction_p9.py) are implemented; ensure_webhook is the last STUB.
+@pytest.mark.parametrize("coro", [ensure_webhook])
 async def test_stubs_raise_not_implemented(coro):
     with pytest.raises(NotImplementedError):
         await coro()

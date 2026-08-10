@@ -421,6 +421,39 @@ class SearchResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class FederatedHit(BaseModel):
+    """One hit of a federated multi-search, labelled with where it came from (R8).
+
+    ``source`` is the LOGICAL index name (``items`` | ``passages``) rather than the
+    raw Meili uid, because the uid is deployment-configurable
+    (``FILEARR_MEILI_INDEX``) and must not leak into a public contract.
+    ``item_id`` is the catalog item every hit resolves to — for an ``items`` hit it
+    is the document id, for a ``passages`` hit it is the ``item_id`` the chunk
+    document already carries, so a caller never has to issue a per-hit lookup."""
+
+    source: str
+    item_id: str | None = None
+    score: float | None = None
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class FederatedSearchResponse(BaseModel):
+    """Merged, single-ranked result list across the item and passage indexes (R8).
+
+    ``hits`` is ONE list ordered by Meilisearch's federated ranking, not two lists
+    the caller has to interleave. ``facets_by_index`` carries Meili's
+    ``facetsByIndex`` block keyed by the LOGICAL index name."""
+
+    hits: list[FederatedHit]
+    total: int
+    limit: int
+    offset: int
+    #: Logical index names actually queried — ``passages`` is absent when the
+    #: chunks index does not exist yet (chunking is a per-library opt-in).
+    indexes: list[str] = Field(default_factory=list)
+    facets_by_index: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
 class ScanOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

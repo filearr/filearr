@@ -1267,6 +1267,42 @@ async def reap_shadow_indexes(timestamp: int) -> int:
     return len(await reap_stale_shadows())
 
 
+# --- P9-T4: weekly Meilisearch LMDB compaction ------------------------------
+# Meili's LMDB store never shrinks by itself, so a long-lived index accumulates
+# free pages nothing reads. This weekly job measures the fragmentation ratio and
+# compacts only when it is worth the ~2x transient disk cost. Space reclamation
+# ONLY: the index is a disposable projection (invariant 1), so a skip is always
+# safe and every operational failure inside compact_if_fragmented degrades to a
+# structured skip rather than an exception. Registry default "0 6 * * 0" (Sunday
+# 06:00 UTC) puts it clear of the whole 03:30-05:20 nightly purge/reconcile
+# window; operator-overridable from the Jobs page. FIX-8/FIX-9 discipline: NO
+# retry (a transient Meili fault is simply re-measured next week) and the
+# queueing_lock collapses any duplicate enqueue onto a still-running compaction.
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.compact_meili",
+    queueing_lock="compact-meili",  # FIX-8: no retry (weekly re-runs)
+)
+async def compact_meili(timestamp: int) -> dict:
+    """Compact the search index when it is fragmented past the threshold (P9-T4).
+
+    Meili-only; never touches Postgres. Returns the structured result from
+    :func:`filearr.meili_ops.compact_if_fragmented`."""
+    from filearr import maintmode
+    from filearr.meili_ops import compact_if_fragmented
+
+    # Central maintenance mode: skip, exactly like the other work-generating
+    # periodics. The maintenance tick already refuses to DEFER while the mode is
+    # active (without consuming the occurrence, so this fires once the mode
+    # lifts) — this second gate covers the Jobs-page "Run now" path, which
+    # bypasses the tick. Sustained heavy disk I/O is precisely what an operator
+    # enters maintenance mode to stop.
+    if await maintmode.is_active_standalone():
+        return {"status": "skipped", "reason": "maintenance_mode", "compacted": False}
+
+    return await compact_if_fragmented()
+
+
 # --- T5: cron-scheduled scanning -------------------------------------------
 # One static, import-time periodic task on a 1-minute tick (Procrastinate cannot
 # register periodic tasks dynamically, so per-library cron is evaluated here in

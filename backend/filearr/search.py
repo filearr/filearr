@@ -32,9 +32,11 @@ from filearr.meili_ops import (
     FACET_SEARCH_CANDIDATES,
     FACET_SEARCH_DISABLED,
     FILTERABLE_ATTRIBUTES,
+    GEO_ATTR,
     RANKING_RULES,
     SEARCHABLE_ATTRIBUTES,
     SORTABLE_ATTRIBUTES,
+    STRING_FORM_FILTERABLE,
     build_embedders,
     embedder_matches,
     settings_drift,
@@ -72,7 +74,7 @@ def _facet_value_order() -> dict[str, str]:
 
 def _filterable_settings(
     cf_filterable: list[str] | None = None,
-) -> list[FilterableAttributes]:
+) -> list[str | FilterableAttributes]:
     """Object-form filterable attributes (P9-T1): disable facet search on the
     high-cardinality numeric fields (``size``/``mtime``/``year``) while leaving
     equality + comparison filtering intact for every attribute. Typed SDK models
@@ -83,9 +85,18 @@ def _filterable_settings(
     ``facetable`` custom fields, computed from the ``custom_fields`` table at
     apply time) is appended STATIC + dynamic. Facet search stays enabled on them
     (they are not in ``FACET_SEARCH_DISABLED``). This settings change only ever
-    lands via the rebuild-and-swap path — never an in-place update call."""
-    out: list[FilterableAttributes] = []
+    lands via the rebuild-and-swap path — never an in-place update call.
+
+    R8: attributes in ``meili_ops.STRING_FORM_FILTERABLE`` (today just Meili's
+    reserved ``_geo``) go in the SAME payload as PLAIN STRINGS — the documented
+    spelling for the geo field, which cannot be rejected on feature-shape grounds
+    the way an unverified object-form entry for a reserved field might be. The SDK
+    types this parameter ``list[str | FilterableAttributes]`` for exactly that mix."""
+    out: list[str | FilterableAttributes] = []
     for attr in [*FILTERABLE_ATTRIBUTES, *(cf_filterable or [])]:
+        if attr in STRING_FORM_FILTERABLE:
+            out.append(attr)
+            continue
         out.append(
             FilterableAttributes(
                 attribute_patterns=[attr],
@@ -129,8 +140,11 @@ def _desired_settings(
     cf_sortable = cf_sortable or []
     return {
         "searchableAttributes": list(SEARCHABLE_ATTRIBUTES),
+        # R8: a STRING_FORM_FILTERABLE attribute carries Meili's DEFAULT features,
+        # so its drift token is ``:True`` — matching what ``_project_current`` maps
+        # a plain-string element (or an echoed default-features object) to.
         "filterableAttributes": [
-            f"{attr}:{attr not in FACET_SEARCH_DISABLED}"
+            f"{attr}:{attr in STRING_FORM_FILTERABLE or attr not in FACET_SEARCH_DISABLED}"
             for attr in [*FILTERABLE_ATTRIBUTES, *cf_filterable]
         ],
         "sortableAttributes": [*SORTABLE_ATTRIBUTES, *cf_sortable],
@@ -448,6 +462,75 @@ def _project_exif(meta: dict[str, Any], expose_gps: bool) -> dict[str, Any]:
     if not expose_gps:
         exif = strip_gps(exif)
     return exif
+
+
+# --------------------------------------------------------------------------- #
+# R8 (roadmap §8) — the Meilisearch ``_geo`` projection.                        #
+#                                                                               #
+# THE GPS EXPOSURE GATE IS NOT HERE. It lives in exactly two places and must    #
+# stay there: (1) ``filearr.exif.strip_gps`` (the pure key filter) and (2) the  #
+# per-library ``Library.expose_gps`` column that callers resolve and pass in as #
+# ``build_doc(..., expose_gps=...)``. This function is only the SHAPE           #
+# conversion; it refuses to emit anything when the caller says the library has  #
+# not opted in. Do NOT "helpfully" move the decision into an extractor: the     #
+# extractors deliberately store GPS RAW in ``metadata_`` (invariant 2 —         #
+# extracted truth is never edited), and a gate placed there would both lose     #
+# that truth and silently stop applying the moment a new extractor appears.     #
+# CWE-1230; see ``filearr/exif.py`` for the full rationale.                     #
+# --------------------------------------------------------------------------- #
+_GEO_LAT_KEY = "exif.gps_latitude"
+_GEO_LNG_KEY = "exif.gps_longitude"
+
+
+def _coord(value: Any, limit: float) -> float | None:
+    """Coerce one coordinate to a finite float inside ``[-limit, limit]``.
+
+    Returns ``None`` — meaning "drop the whole point" — for anything else. A
+    malformed pair is DROPPED, never clamped: clamping a garbage coordinate would
+    invent a location the camera never recorded and place the file somewhere real
+    on a map, which is worse than having no pin at all. ``bool`` is rejected
+    explicitly (it is an ``int`` subclass, and ``True`` is not a latitude), and
+    strings are accepted because exiftool output is untrusted parser output that
+    has historically arrived as either numbers or numeric strings."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN/±inf: ``out != out`` catches NaN, the range test catches the infinities.
+    if out != out or not (-limit <= out <= limit):
+        return None
+    return out
+
+
+def geo_point(meta: dict[str, Any], expose_gps: bool) -> dict[str, float] | None:
+    """The ``{"lat": ..., "lng": ...}`` object Meilisearch requires under ``_geo``,
+    or ``None`` when this document must not carry one.
+
+    ``None`` (i.e. the document is emitted with NO ``_geo`` key at all) whenever:
+
+    * the owning library has not opted in (``expose_gps`` false) — the CWE-1230
+      gate. Emitting an empty/placeholder geo object would still let a geo query
+      confirm "this deployment holds a photo, just not near you"; ABSENCE is what
+      makes the gate honest, so a geo filter cannot even indirectly leak that a
+      located photo exists;
+    * either coordinate is missing (a partial pair is not a location); or
+    * either coordinate is non-finite or out of range (see :func:`_coord`).
+
+    Latitude ∈ [-90, 90], longitude ∈ [-180, 180] — Meilisearch rejects a document
+    outside those bounds with ``invalid_document_geo_field``, which would fail the
+    WHOLE indexing batch, so validating here also protects unrelated documents from
+    one bad EXIF record."""
+    if not expose_gps:
+        return None
+    lat = _coord(meta.get(_GEO_LAT_KEY), 90.0)
+    lng = _coord(meta.get(_GEO_LNG_KEY), 180.0)
+    if lat is None or lng is None:
+        return None
+    return {"lat": lat, "lng": lng}
+
+
 def _index_archive_members(value: Any) -> str | None:
     """Cap the stored ``archive_members`` string down to the Meili INDEX ceiling
     (P3-T13). ``metadata_.archive_members`` is already stored capped, but the
@@ -568,6 +651,18 @@ def build_doc(
     # P3-T11: exif.* facts, GPS gated by the library's expose_gps flag (default
     # false => GPS absent from the projection, facets, and /search hits).
     doc.update(_project_exif(meta, expose_gps))
+    # R8: the Meili ``_geo`` point for geo filters/sorting, behind the SAME gate.
+    # Emitted ONLY when the library opted in AND the stored coordinates are a valid
+    # finite pair; otherwise the key is absent entirely (never null, never a
+    # placeholder), so a ``_geoRadius``/``_geoBoundingBox`` query cannot confirm the
+    # existence of a located file in an un-exposed library. NOTE for the next
+    # reader: because ``upsert_docs`` uses Meili's add-or-UPDATE (merge) semantics,
+    # merely re-projecting a document does NOT remove a ``_geo`` a previous
+    # exposure wrote — turning ``expose_gps`` OFF goes through
+    # ``replace_docs``/``reproject_library`` (add-or-REPLACE), see those docstrings.
+    geo = geo_point(meta, expose_gps)
+    if geo is not None:
+        doc[GEO_ATTR] = geo
     # P3-T8: attach the semantic vector under _vectors ONLY when semantic search is
     # enabled AND the item carries a fingerprint-matching embedding. A drifted
     # (old-model) or missing vector is silently omitted — never mixed with current
@@ -608,6 +703,31 @@ async def upsert_docs(docs: list[dict[str, Any]]) -> None:
         # this lets Meili infer "id" from the payload instead of guessing/erroring.
         # Ignored by the server once a primary key is already set.
         await c.index(s.meili_index).update_documents(docs, primary_key="id")
+
+
+async def replace_docs(docs: list[dict[str, Any]]) -> None:
+    """Write documents with add-or-REPLACE semantics (Meili ``POST /documents``).
+
+    The difference from :func:`upsert_docs` matters exactly once, and it is a
+    SECURITY difference (R8). ``upsert_docs`` calls the SDK's ``update_documents``
+    (HTTP ``PUT`` = add-or-update), which MERGES the payload into the stored
+    document: a field the new projection omits keeps its old value. That is the
+    right default for incremental syncs, but it means re-projecting an item after
+    its library's ``expose_gps`` was turned OFF would leave the previously indexed
+    ``_geo`` point in place — the index would keep answering geo queries with a
+    location the operator has just forbidden.
+
+    ``add_documents`` (HTTP ``POST`` = add-or-replace) rewrites the document
+    wholesale, so any attribute absent from the new projection — ``_geo`` above all
+    — is genuinely gone. Used by ``tasks.index_sync.reproject_library``; every
+    other write path deliberately keeps the merge semantics it has always had.
+    Invariant 1 is untouched: this still only ever writes a projection of Postgres
+    truth, and a full ``rebuild_index`` (shadow swap) produces the same result."""
+    if not docs:
+        return
+    s = get_settings()
+    async with client() as c:
+        await c.index(s.meili_index).add_documents(docs, primary_key="id")
 
 
 async def delete_docs(ids: list[str]) -> None:

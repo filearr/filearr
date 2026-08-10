@@ -11,6 +11,12 @@ to the central server over mTLS.
     Admin → Agents panel is hidden, and the certificate authority never runs. The
     tables still exist (empty), so enabling later needs no migration.
 
+!!! tip "Looking for a specific setting?"
+    [Agent settings reference](reference/agent-settings.md) enumerates all three
+    configuration surfaces — central policy, the `FILEARR_AGENT_*` environment
+    variables, and the `filearr-agent.json` sidecar — and states which one wins
+    when the same thing is set in more than one place.
+
 ## What the agent is (and is not)
 
 - **It is** an offline-first local catalog plus a reliable, at-least-once,
@@ -127,6 +133,22 @@ winget install Gyan.FFmpeg && winget install OliverBetz.ExifTool
 # poppler release zip, then either put their bin\ dirs on PATH or point the agent
 # at them directly (FILEARR_AGENT_PDFTOTEXT_PATH, FILEARR_AGENT_TESSERACT_PATH, …).
 ```
+
+**Which install gets what.** The **container agent ships all of them** — ffmpeg,
+poppler-utils, exiftool and tesseract with English data — so a containerized host
+has no capability gaps and nothing to install. A **binary or service install**
+(the Windows service, a hand-placed binary) ships **none** of them: the agent is
+a single static executable and every tool above is a *host* program it shells out
+to, so those endpoints need the packages installed (or the path overrides below).
+
+**Verifying what an agent actually found.** The agents table shows each tool as a
+chip with its **detected version** — `tesseract 5.3.4`, `ffmpeg 6.1.1-3ubuntu5` —
+so you can confirm not just that a tool is present but that it is the build you
+expect (a tesseract 4 reads scans materially worse than a 5.x, and "installed" on
+Windows often means a years-old zip). A chip showing `✓` without a version means
+the tool is there but did not report one; `✕` means it is not on `PATH` at all.
+The same matrix, with versions, appears on the agent's own local status page and
+is printed by `filearr-agent install`.
 
 Each tool also honours an explicit path override, which wins over `PATH`:
 `FILEARR_AGENT_FFMPEG_PATH`, `FILEARR_AGENT_FFPROBE_PATH`,
@@ -700,6 +722,10 @@ operator is the sole policy author). Policy is **advisory-by-asymmetry**: centra
 can *disable* a local capability and the agent honors it on next poll, but
 central cannot reach into the agent to read local-only data.
 
+For how these keys interact with the host's environment variables and sidecar
+file — which surface wins per setting — see
+[Agent settings → Precedence](reference/agent-settings.md#precedence).
+
 ### Scopes, and why they replace rather than merge {#policy-scopes}
 
 A policy document is written at one of three scopes:
@@ -752,7 +778,10 @@ same as `false`. "Enforced by" says who actually acts on the value.
 | `auth_required` | bool | **on** | agent | Whether the local web UI demands its bootstrap token. Never affects the CLI peer-credential check. |
 | `offline_grace_seconds` | int ≥ 0 | 86400 (24 h) | agent | How long a cached policy stays trusted offline. Past it the web UI fails closed; the CLI keeps answering. |
 | `path_scope` | list[str], max 1000 | unrestricted | agent | OR-combined `rel_path` GLOB allow-list applied to every **local** result set. |
-| `read_only` | bool | true | agent | **Always `true`.** The local surface is read-only by invariant; a `false` is rejected with a 422 rather than normalised. Not editable in the console. |
+| `local_scan_control` | bool | **off** | agent | Lets the agent's own web UI pause/resume **its** scanning and trigger a scan. See [Local scan controls](#local-scan-controls). |
+| `local_schedule_control` | bool | **off** | agent | Lets the agent's own web UI edit `scan_cron` / `scan_interval_seconds` / `scan_on_start` — but only the ones this policy leaves **unset**. |
+| `local_roots_control` | bool | **off** | agent | Lets the agent's own web UI add/remove **its** scan roots. Still refused when the agent's config group derives roots from `scan_selections`. |
+| `read_only` | bool | true | agent | **Always `true`.** The local surface is read-only by invariant; a `false` is rejected with a 422 rather than normalised. Not editable in the console. This is about the **catalog** and is unaffected by the three `local_*_control` keys, which delegate agent self-administration only. |
 | `auto_update` | bool | on | **central** | Whether central *offers* an update on this agent's update-manifest poll (the poll answers `204` when off), so it gates every agent build uniformly — including old ones. An operator-triggered update from the agents table bypasses it: the click *is* the authorization. |
 
 Two more keys appear in a delivered document but are **not operator-settable**:
@@ -816,9 +845,10 @@ the machine is disconnected from central:
 
 - **CLI** — `filearr query 'kind:video size:>1G modified:<7d'`. A `filearr`
   alias/symlink to the binary gives the branded verb.
-- **Local web UI** — a minimal, **read-only** search page the `run` daemon can
-  serve. It is **loopback-only** (default `127.0.0.1:8686`; a non-loopback bind
-  is refused), **GET/HEAD-only**, Host-header allow-listed (DNS-rebinding
+- **Local web UI** — a minimal search page the `run` daemon can serve, **read-only
+  over the catalog**. It is **loopback-only** (default `127.0.0.1:8686`; a
+  non-loopback bind is refused), **GET/HEAD-only** except for the four local
+  scan-control endpoints below, Host-header allow-listed (DNS-rebinding
   defense), CSRF-protected, and gated by a one-time bootstrap token printed to the
   log (Jupyter-style), exchanged for an `HttpOnly`, `SameSite=Strict` session
   cookie. It is **policy-gated and fails closed**: it serves only while central
@@ -832,6 +862,67 @@ the machine is disconnected from central:
     index store's handle, so it is *incapable* of touching a history row — the
     isolation is architectural, not merely policy-gated. Central holds no copy;
     wiping the agent's data directory erases the history with no way to restore it.
+
+### Local scan controls {#local-scan-controls}
+
+The agent's **Controls** tab lets whoever is at the machine pause and resume
+**that agent's** scanning, trigger a scan, edit its scan schedule, and manage its
+scan roots. It exists for the cases central cannot see: a laptop about to go on
+battery, a NAS whose disk is being replaced, a workstation whose owner just
+mounted a new share.
+
+!!! danger "These controls administer the AGENT. They never touch the catalog."
+    There is no local write path to items or metadata, and there never will be —
+    `read_only` keeps its exact meaning and is still rejected as `false`. What
+    these permissions delegate is *when this agent scans and what it walks*.
+    Nothing here can create, edit, move or delete a catalogued item, on the agent
+    or centrally.
+
+Everything is **off by default** and enabled per scope from the console (Agents →
+policy editor → *Local access*):
+
+| Policy key | What the local UI may then do |
+| --- | --- |
+| `local_scan_control` | Pause / resume scanning; **Scan now** |
+| `local_schedule_control` | Edit `scan_cron`, `scan_interval_seconds`, `scan_on_start` |
+| `local_roots_control` | Add / remove scan roots |
+
+Three rules make this safe to hand out:
+
+- **A key you set centrally is locked locally.** Local editing may only fill in
+  keys your policy leaves *unset*. The agent renders a centrally-set value
+  read-only, labelled *managed by central* with the scope and version that set it
+  (e.g. `central policy group:nas v7`), and refuses the edit with a `409`. The
+  reason is not politeness: central re-applies its document on every poll, so a
+  local edit to a key you own would silently revert a minute later — worse than
+  being told no. The resulting chain is
+  **central policy > local override > `FILEARR_AGENT_*` env > sidecar > default**
+  (see [Agent settings → Precedence](reference/agent-settings.md#precedence)).
+- **A local resume cannot lift a central suspend.** The local pause is a separate,
+  **scan-only** flag; [suspend](#agent-suspend-maintenance) is a fleet control
+  that also stops the replication push. Both gate the scheduler, so scanning runs
+  only when *neither* is set. If you suspended the agent, its UI says so, points
+  at the console, and offers no resume button — and **Scan now** is refused too.
+- **Actions always require the agent's bootstrap token**, even on an agent whose
+  policy sets `auth_required: false`. Open reads are a defensible choice for a
+  loopback status page; anonymous "stop scanning this machine" is a different
+  decision and is never inherited from it. When reads are open, the daemon log
+  still prints the tokenized `http://127.0.0.1:PORT/?token=…` URL — that is how
+  an operator signs in for the controls.
+
+Scan roots are the agent's own `scan.json`, so they are genuinely local
+configuration — but an agent whose **configuration group** derives roots from
+`scan_selections` is locked out of root editing for the same reason: central
+would recompute the edit away. Removing a root only stops **future** scans of it;
+already-indexed items are left alone, because deleting them locally would
+replicate to central as a mass deletion (tombstoning stays the scan's job).
+
+The agent reports what was changed locally in its **health snapshot**, so this is
+visible fleet-wide rather than only on the machine: the agents table shows a
+`paused locally` badge and a `local settings` badge, and the row tooltip lists the
+local cron / interval / scan-on-start and when the roots were last edited. If you
+would rather this agent stopped deciding for itself, turn the permission off — the
+local overrides stop applying the moment central sets the same key.
 
 ## Self-update with signed releases
 

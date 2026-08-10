@@ -127,7 +127,12 @@ async def deliver_scheduled_export(
             await _deliver_webhook(export, schedule, summary, cfg, settings)
         elif channel.type_ == "apprise":
             rendered = _render(export, schedule, summary, with_link=True)
-            await send_via_apprise(cfg.get("url", ""), rendered)
+            # No attachment path: apprise's attach= is per-plugin and many chat
+            # services reject it, so a scheduled report always travels as the
+            # link-bearing summary body (with_link=True) on this channel type.
+            await send_via_apprise(
+                cfg.get("url", ""), rendered, timeout_s=settings.alert_apprise_timeout_s
+            )
         else:
             raise ChannelDeliveryError(
                 f"unknown channel type {channel.type_!r}", retryable=False

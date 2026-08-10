@@ -2,13 +2,17 @@
 ``docs/research/phase-10-agent-file-transfer.md`` + user-mandated share-location
 model, ``docs/tasks/phase-10-agent-transfer-tasks.md``).
 
-**Inert scaffolding.** Nothing in the runtime imports this module yet — only its
-tests (and the deliberately-501 API router in :mod:`filearr.api.transfers`, whose
-*contract* ships early so clients can code against it) do. It carries the
-*pure*, unit-testable core of the agent→central retrieval + share-mapping
-contract plus typed ``NotImplementedError`` stubs for the stateful pieces, each
-tagged with the Phase-10 task (``P10-Tk``) that will implement it. Wiring the
-staging/tus data plane + SSE is P10-T4/T6/T13 — see the tasks doc.
+**Phase 10 SHIPPED.** This header described "inert scaffolding" long after the
+feature went live; corrected 2026-08-10. Retrieve, the resumable staging upload
+and the Range download all work — they live in :mod:`filearr.api.transfers` and
+:mod:`filearr.api.agent_staging`, and :mod:`filearr.share_map` builds on the
+resolution helpers here.
+
+What stays in THIS module is the pure, unit-testable core: the wire contracts,
+share-URL resolution, the transfer state machine and the content-addressed
+staging path — everything that needs no Postgres, no network and no mTLS. That
+split is deliberate (it is what makes the rules testable without a stack), not a
+sign of unfinished work.
 
 What is *pure and implemented here*:
 
@@ -403,30 +407,21 @@ def staging_path_for(transfer_id: str) -> str:
     return str(PurePosixPath(STAGING_ROOT) / f"{canonical}.bin")
 
 
-# --- Stateful pieces: stubs, implemented by the tagged Phase-10 task --------
-
-
-def initiate_transfer(*_args: Any, **_kwargs: Any) -> Any:
-    """P10-T13/T6: RBAC-``download``-gated retrieve initiation — create the
-    ``agent_commands(kind='stage_upload')`` row + a ``staging_transfers`` row and
-    return the transfer id (brief §4.1, §6). Authorization MUST run *before* this
-    (no agent bandwidth / central disk spent for a principal lacking
-    ``download``); the completed retrieve audits unconditionally (R2)."""
-    raise NotImplementedError("P10-T13: RBAC-gated transfer initiation")
-
-
-def stage_receiver(*_args: Any, **_kwargs: Any) -> Any:
-    """P10-T4: the tus (or offset-``PATCH`` subset) staging-upload endpoint the
-    agent drains bytes into — resumable, per-agent token-bucket rate limited,
-    with agent-side path re-validation against its own roots before any read
-    (brief §2.2/§2.4, §4 defense-in-depth). Streaming hash verify on completion
-    is P10-T5."""
-    raise NotImplementedError("P10-T4: tus staging-upload receiver")
-
-
-def stream_staged(*_args: Any, **_kwargs: Any) -> Any:
-    """P10-T6: Range-capable ``GET`` that streams a verified staged file to the
-    browser (``Content-Disposition`` attachment), watermarking
-    ``last_range_request_at`` so the TTL sweep (P10-T8) won't reap a file mid
-    download. Gated by RBAC ``download`` + an unconditional audit line (R2)."""
-    raise NotImplementedError("P10-T6: staged-file Range download stream")
+# --- Where the stateful pieces actually live -------------------------------
+#
+# This module is PURE: wire contracts, share-URL resolution, the transfer state
+# machine, and the content-addressed staging path. The stateful halves of P10
+# ship elsewhere and are reached through the API layer, NOT through here:
+#
+#   * retrieve initiation (RBAC ``download`` gate + the stage_upload command and
+#     staging_transfers row) -> :func:`filearr.api.transfers.initiate_transfer`
+#   * the resumable staging-upload receiver the agent drains bytes into
+#     -> :mod:`filearr.api.agent_staging`
+#   * the Range-capable staged-file download stream
+#     -> :mod:`filearr.api.transfers`
+#
+# Three same-named placeholder functions used to sit here raising
+# NotImplementedError. They were dead from the day the real endpoints landed and
+# survived only because nothing imported them — which made a fully shipped
+# feature read as unfinished in every grep for NotImplementedError. Removed
+# 2026-08-10; this note exists so nobody adds them back.

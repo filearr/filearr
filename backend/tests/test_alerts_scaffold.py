@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from filearr.alerts.dispatch import (
+    ChannelDeliveryError,
     DeliveryResult,
     RenderedAlert,
     decrypt_channel_secret,
@@ -401,10 +402,11 @@ def test_bytes_and_str_bodies_equivalent():
     assert verify_signature(SECRET, BODY, header, now=NOW, max_age_s=300) is True
 
 
-# --- dispatch: dataclasses + remaining stub (apprise) ----------------------
-# P8-T2 implemented send_webhook/send_email and the P8-T4 crypto helpers; their
-# behaviour is covered in test_alert_drivers.py / test_alert_crypto.py. Only the
-# apprise adapter (P8-T3) remains a tagged stub, asserted here.
+# --- dispatch: dataclasses -------------------------------------------------
+# Every driver is now implemented: P8-T2 landed send_webhook/send_email, P8-T4 the
+# crypto helpers and P8-T3 the apprise adapter. Their behaviour is covered in
+# test_alert_drivers.py / test_alert_crypto.py / test_alert_apprise.py; only the
+# shared dataclass contract is asserted here.
 
 
 def test_render_and_result_dataclasses():
@@ -414,9 +416,14 @@ def test_render_and_result_dataclasses():
     assert dr.retryable is False
 
 
-async def test_apprise_stub_still_raises():
-    with pytest.raises(NotImplementedError):
-        await send_via_apprise("json://x", RenderedAlert("s", "b"))
+async def test_apprise_blank_url_is_permanent():
+    # The one apprise behaviour worth restating on the scaffold seam: the driver
+    # is reachable from this import path and refuses an unconfigured channel
+    # without touching the optional dependency (full coverage in
+    # test_alert_apprise.py).
+    with pytest.raises(ChannelDeliveryError) as ei:
+        await send_via_apprise("", RenderedAlert("s", "b"))
+    assert ei.value.retryable is False
 
 
 def test_crypto_helpers_round_trip():

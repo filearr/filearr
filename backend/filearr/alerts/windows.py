@@ -1,6 +1,7 @@
 """Throttle / digest windowing state machine (Phase 8, brief §4).
 
-Inert scaffolding for Phase 8. Pure functions over an explicit ``GroupState``
+LIVE: the dispatch pump asks this module whether each group is due. (This header
+said "inert scaffolding" until 2026-08-10.) Pure functions over an explicit ``GroupState``
 and a caller-supplied ``now`` (a synthetic clock in tests, ``datetime.now`` in
 production) — no DB, no timers. The persistent home of this state is the
 ``alert_events`` rows themselves (brief §3.3: no separate ring-buffer/digest

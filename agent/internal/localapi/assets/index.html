@@ -14,6 +14,7 @@
       <button id="tab-search" class="tab active" role="tab" aria-selected="true">Search</button>
       <button id="tab-filters" class="tab" role="tab" aria-selected="false">Filters</button>
       <button id="tab-reports" class="tab" role="tab" aria-selected="false">Reports</button>
+      <button id="tab-controls" class="tab" role="tab" aria-selected="false">Controls</button>
       <button id="tab-status" class="tab" role="tab" aria-selected="false">Status</button>
       <button id="tab-logs" class="tab" role="tab" aria-selected="false">Logs</button>
     </nav>
@@ -137,11 +138,75 @@
       <p id="rpt-empty" class="empty" hidden>No rows.</p>
     </section>
 
+    <section id="panel-controls" hidden>
+      <h2 class="panel-title">Scan controls</h2>
+      <p class="hint">These settings change what <strong>this agent does</strong> —
+        when it scans and which folders it walks. They never change the catalog:
+        the local surface stays read-only over items and metadata. Every control
+        is permitted (or not) by the central policy, and a setting central has
+        explicitly set is shown here but edited in the console.</p>
+      <div id="ctl-error" class="error" hidden></div>
+      <div id="ctl-notice" class="banner banner-info" hidden></div>
+
+      <h3 class="subhead">Scanning</h3>
+      <p id="ctl-scan-state" class="meta" aria-live="polite"></p>
+      <div class="toolbar">
+        <button type="button" id="ctl-pause" class="btn">Pause scanning</button>
+        <button type="button" id="ctl-resume" class="btn">Resume scanning</button>
+        <button type="button" id="ctl-scan-now" class="btn btn-accent">Scan now</button>
+      </div>
+      <p id="ctl-scan-why" class="hint"></p>
+
+      <h3 class="subhead">Schedule</h3>
+      <div class="ctl-grid">
+        <label class="ctl-label" for="ctl-cron">Cron (agent local time)</label>
+        <div class="ctl-field">
+          <input id="ctl-cron" type="text" spellcheck="false" placeholder="0 3 * * *">
+          <span id="ctl-cron-src" class="ctl-src"></span>
+        </div>
+
+        <label class="ctl-label" for="ctl-interval">Interval (seconds, min 300)</label>
+        <div class="ctl-field">
+          <input id="ctl-interval" type="number" min="300" step="60" placeholder="none">
+          <span id="ctl-interval-src" class="ctl-src"></span>
+        </div>
+
+        <label class="ctl-label" for="ctl-onstart">Scan on daemon start</label>
+        <div class="ctl-field">
+          <input id="ctl-onstart" type="checkbox">
+          <span id="ctl-onstart-src" class="ctl-src"></span>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button type="button" id="ctl-schedule-save" class="btn btn-accent">Save schedule</button>
+        <button type="button" id="ctl-schedule-clear" class="btn">Clear local overrides</button>
+      </div>
+      <p class="hint">Cron wins over the interval when both are set. Clearing a
+        local override falls back to this machine's environment variables and
+        then the built-in default. Precedence:
+        <code>central policy &gt; local override &gt; FILEARR_AGENT_* env &gt; sidecar &gt; default</code>.</p>
+
+      <h3 class="subhead">Scan roots</h3>
+      <div class="table-scroll"><table id="ctl-roots-table" class="data-table">
+        <thead><tr><th>Root</th><th class="col-copy"></th></tr></thead>
+        <tbody id="ctl-roots-body"></tbody>
+      </table></div>
+      <p id="ctl-roots-empty" class="empty" hidden>No scan roots configured.</p>
+      <div class="toolbar">
+        <input id="ctl-root-new" type="text" spellcheck="false" placeholder="absolute path of a folder to scan">
+        <button type="button" id="ctl-root-add" class="btn">Add root</button>
+      </div>
+      <p id="ctl-roots-why" class="hint"></p>
+    </section>
+
     <section id="panel-status" hidden>
       <h2 class="panel-title">Agent status &amp; settings</h2>
       <p class="hint">Read-only snapshot of this agent's identity, configuration,
-        and the central policy it is currently applying. Changes are made in the
-        central console (or the container's environment), never here.</p>
+        and the central policy it is currently applying. Catalog data is never
+        editable here. Scan scheduling and scan roots can be changed on the
+        <strong>Controls</strong> tab when the central policy permits it;
+        everything else is set in the central console (or the container's
+        environment).</p>
       <div id="status-error" class="error" hidden></div>
       <div id="roots-wrap" hidden>
         <h3 class="subhead">Scan roots</h3>
@@ -187,7 +252,9 @@
   </main>
 
   <footer class="footer">
-    Read-only · same-machine only ·
+    Catalog is read-only · same-machine only ·
+    scan controls administer this agent, never the catalog, and only as far as
+    central policy permits ·
     search history stays on this machine and is never sent to the central server.
   </footer>
 

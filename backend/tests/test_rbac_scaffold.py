@@ -341,9 +341,12 @@ def test_mint_tenant_token_stub_raises():
 @pytest.mark.parametrize(
     "provider_cls",
     [
-        authx.LocalPasswordProvider,
-        # authx.OIDCProvider is IMPLEMENTED as of P6-T5 (see tests/test_oidc_p6t5.py);
-        # only LDAP/SAML remain stubs.
+        # authx.OIDCProvider is IMPLEMENTED as of P6-T5 (see tests/test_oidc_p6t5.py)
+        # and authx.LDAPProvider as of P6-T6 (tests/test_ldap_p6t6.py) — both real
+        # login paths are async and live in their own modules, so the SYNC Protocol
+        # method is the part that stays unimplemented. authx.LocalPasswordProvider
+        # was deleted 2026-08-10: it was a placeholder for a wrapper P6-T2 shipped
+        # without needing, and local login is authx.authenticate_local.
         authx.LDAPProvider,
         authx.SAMLProvider,
     ],

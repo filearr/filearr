@@ -108,6 +108,28 @@ dependencies = [
     "huggingface-hub==1.23.0",
 ]
 
+[project.optional-dependencies]
+# Phase 8 alerting (P8-T3): the `apprise` notification-channel driver
+# (filearr/alerts/dispatch.send_via_apprise), which fans one URL out to any of
+# ~100 services (Discord/Telegram/ntfy/Pushover/Matrix/Gotify/...).
+#
+# OPTIONAL, not a core dependency, for two reasons. (1) Cost: apprise pulls a
+# large tree — requests, requests-oauthlib, markdown, PyYAML, click, certifi —
+# that a deployment using only the in-tree webhook and SMTP drivers never
+# executes; requests in particular is a second HTTP stack alongside our httpx.
+# (2) Safe degradation: an apprise-type channel configured WITHOUT the extra
+# fails with a non-retryable, actionable "install filearr[apprise]" error that
+# lands in alert_events.last_error and the channel Test button — alerts are never
+# silently dropped, so the absent extra is a visible configuration fault rather
+# than a reliability hazard.
+#
+# Pinned `==` like every core dependency above. 1.12.0 verified on PyPI
+# (released 2026-07-04, BSD-2-Clause — AGPL-compatible, pure Python, no build
+# toolchain) and against OSV/GitHub advisories 2026-08-10: the only advisory ever
+# filed against apprise is GHSA-qhmp-h54x-38qr (IFTTT regex injection), fixed in
+# 0.9.5.1. Re-check the FULL advisory list on the next bump.
+apprise = ["apprise==1.12.0"]
+
 [dependency-groups]
 dev = [
     "ruff==0.15.20",

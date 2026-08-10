@@ -1,8 +1,9 @@
 """Filearr local query DSL — the **normative reference parser** (Phase 7,
 roadmap §2 / ``docs/research/phase-7-local-query-access.md`` §1.4 + §4).
 
-**Inert scaffolding / reference implementation.** Nothing in the runtime imports
-this module yet — only its tests do. It is the *single source of truth* for the
+**LIVE, and still the reference implementation.**
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It is the *single source of truth* for the
 local query grammar that the offline agent's ``filearr query`` CLI and local web
 UI parse (``agent/internal/localapi``, see ``agent/docs/layout.md``). Per
 Architect ruling **R6**, the grammar is specified **once**, language-neutrally:

@@ -1,7 +1,8 @@
 """On-demand content digests (Phase 3, roadmap §5 — P3-T1 hash search).
 
-**Inert scaffolding.** Only tests import this module; nothing in the runtime
-wires it in yet. It ships one implemented, unit-tested pure helper
+**LIVE.** Wired into the hashing path.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships one implemented, unit-tested pure helper
 (``compute_digests``) plus the ``HASH_ATTRIBUTES`` constant that P3-T1 will feed
 into ``search.py``'s typo-tolerance ``disable_on_attributes`` list.
 

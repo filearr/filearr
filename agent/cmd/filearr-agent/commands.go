@@ -124,6 +124,38 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, 
 			if ops.CentralMaintenance() {
 				h["central_maintenance"] = true
 			}
+			// 2026-08-10: the LOCAL scan pause is a separate flag from central's
+			// suspend, and central has no other way to learn it — an agent that
+			// simply stops scanning while still heartbeating is exactly the
+			// silent-freeze failure the in-daemon scheduler exists to prevent.
+			if ops.LocalScanPaused() {
+				h["local_scan_paused"] = true
+			}
+		}
+		// Local schedule overrides / local root edits: an operator changed this
+		// agent's setup ON THE MACHINE (under the local_* permissions), so the
+		// console must be able to see that its group's schedule is not the whole
+		// story here. Omitted entirely when nothing was set locally.
+		if ls, lerr := agentcfg.LoadLocalSettings(dataDir); lerr == nil {
+			lo := map[string]any{}
+			if ls.ScanCron != nil {
+				lo["scan_cron"] = *ls.ScanCron
+			}
+			if ls.ScanIntervalSeconds != nil {
+				lo["scan_interval_seconds"] = *ls.ScanIntervalSeconds
+			}
+			if ls.ScanOnStart != nil {
+				lo["scan_on_start"] = *ls.ScanOnStart
+			}
+			if ls.RootsEditedAt != "" {
+				lo["roots_edited_at"] = ls.RootsEditedAt
+			}
+			if len(lo) > 0 {
+				if ls.UpdatedAt != "" {
+					lo["updated_at"] = ls.UpdatedAt
+				}
+				h["local_overrides"] = lo
+			}
 		}
 		if n, err := outbox.New(idx.DB()).CountUnsent(ctx); err == nil {
 			h["outbox_pending"] = n

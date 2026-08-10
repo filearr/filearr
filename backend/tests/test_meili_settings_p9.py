@@ -59,21 +59,29 @@ async def test_ensure_index_applies_typed_settings_on_fresh_index(monkeypatch):
 
     # facetSearch=false on the high-cardinality set; all attrs present; typed objects
     filt = index.update_filterable_attributes.call_args.args[0]
-    assert all(isinstance(f, FilterableAttributes) for f in filt)
-    disabled = {p for f in filt for p in f.attribute_patterns if not f.features.facet_search}
+    # Object form for every ordinary attribute; R8's reserved ``_geo`` is the one
+    # plain string in the payload (meili_ops.STRING_FORM_FILTERABLE).
+    objs = [f for f in filt if isinstance(f, FilterableAttributes)]
+    strs = [f for f in filt if isinstance(f, str)]
+    assert strs == ["_geo"]
+    assert len(objs) + len(strs) == len(filt)
+    disabled = {p for f in objs for p in f.attribute_patterns if not f.features.facet_search}
     assert disabled == set(FACET_SEARCH_DISABLED)
     # P6-T3 added path_scope (a scope key, never a human facet); the queued hash
     # facet decision added the near-unique P3-T1 digests (opaque exact-match only).
+    # R8's _geo is absent: it travels in the same payload as a PLAIN STRING (the
+    # documented spelling for the reserved geo field), so it has no features block.
     assert disabled == {"size", "mtime", "year", "path_scope", "quick_hash", "content_hash"}
+    assert "_geo" in [f for f in filt if isinstance(f, str)]
     # ...but the hashes stay FILTERABLE (exact-match hash search must still work):
     # facet-search-disabled only flips features.facet_search, not filterability.
     hash_feats = [
-        f for f in filt for p in f.attribute_patterns if p in ("quick_hash", "content_hash")
+        f for f in objs for p in f.attribute_patterns if p in ("quick_hash", "content_hash")
     ]
     assert hash_feats and all(
         f.features.filter.equality and not f.features.facet_search for f in hash_feats
     )
-    patterns = {p for f in filt for p in f.attribute_patterns}
+    patterns = {p for f in objs for p in f.attribute_patterns} | set(strs)
     assert patterns == set(FILTERABLE_ATTRIBUTES)
 
     # sortFacetValuesBy: count for the type-ahead candidates (R2), alpha default

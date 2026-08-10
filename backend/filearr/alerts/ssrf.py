@@ -1,6 +1,8 @@
 """Webhook SSRF guard (Phase 8, brief §7.1).
 
-Inert scaffolding for Phase 8. A webhook channel lets an admin supply an
+LIVE: ``alerts.dispatch.send_webhook`` calls :func:`check_webhook_url` before
+every POST, so this is an enforced control, not a plan. (This header said "inert
+scaffolding" until 2026-08-10.) A webhook channel lets an admin supply an
 arbitrary URL that Filearr's **own server** will POST to — a textbook SSRF
 surface (brief §7.1). This module is the pure classification + verdict core:
 

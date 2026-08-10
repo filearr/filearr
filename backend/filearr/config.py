@@ -270,6 +270,37 @@ class Settings(BaseSettings):
     meili_shadow_max_age_hours: int = 6
     meili_rebuild_batch: int = 1_000  # Postgres->shadow backfill page size
 
+    # --- P9-T4: periodic Meilisearch LMDB compaction ------------------------
+    # Meili's LMDB store never shrinks on its own: deletes and re-indexes leave
+    # free pages behind, so ``database_size`` drifts above ``used_database_size``
+    # and the volume holds bytes nothing reads. ``POST /indexes/{uid}/compact``
+    # (Meili >= 1.23; we pin >= 1.48) rewrites the environment compactly. This is
+    # a pure SPACE-RECLAMATION knob — the index is a disposable projection
+    # (invariant 1), so compaction never protects data and skipping it is always
+    # safe. Master switch so an operator on a tight maintenance window (or a
+    # deployment whose Meili predates the endpoint) can turn the weekly job off;
+    # the Jobs page then shows the task's amber "will no-op" chip.
+    meili_compaction_enabled: bool = True
+    # Fragmentation ratio (database_size / used_database_size) above which the
+    # 2x-disk compaction cost is worth paying. Mirrors
+    # ``meili_ops.DEFAULT_COMPACTION_THRESHOLD`` (Meili's own ~1.3 guidance),
+    # kept in lockstep by test_compaction_threshold_mirrors_meili_ops_default.
+    meili_compaction_threshold: float = 1.3
+    # Wall-clock budget for waiting on the compaction task. Generous (30 min):
+    # compacting a multi-million-document store is minutes of disk I/O. On
+    # timeout the job does NOT fail — Meili keeps compacting server-side and the
+    # result simply reports ``timeout`` (invariant 1 again: nothing is at risk).
+    meili_compaction_wait_s: float = 1800.0
+    # Meilisearch data dir, checked against the FIX-11 critical disk floor before
+    # a compaction starts, and ONLY when visible to THIS process — same rule as
+    # ``disk_pg_path``. Compaction transiently holds BOTH the old and the compact
+    # copy (~2x the index size), which is exactly the shape of the incident that
+    # motivated diskguard, so starting one on a nearly-full volume is refused.
+    # In the compose stack Meili owns its own container/volume (invisible here)
+    # so this stays unset and the guard is simply not applicable; in the
+    # single-volume LXC deploy it is /config/meili.
+    meili_data_path: str | None = None
+
     scan_hash_full_max_bytes: int = 1_073_741_824
     scan_batch_size: int = 500
     recycle_retention_days: int = 30
@@ -310,9 +341,9 @@ class Settings(BaseSettings):
     # --- Roadmap §17: adaptive extract backpressure ------------------------
     # The extract queue's static priority already keeps it below scan-control;
     # this adds a load-aware concurrency ceiling INSIDE the worker: when host
-    # pressure is high (1-min loadavg per core >= high water), extract jobs
-    # beyond `extract_backpressure_min_concurrency` are rescheduled a short
-    # jittered delay into the future instead of running — worker slots stay
+    # pressure is high (1-min loadavg per core >= high water), the ceiling
+    # contracts (see the control-loop knobs below) and extract jobs beyond it
+    # are rescheduled a short jittered delay into the future — worker slots stay
     # free for scan/index/maintenance jobs rather than queueing behind
     # extraction. Pressure is sampled at most once per sample_seconds; the
     # ceiling recovers only below the low water mark (hysteresis, no thrash).
@@ -331,6 +362,28 @@ class Settings(BaseSettings):
     extract_backpressure_high_load: float = 0.85  # load1/cores ceiling trip
     extract_backpressure_low_load: float = 0.60  # recovery threshold
     extract_backpressure_sample_seconds: float = 15.0
+    # --- §17 control loop (AIMD): the ceiling now FLOATS between
+    # `min_concurrency` and the max below instead of jumping between "the
+    # floor" and "unlimited". Host pressure drives contraction; extract queue
+    # depth drives expansion (the two roadmap notes contradict each other only
+    # because each describes one direction -- reasoning in backpressure.py's
+    # module docstring). 0 = auto: use `worker_concurrency`, since this process
+    # can never run more extract jobs than it has worker slots and that setting
+    # is what backs the FILEARR_WORKER_CONCURRENCY the compose worker command
+    # turns into `--concurrency`. Set it explicitly if you pass `--concurrency`
+    # on the CLI without also setting that env, or the ceiling will bind lower
+    # than the slots you actually have.
+    extract_backpressure_max_concurrency: int = 0
+    # Halving (rather than dropping straight to the floor) means a brief load
+    # spike costs one step of throughput instead of the whole recovery window,
+    # while sustained pressure still reaches the floor in 2-3 samples
+    # (4 -> 2 -> 1 = 30 s at the default cadence).
+    extract_backpressure_decrease_factor: float = 0.5
+    # No expansion for this long after a contraction. The input signal is the
+    # ONE-MINUTE loadavg -- an exponentially weighted average that lags reality
+    # by about that window -- so re-expanding sooner means reacting to a number
+    # that has not yet finished reflecting the contraction we just made.
+    extract_backpressure_expand_cooldown_seconds: float = 60.0
 
     # --- FIX-8/FIX-17: procrastinate job-history retention ------------------
     # Terminal procrastinate rows older than these windows are hard-deleted by
@@ -729,6 +782,15 @@ class Settings(BaseSettings):
     # P8-T14: retention (days) for TERMINAL alert_events (delivered OR
     # retries-exhausted). Pending/held rows are NEVER purged regardless of age.
     alert_events_retention_days: int = 30
+    # P8-T3: wall-clock ceiling for ONE apprise channel send. Generous relative to
+    # alert_webhook_timeout_s (10s) for two reasons: an apprise channel may hold
+    # several target URLs that its notify() walks SEQUENTIALLY, and each plugin
+    # runs its own request (some with internal retries) against a third-party SaaS.
+    # 30s matches the SMTP driver's budget — the other blocking, thread-offloaded
+    # driver — rather than the single-POST webhook budget. Like
+    # extract_timeout_seconds this bounds the CALLER only: the timed-out thread is
+    # abandoned, not killed (see alerts/dispatch.send_via_apprise).
+    alert_apprise_timeout_s: float = 30.0
 
     # --- Phase 12 thumbnails (S12/P12 slice 1) --------------------------------
     # Content-addressed WebP thumbnail cache under ``{config_dir}/thumbnails``.

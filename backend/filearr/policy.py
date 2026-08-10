@@ -111,6 +111,8 @@ class PolicyModel(BaseModel):
       absent = agent default ON. Never affects the CLI peer-credential check.
     * ``read_only`` (bool) — ALWAYS ``true``. The local surface is read-only by
       invariant; a ``false`` is REJECTED here (fail-closed, security > all).
+      This is about the CATALOG and is unaffected by the ``local_*_control``
+      permissions below, which delegate agent SELF-ADMINISTRATION only.
     * ``path_scope`` (list[str]) — the FLATTENED allow-list of ``rel_path`` GLOB
       predicates the agent applies as ``WHERE rel_path GLOB ?`` (OR-combined) to
       every local result set (R2: the agent consumes flattened predicates only, it
@@ -195,6 +197,35 @@ class PolicyModel(BaseModel):
     #: identity half of the event is unaffected). Absent = the agent's built-in
     #: cap (32 MiB). 0 = extract nothing by size.
     extract_max_bytes: int | None = Field(default=None, ge=0)
+
+    # --- local self-administration permissions (2026-08-10) ----------------
+    # These delegate a slice of AGENT ADMINISTRATION to the operator sitting at
+    # the machine, through the agent's own local web UI. They are deliberately
+    # NOT about the catalog: ``read_only`` above keeps its exact meaning and the
+    # local surface never mutates items or metadata, whatever these say.
+    #
+    # All three are absent = FALSE (matching the ``extract_*`` family), so an
+    # existing fleet delegates nothing until an operator opts in.
+    #
+    # Precedence, and the reason it is not negotiable: a key CENTRAL EXPLICITLY
+    # SET is locked in the local UI. Central re-applies its document on every
+    # policy poll, so a local edit to the same key would silently revert within a
+    # poll interval; the agent refuses the edit and names the owning scope
+    # instead. Local editing may only fill in keys central left unset, which
+    # yields the chain ``central policy > local override > FILEARR_AGENT_* env >
+    # sidecar > built-in default``.
+    #: Let the local UI pause/resume this agent's scanning and trigger a scan
+    #: now. The local pause is a scan-only flag SEPARATE from the ``suspend``
+    #: command (which also stops replication fleet-wide); both gate the
+    #: scheduler, and a local resume can never lift a central suspend.
+    local_scan_control: bool | None = None
+    #: Let the local UI edit ``scan_cron`` / ``scan_interval_seconds`` /
+    #: ``scan_on_start`` — but only the ones this policy does not itself set.
+    local_schedule_control: bool | None = None
+    #: Let the local UI add/remove this agent's scan roots (its ``scan.json``).
+    #: Still refused when a config group's ``scan_selections`` derives the roots,
+    #: since central would recompute a local edit away.
+    local_roots_control: bool | None = None
 
     @field_validator("scan_cron")
     @classmethod

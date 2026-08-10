@@ -22,6 +22,15 @@ index other machines and replicate their catalogs to a central server.
   per-library include/exclude rules.
 - **Typo tolerance and facets.** Powered by Meilisearch: instant results, typo
   correction, faceted filtering, and (optionally) local semantic/hybrid search.
+- **Search by place, and across passages.** Optional
+  [geo filters](reference/api.md#geo-search-radius-and-bounding-box) (radius or
+  map viewport, nearest-first ordering) for photos in a library that opts into
+  GPS exposure — with a
+  [map view in the console](reference/api.md#map-view-in-the-console) that plots
+  the current search and turns a dragged area into a filter, using a bundled
+  offline basemap and no third-party tiles unless you ask for them. Plus a
+  [federated search](reference/api.md#federated-multi-search) that merges file
+  hits and document-passage hits into one ranked list.
 - **Rich, per-type metadata extraction.** ffprobe for video, audio tags, EXIF
   for images (GPS hidden by default), document properties and body text,
   archive member listings, on-demand cryptographic digests, and thumbnails /

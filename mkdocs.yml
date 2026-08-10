@@ -86,6 +86,7 @@ nav:
   - Operations & recovery: operations.md
   - Reference:
       - Configuration: reference/configuration.md
+      - Agent settings: reference/agent-settings.md
       - API: reference/api.md
       - File-extension groups: reference/file-extension-groups.md
       - Development: reference/development.md

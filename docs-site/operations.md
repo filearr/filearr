@@ -41,7 +41,8 @@ part from `/opt/filearr`.
 
 The **Scheduled maintenance** panel on the Jobs page lists every housekeeping
 task the worker runs — retention purges, search-index reconcilers, thumbnail
-GC, monitors — with a tooltip describing what each does, its schedule, next
+GC, the weekly [search-index compaction](#meili-compaction), monitors — with a
+tooltip describing what each does, its schedule, next
 occurrence, and last-run status (from job history: succeeded runs are visible
 for ~48 h, failures for days).
 
@@ -326,6 +327,75 @@ give the container real swap headroom (the 512 MiB LXC default converts
 spikes into reclaim storms), and expect a busy minute at the start of every
 redeploy — the quiesce step deliberately triggers the wrap-up flush *before*
 containers are replaced.
+
+## Extraction throughput and adaptive backpressure {#extract-backpressure}
+
+Extraction is the greediest stage of the pipeline: one job per file, each one
+opening a file over SMB/NFS and running a parser. Two mechanisms keep it from
+eating the box.
+
+**Static (always on).** The `extract` queue carries a negative job priority, so
+a freshly triggered scan — or a cancel — is never queued behind a 5k-file
+extract backlog on a shared worker. Extraction never preempts scan control.
+
+**Adaptive (the controller).** Each worker process runs a small control loop
+that varies *how many extract jobs it runs at once*, between
+`FILEARR_EXTRACT_BACKPRESSURE_MIN_CONCURRENCY` and
+`FILEARR_EXTRACT_BACKPRESSURE_MAX_CONCURRENCY`. Two different signals move the
+ceiling in the two different directions:
+
+- **Host load contracts it.** Every
+  `FILEARR_EXTRACT_BACKPRESSURE_SAMPLE_SECONDS` the worker reads the 1-minute
+  load average per core — the same number an operator eyeballs. At or above
+  `FILEARR_EXTRACT_BACKPRESSURE_HIGH_LOAD` the ceiling is *multiplied* by
+  `FILEARR_EXTRACT_BACKPRESSURE_DECREASE_FACTOR` (halved by default), again on
+  each sample while the pressure lasts, down to the minimum. Halving rather
+  than dropping straight to the minimum means a brief spike costs one step of
+  throughput instead of the whole recovery window. The ceiling only starts
+  recovering below `FILEARR_EXTRACT_BACKPRESSURE_LOW_LOAD` (hysteresis — a
+  single threshold would flap).
+- **Queue depth expands it.** One slot per sample, and only when the host is
+  quiet *and* extract jobs are actually waiting. Backlog is deliberately never
+  a reason to throttle — the only way a deep extract queue gets shorter is by
+  running extract jobs — but a deep queue on an idle host is exactly when more
+  concurrency is free throughput. Nothing waiting means nothing to gain, so
+  the ceiling stays put. The backlog reading is a bounded query (it saturates
+  at "deep enough" rather than counting a multi-million-row job table).
+- **Anti-thrash.** At most one adjustment per sample, and no expansion within
+  `FILEARR_EXTRACT_BACKPRESSURE_EXPAND_COOLDOWN_SECONDS` of a contraction —
+  the 1-minute load average lags reality by about a minute, so expanding
+  sooner reacts to a number that has not caught up yet.
+
+Jobs above the ceiling are **not** parked on a worker slot: they are
+rescheduled 15–45 s out (jittered, attempt-agnostic — never counted as a
+failure and never recorded as a job error), so the slot goes to scan, index or
+maintenance work and the queue drains itself as pressure subsides.
+
+**What you will see.** Every transition is logged at INFO by the *worker*
+(`filearr.backpressure`) with its reason and inputs, visible in the Jobs page
+[Logs panel](#logs-panel):
+
+```text
+extract backpressure: tripped (load/core 1.42 >= 0.85); contracting extract concurrency in this worker
+extract backpressure: contracting 4 -> 2 (load/core 1.42 >= 0.85, in flight 4)
+extract backpressure: recovered (load/core 0.51 <= 0.60); ceiling 1/4, 137 jobs were rescheduled while tripped
+extract backpressure: expanding 1 -> 2 (load/core 0.22 <= 0.60, backlog >=100 waiting, in flight 1)
+```
+
+The state is deliberately **per worker process** and not shown on any
+dashboard: each worker samples its own host and protects its own share, and
+the API process — which never runs extract jobs — would only ever report an
+idle limiter. Read the worker's log lines, not a gauge.
+
+**When to intervene.** Extraction that never seems to reach full concurrency
+on a busy box is the controller working, not a fault. If you want it out of
+the way entirely, set `FILEARR_EXTRACT_BACKPRESSURE=false`; the static queue
+priority still stands. On hosts with no load average (Windows dev) the
+controller never activates at all. Note that the ceiling's default maximum is
+`FILEARR_WORKER_CONCURRENCY` — if you pass `--concurrency` to the worker
+command without setting that variable to match, set
+`FILEARR_EXTRACT_BACKPRESSURE_MAX_CONCURRENCY` explicitly or extraction will
+cap below the slots you actually have.
 
 ## A library indexes fewer files than the OS reports {#library-file-count-mismatch}
 
@@ -703,14 +773,60 @@ container). The shipped Caddyfile pins the check to public resolvers
 offline/stall, or failed report deliveries.
 
 **Fix.** All system rules ship **seeded, disabled, with no channel**. In Admin →
-Alerts: create a channel (webhook / SMTP), attach it to the rule, and **enable**
-the rule. Use the channel-row **Test** button to confirm delivery.
+Alerts: create a channel (webhook / SMTP / Apprise), attach it to the rule, and
+**enable** the rule. Use the channel-row **Test** button to confirm delivery.
 
 **Webhook specifics.** A Discord webhook rejects a generic body (`400 … Cannot
 send an empty message`). Set the channel's payload format to `discord`
 (auto-detected from a `discord.com/api/webhooks/…` URL) or `slack`; leave the HMAC
 secret blank for those (they don't verify it). All other protections (SSRF
 default-deny, no-redirect, bounded I/O) are identical.
+
+### Apprise channels {#apprise-channels}
+
+[Apprise](https://github.com/caronc/apprise) is the "everything else" channel: one
+URL selects one of ~100 notification services — `tgram://`, `ntfy://`, `pover://`,
+`matrixs://`, `gotify://`, `discord://` and so on — so Filearr does not need a
+driver per service. Pick channel type **apprise** in Admin → Alerts and paste the
+service URL; the [Apprise URL syntax][apprise-urls] page documents the format for
+each service.
+
+[apprise-urls]: https://github.com/caronc/apprise/wiki
+
+**It is an optional extra.** Apprise is not installed by default (it pulls a large
+dependency tree that webhook/SMTP-only deployments never use). Install it
+alongside Filearr:
+
+```bash
+pip install "filearr[apprise]"
+```
+
+For Docker, add it to the image (a one-line `RUN pip install apprise` layer on top
+of `ghcr.io/pwsh/filearr`, rebuilt with each upgrade) — installing into a running
+container does not survive a recreate.
+
+**A missing extra never drops alerts silently.** An apprise channel configured
+without the package fails with a **permanent** (non-retryable) error naming the
+fix, visible in the channel's **Test** result and in the alert's `last_error` on
+the Events tab. The alert goes terminal on the first attempt rather than retrying
+an outcome that cannot change — no retry storm, no silence.
+
+**The whole URL is the secret.** An apprise URL embeds its credential inline
+(`tgram://<bot-token>/<chat-id>`), so Filearr treats the entire string as a secret:
+it is AES-GCM encrypted at rest under `FILEARR_SECRET_KEY` (like the SMTP password
+and webhook HMAC secret — see [Security](security.md)), never returned by the API
+(reads show `__redacted__`; leave the field blank when editing to keep it), and
+never written to a log or an error message — even when a service quotes it back in
+a failure, the URL and its components are scrubbed before the error is stored.
+
+**Two other apprise-specific behaviours.** A multi-target channel takes **one URL
+per line** (newline is the only separator, because apprise URLs legitimately
+contain commas in query parameters). And unlike webhook channels, apprise targets
+are **not** SSRF-vetted — apprise owns URL parsing and connection setup for every
+plugin, so there is no seam to check a resolved address; the compensating control
+is that these URLs are admin-scope configuration carrying an embedded service
+credential, not attacker-suppliable targets. One send is bounded by
+`FILEARR_ALERT_APPRISE_TIMEOUT_S` (30s).
 
 **Agent alert thresholds.** *Agent offline* defaults to a generous 48h (offline is
 normal for laptops); *replication stalled* is the sharper 6h signal (alive but not
@@ -737,6 +853,43 @@ path-scoped RBAC search (until the rebuild finishes, scoped non-admin users fail
 *closed* to empty results; admins/API keys are unaffected). A crashed rebuild can
 leave an orphaned shadow index; an hourly reaper deletes shadows older than
 `FILEARR_MEILI_SHADOW_MAX_AGE_HOURS` (6h), never touching a young in-flight one.
+
+## Search index grows on disk → compaction {#meili-compaction}
+
+**Symptom.** The Meilisearch store keeps growing after big deletes, re-scans or
+a rebuild, and `du` reports far more than the catalogue should need. Meili's
+LMDB store never shrinks by itself: freed pages stay allocated to the file.
+
+**Diagnosis.** Compare the two sizes Meili reports — `database_size` is what the
+store occupies, `used_database_size` is what is actually in use:
+
+```bash
+curl -s -H "Authorization: Bearer $MEILI_MASTER_KEY" \
+  http://localhost:7700/stats | jq '{databaseSize, usedDatabaseSize}'
+```
+
+Their ratio is the fragmentation. Around 1.0 is healthy; past
+`FILEARR_MEILI_COMPACTION_THRESHOLD` (default 1.3) there is real space to
+reclaim.
+
+**Fix.** The **Compact search index** maintenance task runs weekly (Sunday 06:00
+UTC by default, editable on the Jobs page) and compacts only when the ratio is
+past the threshold — otherwise it logs "not fragmented" and stops. **Run now**
+on the Jobs page triggers it immediately.
+
+Two things to know before triggering one by hand:
+
+- Compaction transiently needs **roughly twice the index size free**, because
+  Meili writes the compact copy alongside the old one. If
+  `FILEARR_MEILI_DATA_PATH` points at a store this process can see, the task
+  **refuses to start** at the critical disk floor and says so in the log; on the
+  bundled compose stack Meili owns its own volume, so set that variable only
+  where the path is genuinely visible to the app/worker.
+- It reclaims space and nothing else. The index is a disposable projection of
+  Postgres, so a compaction that is skipped, refused or fails costs you bytes,
+  never data — every failure path logs and exits cleanly rather than failing the
+  job. Set `FILEARR_MEILI_COMPACTION_ENABLED=false` to switch the weekly job off
+  entirely; the Jobs page then shows it with a "will no-op" chip.
 
 ## Recycle-bin / tombstone recovery {#recycle-bin-tombstone-recovery}
 

@@ -150,6 +150,32 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         ),
         category="cleanup", default_cron="30 3 * * *", editable=True,
     ),
+    # Category rationale (P9-T4): NEITHER of the two categories the brief
+    # offered fits this registry's own rules. ``system`` means the minutely
+    # infrastructure ticks whose cadence IS their semantics — fixed, not
+    # editable, ``runnable=False`` — and a weekly job an operator may want to
+    # move or run by hand is none of those; ``ondemand`` means ``default_cron
+    # is None``, but this job's whole point is that it runs unattended. It is a
+    # scheduled space-reclamation sweep, which is exactly what ``cleanup``
+    # already holds (the retention purges and the thumbnail GC), so it lands
+    # here as an editable weekly entry. That also buys the maintenance-mode
+    # gate and the runtime-editable schedule for free, since editable+cron
+    # tasks are deferred by ``maintenance_tick`` rather than a static decorator.
+    MaintTaskSpec(
+        key="compact_meili",
+        task_name="filearr.worker.compact_meili",
+        title="Compact search index",
+        description=(
+            "Defragments the Meilisearch store when its on-disk size has grown "
+            "past FILEARR_MEILI_COMPACTION_THRESHOLD times the size actually "
+            "in use — Meili's LMDB never shrinks on its own. Reclaims disk "
+            "only: the index is a rebuildable projection, so skipping this is "
+            "always safe. Heavy, and needs roughly twice the index size free "
+            "while it runs, so it is refused at the critical disk floor."
+        ),
+        category="cleanup", default_cron="0 6 * * 0",
+        lock="compact-meili", editable=True,
+    ),
     # --- integrity (reconcilers/sweeps — schedules editable) ----------------
     MaintTaskSpec(
         key="reconcile_meili",
@@ -560,6 +586,7 @@ _GATED_TASKS: dict[str, str] = {
     "chunk_missing": "chunking",
     "rebuild_chunks_index": "chunking",
     "content_sniff": "content_sniff",
+    "compact_meili": "meili_compaction",
 }
 
 #: Operator-facing reason per OFF gate, surfaced as a "will no-op" chip.
@@ -575,13 +602,17 @@ _GATE_REASONS: dict[str, str] = {
         "content sniffing is disabled (FILEARR_CONTENT_SNIFF_ENABLED) — this "
         "task will no-op"
     ),
+    "meili_compaction": (
+        "search-index compaction is disabled (FILEARR_MEILI_COMPACTION_ENABLED) "
+        "— this task will no-op"
+    ),
 }
 
 
 async def _gates(session: AsyncSession) -> dict[str, bool]:
     """Current on/off state of every feature gate referenced by _GATED_TASKS.
 
-    Deliberately cheap: two settings reads plus ONE existence probe for a
+    Deliberately cheap: a handful of settings reads plus ONE existence probe for a
     chunking-enabled library (EXISTS, not COUNT — the Jobs page polls this).
     Procrastinate persists no task return value, so a run's own "skipped"
     reason can never be replayed; this deterministic pre-flight is what the UI
@@ -598,6 +629,7 @@ async def _gates(session: AsyncSession) -> dict[str, bool]:
         "semantic": settings.semantic_enabled,
         "chunking": chunking,
         "content_sniff": settings.content_sniff_enabled,
+        "meili_compaction": settings.meili_compaction_enabled,
     }
 
 

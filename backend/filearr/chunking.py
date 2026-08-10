@@ -28,6 +28,7 @@ from typing import Any
 from filearr.config import get_settings
 from filearr.meili_ops import DEFAULT_EMBEDDER_NAME, build_embedders, embedder_matches
 from filearr.models import DocChunk, Item
+from filearr.tenant_tokens import scope_ancestors
 
 log = logging.getLogger("filearr.chunking")
 
@@ -105,7 +106,19 @@ def build_chunk_doc(chunk: DocChunk, item: Item) -> dict[str, Any]:
         "rel_path": item.rel_path,
     }
     if item.path_scope is not None:
-        doc["path_scope"] = str(item.path_scope)
+        # R8: the ANCESTOR ARRAY, exactly like ``search.build_doc`` projects on the
+        # item index — not the single leaf scope this used to emit. The RBAC scope
+        # filter (``tenant_tokens.compile_scope_filter``) is written against Meili's
+        # array-membership semantics: a grant at any ancestor prefix matches via
+        # ``path_scope = "<prefix>"``. With a scalar leaf value only an exact-depth
+        # grant matched, so federating this index under the SAME compiled filter
+        # (or the LLM ``retrieve_passages`` path, which already used that filter)
+        # silently dropped passages the caller was entitled to. Fail-closed, never
+        # leaky — but wrong, and it would have made the federated endpoint's RBAC
+        # behaviour differ from the single-index one. The chunks index is disposable
+        # (invariant 1): existing docs pick this up on the next chunk pass or via
+        # the ``rebuild_chunks_index`` maintenance action.
+        doc["path_scope"] = list(scope_ancestors(str(item.path_scope)))
     if chunk.embedding:
         doc["_vectors"] = {DEFAULT_EMBEDDER_NAME: chunk.embedding}
     return doc

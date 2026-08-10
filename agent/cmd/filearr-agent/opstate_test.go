@@ -51,6 +51,64 @@ func TestOpStateCentralMaintenanceGatesReplicationOnly(t *testing.T) {
 	}
 }
 
+// The LOCAL scan pause (2026-08-10) is a separate, scan-only flag: it persists
+// on its own, does not touch replication, and — the rule the permission gates
+// exist for — a local resume can never lift a CENTRAL suspend.
+func TestLocalScanPauseIsSeparateFromCentralSuspend(t *testing.T) {
+	dir := t.TempDir()
+	s := newOpState(dir, discard())
+	if held, _ := s.ScanHold(); held {
+		t.Fatal("a fresh data dir must not hold scanning")
+	}
+
+	if err := s.SetLocalScanPaused(true); err != nil {
+		t.Fatalf("SetLocalScanPaused: %v", err)
+	}
+	held, by := s.ScanHold()
+	if !held || by != "paused locally" {
+		t.Fatalf("local pause must hold scanning, got held=%v by=%q", held, by)
+	}
+	if s.ReplicationPaused() {
+		t.Fatal("a LOCAL pause must not stop the replication push — that is central's suspend, not this")
+	}
+	if s.Suspended() {
+		t.Fatal("a local pause must not masquerade as a central suspend")
+	}
+
+	// It survives a restart, like suspend.json does.
+	if held, _ := newOpState(dir, discard()).ScanHold(); !held {
+		t.Fatal("the local pause must survive a restart")
+	}
+
+	// Now central suspends the agent too. A LOCAL resume clears only the local
+	// flag: the agent stays held, and it is held BY CENTRAL — otherwise the
+	// machine's operator could defeat the fleet control.
+	if err := s.SetSuspended(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLocalScanPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	held, by = s.ScanHold()
+	if !held {
+		t.Fatal("a local resume lifted a CENTRAL suspend")
+	}
+	if by != "suspended by central" {
+		t.Fatalf("the surviving hold must be attributed to central, got %q", by)
+	}
+	if !s.Suspended() || !s.ReplicationPaused() {
+		t.Fatal("the central suspend must be entirely untouched by a local resume")
+	}
+
+	// And only central can lift its own.
+	if err := s.SetSuspended(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if held, _ := s.ScanHold(); held {
+		t.Fatal("with both holds cleared, scanning must resume")
+	}
+}
+
 func TestSweepTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	old := time.Now().Add(-48 * time.Hour)

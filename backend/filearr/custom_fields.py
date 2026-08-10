@@ -1,6 +1,8 @@
 """Admin-defined custom fields (Phase 4, roadmap §7 — P4-T3 / P4-T4 / P4-T6).
 
-**Inert scaffolding.** Only tests import this module. Custom fields are the
+**SHIPPED** — P4-T4 wired this into the item PATCH path and the API imports it;
+the "only tests import this module" note that used to stand here was stale and is
+corrected 2026-08-10. Custom fields are the
 Paperless-``CustomField``-shaped, admin-defined extension point (research brief
 §6.1): a central definition table plus typed values written **only** into
 ``Item.user_metadata`` (never ``metadata_`` — invariant 2 keeps extractors off

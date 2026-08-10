@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,6 +106,141 @@ func TestResolveScanScheduleBadValuesIgnored(t *testing.T) {
 	if spec.enabled() {
 		t.Fatal("all knobs invalid: scheduler must resolve OFF")
 	}
+}
+
+// --- local overrides (2026-08-10) --------------------------------------------
+
+func saveLocal(t *testing.T, dataDir string, ls agentcfg.LocalSettings) {
+	t.Helper()
+	if err := agentcfg.SaveLocalSettings(dataDir, ls); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sp(s string) *string { return &s }
+func ip(n int) *int       { return &n }
+func bp(b bool) *bool     { return &b }
+
+// The full documented chain, per knob:
+//
+//	central policy > local override > FILEARR_AGENT_* env > default
+func TestResolveScanSchedulePrecedenceCentralLocalEnvDefault(t *testing.T) {
+	envAll := env(map[string]string{
+		envScanCron: "30 5 * * *", envScanEvery: "15m", envScanOnBoot: "false",
+	})
+
+	// (1) env only.
+	dir := t.TempDir()
+	spec := resolveScanSchedule(dir, envAll, discard())
+	if spec.cronStr != "30 5 * * *" || spec.every != 15*time.Minute || spec.onStart {
+		t.Fatalf("env-only tier wrong: %+v", spec)
+	}
+
+	// (2) a local override beats env.
+	saveLocal(t, dir, agentcfg.LocalSettings{
+		ScanCron: sp("0 2 * * *"), ScanIntervalSeconds: ip(3600), ScanOnStart: bp(true),
+	})
+	spec = resolveScanSchedule(dir, envAll, discard())
+	if spec.cronStr != "0 2 * * *" || spec.every != time.Hour || !spec.onStart {
+		t.Fatalf("local override must beat env: %+v", spec)
+	}
+
+	// (3) central policy beats the local override.
+	savePolicy(t, dir, map[string]any{
+		"scan_cron": "0 4 * * *", "scan_interval_seconds": 7200, "scan_on_start": false,
+	})
+	spec = resolveScanSchedule(dir, envAll, discard())
+	if spec.cronStr != "0 4 * * *" || spec.every != 2*time.Hour || spec.onStart {
+		t.Fatalf("central policy must beat the local override: %+v", spec)
+	}
+
+	// (4) a config group's cron is CENTRAL too, so it also beats local.
+	savePolicy(t, dir, map[string]any{"group": map[string]any{"scan_schedule_cron": "0 6 * * *"}})
+	spec = resolveScanSchedule(dir, envAll, discard())
+	if spec.cronStr != "0 6 * * *" {
+		t.Fatalf("group cron must beat the local override: %q", spec.cronStr)
+	}
+
+	// (5) with no policy at all, the local override is back in charge, and a
+	// knob it does NOT set still falls through to env.
+	dir2 := t.TempDir()
+	saveLocal(t, dir2, agentcfg.LocalSettings{ScanCron: sp("0 1 * * *")})
+	spec = resolveScanSchedule(dir2, envAll, discard())
+	if spec.cronStr != "0 1 * * *" {
+		t.Fatalf("local cron: %q", spec.cronStr)
+	}
+	if spec.every != 15*time.Minute {
+		t.Fatalf("an unset local knob must fall through to env, got %s", spec.every)
+	}
+
+	// (6) nothing anywhere: scheduler off.
+	if resolveScanSchedule(t.TempDir(), env(nil), discard()).enabled() {
+		t.Fatal("no policy, no local, no env: the scheduler must be OFF")
+	}
+}
+
+// A corrupt local-settings.json must not disturb resolution — the chain simply
+// carries on without local overrides.
+func TestResolveScanScheduleIgnoresCorruptLocalSettings(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, agentcfg.LocalSettingsName), []byte("{oops"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := resolveScanSchedule(dir, env(map[string]string{envScanCron: "0 7 * * *"}), discard())
+	if spec.cronStr != "0 7 * * *" {
+		t.Fatalf("a corrupt local file must fall through to env, got %q", spec.cronStr)
+	}
+}
+
+// The scheduler must not fire while scanning is held — by either holder.
+func TestSchedulerSkipsWhileHeld(t *testing.T) {
+	oldTick, oldDelay := schedTick, schedOnStartDelay
+	schedTick, schedOnStartDelay = 10*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { schedTick, schedOnStartDelay = oldTick, oldDelay })
+	t.Cleanup(func() { scanInFlight.Store(false) })
+
+	// An INTERVAL schedule (not scan-on-start): on-start fires at most once for
+	// the process lifetime, so it cannot show that a release lets scanning
+	// resume — an interval retries every tick, which is exactly the property
+	// under test.
+	dir := t.TempDir()
+	t.Setenv(envScanEvery, "20ms")
+
+	ops := newOpState(dir, discard())
+	if err := ops.SetLocalScanPaused(true); err != nil {
+		t.Fatal(err)
+	}
+
+	var fired atomic.Int32
+	run := func(context.Context, *config) error { fired.Add(1); return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runScanScheduler(ctx, &config{DataDir: dir}, discard(), run, ops.ScanHold)
+	}()
+	time.Sleep(150 * time.Millisecond) // many ticks past the on-start delay
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("a locally paused agent must not scan, got %d run(s)", got)
+	}
+
+	// Resuming locally releases it (nothing else is holding).
+	if err := ops.SetLocalScanPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for fired.Load() == 0 {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("scanning did not resume after the local pause was cleared")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
 }
 
 // The loop fires the injected runner from a policy interval and never

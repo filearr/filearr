@@ -288,6 +288,28 @@ tbody tr:hover { background: var(--row-hover); }
 #fb-table th, #fb-table td { padding: 0.3rem 0.5rem; border-top: 1px solid var(--border); text-align: left; }
 #fb-table thead th { border-top: none; background: var(--code-bg); }
 
+/* scan controls (agent self-administration; never catalog writes) */
+.ctl-grid {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: 0.5rem 0.8rem; align-items: center; margin: 0.4rem 0 0.8rem;
+}
+.ctl-label { color: var(--muted); font-size: 0.85rem; }
+.ctl-field { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.ctl-field input[type="text"], .ctl-field input[type="number"] {
+  font: inherit; font-size: 0.85rem; padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border); border-radius: 0.4rem;
+  background: var(--bg); color: var(--fg); min-width: 12rem;
+}
+/* A disabled control always says why (title attribute); the dashed border is
+   the visual cue that the value is owned elsewhere. */
+.ctl-field input:disabled, .ctl-field input.is-managed { opacity: 0.6; border-style: dashed; }
+.ctl-src { color: var(--muted); font-size: 0.78rem; }
+#ctl-root-new {
+  font: inherit; font-size: 0.85rem; padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border); border-radius: 0.4rem;
+  background: var(--bg); color: var(--fg); min-width: 20rem;
+}
+
 /* logs table */
 .loglines-wrap { max-height: 32rem; overflow: auto; border: 1px solid var(--border); border-radius: 0.5rem; }
 .log-table { border: none; }

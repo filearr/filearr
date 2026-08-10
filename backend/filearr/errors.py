@@ -49,6 +49,7 @@ TASK_RETRY_CAPS: dict[str, int] = {
     "filearr.tasks.extract.extract_item": 2,       # extract.EXTRACT_MAX_ATTEMPTS
     "filearr.tasks.index_sync.sync_items": 4,       # retrying.MEILI_RETRY_MAX_ATTEMPTS
     "filearr.tasks.index_sync.rebuild_index": 4,    # retrying.MEILI_RETRY_MAX_ATTEMPTS
+    "filearr.tasks.index_sync.reproject_library": 4,  # retrying.MEILI_RETRY_MAX_ATTEMPTS
     "filearr.tasks.embed.embed_item": 2,            # embed.py retry=2
     "filearr.tasks.embed.embed_missing": 2,         # embed.py retry=2
 }

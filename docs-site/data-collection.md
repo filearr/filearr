@@ -82,6 +82,20 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
     deliberately **no** global default-on path — location data does not leak into
     search results or API responses unless you opt a library in.
 
+    The same flag governs **geo search**: only an opted-in library's files carry
+    a `_geo` point in the search index, so
+    [radius / bounding-box queries](reference/api.md#geo-search-radius-and-bounding-box)
+    simply return nothing on a deployment where no library exposes GPS. Turning
+    `expose_gps` **off** again queues a re-projection that **rewrites** that
+    library's documents without their coordinates — points already indexed are
+    removed, not left behind.
+
+    The console's [map view](reference/api.md#map-view-in-the-console) is subject
+    to exactly this gate: with no library opted in it explains the toggle instead
+    of drawing an empty map. The map itself sends nothing outward — it draws a
+    basemap bundled with the console, and the optional third-party tile layer is
+    off by default.
+
 !!! note "OCR and semantic embeddings are opt-in"
     - **OCR** (Tesseract) runs only for a library with `ocr_enabled` — the default
       install pays zero OCR cost. When on, it OCRs pages/images with no usable
@@ -193,9 +207,11 @@ Meilisearch holds a **projection** of the catalog optimized for search: item
 identity and display fields (path, filename, type, size, times), searchable text
 (titles, tags, selected metadata, capped document body text and archive member
 names when present), facet values, and — when RBAC search is enabled — the item's
-path scope for tenant filtering. GPS is excluded unless a library opts in. The
-index is **disposable**: every field is rebuildable from Postgres, and it is never
-a store of record.
+path scope for tenant filtering. GPS is excluded unless a library opts in — when
+it does, the coordinates are also projected as Meilisearch's `_geo` point so
+[geo queries](reference/api.md#geo-search-radius-and-bounding-box) can filter and
+sort by location. The index is **disposable**: every field is rebuildable from
+Postgres, and it is never a store of record.
 
 ## Usage signals: frecency profiles {#frecency}
 

@@ -212,7 +212,16 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 > conservative choice; revisit deliberately). Adopt-later: hybrid/vector +
 > local embedder shipped (quantization deliberately deferred until the corpus
 > needs it); **`/similar` adopted** (P3-T9, `search_similar_documents`);
-> federated multi-search and geo filters still open (GPS stays gated).
+> **federated multi-search + `facetsByIndex` adopted** (R8, 2026-08-10 —
+> `GET /search/federated` merges the item and chunks indexes via the SDK's
+> `multi_search(..., federation=Federation(...))`, RBAC scope filter in EVERY
+> sub-query) and **geo filters adopted** (R8 — `_geo` projection plus
+> `_geoRadius` / `_geoBoundingBox` / `_geoPoint` params on `/search`).
+> **GPS STAYS GATED:** `_geo` is emitted only for a library with `expose_gps`;
+> the gate still lives in `exif.strip_gps` + `Library.expose_gps` and NEVER in
+> an extractor; flipping the flag off queues `reproject_library`, which rewrites
+> the library's documents with add-or-REPLACE semantics so already-indexed
+> points are actually removed (a plain re-sync merges and would not).
 
 **Adopt now:** tenant tokens (RBAC); pin ≥1.48.2 (CVE-2026-57823/4); facet
 search endpoint; **index-swap** pattern for zero-downtime settings changes;
@@ -549,8 +558,26 @@ Remaining, non-trivial:
 > `GET /libraries` now annotates `last_scan` with the run's `files_per_s`
 > plus a rolling 30-day median over finished FULL scans
 > (`median_files_per_s`, `throughput_runs`); the Admin page badges "slower
-> than usual" when a run comes in under 60% of a >=3-run median. A dedicated
-> control loop with metrics history stays future work.
+> than usual" when a run comes in under 60% of a >=3-run median.
+>
+> **SHIPPED 2026-08-10 — the control loop.** The binary trip is now an AIMD
+> controller in `filearr.backpressure`: a ceiling floating between
+> `..._MIN_CONCURRENCY` and `..._MAX_CONCURRENCY` (auto =
+> `FILEARR_WORKER_CONCURRENCY`), **multiplicative decrease** on host pressure
+> (halve per sample above the high water, so a brief spike costs one step, not
+> the whole recovery window) and **additive increase** (one slot per sample)
+> only when pressure is at/below the low water AND a *bounded* probe of the
+> extract queue says work is waiting. Anti-thrash: one move per sample plus a
+> 60 s post-contraction expansion cooldown (the 1-min loadavg lags by about
+> its own window). A 32-sample in-process ring backs `snapshot()`; transitions
+> are logged INFO with their inputs, still not dashboarded (the API process's
+> limiter is idle). **This resolves the contradiction below**: the deferred
+> bullet ("keep queue depth as the primary signal") and the 2026-07-24 note
+> ("depth remains untouched — host load IS the signal") are each right about
+> one DIRECTION. Depth may never throttle (that deepens the very queue it
+> reacts to) but it is the only sound reason to expand; pressure only ever
+> contracts. Reasoning in the `backpressure.py` module docstring; operator
+> view in `docs-site/operations.md#extract-backpressure`.
 - **Adaptive extract concurrency / backpressure (major, deferred).** T8 ships
   *static* knobs: per-worker `--concurrency`, per-queue worker pinning, and a
   negative extract priority so scan-control jumps the queue. It does **not**
@@ -725,3 +752,42 @@ retrieve_passages behind the per-library chunking_enabled opt-in; M3
 (2026-08-06) added the curator role (tag_files/annotate, PATCH-only,
 ItemVersion-attributed) + the per-key tool-call dashboard (and fixed M1's
 silently-dropped facade audit events — ApiKey uuid vs principals FK).
+
+## 22. Permissions enumeration, reconciliation & audit (W7 — LOW priority, scaffold only)
+
+**Status: scaffolded on both sides 2026-07-18, inert since.** Recorded here on
+2026-08-10 because it had no roadmap entry at all — the design lived only in
+`docs/research/permissions-enumeration-audit.md`, which made the largest
+unstarted item on the project invisible to anyone reading this file.
+
+The idea: enumerate filesystem ACLs (Windows DACLs, POSIX modes + ACLs, macOS)
+for indexed items, reconcile them against the catalog, and report on them — "who
+can actually read this share", "what changed since last week", "which files are
+world-readable". Permissions are read **agent-side** by design: only the agent
+can see a remote host's ACLs, exactly as with content extraction.
+
+What exists today is deliberately non-functional:
+
+- `backend/filearr/permissions.py` — the record schema plus pure diff/filter
+  logic. Explicitly inert: it performs no OS reads, and the four permission
+  report builders are typed stubs raising `NotImplementedError`. They are NOT
+  registered in the live canned-report registry, so nothing can invoke them.
+- `permission_snapshots` — documented in the research doc, **not** a live
+  SQLAlchemy model and not migrated.
+- `agent/internal/inventory/permissions/` — the collector returns
+  "permissions collector is scaffold-only: per-OS ACL reads not implemented
+  (W7)". `permissions_windows.go` / `permissions_posix.go` /
+  `permissions_darwin.go` / `masks.go` carry `TODO(W7-Tn)` markers where the
+  actual reads belong; only the record/mask/diff cores are real.
+
+Why it stays low priority: nothing depends on it, the catalog is fully useful
+without it, and the per-OS ACL surface is the kind of work that is only worth
+starting when someone actually needs the answer it produces. When that happens,
+the sequence is: per-OS reads behind the existing collector interface → the
+snapshot table + migration → wire the report builders into the registry → an
+audit/diff view. The pure cores are already tested, so the remaining work is
+genuinely the OS-specific reads and the plumbing, not the design.
+
+**Do not mistake the scaffold for a partial implementation.** Every entry point
+fails loudly and on purpose; there is no half-working path a user could stumble
+into.

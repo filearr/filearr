@@ -1,13 +1,14 @@
 """Meilisearch operational helpers (Phase 9, roadmap §8 — Meili feature adoption).
 
-**Inert scaffolding.** Only tests import this module; nothing in the runtime wires
-it in yet. It ships the *pure* logic behind the phase-9 operational features
+**LIVE.** The shadow-swap rebuild and the compaction sweep both run from here.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the *pure* logic behind the phase-9 operational features
 (fragmentation-driven compaction, shadow-index swap naming, settings drift
 detection, webhook-secret verification) plus the target settings/typo-tolerance
 *specification* that ``search.py``'s ``ensure_index()`` will consume once the
-tasks below land. The Meili-client-touching entry points are typed STUBS tagged
-with their owning task (``compact_if_fragmented`` P9-T4, ``rebuild_via_swap``
-P9-T5, ``ensure_webhook`` P9-T6).
+tasks below land. The Meili-client-touching entry points are tagged with their
+owning task; ``compact_if_fragmented`` (P9-T4) and ``rebuild_via_swap`` (P9-T5)
+are implemented, ``ensure_webhook`` (P9-T6) is still a typed STUB.
 
 Design constraint (whole module): **no Meilisearch client calls, no network, no
 ORM** — every function here is pure and unit-testable so the implementing tasks
@@ -48,6 +49,11 @@ logger = logging.getLogger(__name__)
 # names so ``settings_drift`` can diff them directly against a ``GET /settings``
 # response.
 # ---------------------------------------------------------------------------
+
+# R8 — Meilisearch's RESERVED geo field name. Documents carry it as
+# ``{"lat": <float>, "lng": <float>}``; the engine only recognises this exact
+# spelling, so it is named once here and referenced everywhere else.
+GEO_ATTR: str = "_geo"
 
 # NOTE: attribute ORDER is meaningful for ``searchableAttributes`` (it feeds the
 # attribute-ranking rule) and for ``rankingRules`` — both listed in
@@ -95,12 +101,47 @@ FILTERABLE_ATTRIBUTES: tuple[str, ...] = (
     # FACET_SEARCH_DISABLED). Adding it is genuine settings drift → a rebuild-index
     # is required after deploy to project it onto existing docs (ops runbook).
     "path_scope",
+    # R8 (roadmap §8 "geo filters (photo GPS)"): Meilisearch's reserved geo field.
+    # Filterable is what enables the ``_geoRadius(...)`` / ``_geoBoundingBox(...)``
+    # filter functions; sortable (below) is what enables ``_geoPoint(...)`` ordering.
+    # Emitted in the PLAIN-STRING form, not the object form — see
+    # STRING_FORM_FILTERABLE below for why.
+    # The DOCUMENT side is gated: ``search.build_doc`` only ever emits ``_geo`` for a
+    # library whose ``expose_gps`` is true (CWE-1230 default-hidden gate, P3-T11), so
+    # on a deployment where no library opted in this attribute is simply filterable
+    # over a corpus in which no document has it — every geo query matches nothing.
+    GEO_ATTR,
 )
+
+# Filterable attributes that must be sent to Meilisearch as PLAIN STRINGS rather
+# than as the per-attribute object form the rest of the list uses (R8).
+#
+# ``_geo`` is Meilisearch's RESERVED geo field, and ``["_geo"]`` is the exact,
+# long-documented spelling that enables geosearch. The object form's
+# ``features`` block (facetSearch + filter.equality/comparison) describes a
+# normal user attribute; whether the engine accepts — and correctly interprets —
+# that block for the reserved geo field is a LIVE-ONLY question we cannot settle
+# from the SDK alone, and the cost of guessing wrong is not cosmetic:
+# ``ensure_index()`` is awaited unguarded in the app lifespan, so a rejected
+# settings payload would fail STARTUP. The documented string form cannot be
+# rejected on feature-shape grounds, so it is what we send. Both forms travel in
+# the SAME ``update_filterable_attributes`` call (the SDK's parameter is typed
+# ``list[str | FilterableAttributes]`` precisely to allow the mix).
+#
+# Consequence to keep in mind: a string entry carries Meili's DEFAULT features,
+# i.e. facet search is nominally enabled for it — which is why ``_geo`` is
+# deliberately absent from FACET_SEARCH_DISABLED below. That is inert in
+# practice (a lat/lng object is not a facet-searchable string value) and is a
+# far better trade than risking a boot-time settings rejection.
+STRING_FORM_FILTERABLE: tuple[str, ...] = (GEO_ATTR,)
 # ``mtime_sort`` (FIX-3): a CLAMPED copy of ``mtime`` (min(mtime, index-time)) used
 # as the sort key for sort=newest so a bogus FUTURE mtime cannot float to the top.
 # Raw ``mtime`` stays sortable too (explicit sort=mtime:asc|desc / range filters).
+# ``_geo`` (R8) is sortable so ``sort=_geoPoint(lat,lng):asc`` (nearest-first
+# distance ordering) is accepted; like every other geo surface it is inert on a
+# corpus whose documents carry no ``_geo`` (the expose_gps gate decides that).
 SORTABLE_ATTRIBUTES: tuple[str, ...] = (
-    "title", "year", "size", "mtime", "mtime_sort", "recency_bucket",
+    "title", "year", "size", "mtime", "mtime_sort", "recency_bucket", GEO_ATTR,
 )
 
 # Numeric fields where fuzzy matching is nonsensical (brief §2e). The string /
@@ -129,6 +170,11 @@ DISABLE_TYPO_ATTRIBUTES: tuple[str, ...] = tuple(
 # here while REMAINING filterable (P3-T1 exact-match search is unaffected —
 # ``search.py._filterable_settings`` keeps ``filter=equality+comparison`` for
 # every attribute and only flips ``features.facet_search`` off for this set).
+# R8 NOTE: ``_geo`` is deliberately NOT here even though a coordinate pair is
+# obviously not a human facet — it ships in the plain-string form
+# (STRING_FORM_FILTERABLE), which carries Meili's default features and therefore
+# cannot express a facet-search opt-out. Harmless: the engine has no string facet
+# values to build for a geo point.
 FACET_SEARCH_DISABLED: tuple[str, ...] = (
     "size", "mtime", "year", "path_scope", "quick_hash", "content_hash",
 )
@@ -478,13 +524,139 @@ class WebhookTarget:
 # Meili-client-touching entry points — STUBS (each owns a task). No client calls
 # land in this scaffolding pass; the pure decision logic above is what they wire.
 # ---------------------------------------------------------------------------
-async def compact_if_fragmented() -> bool:
+async def compact_if_fragmented(
+    *, threshold: float | None = None, wait_s: float | None = None
+) -> dict:
     """P9-T4: weekly periodic — compact the index iff fragmented past threshold.
 
-    Wiring: ``get_stats()`` → ``fragmentation_ratio`` → ``should_compact`` →
-    ``AsyncIndex.compact()``; returns whether a compaction was triggered.
+    Wiring: ``get_stats()`` → :func:`fragmentation_ratio` → :func:`should_compact`
+    → ``AsyncIndex.compact()`` (the SDK binding for Meili's
+    ``POST /indexes/{uid}/compact``, present since Meilisearch 1.23 and verified
+    against the installed ``meilisearch-python-sdk`` — no hand-rolled HTTP here).
+
+    **This reclaims disk, it does not protect anything.** Meili's LMDB store never
+    shrinks on its own, so deletes/re-indexes leave free pages that keep
+    ``database_size`` above ``used_database_size``; compaction rewrites the
+    environment compactly. Under invariant 1 the index is a DISPOSABLE projection
+    of Postgres truth, so a skipped, refused or failed compaction costs nothing but
+    bytes — which is why every failure path below degrades to a logged, structured
+    skip instead of an exception (same posture as the rest of this module's
+    operational entry points, and the FIX-8 "no retry, the next tick re-runs"
+    discipline the calling periodic follows).
+
+    **Disk safety.** Compaction transiently holds BOTH the old and the compact copy
+    (~2x the index size on disk) — the same LMDB constraint ``rebuild_via_swap``
+    notes for its shadow. When ``FILEARR_MEILI_DATA_PATH`` is set (i.e. the Meili
+    store is visible to this process; unset in the compose stack where Meili owns
+    its own volume) a compaction is REFUSED at the FIX-11 critical low-space floor
+    via :func:`filearr.diskguard.is_critical` — the cheap cached, non-raising probe
+    that exists for exactly this "should I even start?" question. The check runs
+    only once fragmentation has already argued FOR compacting, so a healthy index
+    on a full volume reports the honest "not fragmented", not a scary refusal.
+
+    Returns a structured result (``status`` ∈ ``compacted`` | ``not_fragmented`` |
+    ``skipped`` | ``timeout`` | ``error``, plus ``compacted`` as the plain boolean
+    the caller usually wants and the sizes/ratio the decision was made on). The
+    decision is logged at INFO either way: an operator needs to see "checked, not
+    fragmented" as much as "compacting".
     """
-    raise NotImplementedError("P9-T4: compact_if_fragmented periodic task")
+    from filearr import diskguard
+    from filearr.config import get_settings
+    from filearr.search import client
+
+    s = get_settings()
+    if not s.meili_compaction_enabled:
+        # Master switch off — mirrors how the other gated tasks report a skip; the
+        # Jobs page already shows the amber "will no-op" chip for this state.
+        logger.info("compact_if_fragmented: skipped — compaction disabled")
+        return {"status": "skipped", "reason": "disabled", "compacted": False}
+
+    threshold = s.meili_compaction_threshold if threshold is None else threshold
+    budget = s.meili_compaction_wait_s if wait_s is None else wait_s
+
+    try:
+        async with client() as c:
+            index = c.index(s.meili_index)
+            stats = await index.get_stats()
+            db_size = getattr(stats, "database_size", None)
+            used = getattr(stats, "used_database_size", None)
+            ratio = fragmentation_ratio(db_size, used)
+            if not should_compact(ratio, threshold):
+                logger.info(
+                    "compact_if_fragmented: not fragmented — index=%s ratio=%.3f "
+                    "(threshold %.3f) database_size=%s used_database_size=%s",
+                    s.meili_index, ratio, threshold, db_size, used,
+                )
+                return {
+                    "status": "not_fragmented", "compacted": False, "ratio": ratio,
+                    "threshold": threshold,
+                    "database_size": db_size, "used_database_size": used,
+                }
+
+            # Fragmented enough to be worth it — now, and only now, ask whether
+            # there is room for the transient second copy.
+            if s.meili_data_path and diskguard.is_critical(s.meili_data_path, s):
+                logger.warning(
+                    "compact_if_fragmented: refusing to compact %s (ratio %.3f) — "
+                    "%s is at the critical disk floor and compaction needs ~2x the "
+                    "index size; reclaiming space is never worth risking a full "
+                    "volume (FIX-11)",
+                    s.meili_index, ratio, s.meili_data_path,
+                )
+                return {
+                    "status": "skipped", "reason": "disk_critical", "compacted": False,
+                    "ratio": ratio, "threshold": threshold,
+                    "database_size": db_size, "used_database_size": used,
+                }
+
+            logger.info(
+                "compact_if_fragmented: compacting %s — ratio=%.3f exceeds %.3f "
+                "(database_size=%s used_database_size=%s)",
+                s.meili_index, ratio, threshold, db_size, used,
+            )
+            info = await index.compact()
+            try:
+                res = await c.wait_for_task(
+                    info.task_uid, timeout_in_ms=int(budget * 1000)
+                )
+            except Exception:
+                # The compaction task IS enqueued and Meili keeps working on it;
+                # only our observation timed out. Report it rather than failing the
+                # job — the next weekly run re-measures the ratio anyway.
+                logger.warning(
+                    "compact_if_fragmented: compaction task %s still running after "
+                    "%.0fs — Meili continues server-side; next run re-measures",
+                    info.task_uid, budget, exc_info=True,
+                )
+                return {
+                    "status": "timeout", "compacted": True, "ratio": ratio,
+                    "threshold": threshold, "task_uid": info.task_uid,
+                    "database_size": db_size, "used_database_size": used,
+                }
+            status = getattr(res, "status", None)
+            logger.info(
+                "compact_if_fragmented: compaction task %s finished %r (index=%s, "
+                "ratio was %.3f)",
+                info.task_uid, status, s.meili_index, ratio,
+            )
+            return {
+                "status": "compacted" if status == "succeeded" else "error",
+                "compacted": True, "task_status": status, "ratio": ratio,
+                "threshold": threshold, "task_uid": info.task_uid,
+                "database_size": db_size, "used_database_size": used,
+            }
+    except Exception as exc:
+        # Meili unreachable / API error / an unstatable data path: a disposable
+        # projection's housekeeping must never raise into the worker and burn a
+        # failed-job slot. Log with the traceback and let the next tick retry.
+        logger.warning(
+            "compact_if_fragmented: skipped — Meilisearch unavailable or the "
+            "compaction call failed (%s)", exc, exc_info=True,
+        )
+        return {
+            "status": "skipped", "reason": "unavailable", "compacted": False,
+            "error": str(exc),
+        }
 
 
 async def rebuild_via_swap(*, wait_s: float | None = None) -> int:

@@ -9,14 +9,17 @@ the async Postgres-backed session lifecycle (``create_session`` /
 the global-role → API-scope mapping (``scopes_for_role``) that lets a session
 principal satisfy the existing Bearer-scope dependencies.
 
-**Still stubs (later tasks):** the federated ``AuthProvider`` implementations —
-``OIDCProvider`` (P6-T5), ``LDAPProvider`` (P6-T6), ``SAMLProvider`` (P6-T7).
-They keep the RBAC layer provider-agnostic: every mechanism converges on
-:class:`AuthResult`, so RBAC evaluation never learns which provider produced a
-principal. ``LocalPasswordProvider`` stays a typed placeholder — the P6-T1 local
-login path is the async ``authenticate_local`` below (verifying against
-``users.password_hash``); the provider wrapper is completed alongside
-group resolution in P6-T2.
+**Provider status.** ``OIDCProvider`` (P6-T5) and ``LDAPProvider`` (P6-T6) are
+IMPLEMENTED — in :mod:`filearr.oidc` and :mod:`filearr.ldap_auth` respectively,
+because both real login paths are async (a DB session for JIT provisioning, a
+threadpool for blocking directory I/O) and the synchronous ``AuthProvider``
+Protocol cannot carry either. ``SAMLProvider`` (P6-T7) is genuinely unshipped and
+deliberately blocked: pysaml2 hard-pins ``pyopenssl<24.3.0``, which would
+force-downgrade the crypto stack. The Protocol keeps the RBAC layer
+provider-agnostic: every mechanism converges on :class:`AuthResult`, so RBAC
+evaluation never learns which provider produced a principal. Local login is the
+async :func:`authenticate_local` below (verifying against
+``users.password_hash``).
 
 Deliberately NOT decided here (per the brief's rulings): **R5** (the Authlib
 floor is re-verified live at P6-T5) and **R4** (external group memberships
@@ -318,23 +321,16 @@ class AuthProvider(Protocol):
         ...
 
 
-class LocalPasswordProvider:
-    """local username/password provider placeholder (brief §2.1). The P6-T1
-    login path is the async :func:`authenticate_local` above (it needs a DB
-    session, which the sync provider Protocol deliberately does not carry); this
-    class is completed as the provider wrapper alongside group resolution in
-    P6-T2, keeping the federated providers and local login one uniform shape."""
-
-    provider_name = "local"
-
-    def authenticate(self, credentials: dict[str, str]) -> AuthResult:
-        raise NotImplementedError(
-            "LocalPasswordProvider wrapper lands in P6-T2; P6-T1 login uses "
-            "authx.authenticate_local"
-        )
-
-    def resolve_groups(self, external_subject: str) -> tuple[str, ...]:
-        raise NotImplementedError("LocalPasswordProvider group resolution is P6-T2")
+# NOTE (2026-08-10): a ``LocalPasswordProvider`` placeholder class used to sit
+# here raising NotImplementedError, waiting to become "the provider wrapper" in
+# P6-T2. P6-T2 shipped without ever needing it: local login is the async
+# :func:`authenticate_local` above, because it needs a DB session that the
+# synchronous provider Protocol deliberately does not carry, and group
+# resolution for local users is a plain DB read rather than a directory call.
+# The class was therefore dead from the moment local auth worked, and its only
+# effect was to make a shipped feature look unfinished to anyone grepping for
+# NotImplementedError. Removed; the federated providers below are the real
+# Protocol implementations.
 
 
 class LDAPProvider:

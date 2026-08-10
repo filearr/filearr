@@ -72,9 +72,12 @@ async def test_ensure_index_sets_sidecar_filterable(monkeypatch):
     monkeypatch.setattr(search_mod, "client", lambda: fake_client)
     await search_mod.ensure_index()
 
-    # filterable attributes are now object-form; sidecar fields still present
+    # filterable attributes are now object-form (R8: plus Meili's reserved ``_geo``
+    # as a plain string in the same payload); sidecar fields still present
     filt = index.update_filterable_attributes.call_args.args[0]
-    patterns = {p for fa in filt for p in fa.attribute_patterns}
+    patterns = {
+        p for fa in filt if not isinstance(fa, str) for p in fa.attribute_patterns
+    } | {fa for fa in filt if isinstance(fa, str)}
     assert "is_sidecar" in patterns
     assert "sidecar_of" in patterns
     # typo tolerance still uses a typed model, not a dict

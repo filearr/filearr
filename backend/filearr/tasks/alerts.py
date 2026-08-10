@@ -149,7 +149,11 @@ async def _send_to_channel(channel: AlertChannel, rendered, settings) -> None:
     elif channel.type_ == "email":
         await send_email(cfg, rendered)
     elif channel.type_ == "apprise":
-        await send_via_apprise(cfg.get("url", ""), rendered)
+        # The whole URL is the secret (decrypted just above by _decrypt_config);
+        # it is passed by value and never logged or echoed into last_error.
+        await send_via_apprise(
+            cfg.get("url", ""), rendered, timeout_s=settings.alert_apprise_timeout_s
+        )
     else:
         raise ChannelDeliveryError(
             f"unknown channel type {channel.type_!r}", retryable=False
@@ -302,7 +306,11 @@ async def run_pending_dispatch(session, now: datetime | None = None) -> dict:
             await session.commit()
             continue
         except NotImplementedError as exc:
-            # e.g. apprise extra absent — a permanent misconfiguration, terminal.
+            # Backstop for any driver that is not wired yet (every shipped type is
+            # now implemented — P8-T3 closed the last one, the apprise adapter,
+            # which reports a missing optional extra as a non-retryable
+            # ChannelDeliveryError above rather than through this branch). A
+            # not-implemented driver is a permanent misconfiguration, so terminal.
             note = sanitize_error(str(exc))
             for r in grp:
                 r.delivery_attempts = max_attempts

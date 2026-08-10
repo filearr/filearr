@@ -228,6 +228,14 @@
     return POLICY_FIELDS.filter((f) => f.section === section);
   }
 
+  /** Hover text for a field's label and its control. Same words as the visible
+   *  hint (which is small grey text some operators hover rather than read),
+   *  plus the key and the absent-key behaviour — the two things an operator has
+   *  to know before deciding whether to set it at all. */
+  function fieldTitle(f: PolicyFieldSpec): string {
+    return `${f.label} (${f.key}) — ${f.hint} Not set → ${f.fallback}.`;
+  }
+
   function fmtValue(v: unknown): string {
     if (v === undefined) return "—";
     if (Array.isArray(v) || (v && typeof v === "object")) return JSON.stringify(v);
@@ -339,10 +347,19 @@
   <!-- Scope selector -->
   <div class="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
     <div class="flex flex-wrap items-center gap-2">
-      <span class="text-xs font-medium text-slate-500">Scope</span>
+      <span
+        class="text-xs font-medium text-slate-500"
+        title="Which document you are editing. Resolution is most-specific-wins with NO key merging: agent beats rollout group beats global, and the winning document supplies the agent's WHOLE policy.">
+        Scope
+      </span>
       {#each [["global", "Global"], ["group", "Rollout group"], ["agent", "Specific agent"]] as [kind, label] (kind)}
         <button
           type="button"
+          title={kind === "global"
+            ? "The fleet-wide document. Applies to every agent that has no rollout-group or per-agent document of its own."
+            : kind === "group"
+              ? "One document for every agent whose ENROLLMENT put it in this rollout group. Not the same thing as a configuration group. Outranks global for those agents."
+              : "One document for one agent. Outranks both other scopes — and replaces them outright, so it must carry every key that agent needs."}
           class="rounded-full border px-3 py-1 text-xs {scopeKind === kind
             ? 'border-transparent bg-[var(--accent)] text-white'
             : 'border-slate-300 dark:border-slate-700'}"
@@ -353,6 +370,7 @@
         <input
           list="filearr-rollout-groups"
           class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
+          title="Rollout group name, assigned at enrollment. Existing groups are offered as suggestions; a name that matches no agent stores a document that nothing reads yet."
           placeholder="rollout group name"
           value={groupName}
           onchange={(e) => {
@@ -365,6 +383,7 @@
       {:else if scopeKind === "agent"}
         <select
           class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"
+          title="The one agent this document applies to. Saving here stops the global and rollout-group documents from applying to it entirely — this document must then carry every key it needs."
           value={agentId}
           onchange={(e) => {
             agentId = (e.currentTarget as HTMLSelectElement).value;
@@ -461,7 +480,7 @@
             class="mt-3 grid gap-2 border-t border-slate-100 pt-3 md:grid-cols-[18rem_1fr_14rem] dark:border-slate-800/60">
             <div>
               <div class="flex flex-wrap items-center gap-1.5">
-                <span class="text-sm">{f.label}</span>
+                <span class="text-sm" title={fieldTitle(f)}>{f.label}</span>
                 {#if f.enforcedBy === "central"}
                   <span
                     class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
@@ -470,14 +489,15 @@
                   </span>
                 {/if}
               </div>
-              <code class="text-[11px] text-slate-400">{f.key}</code>
-              <p class="mt-0.5 text-xs text-slate-500">{f.hint}</p>
+              <code class="text-[11px] text-slate-400" title={fieldTitle(f)}>{f.key}</code>
+              <p class="mt-0.5 text-xs text-slate-500" title={fieldTitle(f)}>{f.hint}</p>
             </div>
 
             <div>
               {#if f.kind === "bool"}
                 <select
                   class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                  title={fieldTitle(f)}
                   value={boolMode(f.key)}
                   onchange={(e) =>
                     setBoolMode(f.key, (e.currentTarget as HTMLSelectElement).value)}>
@@ -486,7 +506,9 @@
                   <option value="false">Off</option>
                 </select>
               {:else}
-                <label class="inline-flex items-center gap-2 text-xs text-slate-500">
+                <label
+                  class="inline-flex items-center gap-2 text-xs text-slate-500"
+                  title="Write this key into the document at the selected scope. Unticked leaves it absent, which is not the same as off — {f.label} then falls back to {f.fallback}.">
                   <input
                     type="checkbox"
                     checked={form[f.key]?.set ?? false}
@@ -500,6 +522,7 @@
                       type="number"
                       min={f.min}
                       max={f.max}
+                      title={fieldTitle(f)}
                       class="mt-1 block w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
                       value={form[f.key].value}
                       oninput={(e) =>
@@ -507,6 +530,7 @@
                   {:else if f.kind === "cron"}
                     <input
                       class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+                      title={fieldTitle(f)}
                       placeholder="0 3 * * *"
                       value={form[f.key].value}
                       oninput={(e) =>
@@ -537,6 +561,7 @@
                     </div>
                     <input
                       class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                      title={fieldTitle(f)}
                       placeholder="comma-separated preset names"
                       value={form[f.key].value}
                       oninput={(e) =>
@@ -545,6 +570,7 @@
                     <textarea
                       rows="3"
                       class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                      title={fieldTitle(f)}
                       placeholder="one per line"
                       value={form[f.key].value}
                       oninput={(e) =>
@@ -645,6 +671,7 @@
         <textarea
           rows="12"
           class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+          title="The whole policy document, including keys this console does not render (those round-trip untouched). Editing here is how you set a key the form has no field for. Apply to load it back into the form; nothing is stored until you Save."
           bind:value={rawText}></textarea>
         {#if rawError}<p class="mt-1 text-xs text-red-600">{rawError}</p>{/if}
         <button

@@ -14,7 +14,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  EDITABLE_POLICY_KEYS,
   POLICY_FIELDS,
+  RESERVED_POLICY_KEYS,
   blankPolicyForm,
   buildPolicyDoc,
   cronShapeError,
@@ -189,6 +191,69 @@ test("extraction keys are grouped in their own editor section, with bounds", () 
   assert.match(validatePolicyForm(form).extract_max_bytes, /≥ 0/);
   form.extract_max_bytes = { set: true, value: "0" }; // 0 = extract nothing, valid
   assert.equal(validatePolicyForm(form).extract_max_bytes, undefined);
+});
+
+// --------------------------------------------------------------------------- //
+// Local self-administration permissions (2026-08-10 local scan controls)        //
+// --------------------------------------------------------------------------- //
+test("the three local-control keys round-trip and are tri-state", () => {
+  const stored: AgentPolicyDoc = {
+    local_scan_control: true,
+    local_schedule_control: false, // an explicit denial, not "unset"
+    local_roots_control: true,
+  };
+  const form = formFromDoc(stored);
+  const passthrough = passthroughFromDoc(stored, form);
+  assert.equal(form.local_scan_control.value, "true");
+  assert.equal(form.local_schedule_control.set, true);
+  assert.equal(form.local_schedule_control.value, "false");
+  assert.deepEqual(buildPolicyDoc(form, passthrough), stored);
+
+  // Inherit means the key is ABSENT — the agent default (off), which is a
+  // different statement from an explicit false at this scope.
+  form.local_schedule_control = { set: false, value: "false" };
+  const saved = buildPolicyDoc(form, passthrough);
+  assert.equal("local_schedule_control" in saved, false);
+  assert.equal(saved.local_scan_control, true);
+});
+
+test("local-control keys live in the Local access section and are modelled fields", () => {
+  const keys = POLICY_FIELDS.filter((f) => f.section === "local").map((f) => f.key);
+  assert.deepEqual(keys.sort(), [
+    "auth_required",
+    "local_access_enabled",
+    "local_roots_control",
+    "local_scan_control",
+    "local_schedule_control",
+    "offline_grace_seconds",
+    "path_scope",
+    "web_ui_enabled",
+  ]);
+  // They must not be reported as forward-compat unknowns: the editor renders a
+  // field per known key, and an "unknown key" chip would be wrong.
+  assert.deepEqual(
+    unknownPolicyKeys({
+      local_scan_control: true,
+      local_schedule_control: true,
+      local_roots_control: true,
+    }),
+    [],
+  );
+});
+
+test("local-control hints say these are agent self-administration, never catalog edits", () => {
+  // The invariant a reader of the console must never doubt: read_only still
+  // holds, and it stays the reserved, un-editable key it always was.
+  for (const key of ["local_scan_control", "local_schedule_control", "local_roots_control"]) {
+    const field = POLICY_FIELDS.find((f) => f.key === key);
+    assert.ok(field, `${key} must be a rendered field`);
+    assert.equal(field.kind, "bool");
+    assert.equal(field.enforcedBy, "agent"); // the agent gates its own controls
+    assert.match(field.hint, /never catalog edits|read-only over items/i);
+    assert.match(field.fallback, /^off/); // absent = no delegation
+  }
+  assert.ok("read_only" in RESERVED_POLICY_KEYS);
+  assert.equal(EDITABLE_POLICY_KEYS.includes("read_only"), false);
 });
 
 // --------------------------------------------------------------------------- //

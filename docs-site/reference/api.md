@@ -34,7 +34,7 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 
 | Area | Routes (under `/api/v1`) | What it does |
 |---|---|---|
-| Search | `search` | Typo-tolerant search, facets, filters. |
+| Search | `search`, `search/tags`, `search/federated` | Typo-tolerant search, facets, filters, [geo bounds](#geo-search-radius-and-bounding-box), tag type-ahead, and [federated item+passage search](#federated-multi-search). |
 | Items | `items` (incl. `PATCH`, batch, `digests`, `POST /items/{id}/touch`) | Read items; edit `user_metadata`/tags; batch edits; on-demand digests; frecency use pings. |
 | Libraries | `libraries`, `scan-paths` | Define libraries, roots, schedules, presets. |
 | Scans | `scans` (with SSE) | Trigger/stop scans; live progress via Server-Sent Events. |
@@ -79,3 +79,141 @@ curl http://localhost:8484/api/v1/version
     `PATCH /items/{id}` writes the **user** overlay; a rescan can never clobber
     it. Extracted metadata is read-only through the API. This is
     [architecture invariant 2](../data-collection.md#extracted-metadata-vs-user-edits-the-separation-contract).
+
+## Geo search (radius and bounding box) {#geo-search-radius-and-bounding-box}
+
+`GET /api/v1/search` accepts optional geographic bounds, compiled to
+Meilisearch's `_geoRadius` / `_geoBoundingBox` filters over the reserved `_geo`
+attribute. They compose with every other filter (and with RBAC path scoping)
+with `AND`, so a geo query can only ever **narrow** what a caller is already
+allowed to see. Omit them and the query is unchanged.
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `geo_lat` / `geo_lng` | float | Centre point. Latitude ∈ [-90, 90], longitude ∈ [-180, 180]. |
+| `geo_radius_m` | float > 0 | Radius **in metres** around the centre → `_geoRadius`. |
+| `geo_top_lat` / `geo_right_lng` / `geo_bottom_lat` / `geo_left_lng` | float | Bounding-box edges → `_geoBoundingBox`. All four are required together. |
+| `geo_sort` | `asc` \| `desc` | Order by distance from the centre (`asc` = nearest first). Takes precedence over `sort`, which becomes the tie-break. |
+
+```bash
+# photos within 2 km of San Francisco, nearest first
+curl "http://localhost:8484/api/v1/search?file_category=image\
+&geo_lat=37.7749&geo_lng=-122.4194&geo_radius_m=2000&geo_sort=asc"
+
+# everything inside a map viewport (top-right / bottom-left corners)
+curl "http://localhost:8484/api/v1/search?geo_top_lat=38&geo_right_lng=-122\
+&geo_bottom_lat=37&geo_left_lng=-123"
+```
+
+Nonsense is refused with **422**, never quietly normalised: half a centre, a
+radius with no centre, a bare centre that feeds neither a radius nor a sort, a
+partially specified box, an inverted box (top below bottom, or west edge east of
+the east edge — Meilisearch boxes cannot cross the 180th meridian; issue two
+queries), an out-of-range coordinate, or a non-positive radius.
+
+!!! warning "Geo results depend on the per-library GPS gate"
+    Only files in a library with **`expose_gps` enabled** carry coordinates in
+    the search index. GPS is extracted and stored in Postgres as usual, but the
+    search projection omits it unless the library opted in — the default-hidden
+    control described in
+    [Data collected](../data-collection.md#per-type-extractors).
+
+    A geo query on a deployment where **no** library exposes GPS therefore
+    returns **zero hits with HTTP 200** — not an error. That silence is
+    deliberate: failing loudly would itself disclose how the server is
+    configured. Malformed geo *parameters* are still a 422.
+
+    The console's [map view](#map-view-in-the-console) says so in words rather
+    than showing an empty map, and links back here.
+
+    `PATCH /api/v1/libraries/{id}` with `expose_gps` queues a re-projection of
+    that library's documents in **both** directions. Turning the flag **off**
+    rewrites each document without its coordinates, so points already in the
+    index are removed rather than left behind; the change is asynchronous (an
+    index job), so allow a moment on a large library — or run
+    `POST /api/v1/system/rebuild-index` to force it.
+
+### Map view in the console {#map-view-in-the-console}
+
+The web console exposes the same geo filters as a map, next to **List** and
+**Grid** in the search results toolbar. It is a *lens on the current query*, not
+a second search box: it plots the geo-bearing hits of whatever search is already
+running, so text, chips, tags and ranges all still apply.
+
+**Drawing an area filters the search.** Drag on the map (or type coordinates into
+the North / South / West / East fields below it, which is also the keyboard path
+and how you paste coordinates from elsewhere) and the selection becomes
+`geo_top_lat` / `geo_right_lng` / `geo_bottom_lat` / `geo_left_lng` on the same
+query. Because those are ordinary flat search params, the area:
+
+- appears as a removable chip alongside the other active filters;
+- rides the deep-link hash (`#/search?...`), so it survives a reload and browser
+  back/forward;
+- is captured by a **saved search** like any other filter.
+
+The console normalises what it sends: a drag cannot produce an inverted box, and
+the numeric fields refuse a box that is inverted, crosses the 180th meridian, or
+carries an out-of-range coordinate — the same cases the API answers **422** to.
+
+**Bounded, not truncated.** A photo library can hold tens of thousands of
+geo-bearing files. The map fetches at most **1000** points per search (in pages
+of 200) and reports what it did — *"Showing 1000 of 24 812 results with
+coordinates"* — rather than silently drawing a subset. On screen, points are
+clustered into a fixed pixel grid, so the number of drawn markers is bounded by
+the size of the viewport, not by the number of points; zooming in splits clusters
+apart, and clicking one lists its items. Clicking a single point opens the normal
+item detail panel.
+
+!!! info "The map makes no network requests by default"
+    Filearr is meant to run with no outbound internet, so the map ships with its
+    own basemap: a simplified **Natural Earth 1:110m** country outline (public
+    domain), bundled with the console as a ~50 KB encoded coordinate table and
+    loaded only when you open the map. No tile server, no CDN, no web font.
+
+    A **Background tiles** checkbox in the map toolbar can overlay raster tiles
+    from a third-party XYZ server (OpenStreetMap by default; the URL template is
+    configurable per browser). It is **off by default and never enabled for
+    you**. Turning it on means your browser — not the Filearr server — requests
+    images directly from that server, which then sees your IP address and, tile
+    by tile, which places you are looking at in your own library. The toolbar
+    always states which mode is active, and says so plainly when tiles are on but
+    the browser is offline.
+
+## Federated multi-search {#federated-multi-search}
+
+`GET /api/v1/search/federated` searches the **item** index and the **passage**
+(chunk) index in one Meilisearch federated query and returns **one merged,
+ranked list** instead of two the caller has to interleave.
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `q` | `""` | Query text, applied to both indexes. |
+| `library` | – | Restrict both sub-queries to one library id (must be a UUID — the value is interpolated into every sub-query's filter alongside the RBAC clause, so it is validated rather than trusted). |
+| `status` | `active` | Item status (item sub-query only — the chunks index has no status attribute). |
+| `include_sidecars` | `false` | Include sidecar files in the item sub-query. |
+| `facets` | `false` | Also return Meilisearch's `facetsByIndex` distribution for the item index. |
+| `limit` / `offset` | `20` / `0` | Federation-level paging over the merged list. |
+
+```json
+{
+  "hits": [
+    {"source": "items", "item_id": "0191…", "score": 0.91,
+     "fields": {"filename": "beach.jpg", "rel_path": "2019/beach.jpg"}},
+    {"source": "passages", "item_id": "0192…", "score": 0.44,
+     "fields": {"chunk_no": 3, "filename": "notes.pdf", "text": "…"}}
+  ],
+  "total": 2, "limit": 20, "offset": 0,
+  "indexes": ["items", "passages"], "facets_by_index": {}
+}
+```
+
+- `source` is the **logical** index name (`items` | `passages`); the underlying
+  Meilisearch uids are deployment-configurable and never appear in the contract.
+- `item_id` resolves every hit back to a catalog item. Passage documents already
+  carry the item id plus a denormalised filename/`rel_path`, so rendering the
+  merged list costs **no per-hit lookup**.
+- RBAC path scoping is applied to **every** sub-query, identically to the
+  single-index `/search` path — Meilisearch does the row-level filtering.
+- Passage indexing (chunking) is a per-library opt-in. When no chunks index
+  exists the endpoint answers over the item index alone and says so in
+  `indexes`, rather than failing.

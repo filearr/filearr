@@ -42,6 +42,9 @@ export interface AgentPolicyDoc {
   extract_ocr?: boolean;
   extract_exif?: boolean;
   extract_max_bytes?: number;
+  local_scan_control?: boolean;
+  local_schedule_control?: boolean;
+  local_roots_control?: boolean;
   [key: string]: unknown;
 }
 
@@ -85,8 +88,10 @@ export const POLICY_SECTIONS: { id: PolicySection; label: string; blurb: string 
     id: "local",
     label: "Local access",
     blurb:
-      "The agent's on-device query surfaces (CLI socket + read-only web UI) and " +
-      "what they are allowed to return.",
+      "The agent's on-device query surfaces (CLI socket + read-only web UI), what " +
+      "they are allowed to return, and how much of the agent's OWN administration " +
+      "(pause, schedule, scan roots) its local operator may change. The catalog " +
+      "stays read-only locally whatever these say.",
   },
   { id: "updates", label: "Updates", blurb: "Self-update offers." },
 ];
@@ -312,6 +317,37 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     section: "local",
     hint: "One glob per line, OR-combined, applied to every LOCAL result set. Empty/absent = unrestricted. Max 1000 entries.",
     fallback: "unrestricted",
+    enforcedBy: "agent",
+  },
+  // --- Local self-administration (2026-08-10) -------------------------------
+  // These three delegate a slice of AGENT administration to whoever is at the
+  // machine. They are a different axis from read_only, which still holds: the
+  // local surface never writes to the catalog whatever these say.
+  {
+    key: "local_scan_control",
+    label: "Local pause / resume / scan now",
+    kind: "bool",
+    section: "local",
+    hint: "Lets the agent's own web UI pause and resume ITS scanning and trigger a scan. Agent self-administration only — never catalog edits; the local surface stays read-only over items and metadata. The local pause is separate from the Suspend action here: a local resume cannot lift a central suspend.",
+    fallback: "off — scanning is controlled only from this console",
+    enforcedBy: "agent",
+  },
+  {
+    key: "local_schedule_control",
+    label: "Local schedule editing",
+    kind: "bool",
+    section: "local",
+    hint: "Lets the agent's own web UI set the scan cron, interval and scan-on-start — but only the ones this policy leaves unset. A key you set here is locked on the agent and shown as 'managed by central', because central re-applies it every poll and a local edit would silently revert. Agent self-administration only; never catalog edits.",
+    fallback: "off — the schedule comes only from policy and the host's environment",
+    enforcedBy: "agent",
+  },
+  {
+    key: "local_roots_control",
+    label: "Local scan-root editing",
+    kind: "bool",
+    section: "local",
+    hint: "Lets the agent's own web UI add and remove ITS scan roots (its local scan.json). Refused anyway when the agent's config group derives roots from scan_selections. Removing a root only stops future scans of it — already-indexed items are left alone. Agent self-administration only; never catalog edits.",
+    fallback: "off — roots come from the agent's own config or its config group",
     enforcedBy: "agent",
   },
   // --- Updates -------------------------------------------------------------
@@ -557,6 +593,10 @@ export interface AgentCapabilities {
   extract_schema?: number;
   /** Host tools found on PATH — capability is a HOST property, not a build one. */
   tools?: Record<string, boolean>;
+  /** Versions of the tools that are present AND willing to state one. A tool in
+   *  `tools` but absent here is installed with an unreportable version, which is
+   *  a different thing from not installed — render them differently. */
+  tool_versions?: Record<string, string>;
   /** What it can actually extract here, e.g. ["image","audio","document"]. */
   formats?: string[];
   /** Pre-existing key: the agent runs in a container (self-update N/A). */

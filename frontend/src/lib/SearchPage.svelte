@@ -26,6 +26,16 @@
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import { encodeSearchHash, parseSearchHash } from "./searchparams";
+  import MapPanel from "./map/MapPanel.svelte";
+  import {
+    MAP_POINT_CAP,
+    boxParams,
+    formatBox,
+    geoOf,
+    parseBox,
+    type GeoBox,
+    type MapPoint,
+  } from "./map/geo";
 
   // ---------------------------------------------------------------------- //
   // P3-T3/T4 — virtualized, keyboard-first results with facet chips +       //
@@ -87,10 +97,27 @@
   let hashMode = $state(false);
   // Explicit ordering (P3-T7 deep-linkable): round-trips through save/apply + hash.
   let sortMode = $state("");
-  // P12 slice 2 — list vs. responsive thumbnail GRID. Rides the search hash
-  // (``view=grid``) so a deep link / saved search preserves it. Presentational
-  // only: never affects the /search query (the backend ignores the extra param).
-  let view = $state<"list" | "grid">("list");
+  // P12 slice 2 — list vs. responsive thumbnail GRID, plus the R8-UI ``map``
+  // lens. Rides the search hash (``view=grid`` / ``view=map``) so a deep link /
+  // saved search preserves it. Presentational only: never affects the /search
+  // query (the backend ignores the extra param).
+  let view = $state<"list" | "grid" | "map">("list");
+
+  // R8-UI photo GPS map. The map is a LENS on the current query, so the area a
+  // user draws on it is just another filter in the SAME flat param record
+  // everything else uses (geo_top_lat/geo_right_lng/geo_bottom_lat/geo_left_lng
+  // — see map/geo.ts). That means it composes with the text query and every
+  // chip, rides the deep-link hash, and is captured by a saved search for free.
+  let geoBox = $state<GeoBox | null>(null);
+  let mapPoints = $state<MapPoint[]>([]);
+  let geoTotal = $state(0);
+  let mapLoading = $state(false);
+  let mapController: AbortController | null = null;
+  // One page of the map fetch. 200 is the API's own per-request ceiling.
+  const MAP_PAGE = 200;
+  // The bundled manual is served at /docs/ by this instance; the Vite dev server
+  // has no such mount, so dev points at the public site (same rule as HelpPage).
+  const DOCS_URL = import.meta.env.DEV ? "https://pwsh.github.io/filearr/" : "/docs/";
 
   // P3-T8 hybrid semantic search. The slider is HIDDEN unless /stats reports the
   // feature enabled server-side; `semantic` is the 0..1 blend ratio (0 = keyword).
@@ -151,6 +178,14 @@
 
   // library_id -> Library, for native_prefix-resolved copy-path (invariant 3).
   let libs = $state<Map<string, Library>>(new Map());
+
+  // R8-UI privacy gate, read off the libraries we already load: when NO library
+  // has ``expose_gps`` on, the search index carries no coordinates at all, so a
+  // geo query returns nothing by design. The map must say THAT rather than look
+  // broken. Undecidable until the libraries land, hence the size check.
+  const gpsGated = $derived(
+    libs.size > 0 && ![...libs.values()].some((l) => l.expose_gps),
+  );
 
   // Range sliders (P3-T4). Bounds come from facetStats; positions are the live
   // slider values. A filter is "active" only while the slider is narrowed off a
@@ -229,7 +264,12 @@
       if (!(k in p) && pendingRange[k]) p[k] = pendingRange[k];
     }
     if (sortMode) p.sort = sortMode;
-    if (view === "grid") p.view = "grid";
+    if (view !== "list") p.view = view;
+    // R8-UI: the map's area selection is a FILTER like any other — four flat
+    // params on the same query. boxParams() emits nothing for a box the API
+    // would reject (inverted / antimeridian-crossing), so a bad box degrades to
+    // "no area filter" instead of a 422.
+    Object.assign(p, boxParams(geoBox));
     // Only send a semantic ratio when the feature is on AND the user dialed it
     // up — a 0 keeps the keyword path byte-identical (and deep links stay clean).
     if (semanticEnabled && semantic > 0) p.semantic = String(semantic);
@@ -261,10 +301,13 @@
   // Toggle list/grid. A layout change needs no re-query -- just re-render the
   // already-loaded hits and reflect the new ``view`` into the URL hash so the
   // choice is deep-linkable / saved-search-persisted.
-  function setView(v: "list" | "grid") {
+  function setView(v: "list" | "grid" | "map") {
     if (view === v) return;
     view = v;
     reflectHash();
+    // The map needs its own bounded, geo-filtered fetch (the results page is
+    // ordered by relevance and capped at a screenful) — pull it on first open.
+    if (v === "map" && searched) loadMapPoints();
   }
 
   // Apply a flat param bundle (deep link, back/forward, or a saved search) into
@@ -283,7 +326,11 @@
     tagOpen = false;
     includeSidecars = p.include_sidecars === "true";
     sortMode = p.sort ?? "";
-    view = p.view === "grid" ? "grid" : "list";
+    view = p.view === "grid" || p.view === "map" ? p.view : "list";
+    // A deep link / saved search carrying all four geo edges restores the drawn
+    // area; a partial one restores nothing (parseBox is all-or-nothing) so we can
+    // never send half a box.
+    geoBox = parseBox(p);
     semantic = p.semantic ? Number(p.semantic) : 0;
     pendingRange = {};
     for (const k of ["size_gte", "size_lte", "mtime_gte", "mtime_lte"]) {
@@ -409,6 +456,7 @@
       copyCountMap = {};
       refreshCopyCounts(r.hits); // P3-T10 batch badge counts
       vlist?.scrollTo(0);
+      if (view === "map") loadMapPoints(); // keep the map on the same query
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return; // superseded — ignore
       error = String(e);
@@ -435,6 +483,72 @@
     } finally {
       if (controller === ctrl) loading = false;
     }
+  }
+
+  // ---- R8-UI map points ---------------------------------------------------
+  // The map plots the CURRENT query, not a second search: same buildParams(),
+  // plus one extra constraint and a hard cap.
+  //
+  // Why the whole-world box when no area is drawn: `_geo` is the only marker of
+  // a geo-bearing document and it is not a filterable facet, so "has
+  // coordinates" is expressed as a bounding box covering the planet — which is
+  // exactly what _geoBoundingBox does, and it costs nothing extra server-side.
+  //
+  // Two bounds, both stated in the UI rather than applied silently (see the
+  // MapPanel caption): at most MAP_POINT_CAP points are fetched, over at most
+  // ceil(MAP_POINT_CAP / MAP_PAGE) sequential pages, and the response's `total`
+  // is kept so the map can say "showing N of M".
+  async function loadMapPoints() {
+    mapController?.abort();
+    const ctrl = new AbortController();
+    mapController = ctrl;
+    mapLoading = true;
+    try {
+      const base = buildParams();
+      base.limit = String(MAP_PAGE);
+      if (!geoBox) {
+        base.geo_top_lat = "90";
+        base.geo_bottom_lat = "-90";
+        base.geo_left_lng = "-180";
+        base.geo_right_lng = "180";
+      }
+      const acc: MapPoint[] = [];
+      let cursor: string | null = null;
+      let seen = 0;
+      do {
+        const r = await search(cursor ? { ...base, cursor } : base, ctrl.signal);
+        if (ctrl.signal.aborted || mapController !== ctrl) return;
+        geoTotal = r.total;
+        for (const h of r.hits) {
+          const g = geoOf(h);
+          const id = str(h, "id");
+          if (!g || !id) continue;
+          acc.push({
+            id,
+            lat: g.lat,
+            lng: g.lng,
+            label: str(h, "title") || str(h, "filename") || str(h, "rel_path") || id,
+          });
+        }
+        seen += r.hits.length;
+        cursor = r.next_cursor;
+      } while (cursor && seen < MAP_POINT_CAP);
+      mapPoints = acc.slice(0, MAP_POINT_CAP);
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") return; // superseded — ignore
+      // Non-fatal: the map shows its empty state rather than replacing the
+      // results list with an error.
+      mapPoints = [];
+    } finally {
+      if (mapController === ctrl) mapLoading = false;
+    }
+  }
+
+  // A box drawn (or typed) on the map is applied to the query like any chip:
+  // set the filter, re-run, and let reflectHash() put it in the URL.
+  function onMapBox(b: GeoBox | null) {
+    geoBox = b;
+    runFresh();
   }
 
   // P3-T10: fetch copy counts for a batch of hits (ids only, cap 200) and merge
@@ -596,6 +710,9 @@
     for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
     for (const t of selectedTags) out.push({ key: `tag:${t}`, label: `tag: ${t}`, clear: () => removeTag(t) });
     if (includeSidecars) out.push({ key: "sidecar", label: "sidecars shown", clear: () => { includeSidecars = false; reset(); } });
+    // R8-UI: the map's area reads as an ordinary removable filter, so it can be
+    // cleared from the chip row without opening the map.
+    if (geoBox) out.push({ key: "geo", label: `area ${formatBox(geoBox)}`, clear: () => onMapBox(null) });
     if (sizeActive) out.push({ key: "size", label: `size ${fmtBytes(sizeLo)}–${fmtBytes(sizeHi)}`, clear: snapSize });
     if (mtimeActive) out.push({ key: "mtime", label: `date ${fmtDate(mtimeLo)}–${fmtDate(mtimeHi)}`, clear: snapMtime });
     return out;
@@ -668,6 +785,10 @@
       return;
     }
     if (selected) return; // ItemDetail modal owns keys while open
+    // R8-UI: on the map, arrows pan. The map's own handler stops propagation
+    // while it has focus; this keeps the arrows from silently walking a results
+    // list nobody can see when it does not.
+    if (view === "map") return;
     if (!hits.length) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -774,6 +895,7 @@
   onDestroy(() => {
     destroyed = true;
     controller?.abort();
+    mapController?.abort();
     tagController?.abort();
     clearTimeout(debounce);
     clearTimeout(tagDebounce);
@@ -859,6 +981,13 @@
         aria-pressed={view === 'grid'}
         title="Grid view"
         onclick={() => setView('grid')}>Grid</button>
+      <!-- R8-UI: the map is a third view of the SAME query, not a separate page. -->
+      <button
+        type="button"
+        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-white' : ''}"
+        aria-pressed={view === 'map'}
+        title="Map view — plot the results that carry GPS coordinates, and drag an area to filter by it"
+        onclick={() => setView('map')}>Map</button>
     </div>
     <!-- Saved searches (P3-T7). Roadmap §20: the open state reads as ACTIVE
          (accent fill, matching the chip convention) — the chevron alone was
@@ -1076,7 +1205,25 @@
     </div>
   {/if}
 
-  {#if !searched}
+  {#if view === "map"}
+    <!-- R8-UI: same query, plotted. The map renders even before a search has run
+         — its own copy explains what it is waiting for, and the GPS-gate
+         explanation is worth seeing immediately. The panel owns only its
+         viewport; the area it reports comes straight back into this page's param
+         state. -->
+    {#if error}<p class="mt-6 text-red-500">{error}</p>{/if}
+    <MapPanel
+      points={mapPoints}
+      {geoTotal}
+      queryTotal={total}
+      loading={mapLoading}
+      box={geoBox}
+      {gpsGated}
+      docsUrl={DOCS_URL}
+      onBoxChange={onMapBox}
+      onOpenItem={(id) => (selected = id)}
+    />
+  {:else if !searched}
     <!-- Roadmap §20 empty start: nothing has been queried yet — an honest blank
          slate instead of a match-all dump of the whole catalog. -->
     <div class="mt-16 text-center text-slate-500">

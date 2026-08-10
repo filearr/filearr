@@ -3,9 +3,9 @@
 The pure, network-free cores — rule matching, windowing, SSRF classification,
 HMAC signing — live in the sibling modules and are implemented + tested. This
 module wires the async I/O: the ``webhook`` and ``email`` drivers (in-tree core,
-brief §1.5), plus the channel-secret encryption helpers (delegating to
-:mod:`filearr.alerts.crypto`). ``apprise`` (R2) remains an optional-extra stub
-(P8-T3).
+brief §1.5) and the ``apprise`` fan-out driver (R2, P8-T3 — behind the optional
+``filearr[apprise]`` extra), plus the channel-secret encryption helpers
+(delegating to :mod:`filearr.alerts.crypto`).
 
 Security posture (priority: security > integrity > reliability):
 
@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import socket
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,10 @@ import httpx
 
 from filearr.alerts import crypto, signing, ssrf, webhook_formats
 from filearr.errors import sanitize_error
+
+# Same logger name the dispatch pump uses (tasks/alerts.py) so channel-driver
+# output lands in one place. Nothing logged here may contain a channel secret.
+log = logging.getLogger("filearr.alerts")
 
 
 @dataclass(frozen=True)
@@ -392,16 +397,219 @@ async def send_email(
 
 
 # --------------------------------------------------------------------------- #
-# apprise (P8-T3 — optional extra, still a stub)                              #
+# apprise (P8-T3 — optional extra: the R2 fan-out channel)                    #
 # --------------------------------------------------------------------------- #
+# Apprise is the "everything else" channel: one URL string selects one of ~100
+# notification services (Discord, Telegram, ntfy, Pushover, Matrix, Gotify, ...)
+# so we do not have to grow a driver per service. It is an OPTIONAL extra
+# (``pip install "filearr[apprise]"``) because it drags a large dependency tree
+# (requests + requests-oauthlib + markdown + PyYAML + click) that the vast
+# majority of deployments — webhook and/or SMTP only — never execute; see the
+# rationale on the extra in backend/pyproject.toml.
+#
+# Security posture, inherited from the rest of this module: an apprise URL is a
+# CREDENTIAL end to end (``discord://webhook_id/webhook_token``,
+# ``tgram://bot_token/chat_id``), which is exactly why brief §7.2 makes the whole
+# URL the encrypted sub-field (see :func:`encrypt_channel_secret`). Nothing in
+# this section may put that string — or a fragment of it — into a log record, a
+# ``DeliveryResult.detail`` or a ``ChannelDeliveryError.detail``, because
+# ``alert_events.last_error`` is persisted and served to API clients.
+#
+# NOTE the deliberate asymmetry with :func:`send_webhook`: the SSRF guard is NOT
+# applied here. It cannot be — apprise owns URL parsing and socket setup for every
+# plugin, so there is no seam to vet a resolved address before the connect. The
+# compensating control is that an apprise URL is admin-scope configuration
+# carrying an embedded service credential, not an attacker-suppliable target.
 
-async def send_via_apprise(apprise_url: str, rendered: RenderedAlert) -> DeliveryResult:
+_APPRISE_REDACTED = "<apprise-url redacted>"  # marker left where a URL was scrubbed
+
+
+def _split_apprise_urls(raw: str) -> list[str]:
+    """Split a channel's stored apprise config into individual target URLs.
+
+    A multi-target channel is expressed as **one URL per line**, and each line is
+    handed to its own ``Apprise.add()`` call (apprise's own native idiom — an
+    ``Apprise`` object is a bag of servers that ``notify()`` fans out to). Newline
+    is the only separator we accept: apprise URLs legitimately embed commas and
+    spaces inside query parameters (``mailto://…?to=a@x.test,b@y.test``,
+    ``?tags=a,b``), so a comma split would silently corrupt a valid credential
+    into two unusable ones. Blank lines are dropped so trailing whitespace in the
+    admin form is harmless."""
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _apprise_scheme(url: str) -> str:
+    """The plugin scheme of ``url`` (``discord``, ``tgram``, …) — the only part of
+    an apprise URL that is safe to log, since every credential lives after the
+    ``://``. Returns ``"?"`` when the string has no scheme rather than falling
+    back to the whole value (that fallback would leak the secret)."""
+    scheme, sep, _ = url.partition("://")
+    return scheme.lower() if sep and scheme else "?"
+
+
+def _apprise_secret_fragments(urls: list[str]) -> list[str]:
+    """Substrings that must never survive into a message, longest first.
+
+    ``sanitize_error`` makes an untrusted string safe to *store* (control-char
+    stripping + truncation); it does NOT redact, so an exception raised from
+    inside a plugin can carry the configured URL verbatim. Full-string
+    replacement alone is not enough either: plugins routinely raise with only a
+    piece of the URL (a bot token, a room id), and apprise puts credentials in
+    every positional slot — ``tgram://<token>/<chat_id>`` keeps them in the PATH,
+    not in userinfo. So we scrub the whole URL *and* each of its components,
+    ignoring fragments of 3 characters or fewer (a port or a one-letter path
+    segment matches too much text to be worth redacting). Longest-first ordering
+    means the full URL is replaced before any of its parts, which keeps a single
+    marker in the common case instead of a shredded string."""
+    fragments: set[str] = set()
+    for url in urls:
+        if not url:
+            continue
+        fragments.add(url)
+        _, sep, remainder = url.partition("://")
+        if not sep:
+            continue
+        for part in remainder.replace("?", "/").replace("&", "/").replace("@", "/").split("/"):
+            if len(part) > 3:
+                fragments.add(part)
+    return sorted(fragments, key=len, reverse=True)
+
+
+def _scrub_apprise(value: object, fragments: list[str]) -> str:
+    """Redact ``fragments`` out of ``value``, then sanitize it for storage.
+
+    Order is load-bearing and the reason this is not a one-liner: scrubbing runs
+    on the RAW text first because ``sanitize_error`` truncates at
+    ``MAX_ERROR_CHARS`` and a URL straddling that boundary would leave its
+    surviving prefix — still credential-bearing — permanently in
+    ``alert_events.last_error``. The second scrub pass catches the (pathological)
+    case where control-character stripping splices a fragment back together."""
+    text = str(value)
+    for fragment in fragments:
+        text = text.replace(fragment, _APPRISE_REDACTED)
+    text = sanitize_error(text)
+    for fragment in fragments:
+        text = text.replace(fragment, _APPRISE_REDACTED)
+    return text
+
+
+def _notify_apprise_sync(apprise_mod, urls: list[str], rendered: RenderedAlert) -> bool:
+    """Blocking apprise fan-out; runs in a worker thread (see the caller).
+
+    Mirrors :func:`_send_email_sync`: the third-party client is synchronous, so
+    the whole of it — object construction, URL parsing and every outbound HTTP
+    request — happens off the event loop. A URL apprise refuses to parse is a
+    PERMANENT configuration error (an unknown scheme or malformed credential will
+    never start working on retry), so ``add()``'s boolean is checked here rather
+    than being left to surface as an indistinguishable ``notify() -> False``."""
+    client = apprise_mod.Apprise()
+    for url in urls:
+        if not client.add(url):
+            # Only the scheme is quoted back; the URL itself is the credential.
+            raise ChannelDeliveryError(
+                f"apprise rejected a configured {_apprise_scheme(url)!r} URL "
+                "(unknown service scheme or malformed URL)",
+                retryable=False,
+            )
+    # notify_type is left at apprise's default ('info'): RenderedAlert carries no
+    # severity field (render.py renders one body per rule match), so mapping to
+    # warning/failure would be an invention rather than a translation.
+    return bool(client.notify(title=rendered.subject, body=rendered.body_text))
+
+
+async def send_via_apprise(
+    apprise_url: str,
+    rendered: RenderedAlert,
+    *,
+    timeout_s: float = 30.0,
+) -> DeliveryResult:
     """P8-T3: dispatch via the optional ``apprise`` extra, normalized to DeliveryResult.
 
+    ``apprise_url`` is the decrypted channel secret: one URL, or several separated
+    by newlines (see :func:`_split_apprise_urls`). ``rendered`` is mapped onto
+    apprise's ``title``/``body`` using the PLAINTEXT rendering — ``body_text``,
+    never ``payload`` — because apprise re-encodes the body per service (Markdown
+    for Discord, HTML for e-mail plugins) and a JSON blob would arrive as literal
+    JSON in a chat window.
+
     Errors with an actionable message ("install filearr[apprise]") when the
-    optional dependency is absent but an ``apprise``-type channel is configured.
+    optional dependency is absent but an ``apprise``-type channel is configured:
+    a missing optional dependency is a CONFIGURATION fault, so it is classified
+    ``retryable=False`` and goes terminal on the first attempt instead of burning
+    the group's ``alert_max_delivery_attempts`` budget on an outcome that cannot
+    change until an operator acts.
     """
-    raise NotImplementedError("P8-T3: apprise adapter (optional filearr[apprise] extra)")
+    urls = _split_apprise_urls(apprise_url or "")
+    if not urls:
+        # Checked BEFORE the import so a half-configured channel reports the field
+        # it is actually missing rather than an unrelated dependency error.
+        raise ChannelDeliveryError("apprise channel missing 'url'", retryable=False)
+
+    # Imported lazily (never at module import) because the package is an optional
+    # extra; a top-level import would make every worker process depend on it.
+    # Deliberately imported HERE on the event loop rather than inside the worker
+    # thread below: this is a one-time, purely local module load (no network), and
+    # keeping it outside the wall-clock bound is what guarantees a missing extra is
+    # reported as the permanent configuration error it is, instead of being
+    # swallowed by a timeout and misclassified as retryable.
+    try:
+        import apprise
+    except ImportError as exc:
+        raise ChannelDeliveryError(
+            "apprise channel configured but the 'apprise' package is not "
+            'installed; install the optional extra: pip install "filearr[apprise]" '
+            "(or use a Filearr image built with it)",
+            retryable=False,
+        ) from exc
+
+    fragments = _apprise_secret_fragments(urls)
+    log.debug(
+        "apprise dispatch to %d target(s): %s",
+        len(urls),
+        ",".join(_apprise_scheme(u) for u in urls),  # schemes only — never the URLs
+    )
+
+    try:
+        delivered = await asyncio.wait_for(
+            asyncio.to_thread(_notify_apprise_sync, apprise, urls, rendered),
+            timeout=timeout_s,
+        )
+    except ChannelDeliveryError:
+        raise  # already classified inside the thread (unparsable URL)
+    except TimeoutError as exc:
+        # Same honest bound as ``extract_timeout_seconds`` (tasks/extract.py): a
+        # Python thread cannot be killed, so this frees the CALLER, not the
+        # thread. The abandoned thread may keep waiting on whatever socket apprise
+        # opened until it returns on its own (apprise's plugins set their own
+        # request timeouts) — what we guarantee is that the dispatch pump keeps
+        # moving instead of wedging on one channel. Retryable: an overrun is a
+        # transient-looking condition (slow or unreachable service).
+        raise ChannelDeliveryError(
+            f"apprise delivery exceeded {timeout_s}s (thread abandoned; "
+            "tune FILEARR_ALERT_APPRISE_TIMEOUT_S)",
+            retryable=True,
+        ) from exc
+    except Exception as exc:
+        # An exception escaping apprise is a plugin/transport failure; treat it as
+        # transient (the webhook driver classifies transport errors the same way).
+        # The text is scrubbed because a plugin may quote the URL back at us.
+        raise ChannelDeliveryError(
+            f"apprise raised: {_scrub_apprise(exc, fragments)}", retryable=True
+        ) from exc
+
+    if not delivered:
+        # apprise's notify() collapses every per-service failure into one bool and
+        # swallows the reason (it logs the detail through its own 'apprise' logger
+        # and returns False), so there is genuinely nothing more specific to
+        # report here. Retryable: the usual causes — service 5xx, rate limit,
+        # transient DNS — clear on their own.
+        raise ChannelDeliveryError(
+            f"apprise reported failed delivery for {len(urls)} target(s); "
+            "apprise swallows the per-service reason — see the 'apprise' logger "
+            "output in the worker log for the detail",
+            retryable=True,
+        )
+    return DeliveryResult(ok=True, detail=f"apprise delivered to {len(urls)} target(s)")
 
 
 # --------------------------------------------------------------------------- #

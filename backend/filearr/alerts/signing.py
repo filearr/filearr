@@ -1,7 +1,10 @@
 """Outbound webhook HMAC signing + verification (Phase 8, brief §7.1 pt 5).
 
-Inert scaffolding for Phase 8, stdlib-only (``hmac``/``hashlib`` — no new
-dependency). Filearr signs every outbound webhook so the **receiver** can verify
+Stdlib-only (``hmac``/``hashlib`` — no new dependency). LIVE: every outbound
+webhook goes through :func:`sign_payload` from ``alerts.dispatch``. (This header
+said "inert scaffolding" until 2026-08-10, long after Phase 8 shipped.)
+
+Filearr signs every outbound webhook so the **receiver** can verify
 authenticity, and this module is also the reference a receiver reimplements to
 check us. The header binds a ``timestamp`` into the signed content so a captured
 payload cannot be replayed indefinitely (the receiver enforces a freshness

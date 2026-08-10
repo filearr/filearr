@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -43,6 +44,40 @@ var (
 	schedOnStartDelay = 30 * time.Second
 )
 
+// scanInFlight is the process-wide "a scheduled/triggered scan child is
+// running" guard. It is package-level rather than a scheduler local because the
+// local web UI's "scan now" button (2026-08-10) must share the SAME guard: two
+// concurrent scans of the same roots would fight over the local index and
+// double-emit replication events.
+var scanInFlight atomic.Bool
+
+// errScanAlreadyRunning is returned by triggerScanNow when the guard is held.
+var errScanAlreadyRunning = errors.New("a scan is already running")
+
+// triggerScanNow starts one scan child immediately, honouring the shared
+// overlap guard. daemonCtx (NOT a request context) owns the child: an HTTP
+// handler's context is cancelled the moment the response is written, which
+// would kill the scan it just started.
+func triggerScanNow(daemonCtx context.Context, cfg *config, log *slog.Logger) error {
+	if !scanInFlight.CompareAndSwap(false, true) {
+		return errScanAlreadyRunning
+	}
+	log.Info("scan scheduler: starting scan", "reason", "local web UI trigger")
+	go func() {
+		defer scanInFlight.Store(false)
+		t0 := time.Now()
+		err := runScanChild(daemonCtx, cfg)
+		if err != nil && daemonCtx.Err() == nil {
+			log.Error("scan scheduler: scan failed", "reason", "local web UI trigger",
+				"duration", time.Since(t0).Round(time.Second).String(), "err", err)
+			return
+		}
+		log.Info("scan scheduler: scan finished", "reason", "local web UI trigger",
+			"duration", time.Since(t0).Round(time.Second).String())
+	}()
+	return nil
+}
+
 type schedSpec struct {
 	cron    *schedule.Cron
 	cronStr string
@@ -52,20 +87,40 @@ type schedSpec struct {
 
 func (s schedSpec) enabled() bool { return s.cron != nil || s.every > 0 || s.onStart }
 
-// resolveScanSchedule computes the effective schedule: per-knob, policy wins
-// over env; unset knobs fall through. Invalid values are logged and ignored
-// (the daemon must keep running on a bad knob, not crash-loop).
+// resolveScanSchedule computes the effective schedule: per-knob, the documented
+// precedence
+//
+//	central policy > local override > FILEARR_AGENT_* env > sidecar > default
+//
+// with unset knobs falling through. Invalid values are logged and ignored (the
+// daemon must keep running on a bad knob, not crash-loop).
+//
+// The LOCAL override (local-settings.json, written by the agent's own web UI
+// under the central `local_schedule_control` permission) sits UNDER central by
+// construction: central re-applies its document on every poll, so a local value
+// for a key central set would silently revert within a poll interval. The local
+// UI therefore refuses to edit a centrally-set key at all — this ordering is the
+// second half of that rule and the reason it is safe.
 func resolveScanSchedule(dataDir string, getenv func(string) string, log *slog.Logger) schedSpec {
 	pol, ok, err := agentcfg.LoadCachedPolicy(dataDir)
 	if err != nil {
 		log.Warn("scan scheduler: cached policy unreadable; using env only", "err", err)
 		ok = false
 	}
+	local, lerr := agentcfg.LoadLocalSettings(dataDir)
+	if lerr != nil {
+		log.Warn("scan scheduler: local settings unreadable; ignoring local overrides", "err", lerr)
+		local = agentcfg.LocalSettings{}
+	}
 	var spec schedSpec
 
-	// Cron precedence (documented): top-level policy key > config-group
-	// settings (group.scan_schedule_cron) > env.
+	// Cron precedence: top-level policy key > config-group settings
+	// (group.scan_schedule_cron) > local override > env. Both policy sources are
+	// CENTRAL, so both outrank the local file.
 	cronStr := getenv(envScanCron)
+	if local.ScanCron != nil {
+		cronStr = *local.ScanCron
+	}
 	if ok && pol.Group != nil && pol.Group.ScanScheduleCron != nil {
 		cronStr = *pol.Group.ScanScheduleCron
 	}
@@ -80,36 +135,49 @@ func resolveScanSchedule(dataDir string, getenv func(string) string, log *slog.L
 		}
 	}
 
-	if ok && pol.ScanIntervalSeconds != nil {
+	switch {
+	case ok && pol.ScanIntervalSeconds != nil:
 		if *pol.ScanIntervalSeconds > 0 {
 			spec.every = time.Duration(*pol.ScanIntervalSeconds) * time.Second
 		}
-	} else if v := getenv(envScanEvery); v != "" {
-		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
-			log.Warn("scan scheduler: invalid "+envScanEvery+" ignored", "value", v)
-		} else {
-			spec.every = d
+	case local.ScanIntervalSeconds != nil:
+		if *local.ScanIntervalSeconds > 0 {
+			spec.every = time.Duration(*local.ScanIntervalSeconds) * time.Second
+		}
+	default:
+		if v := getenv(envScanEvery); v != "" {
+			if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+				log.Warn("scan scheduler: invalid "+envScanEvery+" ignored", "value", v)
+			} else {
+				spec.every = d
+			}
 		}
 	}
 
-	if ok && pol.ScanOnStart != nil {
+	switch {
+	case ok && pol.ScanOnStart != nil:
 		spec.onStart = *pol.ScanOnStart
-	} else if v := getenv(envScanOnBoot); v != "" {
-		b, err := strconv.ParseBool(v)
-		spec.onStart = err == nil && b
+	case local.ScanOnStart != nil:
+		spec.onStart = *local.ScanOnStart
+	default:
+		if v := getenv(envScanOnBoot); v != "" {
+			b, err := strconv.ParseBool(v)
+			spec.onStart = err == nil && b
+		}
 	}
 	return spec
 }
 
 // startScanScheduler launches the scheduler loop; the returned channel closes
 // when it unwinds. A no-op-cheap loop: one policy-cache read per tick.
-// suspended (nil => never) gates firing: an operator-suspended agent skips
-// every trigger until resumed (2026-08-09), logged once per skip reason.
-func startScanScheduler(ctx context.Context, cfg *config, log *slog.Logger, suspended func() bool) <-chan struct{} {
+// hold (nil => never) gates firing and NAMES the holder: an agent suspended by
+// central (2026-08-09) or paused locally (2026-08-10) skips every trigger until
+// released, logged with the reason so the operator knows which console to use.
+func startScanScheduler(ctx context.Context, cfg *config, log *slog.Logger, hold func() (bool, string)) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runScanScheduler(ctx, cfg, log, runScanChild, suspended)
+		runScanScheduler(ctx, cfg, log, runScanChild, hold)
 	}()
 	return done
 }
@@ -141,11 +209,13 @@ func runScanScheduler(
 	cfg *config,
 	log *slog.Logger,
 	run func(context.Context, *config) error,
-	suspended func() bool,
+	hold func() (bool, string),
 ) {
 	tick, onStartDelay := schedTick, schedOnStartDelay
+	// running is the SHARED process-wide guard (scanInFlight), so a scan the
+	// local web UI triggered also blocks a scheduled one, and vice versa.
+	running := &scanInFlight
 	var (
-		running    atomic.Bool
 		lastMinute string       // cron dedup: fire once per matching minute
 		lastEndNs  atomic.Int64 // interval baseline (unix ns); 0 until first run ends
 		started    = time.Now()
@@ -154,9 +224,11 @@ func runScanScheduler(
 	)
 
 	fire := func(reason string) {
-		if suspended != nil && suspended() {
-			log.Info("scan scheduler: agent is suspended; skipping", "reason", reason)
-			return
+		if hold != nil {
+			if held, by := hold(); held {
+				log.Info("scan scheduler: scanning is held; skipping", "held_by", by, "reason", reason)
+				return
+			}
 		}
 		if !running.CompareAndSwap(false, true) {
 			log.Info("scan scheduler: previous scan still running; skipping", "reason", reason)

@@ -106,6 +106,25 @@ model and the source `config.py` for every field.
 | `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` | `2880` | Furthest-back missed cron a recovery tick fires (48h). |
 | `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` | `600` | Grace before finalizing an orphaned scan run. |
 
+### Adaptive extract backpressure
+
+Each worker varies how many extract jobs it runs at once: host load contracts
+the ceiling, extract-queue depth expands it. Full behaviour, the log lines it
+emits, and when to intervene:
+[extraction throughput](../operations.md#extract-backpressure). Inert on hosts
+without a load average (Windows dev).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_EXTRACT_BACKPRESSURE` | `true` | Master switch for the controller (the static queue priority is unaffected). |
+| `FILEARR_EXTRACT_BACKPRESSURE_MIN_CONCURRENCY` | `1` | Floor: extract jobs this worker keeps running under any load. |
+| `FILEARR_EXTRACT_BACKPRESSURE_MAX_CONCURRENCY` | `0` (auto) | Ceiling cap; `0` = use `FILEARR_WORKER_CONCURRENCY`. Set explicitly if you pass `--concurrency` without matching that variable. |
+| `FILEARR_EXTRACT_BACKPRESSURE_HIGH_LOAD` | `0.85` | 1-min loadavg per core at which the ceiling contracts. |
+| `FILEARR_EXTRACT_BACKPRESSURE_LOW_LOAD` | `0.60` | Recovery threshold (hysteresis); expansion happens only at or below it. |
+| `FILEARR_EXTRACT_BACKPRESSURE_SAMPLE_SECONDS` | `15` | Sampling cadence — also the minimum dwell between same-direction moves. |
+| `FILEARR_EXTRACT_BACKPRESSURE_DECREASE_FACTOR` | `0.5` | Multiplicative decrease per sample under pressure (halve, not collapse to the floor). |
+| `FILEARR_EXTRACT_BACKPRESSURE_EXPAND_COOLDOWN_SECONDS` | `60` | No expansion for this long after a contraction (the 1-min loadavg lags by about its own window). |
+
 ### Console log stream (Jobs page Logs panel)
 
 App and worker each persist selected log records to a shared table so the Jobs
@@ -143,6 +162,10 @@ now*; results are cached for 6 hours.
 | `FILEARR_MEILI_REBUILD_WAIT_S` | `900` | Total wait budget for a shadow rebuild before it fails cleanly. |
 | `FILEARR_MEILI_SHADOW_MAX_AGE_HOURS` | `6` | Age at which an orphaned shadow index is reaped. |
 | `FILEARR_MEILI_SCOPE_FILTER_CEILING` | `4096` | Max compiled RBAC scope-filter length (over → refuse). |
+| `FILEARR_MEILI_COMPACTION_ENABLED` | `true` | Run the weekly [search-index compaction](../operations.md#meili-compaction). |
+| `FILEARR_MEILI_COMPACTION_THRESHOLD` | `1.3` | Fragmentation ratio (store size ÷ used size) above which it compacts. |
+| `FILEARR_MEILI_COMPACTION_WAIT_S` | `1800` | Wait budget for the compaction task; a timeout is reported, not failed. |
+| `FILEARR_MEILI_DATA_PATH` | *(unset)* | Meili store path, when visible to this process — checked against the critical disk floor before compacting (compaction needs ~2× the index size). |
 
 ## Extraction limits (safety caps)
 
@@ -160,6 +183,13 @@ now*; results are cached for 6 hours.
 |---|---|---|
 | `FILEARR_GPS_EXPOSE_DEFAULT` | `false` | Per-library GPS-exposure default (no global default-on). |
 | `FILEARR_EXIF_TIMEOUT_S` | `30` | exiftool wall-clock cap. |
+
+A library's `expose_gps` flag is also what puts a `_geo` point in the search
+index, so it is the on/off switch for
+[geo search](api.md#geo-search-radius-and-bounding-box). Turning it off queues a
+re-projection that removes the coordinates already indexed for that library.
+There is no environment variable that can expose GPS globally — only the
+per-library flag.
 
 ### OCR (per-library opt-in)
 
@@ -256,6 +286,7 @@ now*; results are cached for 6 hours.
 |---|---|---|
 | `FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS` | `false` | Permit RFC1918/ULA webhook targets (loopback/link-local still denied). |
 | `FILEARR_ALERT_WEBHOOK_TIMEOUT_S` | `10` | Per-POST wall clock. |
+| `FILEARR_ALERT_APPRISE_TIMEOUT_S` | `30` | Per-send wall clock for an [Apprise channel](../operations.md#apprise-channels) (one channel may hold several URLs, walked sequentially). |
 | `FILEARR_ALERT_RULE_MAX_PER_HOUR` | `100` | Per-rule dispatch ceiling (storm safety net). |
 | `FILEARR_ALERT_EVENTS_RETENTION_DAYS` | `30` | Terminal alert-event retention. |
 

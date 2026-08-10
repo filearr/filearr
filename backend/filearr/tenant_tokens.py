@@ -1,7 +1,11 @@
 """Meilisearch tenant-token compilation (Phase 6, roadmap §3 §8 /
 ``docs/research/phase-6-identity-auth-rbac.md`` §2.6).
 
-**Inert scaffolding.** Only the tests import this module. It ships the *pure*
+**PARTLY LIVE.** The grant → filter compilation is used by the search scope
+layer; only ``mint_tenant_token`` (the signed-JWT path for browser-direct Meili
+queries) is still a stub, and nothing calls it.
+(Corrected 2026-08-10: this header claimed to be unwired scaffolding long after it went live.)
+It ships the *pure*
 grant → Meilisearch-filter compilation step (the part that needs no Meilisearch,
 no signing key, no network) plus the size-ceiling guard, and a typed
 ``NotImplementedError`` stub for the stateful token-minting step (P6-T3).

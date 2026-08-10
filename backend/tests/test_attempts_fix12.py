@@ -44,6 +44,11 @@ async def test_retry_cap_map_matches_source_constants():
         TASK_RETRY_CAPS["filearr.tasks.index_sync.rebuild_index"]
         == MEILI_RETRY_MAX_ATTEMPTS
     )
+    # R8's expose_gps re-projection is a Meili writer too, so it shares the budget.
+    assert (
+        TASK_RETRY_CAPS["filearr.tasks.index_sync.reproject_library"]
+        == MEILI_RETRY_MAX_ATTEMPTS
+    )
 
     # embed tasks are decorated with a literal ``retry=2`` (no named constant).
     assert TASK_RETRY_CAPS["filearr.tasks.embed.embed_item"] == 2

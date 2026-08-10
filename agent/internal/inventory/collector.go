@@ -114,8 +114,15 @@ func Capabilities() map[string]any {
 		// `extracted.schema` version its events will stamp.
 		"extract":        true,
 		"extract_schema": extract.Schema,
-		"tools":          Tools(),
-		"formats":        ExtractFormats(),
+		"tools": Tools(),
+		// The VERSIONS of the tools that are present (2026-08-10). "ffmpeg: true"
+		// answers whether a capability runs here; it does not answer which build
+		// is running, which is the question an operator hits when OCR quality or
+		// a codec probe looks wrong. Present-but-silent tools are omitted, so the
+		// console renders "installed, version unknown" from the two maps rather
+		// than an empty string.
+		"tool_versions": ToolVersions(),
+		"formats":       ExtractFormats(),
 	}
 }
 

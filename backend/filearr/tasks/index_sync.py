@@ -1,5 +1,7 @@
 """Meilisearch projection sync — the index is disposable and rebuildable."""
 
+import uuid
+
 from sqlalchemy import select
 
 from filearr.config import get_settings
@@ -11,6 +13,7 @@ from filearr.search import (
     delete_docs,
     load_projection_defs,
     parent_scope_map,
+    replace_docs,
     upsert_docs,
 )
 from filearr.worker import proc_app
@@ -66,6 +69,88 @@ async def sync_items(item_ids: list[str]) -> None:
         # back to active between enqueue and execution would be wrongly purged —
         # a TOCTOU gap. Explicit ids delete exactly what was diffed, nothing else.
         await delete_docs(gone)
+
+
+#: How many item ids ride one ``reproject_library`` batch. Matches the batch size
+#: the NFO/reclassify re-projection paths already use, so a big library fans out
+#: into many small retryable Meili writes rather than one giant payload.
+REPROJECT_BATCH = 1000
+
+
+@proc_app.task(
+    queue="index",
+    name="filearr.tasks.index_sync.reproject_library",
+    retry=MEILI_RETRY,
+    priority=get_settings().index_priority,
+)
+async def reproject_library(library_id: str) -> int:
+    """Re-project every active item of one library with REPLACE semantics (R8).
+
+    Why this exists: turning a library's ``expose_gps`` OFF must remove the
+    ``_geo`` points already in the index. Nothing else does that. ``sync_items``
+    writes through Meili's add-or-UPDATE (merge) endpoint, so a document keeps
+    fields the new projection omits — a stale ``_geo`` would survive an ordinary
+    re-sync and keep answering ``_geoRadius`` queries with exactly the location the
+    operator just forbade (CWE-1230; the gate itself lives in ``exif.strip_gps`` +
+    ``Library.expose_gps``, never in an extractor). :func:`search.replace_docs`
+    uses add-or-REPLACE, which rewrites the document wholesale.
+
+    Deferred by ``PATCH /libraries/{id}`` whenever ``expose_gps`` CHANGES (both
+    directions — turning it on is the same re-projection, and using one path keeps
+    the flag's two states symmetric). Returns the number of documents rewritten.
+
+    There was NO library-settings re-projection hook before this: the only
+    per-library re-projection in the tree was ``tasks.scan._reindex_library``,
+    which runs inside a scan after NFO merges and (correctly, for that job) uses
+    the merging ``sync_items`` path. ``PATCH /libraries/{id}`` simply committed and
+    returned. This task plus that one call site is the smallest correct hook; it is
+    deliberately not folded into ``sync_items`` because every other caller of that
+    task wants the cheaper merge.
+
+    Invariant 1 holds throughout: this is a projection of Postgres truth, and a
+    full ``rebuild_index`` would produce byte-identical documents."""
+    lib_id = uuid.UUID(library_id) if isinstance(library_id, str) else library_id
+    defs = await load_projection_defs()
+    total = 0
+    async with SessionLocal() as session:
+        library = await session.get(Library, lib_id)
+        if library is None:
+            # The library was deleted between the PATCH and this job running; its
+            # documents are removed by the delete path, so there is nothing to do.
+            return 0
+        expose = bool(library.expose_gps)
+        offset = 0
+        while True:
+            items = (
+                (
+                    await session.execute(
+                        select(Item)
+                        .where(Item.library_id == lib_id, Item.status == ItemStatus.active)
+                        .order_by(Item.id)
+                        .offset(offset)
+                        .limit(REPROJECT_BATCH)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not items:
+                break
+            pscope = await parent_scope_map(session, items)
+            await replace_docs(
+                [
+                    build_doc(
+                        i,
+                        defs,
+                        expose_gps=expose,
+                        parent_path_scope=pscope.get(i.sidecar_of),
+                    )
+                    for i in items
+                ]
+            )
+            total += len(items)
+            offset += REPROJECT_BATCH
+    return total
 
 
 @proc_app.task(

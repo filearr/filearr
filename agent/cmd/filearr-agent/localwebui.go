@@ -42,7 +42,8 @@ const envWebUIAllowRemote = "FILEARR_AGENT_WEBUI_ALLOW_REMOTE"
 // grace, takes the UI down within one gate interval with no central push (R4
 // fail-closed asymmetry); the query socket transport is unaffected. A
 // never-contacted agent starts with the web UI OFF.
-func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, hist *history.Store) <-chan struct{} {
+func startWebUI(ctx context.Context, cfg *config, webAddr string, idx *index.Store, hist *history.Store, ops *opState) <-chan struct{} {
+	dataDir := cfg.DataDir
 	done := make(chan struct{})
 	log := newLogger()
 
@@ -115,7 +116,12 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 			}
 			return agentlog.Recent()
 		},
-		Logger: log,
+		// Local scan controls (2026-08-10). These administer THIS AGENT — pause
+		// its scanning, edit its schedule, manage its roots — under central's
+		// three permission gates. They never write to the catalog: the local
+		// surface stays read-only over items and metadata by invariant.
+		Controls: webControlSeams(ctx, cfg, ops, log),
+		Logger:   log,
 	}
 	// The web UI records history but is given only the write-side Recorder — it
 	// cannot read history back (that surface is the socket API only).
@@ -209,7 +215,8 @@ func webSettingsSnapshot(
 				"extract_schema": extract.Schema,
 				"formats":        inventory.ExtractFormats(),
 			},
-			"tools": inventory.Tools(),
+			"tools":         inventory.Tools(),
+			"tool_versions": inventory.ToolVersions(),
 		}
 		// Effective extraction settings + the settings this host will ignore.
 		// This is the "never shell into a machine to answer what is this agent

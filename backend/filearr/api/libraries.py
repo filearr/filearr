@@ -357,10 +357,48 @@ async def update_library(
         fields["enabled_extension_groups"] = fields["enabled_extension_groups"] or []
         _validate_group_names(fields["enabled_extension_groups"])
 
+    # R8: remember the pre-patch GPS exposure so a CHANGE can trigger the
+    # re-projection below. Read before the setattr loop — afterwards it is gone.
+    gps_was = bool(library.expose_gps)
+
     for key, value in fields.items():
         setattr(library, key, value)
     await session.commit()
     await session.refresh(library)
+
+    # R8 — the ``expose_gps`` flip must reach the search index, in BOTH directions.
+    #
+    # Turning it OFF is the security-critical one: the Meili documents already
+    # written for this library carry a ``_geo`` point, and the incremental sync path
+    # writes through Meili's add-or-UPDATE (merge) endpoint, so those points would
+    # SURVIVE an ordinary re-sync and keep answering ``_geoRadius`` queries with the
+    # very locations the operator just forbade (CWE-1230). ``reproject_library``
+    # rewrites each document with add-or-REPLACE semantics, so the omitted ``_geo``
+    # is genuinely dropped. Turning it ON runs the same job so the flag's two states
+    # are symmetric and the map is populated without waiting for a rescan.
+    #
+    # The gate itself is unchanged and still lives in exactly two places
+    # (``exif.strip_gps`` + this ``Library.expose_gps`` column) — this is only the
+    # cache-invalidation for the disposable projection (invariant 1).
+    if "expose_gps" in fields and bool(library.expose_gps) != gps_was:
+        from filearr.tasks.index_sync import reproject_library
+
+        try:
+            async with open_pool_if_needed():
+                await reproject_library.defer_async(library_id=str(library.id))
+        except Exception:  # noqa: BLE001 - the flag change itself must still land
+            # The column is the source of truth and is already committed, so every
+            # NEW projection honours it immediately; only the backfill of existing
+            # documents is delayed. Log loudly and point at the manual remedy —
+            # failing the PATCH would leave the operator unable to even record the
+            # decision when the queue is down.
+            logger.exception(
+                "library %s: expose_gps changed to %s but the index re-projection "
+                "could not be queued; run POST /api/v1/system/rebuild-index (or "
+                "retry the PATCH) so already-indexed documents pick up the change",
+                library.id,
+                library.expose_gps,
+            )
     return _library_out(library)
 
 

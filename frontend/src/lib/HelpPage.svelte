@@ -46,6 +46,13 @@
     { keys: ["Enter"], action: "Open the selected item's details" },
     { keys: ["Ctrl/⌘ Enter"], action: "Copy the selected item's path" },
     { keys: ["Esc"], action: "Close the detail panel or dialog" },
+    // R8-UI: the map is keyboard-operable end to end — panning/zooming here, and
+    // the numeric North/South/West/East fields for the area selection itself.
+    {
+      keys: ["← ↑ → ↓", "+", "−"],
+      action:
+        "Map view: pan and zoom. Drag selects an area that filters the search (Shift+drag pans); the coordinate fields below the map do the same without a mouse",
+    },
   ];
 
   let query = $state("");

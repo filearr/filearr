@@ -1,7 +1,14 @@
 "use strict";
-// Filearr local web UI — read-only. This script issues ONLY GET requests to the
-// agent's local query API (never a mutating verb). It relies on the same-origin
-// session cookie (set by the bootstrap-token exchange) for auth.
+// Filearr local web UI. Everything that touches the CATALOG is read-only: the
+// search, filter, report, status and log surfaces issue GET only, and there is
+// no code path here that writes an item or its metadata.
+//
+// The Controls tab is the one exception to "GET only", and it is not an
+// exception to read-only: it POSTs to /api/control/* to administer THIS AGENT —
+// pause/resume its scanning, trigger a scan, edit its schedule, manage its scan
+// roots — each permitted or refused by the central policy. Those POSTs always
+// require the session cookie (set by the bootstrap-token exchange), even on an
+// agent whose policy lets reads through anonymously.
 
 (function () {
   var qInput = document.getElementById("q");
@@ -366,6 +373,7 @@
     search: document.getElementById("panel-search"),
     filters: document.getElementById("panel-filters"),
     reports: document.getElementById("panel-reports"),
+    controls: document.getElementById("panel-controls"),
     status: document.getElementById("panel-status"),
     logs: document.getElementById("panel-logs")
   };
@@ -373,6 +381,7 @@
     search: document.getElementById("tab-search"),
     filters: document.getElementById("tab-filters"),
     reports: document.getElementById("tab-reports"),
+    controls: document.getElementById("tab-controls"),
     status: document.getElementById("tab-status"),
     logs: document.getElementById("tab-logs")
   };
@@ -388,6 +397,7 @@
     if (name === "status") loadStatusPanel();
     if (name === "reports") initReports();
     if (name === "filters") initBuilder();
+    if (name === "controls") initControls();
     if (name === "logs") {
       loadLogs();
       logsTimer = setInterval(loadLogs, 5000);
@@ -540,6 +550,239 @@
         errBox2.hidden = false;
         errBox2.textContent = "Could not load settings: " + e.message;
       });
+  }
+
+  // ---- controls tab ---------------------------------------------------------
+  // Agent SELF-ADMINISTRATION only. Every control renders disabled with an
+  // explicit reason when it is not usable: either central has not granted the
+  // permission, or central explicitly set that key and owns it (a local edit
+  // would be overwritten on the next policy poll, so it is refused rather than
+  // silently reverted).
+
+  var ctlState = null;
+  var ctlBusy = false;
+
+  function ctlEl(id) { return document.getElementById(id); }
+
+  function ctlShowError(msg) {
+    var box = ctlEl("ctl-error");
+    box.hidden = !msg;
+    box.textContent = msg || "";
+  }
+  function ctlShowNotice(msg) {
+    var box = ctlEl("ctl-notice");
+    box.hidden = !msg;
+    box.textContent = msg || "";
+  }
+
+  // ctlDisable disables a control and states WHY in its tooltip — a greyed-out
+  // button with no explanation is the thing this page must never ship.
+  function ctlDisable(el, reason) {
+    if (!el) return;
+    el.disabled = !!reason;
+    el.title = reason || "";
+    if (el.classList) el.classList.toggle("is-managed", !!reason);
+  }
+
+  // ctlPost issues one control action. Errors carry the agent's JSON envelope,
+  // whose message already names the policy key or the owning document.
+  function ctlPost(path, body) {
+    if (ctlBusy) return Promise.resolve(null);
+    ctlBusy = true;
+    ctlShowError("");
+    return fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) {
+          var msg = d && d.error ? d.error : "HTTP " + r.status;
+          if (r.status === 401) {
+            msg = "Signed out. Open the tokenized http://127.0.0.1:PORT/?token=… URL " +
+              "from the agent log — scan controls always require the bootstrap token, " +
+              "even when reads are open.";
+          }
+          throw new Error(msg);
+        }
+        return d;
+      });
+    }).catch(function (e) {
+      ctlShowError(e.message);
+      return null;
+    }).then(function (d) {
+      ctlBusy = false;
+      return loadControls().then(function () { return d; });
+    });
+  }
+
+  function ctlScanStateText(s) {
+    if (s.central_suspended) return "SUSPENDED by central — scanning and replication are paused.";
+    if (s.local_paused) return "PAUSED locally — scanning is stopped on this machine.";
+    if (s.scan_running) return "Scanning now.";
+    return "Scanning is active (idle between scheduled runs).";
+  }
+
+  function renderControls(s) {
+    ctlState = s;
+    var perms = s.permissions || {};
+    var managed = s.managed || {};
+
+    // --- scanning ---
+    ctlEl("ctl-scan-state").textContent = ctlScanStateText(s);
+    var scanWhy = "";
+    if (!s.available) {
+      scanWhy = "This agent build does not expose local controls.";
+    } else if (!perms.scan) {
+      scanWhy = "Central policy does not allow scan control from this UI " +
+        "(local_scan_control is off). Ask an admin to enable it in the console.";
+    }
+    var noScanPerm = scanWhy || "";
+    ctlDisable(ctlEl("ctl-pause"), noScanPerm || (s.local_paused ? "already paused locally" : "")
+      || (s.central_suspended ? "already suspended by central" : ""));
+    // A central suspend is deliberately NOT resumable here: a local operator
+    // must not be able to defeat the fleet control.
+    ctlDisable(ctlEl("ctl-resume"), noScanPerm ||
+      (s.central_suspended && !s.local_paused
+        ? "suspended by central — resume it from the central console"
+        : (!s.local_paused ? "not paused locally" : "")));
+    ctlDisable(ctlEl("ctl-scan-now"), noScanPerm ||
+      (s.central_suspended ? "suspended by central" : "") ||
+      (s.local_paused ? "paused locally — resume first" : "") ||
+      (s.scan_running ? "a scan is already running" : ""));
+    if (s.central_suspended && perms.scan) {
+      scanWhy = scanWhy || "This agent is suspended by central. A local resume cannot lift " +
+        "that — resume it from the central console.";
+    }
+    ctlEl("ctl-scan-why").textContent = scanWhy;
+
+    // --- schedule ---
+    var fields = [
+      { key: "scan_cron", input: "ctl-cron", src: "ctl-cron-src", value: s.local_scan_cron || "", eff: s.scan_cron, effSrc: s.scan_cron_source },
+      { key: "scan_interval_seconds", input: "ctl-interval", src: "ctl-interval-src", value: s.local_scan_interval_seconds || "", eff: s.scan_interval_seconds, effSrc: s.scan_interval_seconds_source },
+      { key: "scan_on_start", input: "ctl-onstart", src: "ctl-onstart-src", value: s.local_scan_on_start, eff: s.scan_on_start, effSrc: s.scan_on_start_source }
+    ];
+    var anyEditable = false;
+    fields.forEach(function (f) {
+      var input = ctlEl(f.input);
+      var reason = "";
+      if (!s.available) reason = "This agent build does not expose local controls.";
+      else if (!perms.schedule) reason = "Central policy does not allow schedule editing from this UI (local_schedule_control is off).";
+      else if (managed[f.key]) reason = "Managed by central (" + managed[f.key] + ") — edit it there.";
+      else anyEditable = true;
+      ctlDisable(input, reason);
+      if (input.type === "checkbox") {
+        input.checked = managed[f.key] || !perms.schedule ? !!f.eff : (s.local_scan_on_start_set ? !!f.value : !!f.eff);
+      } else if (document.activeElement !== input) {
+        input.value = managed[f.key] || !perms.schedule ? (f.eff === 0 ? "" : (f.eff || "")) : (f.value || "");
+      }
+      var srcText;
+      if (managed[f.key]) srcText = "managed by central · " + managed[f.key];
+      else srcText = "in effect: " + (f.eff === "" || f.eff === 0 || f.eff === false ? "not scheduled" : f.eff) +
+        " (from " + (f.effSrc || "default") + ")";
+      ctlEl(f.src).textContent = srcText;
+    });
+    ctlDisable(ctlEl("ctl-schedule-save"), anyEditable ? "" :
+      (!perms.schedule
+        ? "Central policy does not allow schedule editing from this UI (local_schedule_control is off)."
+        : "Every schedule key is managed by central — edit them in the console."));
+    ctlDisable(ctlEl("ctl-schedule-clear"), anyEditable ? "" :
+      (!perms.schedule
+        ? "Central policy does not allow schedule editing from this UI (local_schedule_control is off)."
+        : "Every schedule key is managed by central — edit them in the console."));
+
+    // --- roots ---
+    var rootsReason = "";
+    if (!s.available) rootsReason = "This agent build does not expose local controls.";
+    else if (!perms.roots) rootsReason = "Central policy does not allow root editing from this UI (local_roots_control is off).";
+    else if (s.roots_managed_by) rootsReason = "Scan roots are derived centrally (" + s.roots_managed_by + ") — change the selection there.";
+    ctlDisable(ctlEl("ctl-root-new"), rootsReason);
+    ctlDisable(ctlEl("ctl-root-add"), rootsReason);
+    ctlEl("ctl-roots-why").textContent = rootsReason ||
+      "Removing a root stops future scans of it; already-indexed items are left alone " +
+      "(tombstoning stays the scan's job, so nothing is mass-deleted from central).";
+
+    var tbody = ctlEl("ctl-roots-body");
+    tbody.textContent = "";
+    var roots = s.roots || [];
+    ctlEl("ctl-roots-empty").hidden = roots.length > 0;
+    ctlEl("ctl-roots-table").hidden = roots.length === 0;
+    roots.forEach(function (p) {
+      var tr = document.createElement("tr");
+      var tdP = document.createElement("td");
+      tdP.textContent = p;
+      tr.appendChild(tdP);
+      var tdB = document.createElement("td");
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn";
+      btn.textContent = "Remove";
+      ctlDisable(btn, rootsReason);
+      btn.addEventListener("click", function () {
+        ctlPost("/api/control/roots", { action: "remove", path: p });
+      });
+      tdB.appendChild(btn);
+      tr.appendChild(tdB);
+      tbody.appendChild(tr);
+    });
+  }
+
+  function loadControls() {
+    return fetch("/api/control", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (s) { renderControls(s); })
+      .catch(function (e) { ctlShowError("Could not load controls: " + e.message); });
+  }
+
+  var controlsWired = false;
+  function initControls() {
+    if (!controlsWired) {
+      controlsWired = true;
+      ctlEl("ctl-pause").addEventListener("click", function () {
+        ctlPost("/api/control/pause", { paused: true });
+      });
+      ctlEl("ctl-resume").addEventListener("click", function () {
+        ctlShowNotice("");
+        ctlPost("/api/control/pause", { paused: false }).then(function (d) {
+          if (d && d.still_paused_by_central) ctlShowNotice(d.notice);
+        });
+      });
+      ctlEl("ctl-scan-now").addEventListener("click", function () {
+        ctlPost("/api/control/scan-now", {});
+      });
+      ctlEl("ctl-schedule-save").addEventListener("click", function () {
+        var body = {}, clear = [];
+        var managed = (ctlState && ctlState.managed) || {};
+        if (!managed.scan_cron) {
+          var cron = ctlEl("ctl-cron").value.trim();
+          if (cron) body.scan_cron = cron; else clear.push("scan_cron");
+        }
+        if (!managed.scan_interval_seconds) {
+          var iv = ctlEl("ctl-interval").value.trim();
+          if (iv) body.scan_interval_seconds = Number(iv); else clear.push("scan_interval_seconds");
+        }
+        if (!managed.scan_on_start) body.scan_on_start = ctlEl("ctl-onstart").checked;
+        if (clear.length) body.clear = clear;
+        ctlPost("/api/control/schedule", body);
+      });
+      ctlEl("ctl-schedule-clear").addEventListener("click", function () {
+        var managed = (ctlState && ctlState.managed) || {};
+        var clear = ["scan_cron", "scan_interval_seconds", "scan_on_start"].filter(function (k) {
+          return !managed[k];
+        });
+        if (!clear.length) return;
+        ctlPost("/api/control/schedule", { clear: clear });
+      });
+      ctlEl("ctl-root-add").addEventListener("click", function () {
+        var p = ctlEl("ctl-root-new").value.trim();
+        if (!p) return;
+        ctlPost("/api/control/roots", { action: "add", path: p }).then(function (d) {
+          if (d) ctlEl("ctl-root-new").value = "";
+        });
+      });
+    }
+    loadControls();
   }
 
   // ---- logs tab -------------------------------------------------------------

@@ -183,6 +183,26 @@
             : `in progress since ${new Date(rx.started).toLocaleString()}`;
         lines.push(`re-extract: ${when}${enriched}`);
       }
+      // 2026-08-10 local scan controls. Same reason as the re-extract block
+      // above: this tooltip is a FIXED key list, so an agent-reported key that
+      // is not named here is collected, stored, and then never seen by anyone.
+      // Both of these change what the agent is DOING, so both have to surface:
+      // an agent paused by its local operator looks identical to a healthy idle
+      // one from central, and a locally-edited schedule means this agent's
+      // group policy is not the whole story for it.
+      if (h.local_scan_paused === true) lines.push("scanning paused locally (on the agent)");
+      const lo = h.local_overrides as Record<string, unknown> | undefined;
+      if (lo) {
+        const bits: string[] = [];
+        if (typeof lo.scan_cron === "string") bits.push(`cron ${lo.scan_cron}`);
+        if (typeof lo.scan_interval_seconds === "number")
+          bits.push(`every ${lo.scan_interval_seconds}s`);
+        if (typeof lo.scan_on_start === "boolean")
+          bits.push(`on start ${lo.scan_on_start ? "yes" : "no"}`);
+        if (typeof lo.roots_edited_at === "string")
+          bits.push(`roots edited ${new Date(lo.roots_edited_at).toLocaleString()}`);
+        if (bits.length) lines.push(`local overrides: ${bits.join(", ")}`);
+      }
       if (a.health_at) lines.push(`health as of ${new Date(a.health_at).toLocaleString()}`);
     }
     return lines.join("\n");
@@ -837,14 +857,22 @@ ${detail}
           {/if}
           {#each CAPABILITY_TOOLS as tool (tool)}
             {@const present = caps.tools?.[tool] === true}
+            {@const version = caps.tool_versions?.[tool]}
             <span
               class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {present
                 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
                 : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}"
               title={present
-                ? `${tool} was found on this agent host's PATH.`
+                ? version
+                  ? `${tool} ${version} was found on this agent host's PATH.`
+                  : `${tool} was found on this agent host's PATH, but did not report a version (an older build, or a wrapper script).`
                 : `${tool} is NOT on this agent host's PATH — capabilities that need it are unavailable here. Install it on the machine; no new agent build is required.`}>
-              {tool} {present ? "✓" : "✕"}
+              <!-- The version is shown INLINE rather than only in the tooltip:
+                   "installed" and "installed and current" are different answers,
+                   and an ancient tesseract or ffmpeg is a real cause of bad
+                   output that a checkmark alone would hide. -->
+              {tool}
+              {present ? (version ?? "✓") : "✕"}
             </span>
           {/each}
           {#if caps.formats?.length}
@@ -957,6 +985,14 @@ ${detail}
                   <span class="ml-1 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
                     title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends.">backing off</span>
                 {/if}
+                {#if a.health?.local_scan_paused}
+                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title="An operator paused scanning from THIS AGENT's own web UI (allowed by the local_scan_control policy key). Replication is unaffected. Resume it there, or revoke the permission here — the central Suspend action is a separate, stronger hold that a local resume cannot lift.">paused locally</span>
+                {/if}
+                {#if a.health?.local_overrides}
+                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+                    title={healthTitle(a)}>local settings</span>
+                {/if}
                 {#if a.last_auth_mode === "mtls"}
                   <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                     title="Central verified this agent's last authenticated request via the mTLS proxy path (client-certificate SAN identity) — observed server-side, not self-reported.">mTLS</span>
@@ -968,6 +1004,7 @@ ${detail}
               <td class="py-2 pr-3">
                 <select
                   class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
+                  title="Which configuration group's settings this agent receives over the policy channel. Applies immediately — the change invalidates the agent's policy cache, so it lands on the agent's next poll with no restart. Default (built-in) means no group settings at all, not an empty group."
                   disabled={assigning[a.id] || a.status === "revoked"}
                   value={a.config_group_id ?? ""}
                   onchange={(e) => assignGroup(a, (e.currentTarget as HTMLSelectElement).value)}>
@@ -1075,13 +1112,18 @@ ${detail}
 
     <!-- Simple token mint -->
     <div class="mt-3 flex flex-wrap items-end gap-2">
-      <label class="text-xs text-slate-500">
+      <label class="text-xs text-slate-500"
+        title="The rollout group the enrolling agent lands in. Rollout groups are the middle POLICY scope (agent beats group beats global) — not the same thing as a configuration group, which is assigned in the table above. Free text: a new name creates the group on first enrollment.">
         rollout group
-        <input class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700" bind:value={newGroup} />
+        <input class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+          title="The rollout group the enrolling agent lands in. Rollout groups are the middle POLICY scope (agent beats group beats global) — not the same thing as a configuration group. Free text: a new name creates the group on first enrollment."
+          bind:value={newGroup} />
       </label>
-      <label class="text-xs text-slate-500">
+      <label class="text-xs text-slate-500"
+        title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes).">
         TTL (min, blank = default)
         <input class="mt-1 block w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+          title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes)."
           type="number" min="1" placeholder="60" bind:value={newTtl} />
       </label>
       <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
@@ -1105,14 +1147,18 @@ ${detail}
     <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
       <h4 class="text-sm font-medium">Generate installer sidecar</h4>
       <div class="mt-2 flex flex-wrap items-end gap-2">
-        <label class="text-xs text-slate-500">
+        <label class="text-xs text-slate-500"
+          title="Writes agent_name into the sidecar — the friendly name this agent shows under in the fleet table. Left blank, the agent uses the device's own hostname.">
           agent name (optional)
           <input class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+            title="Writes agent_name into the sidecar — the friendly name this agent shows under in the fleet table. Left blank, the agent uses the device's own hostname."
             placeholder="(auto from hostname)" bind:value={insName} />
         </label>
-        <label class="text-xs text-slate-500">
+        <label class="text-xs text-slate-500"
+          title="Writes config_group into the sidecar, so the agent joins that configuration group at enrollment instead of needing an assignment afterwards. Default (built-in) writes no group — the agent gets no group settings at all.">
           config group
           <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+            title="Writes config_group into the sidecar, so the agent joins that configuration group at enrollment instead of needing an assignment afterwards. Default (built-in) writes no group — the agent gets no group settings at all."
             bind:value={insGroupId}>
             <option value="">Default (built-in)</option>
             {#each groups as g (g.id)}
@@ -1120,9 +1166,11 @@ ${detail}
             {/each}
           </select>
         </label>
-        <label class="text-xs text-slate-500">
+        <label class="text-xs text-slate-500"
+          title="Writes log_level into the sidecar. This is the ONE log-level setting a shipped agent actually reads (the per-group Log level below is stored but not yet enforced). The host can still override it with FILEARR_AGENT_LOG_LEVEL or -log-level; the sidecar is the lowest-precedence source. Takes effect at agent start. (default) leaves the key out, so the agent uses info.">
           log level
           <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+            title="Writes log_level into the sidecar. This is the ONE log-level setting a shipped agent actually reads (the per-group Log level below is stored but not yet enforced). The host can still override it with FILEARR_AGENT_LOG_LEVEL or -log-level; the sidecar is the lowest-precedence source. Takes effect at agent start. (default) leaves the key out, so the agent uses info."
             bind:value={insLogLevel}>
             <option value="">(default)</option>
             {#each AGENT_LOG_LEVELS as lvl}
@@ -1280,26 +1328,37 @@ ${detail}
       {/if}
 
       <div class="mt-3 flex flex-col gap-3">
-        <label class="text-xs text-slate-500">Name
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" bind:value={dialog.name} />
+        <label class="text-xs text-slate-500"
+          title="How this group is identified in the assignment dropdown. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned.">Name
+          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+            title="How this group is identified in the assignment dropdown. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned."
+            bind:value={dialog.name} />
         </label>
-        <label class="text-xs text-slate-500">Description
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" bind:value={dialog.description} />
+        <label class="text-xs text-slate-500"
+          title="Free-text note for other operators, up to 1024 characters. Never sent to the agent.">Description
+          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+            title="Free-text note for other operators, up to 1024 characters. Never sent to the agent."
+            bind:value={dialog.description} />
         </label>
 
         <div class="flex flex-wrap gap-4">
           <label class="text-xs text-slate-500">
             <span class="inline-flex items-center gap-1.5">Log level
               {@render notEnforced("Delivered under the policy document's `group` section, but the agent's log level comes only from its sidecar config, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag today. Set it in the installer sidecar to actually change an agent's logging.")}</span>
-            <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.logLevel}>
+            <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              title="Intended log verbosity for this group's members. STORED AND DELIVERED BUT NOT ENFORCED: no shipped agent build reads it. To actually change an agent's logging, use the installer sidecar's log level, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag on the host. (unset) omits the key."
+              bind:value={dialog.logLevel}>
               <option value="">(unset)</option>
               {#each AGENT_LOG_LEVELS as lvl}
                 <option value={lvl}>{lvl}</option>
               {/each}
             </select>
           </label>
-          <label class="text-xs text-slate-500">Scan schedule (cron)
-            <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700" placeholder="0 3 * * *" bind:value={dialog.cron} />
+          <label class="text-xs text-slate-500"
+            title="Arms the in-daemon scan scheduler for this group's members, so a lone `filearr-agent run` service scans itself with no external cron or scheduled task. 5-field cron in the AGENT's local time — not UTC, not this browser's timezone. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave blank on container agents — they scan from their own entrypoint loop and would double-scan.">Scan schedule (cron)
+            <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
+              title="Arms the in-daemon scan scheduler for this group's members. 5-field cron in the AGENT's local time — not UTC, not this browser's timezone. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave blank on container agents — they scan from their own entrypoint loop and would double-scan."
+              placeholder="0 3 * * *" bind:value={dialog.cron} />
             <span class="mt-0.5 block text-[11px] text-slate-400">5-field cron in the agent's local time.</span>
           </label>
         </div>
@@ -1313,25 +1372,34 @@ ${detail}
             rollout-group policy row (API) still outranks them.
           </p>
           <div class="mt-2 flex flex-wrap gap-4">
-            <label class="text-xs text-slate-500">
+            <label class="text-xs text-slate-500"
+              title="Read-only browser search served by the agent itself, on loopback 127.0.0.1:8686 by default. Off by default for an agent central has never reached. Fails closed when the agent's cached policy goes stale past its offline-grace window. This gates what is SERVED; the listener address is a host setting (FILEARR_AGENT_WEBUI_ADDR / _WEBUI_ALLOW_REMOTE).">
               Web UI
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.webUI}>
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                title="Read-only browser search served by the agent itself, on loopback 127.0.0.1:8686 by default. Off by default for an agent central has never reached. Fails closed when the agent's cached policy goes stale past its offline-grace window. This gates what is SERVED; the listener address is a host setting (FILEARR_AGENT_WEBUI_ADDR / _WEBUI_ALLOW_REMOTE)."
+                bind:value={dialog.webUI}>
                 <option value="">Inherit</option>
                 <option value="on">On</option>
                 <option value="off">Off</option>
               </select>
             </label>
-            <label class="text-xs text-slate-500">
+            <label class="text-xs text-slate-500"
+              title="Whether the local web UI demands the agent's bootstrap token before serving anything. Required is the default for an agent central has never reached. Never affects the CLI, which authenticates by peer credentials instead.">
               Web UI auth token
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.authRequired}>
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                title="Whether the local web UI demands the agent's bootstrap token before serving anything. Required is the default for an agent central has never reached. Never affects the CLI, which authenticates by peer credentials instead."
+                bind:value={dialog.authRequired}>
                 <option value="">Inherit</option>
                 <option value="on">Required</option>
                 <option value="off">Not required</option>
               </select>
             </label>
-            <label class="text-xs text-slate-500">
+            <label class="text-xs text-slate-500"
+              title="The on-device `filearr query` socket — offline local search from the agent host's own shell. On by default. Unlike the web UI it keeps answering through a long disconnection; an explicit Off persists through offline periods too, because the policy is cached on the agent.">
               Local query API / CLI
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.localAccess}>
+              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                title="The on-device `filearr query` socket — offline local search from the agent host's own shell. On by default. Unlike the web UI it keeps answering through a long disconnection; an explicit Off persists through offline periods too, because the policy is cached on the agent."
+                bind:value={dialog.localAccess}>
                 <option value="">Inherit</option>
                 <option value="on">On</option>
                 <option value="off">Off</option>
@@ -1343,13 +1411,19 @@ ${detail}
         <!-- Inventory -->
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex flex-wrap items-center gap-2">
-            <label class="inline-flex items-center gap-2 text-sm">
-              <input type="checkbox" bind:checked={dialog.inventoryEnabled} /> Inventory collection enabled
+            <label class="inline-flex items-center gap-2 text-sm"
+              title="Master switch for host inventory collection (OS, hardware, installed packages, permissions) on this group's members. STORED AND DELIVERED BUT NOT ENFORCED: the collectors are agent-side scaffold and no shipped build acts on this yet.">
+              <input type="checkbox" bind:checked={dialog.inventoryEnabled}
+                title="Master switch for host inventory collection on this group's members. STORED AND DELIVERED BUT NOT ENFORCED: the collectors are agent-side scaffold and no shipped build acts on this yet." />
+              Inventory collection enabled
             </label>
             {@render notEnforced("Central validates, stores and delivers these keys, but no shipped agent build reads them yet — the inventory collectors are agent-side scaffold. Authoring them now is safe and forward-looking; it changes nothing on the fleet today.")}
           </div>
-          <label class="mt-2 block text-xs text-slate-500">Collectors (comma or newline separated)
-            <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" placeholder="os, hardware, packages" bind:value={dialog.collectorsText} />
+          <label class="mt-2 block text-xs text-slate-500"
+            title="Which inventory collectors to run, by name. Central deliberately does not hard-code the vocabulary — a new agent build can add a collector without a central redeploy — so a name that no agent implements is simply ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs.">Collectors (comma or newline separated)
+            <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+              title="Which inventory collectors to run, by name. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs."
+              placeholder="os, hardware, packages" bind:value={dialog.collectorsText} />
           </label>
 
           <!-- W7 permissions collector (advanced, collapsed by default) -->
@@ -1367,50 +1441,60 @@ ${detail}
                 is <em>also</em> named in Collectors above — an admin must both name
                 the collector and configure it.
               </p>
-              <label class="mt-2 inline-flex items-center gap-2 text-sm">
+              <label class="mt-2 inline-flex items-center gap-2 text-sm"
+                title="Whether a permissions object is written into this group's settings at all. Unticked omits the whole block, which keeps 'never configured' distinguishable from 'configured, everything off'.">
                 <input type="checkbox" bind:checked={dialog.permsConfigured} />
                 Include a permissions block in this group's settings
               </label>
               {#if dialog.permsConfigured}
                 <div class="mt-2 flex flex-col gap-1.5 text-sm">
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Runs the permissions collector. Off by default — the block can be authored and staged before it is switched on.">
                     <input type="checkbox" bind:checked={dialog.permsEnabled} /> Enabled
                   </label>
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Look each principal's display name up on the agent host. Best-effort: an unresolvable SID/uid is reported as-is rather than failing the collection. Costs a directory lookup per distinct principal.">
                     <input type="checkbox" bind:checked={dialog.permsResolveNames} />
                     Resolve principal names
                     <span class="text-xs text-slate-500">(best-effort SID/uid → display name)</span>
                   </label>
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Report ACEs a path inherited from its parents as well as those set directly on it. Off keeps the report to explicit grants, which is what makes a first run readable; on produces a much larger report.">
                     <input type="checkbox" bind:checked={dialog.permsIncludeInherited} />
                     Include inherited ACEs
                     <span class="text-xs text-slate-500">(off = explicit grants only)</span>
                   </label>
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Drop the baseline principals that appear on almost every path, so what is left is the grant someone actually made. On by default. Turn it off only when you are auditing the baseline itself.">
                     <input type="checkbox" bind:checked={dialog.permsExcludeWellKnown} />
                     Exclude well-known principals
                     <span class="text-xs text-slate-500">(SYSTEM, Administrators, root, Everyone, CREATOR OWNER)</span>
                   </label>
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Also read the SMB share's own ACL, not just the filesystem's. Windows hosts only — a Linux or macOS agent has nothing to report here and skips it.">
                     <input type="checkbox" bind:checked={dialog.permsCollectShareAcls} />
                     Collect share-level ACLs
                     <span class="text-xs text-slate-500">(Windows only)</span>
                   </label>
-                  <label class="inline-flex items-center gap-2">
+                  <label class="inline-flex items-center gap-2"
+                    title="Resolve each principal's net effective access rather than listing raw ACEs. Reserved for v2: central accepts and stores the flag, and the agent no-ops on it until the feature ships.">
                     <input type="checkbox" bind:checked={dialog.permsIncludeEffective} />
                     Include effective access
                     <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
                       title="Reserved for v2 of the permissions brief. Central accepts and stores it; the agent no-ops on it until the feature ships.">reserved v2</span>
                   </label>
                 </div>
-                <label class="mt-2 block text-xs text-slate-500">
+                <label class="mt-2 block text-xs text-slate-500"
+                  title="Extra principals to drop from the report on top of the well-known list — typically backup and monitoring service accounts that hold access everywhere and drown out real findings. Canonical ids (a SID, or DOMAIN\user), max 64 entries of 128 characters.">
                   Exclude principals (comma or newline separated canonical ids; max 64)
                   <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                    title="Extra principals to drop from the report on top of the well-known list — typically backup and monitoring service accounts that hold access everywhere. Canonical ids (a SID, or DOMAIN\user), max 64 entries of 128 characters."
                     placeholder="S-1-5-18, DOMAIN\\svc_backup" bind:value={dialog.permsExcludePrincipalsText} />
                 </label>
 
                 <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                  <label class="inline-flex items-center gap-2 text-sm">
+                  <label class="inline-flex items-center gap-2 text-sm"
+                    title="Whether an audit object is written into the permissions block at all. Unticked omits it entirely.">
                     <input type="checkbox" bind:checked={dialog.auditConfigured} />
                     Include a change-audit block
                   </label>
@@ -1420,23 +1504,29 @@ ${detail}
                   </p>
                   {#if dialog.auditConfigured}
                     <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
-                      <label class="inline-flex items-center gap-2">
+                      <label class="inline-flex items-center gap-2"
+                        title="Take a permissions snapshot of the watch paths on each collection and diff it against the previous one. Off by default.">
                         <input type="checkbox" bind:checked={dialog.auditEnabled} /> Enabled
                       </label>
-                      <label class="inline-flex items-center gap-2">
+                      <label class="inline-flex items-center gap-2"
+                        title="Raise an alert when a diff is non-empty. Off means the snapshots are still taken and kept, just silently — useful while you learn what a normal week of churn looks like.">
                         <input type="checkbox" bind:checked={dialog.auditAlertOnChange} /> Alert on change
                       </label>
-                      <label class="text-xs text-slate-500">
+                      <label class="text-xs text-slate-500"
+                        title="How many past snapshots to keep per watch path before the oldest is discarded. Bounds the disk this costs on the agent; more snapshots means a longer diff history to look back through. Default 10.">
                         Retain snapshots (1–{MAX_RETAIN_SNAPSHOTS})
                         <input type="number" min="1" max={MAX_RETAIN_SNAPSHOTS}
                           class="ml-1 w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                          title="How many past snapshots to keep per watch path before the oldest is discarded. Bounds the disk this costs on the agent. Default 10."
                           bind:value={dialog.auditRetain} />
                       </label>
                     </div>
-                    <label class="mt-2 block text-xs text-slate-500">
+                    <label class="mt-2 block text-xs text-slate-500"
+                      title="Which paths get snapshotted, one per line. Path specs — environment tokens (%USERPROFILE%, $HOME, ~) and globs are expanded ON THE AGENT, so a spec may resolve differently on each host and central cannot preview the result. Central only syntax-checks them. Max 200.">
                       Watch paths (one per line; max 200 — path specs, syntax-checked only)
                       <textarea rows="2"
                         class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                        title="Which paths get snapshotted, one per line. Path specs — environment tokens (%USERPROFILE%, $HOME, ~) and globs are expanded ON THE AGENT, so a spec may resolve differently on each host. Central only syntax-checks them. Max 200."
                         bind:value={dialog.auditWatchPathsText}></textarea>
                     </label>
                   {/if}
@@ -1461,29 +1551,42 @@ ${detail}
           {#each dialog.selections as sel, i (i)}
             <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
               <div class="flex flex-wrap items-center gap-3">
-                <label class="text-xs text-slate-500">Preset
-                  <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={sel.preset}>
+                <label class="text-xs text-slate-500"
+                  title="A predefined, per-OS folder set the AGENT resolves to real locations — Windows known folders (OneDrive-redirect aware), Linux XDG user-dirs, macOS user folders — with system files, thumbnails and caches excluded. Presets are why one selection works across a mixed fleet. (none) means this selection is defined purely by the path specs below.">Preset
+                  <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                    title="A predefined, per-OS folder set the AGENT resolves to real locations — Windows known folders (OneDrive-redirect aware), Linux XDG user-dirs, macOS user folders — with system files, thumbnails and caches excluded. (none) means this selection is defined purely by the path specs below."
+                    bind:value={sel.preset}>
                     <option value="">(none)</option>
                     {#each SCAN_PRESET_NAMES as p}
                       <option value={p}>{p}</option>
                     {/each}
                   </select>
                 </label>
-                <label class="inline-flex items-center gap-2 text-sm">
+                <label class="inline-flex items-center gap-2 text-sm"
+                  title="Whether this selection counts. Unticking keeps it authored but inert, so a scaffold can be staged and switched on later instead of being deleted and retyped.">
                   <input type="checkbox" bind:checked={sel.enabled} /> enabled
                 </label>
                 <div class="grow"></div>
                 <button class="text-xs text-red-600" onclick={() => dialog && (dialog.selections = dialog.selections.filter((_, j) => j !== i))}>remove</button>
               </div>
-              <label class="mt-2 block text-xs text-slate-500">Path specs (one per line — env tokens / globs allowed)
-                <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700" placeholder={"%USERPROFILE%/Documents\n/home/*/documents"} bind:value={sel.pathsText}></textarea>
+              <label class="mt-2 block text-xs text-slate-500"
+                title="Extra locations for this selection, one per line. Environment tokens (%USERPROFILE%, $HOME, ~) and multi-user globs (/home/*/documents) are expanded ON THE AGENT, never centrally — so one spec covers every member of a mixed fleet, and central cannot show you what it will resolve to. Max 200 specs, 4096 characters each.">Path specs (one per line — env tokens / globs allowed)
+                <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                  title="Extra locations for this selection, one per line. Environment tokens (%USERPROFILE%, $HOME, ~) and multi-user globs (/home/*/documents) are expanded ON THE AGENT, never centrally. Max 200 specs, 4096 characters each."
+                  placeholder={"%USERPROFILE%/Documents\n/home/*/documents"} bind:value={sel.pathsText}></textarea>
               </label>
               <div class="mt-2 flex flex-wrap gap-3">
-                <label class="grow text-xs text-slate-500">Include regex (one per line)
-                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700" bind:value={sel.includeText}></textarea>
+                <label class="grow text-xs text-slate-500"
+                  title="Only paths matching one of these expressions are kept, one per line. Empty means no include filter at all — everything the specs resolved that the excludes do not drop. Central compiles them with Python's re as a typo gate only; the agent's RE2 engine is the authority, so an exotic construct can pass here and behave differently there. Max 200.">Include regex (one per line)
+                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                    title="Only paths matching one of these expressions are kept, one per line. Empty means no include filter at all. Central compiles them with Python's re as a typo gate only; the agent's RE2 engine is the authority. Max 200."
+                    bind:value={sel.includeText}></textarea>
                 </label>
-                <label class="grow text-xs text-slate-500">Exclude regex (one per line)
-                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700" bind:value={sel.excludeText}></textarea>
+                <label class="grow text-xs text-slate-500"
+                  title="Paths matching any of these are dropped, one per line, applied after the includes. Same typo-gate caveat: central syntax-checks with Python's re, the agent evaluates with RE2. Max 200.">Exclude regex (one per line)
+                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+                    title="Paths matching any of these are dropped, one per line, applied after the includes. Same typo-gate caveat: central syntax-checks with Python's re, the agent evaluates with RE2. Max 200."
+                    bind:value={sel.excludeText}></textarea>
                 </label>
               </div>
             </div>

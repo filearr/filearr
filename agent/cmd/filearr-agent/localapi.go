@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -93,10 +95,64 @@ func loadPolicyView(cache *agentcfg.ETagCache) localapi.PolicyView {
 		Version:            ls.Version,
 		Predicates:         ls.Predicates,
 		Stale:              ls.Stale,
+		// Local self-administration (2026-08-10): the three permissions plus the
+		// set of keys central EXPLICITLY set — the local UI renders any key in
+		// that set read-only ("managed by central") and refuses to edit it,
+		// because central re-applies its document every poll.
+		ScanControl:     ls.ScanControl,
+		ScheduleControl: ls.ScheduleControl,
+		RootsControl:    ls.RootsControl,
+		CentralKeys:     ls.CentralKeys,
+		PolicySource:    policySourceLabel(ls.Scope, ls.Version),
+		// Roots have no top-level policy key: they are centrally MANAGED only
+		// when a config group's scan_selections derives them (the same document
+		// consumeScanRootSeam expands), in which case a local edit would be
+		// recomputed away.
+		RootsManagedByCentral: hasGroupScanSelections(doc),
 	}
 	if !ls.GraceExpiresAt.IsZero() {
 		g := ls.GraceExpiresAt
 		pv.GraceExpiresAt = &g
 	}
 	return pv
+}
+
+// policySourceLabel names the document a centrally-managed value came from, in
+// the same wording the Status panel's extraction "source" already uses ("central
+// policy global v7"). A local operator who is refused an edit needs to know
+// WHICH scope to go change, not just that "central" owns it.
+func policySourceLabel(scope string, version int) string {
+	if scope == "" {
+		scope = "unknown scope"
+	}
+	return fmt.Sprintf("central policy %s v%d", scope, version)
+}
+
+// hasGroupScanSelections reports whether the cached policy carries an ENABLED
+// config-group scan_selections entry — i.e. this agent's scan roots are DERIVED
+// centrally, so a local root edit would be recomputed away.
+//
+// It reads the document rather than calling inventory.ExpandScanSelections
+// deliberately: this runs on every local-API request (the policy view is
+// rebuilt per request), and expansion walks the filesystem for globs and preset
+// paths. The question here is only "does central author roots for this agent",
+// which the document answers on its own. The `enabled` semantics mirror
+// inventory's scanSelection.enabled(): absent means enabled.
+func hasGroupScanSelections(doc agentcfg.PolicyDoc) bool {
+	var body struct {
+		Group struct {
+			ScanSelections []struct {
+				Enabled *bool `json:"enabled"`
+			} `json:"scan_selections"`
+		} `json:"group"`
+	}
+	if len(doc.Policy) == 0 || json.Unmarshal(doc.Policy, &body) != nil {
+		return false
+	}
+	for _, sel := range body.Group.ScanSelections {
+		if sel.Enabled == nil || *sel.Enabled {
+			return true
+		}
+	}
+	return false
 }
