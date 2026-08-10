@@ -16,39 +16,78 @@ to the central server over mTLS.
 - **It is** an offline-first local catalog plus a reliable, at-least-once,
   idempotent replication client. Local search answers "where did I put that
   file" using path / size / mtime / hashes / filename-derived title.
-- **It is not** a full metadata extractor. Heavy or exotic per-type extraction
-  (3D mesh, structured document properties) stays **central** and runs after
-  replication. Central remains the single source of truth; the agent's local
-  index is disposable and rebuildable from a filesystem walk, exactly as
-  Meilisearch is one level up.
+- **It can also extract**, on its own machine, when policy turns it on: the
+  agent runs the extraction pass locally and attaches the result to its change
+  events. Central never opens a file on a remote host — extraction either
+  happens *on the agent* or not at all for that item.
+- **It is not** the place heavy or exotic extraction lives. Central remains the
+  single source of truth; the agent's local index is disposable and rebuildable
+  from a filesystem walk, exactly as Meilisearch is one level up.
 
 The agent is a single static Go binary (no cgo), cross-compiled for Windows,
 macOS and Linux, using a pure-Go SQLite/FTS5 store.
 
-!!! warning "What agent-owned libraries cannot do (yet)"
+### Content extraction on agent-owned libraries {#agent-extraction}
+
+Extraction on agent libraries is **opt-in and host-dependent**. It is off until
+you enable it, and what an agent can actually do depends on which tools exist on
+*that machine*, not on which binary it runs.
+
+!!! warning "Agent extraction is off by default, and capability is per host"
     Replication carries **identity only** — path, size, mtime, hashes, plus a
-    filename-derived title. The file contents never leave the agent's machine,
-    and central cannot open a path on a remote host, so **no central-side text
-    extraction runs for agent-owned items**. Consequences worth knowing before
-    you plan around them:
+    filename-derived title — until you set `extract_enabled` in the agent's
+    policy. With it on, the agent ships a compact `extracted` object alongside
+    each change event and central folds it into the item's *extracted* metadata
+    (never `user_metadata`).
 
-    - **OCR and RAG chunking do nothing** for an agent library. Both consume
-      extracted document text, which is never produced, so the passage
-      chunker selects zero items. The console disables both toggles on
-      agent-owned libraries and says why.
-    - **Semantic search is shallow, not absent.** Agent items *are* embedded,
-      but only from filename / title / tags — there is no document body to
-      embed, so a match is name-like, not content-like.
-    - **What does work**: filename/path/size/date search and facets, hashes and
-      duplicate detection, move detection, on-demand stat/rehash verification,
-      file retrieval (the agent streams the bytes on request), and thumbnails —
-      which the agent generates itself and pushes to central, precisely because
-      central cannot read the source.
+    **What still cannot work:**
 
-    Full content indexing of remote files would need retrieve-then-extract (pull
-    each file into staging, extract, discard) or an agent-side extractor; today
-    neither is wired. For libraries where document text matters, host them on
-    central (or mount the storage on the central host) rather than via an agent.
+    - **Central-side extraction never runs for agent items.** Central cannot
+      open a path on a remote host. If the agent did not extract it, nothing
+      will — there is no retrieve-then-extract fallback.
+    - **A capability the agent host lacks is silently unavailable.** OCR needs
+      `tesseract`, the media technical probe needs `ffprobe`, deep EXIF needs
+      `exiftool`. These are **host tools on `PATH`**, not compiled-in features:
+      an operator upgrades an agent's capability by installing a package on the
+      machine, not by swapping binaries. An agent asked to do something it
+      cannot logs the ignored setting once and carries on — and the console
+      shows you exactly which agents those are (below).
+    - **Oversize extractions are dropped, not retried.** Central caps the whole
+      `extracted` object at `FILEARR_AGENT_EXTRACTED_MAX_BYTES` (256 KiB). Over
+      that, the object is discarded with a warning and the change event still
+      applies — replication is never allowed to wedge on enrichment.
+    - **Not every format is covered yet.** PDF text, deep EXIF and the more
+      exotic 3D formats are later phases; the agent advertises the `formats` it
+      can actually handle.
+
+    **How to turn it on:** set `extract_enabled: true` in the policy scope you
+    want (Agents page → *Agent policy* → *Content extraction*), plus
+    `extract_body_text` for document text and `extract_ocr` where the hosts have
+    tesseract. Remember that a narrower scope **replaces** a broader one, so an
+    `agent:` document must repeat every key it needs. Then install the host
+    tools on the machines that need them. Existing items pick the new metadata
+    up on their next change event or the next full reconcile; RAG chunking and
+    content embeddings follow automatically once `body_text` lands, because the
+    backfills select on exactly that.
+
+    **What worked all along**: filename/path/size/date search and facets, hashes
+    and duplicate detection, move detection, on-demand stat/rehash verification,
+    file retrieval (the agent streams the bytes on request), and thumbnails —
+    which the agent generates itself and pushes to central, precisely because
+    central cannot read the source.
+
+#### Seeing what an agent can do {#agent-capabilities}
+
+Each agent reports a **capability advertisement** on its command poll — whether
+this build has the extraction pass (`extract`, `extract_schema`), which host
+tools it found (`tools.ffmpeg` / `ffprobe` / `tesseract` / `exiftool`), and the
+`formats` it can handle. The Agents table exposes it per row behind
+**details**, together with the agent's effective content-extraction policy and,
+most usefully, a list of the settings **this agent will ignore** — for example
+an amber `extract_ocr — no tesseract on the agent host` chip when the policy
+asks for OCR on a machine that has none. The check is deliberately conservative:
+an agent that has not yet advertised anything is reported as unknown rather than
+flagged.
 
 ## Installing the agent (service + sidecar config)
 
@@ -589,6 +628,10 @@ same as `false`. "Enforced by" says who actually acts on the value.
 | `exclude_globs` | list[str] | presets only | agent | Extra excludes on top of the preset bundles. |
 | `content_hash_max_bytes` | int ≥ 0 | agent's built-in cap | agent | Files larger than this are cataloged unhashed; `0` disables content hashing. |
 | `watch_mode` | bool | off (polling) | agent | Filesystem-event watching. Local disks only — inotify is unreliable over SMB/NFS. |
+| `extract_enabled` | bool | **off** | agent | Run the agent-side [content-extraction pass](#agent-extraction) and ship the result with each change event. Off = identity-only replication, and the three keys below do nothing. |
+| `extract_body_text` | bool | **off** | agent | Include document body text (txt/md/docx/xlsx/odf/epub…). This is what makes agent items chunkable and content-embeddable rather than filename-only — and what makes events materially larger. |
+| `extract_ocr` | bool | **off** | agent | OCR images and scanned PDFs. **Needs `tesseract` on the agent host**; an agent without it logs the ignored setting and continues. |
+| `extract_max_bytes` | int ≥ 0 | agent's built-in cap (32 MiB) | agent | Skip extraction for files larger than this. The identity half of the event is unaffected; `0` = extract nothing. |
 | `scan_cron` | 5-field cron | no cron schedule | agent | In-daemon scan schedule in **agent-local time**. Wins over `scan_interval_seconds`. |
 | `scan_interval_seconds` | int ≥ 300 | no interval schedule | agent | Fixed-interval scanning; ignored when `scan_cron` is set. |
 | `scan_on_start` | bool | off | agent | One scan ~30 s after the daemon starts. |
@@ -635,6 +678,14 @@ The Agents page carries a full **Agent policy** editor:
   `taxonomy_version`, and never stamps the agent's `last_seen_at`;
 - a **raw JSON** escape hatch that round-trips forward-compat keys;
 - a read-only **recent versions** list per scope.
+
+Setting a key is only half the story for anything host-dependent. Expand an
+agent's **details** row in the agents table to see its
+[capability advertisement](#agent-capabilities) — extraction support and
+schema, the `ffmpeg` / `ffprobe` / `tesseract` / `exiftool` matrix, the supported
+`formats` — next to its effective content-extraction policy, plus an explicit
+list of the settings **that agent will ignore** and why. That is the answer to
+"I turned OCR on fleet-wide; why is nothing happening on this box".
 
 ### Scan scheduling from policy (service installs)
 

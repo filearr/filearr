@@ -37,11 +37,16 @@ export interface AgentPolicyDoc {
   scan_on_start?: boolean;
   upload_rate_bytes_per_sec?: number;
   auto_update?: boolean;
+  extract_enabled?: boolean;
+  extract_body_text?: boolean;
+  extract_ocr?: boolean;
+  extract_max_bytes?: number;
   [key: string]: unknown;
 }
 
 export type PolicySection =
   | "scanning"
+  | "extraction"
   | "scheduling"
   | "polling"
   | "local"
@@ -52,6 +57,16 @@ export const POLICY_SECTIONS: { id: PolicySection; label: string; blurb: string 
     id: "scanning",
     label: "Scanning",
     blurb: "What the agent walks and how hard it hashes.",
+  },
+  {
+    id: "extraction",
+    label: "Content extraction",
+    blurb:
+      "What the agent extracts from the files it catalogs, and ships up with its " +
+      "change events. Central never opens a file on an agent host, so this is the " +
+      "only way agent items get real content metadata. Capability is a property of " +
+      "the AGENT HOST (ffprobe / tesseract / exiftool on PATH), not of the build — " +
+      "the agents table flags any setting a given agent cannot honour.",
   },
   {
     id: "scheduling",
@@ -141,6 +156,44 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     section: "scanning",
     hint: "Filesystem-event watching instead of pure polling. Local disks only — inotify is unreliable over SMB/NFS.",
     fallback: "off (polling)",
+    enforcedBy: "agent",
+  },
+  // --- Content extraction --------------------------------------------------
+  {
+    key: "extract_enabled",
+    label: "Agent-side extraction",
+    kind: "bool",
+    section: "extraction",
+    hint: "Run the extraction pass on the agent and ship the result with each change event. Off means agent items carry identity only (path/size/mtime/hashes) — the other keys in this section then do nothing.",
+    fallback: "off — identity-only replication",
+    enforcedBy: "agent",
+  },
+  {
+    key: "extract_body_text",
+    label: "Include document body text",
+    kind: "bool",
+    section: "extraction",
+    hint: "Extract text from documents (txt/md/docx/xlsx/odf/epub…). This is what makes agent items chunkable and content-embeddable instead of filename-only — and what makes replication events materially larger. Oversize payloads are dropped by central, not retried.",
+    fallback: "off — metadata only, no body text",
+    enforcedBy: "agent",
+  },
+  {
+    key: "extract_ocr",
+    label: "OCR images and scanned PDFs",
+    kind: "bool",
+    section: "extraction",
+    hint: "Needs tesseract installed on the AGENT host. An agent without it logs the ignored setting and carries on; the agents table shows which agents those are.",
+    fallback: "off",
+    enforcedBy: "agent",
+  },
+  {
+    key: "extract_max_bytes",
+    label: "Extraction size cap (bytes)",
+    kind: "int",
+    section: "extraction",
+    min: 0,
+    hint: "Files larger than this are cataloged but not extracted (the identity half of the event is unaffected). 0 = extract nothing.",
+    fallback: "the agent's built-in cap (32 MiB)",
     enforcedBy: "agent",
   },
   // --- Scheduling ----------------------------------------------------------
@@ -478,6 +531,97 @@ export function validatePolicyForm(
     }
   }
   return errors;
+}
+
+// --------------------------------------------------------------------------- //
+// Capability advertisement vs. effective policy ("what will this agent ignore") //
+// --------------------------------------------------------------------------- //
+
+/** The agent's self-reported `capabilities` object (stored verbatim on the agent
+ *  row from its command poll). Everything is optional: an older build advertises
+ *  fewer keys, and a never-polled agent has no object at all. */
+export interface AgentCapabilities {
+  /** This build has the extraction pass at all. */
+  extract?: boolean;
+  /** Extraction vocabulary version the agent produces. */
+  extract_schema?: number;
+  /** Host tools found on PATH — capability is a HOST property, not a build one. */
+  tools?: Record<string, boolean>;
+  /** What it can actually extract here, e.g. ["image","audio","document"]. */
+  formats?: string[];
+  /** Pre-existing key: the agent runs in a container (self-update N/A). */
+  container?: boolean;
+  [key: string]: unknown;
+}
+
+/** The host tools the console renders as an on/off matrix, in display order. */
+export const CAPABILITY_TOOLS: readonly string[] = [
+  "ffmpeg",
+  "ffprobe",
+  "tesseract",
+  "exiftool",
+];
+
+export interface IgnoredSetting {
+  key: string;
+  /** Plain text (rendered as text, never {@html}). */
+  reason: string;
+}
+
+/** Effective policy keys THIS agent cannot honour, with why.
+ *
+ * The point of the capability advertisement: an operator sets `extract_ocr` at
+ * the global scope and has no way to know that three of their hosts have no
+ * tesseract. Rather than let the setting look applied everywhere, the console
+ * cross-references the agent's advertised capabilities against the effective
+ * document and names each dead setting.
+ *
+ * Deliberately CONSERVATIVE — silence beats a false alarm:
+ * - no capabilities object at all (never polled, or a pre-advertisement build)
+ *   returns `[]`; we know nothing, so we claim nothing;
+ * - only settings that would actually DO something are flagged (a bool must be
+ *   `true`, a bound must be present).
+ *
+ * The three cases are mutually exclusive so a single root cause never produces
+ * a wall of chips. */
+export function ignoredPolicySettings(
+  policy: Record<string, unknown> | null | undefined,
+  caps: AgentCapabilities | null | undefined,
+): IgnoredSetting[] {
+  if (!policy || !caps) return [];
+  const out: IgnoredSetting[] = [];
+  const active = (key: string): boolean =>
+    key === "extract_max_bytes"
+      ? typeof policy[key] === "number"
+      : policy[key] === true;
+  const tools = caps.tools ?? {};
+  const dependents = ["extract_body_text", "extract_ocr", "extract_max_bytes"];
+
+  if (caps.extract !== true) {
+    for (const key of ["extract_enabled", ...dependents]) {
+      if (active(key))
+        out.push({
+          key,
+          reason:
+            "this agent advertises no extraction pass (an older build, or " +
+            "extraction is unavailable on the host)",
+        });
+    }
+    return out;
+  }
+  if (policy.extract_enabled !== true) {
+    for (const key of dependents) {
+      if (active(key))
+        out.push({
+          key,
+          reason: "extract_enabled is not on, so the extraction pass never runs",
+        });
+    }
+    return out;
+  }
+  if (active("extract_ocr") && tools.tesseract !== true)
+    out.push({ key: "extract_ocr", reason: "no tesseract on the agent host" });
+  return out;
 }
 
 // --------------------------------------------------------------------------- //

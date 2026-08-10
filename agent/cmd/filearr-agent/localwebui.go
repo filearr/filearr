@@ -10,11 +10,12 @@ import (
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
-	"github.com/filearr/filearr/agent/internal/inventory"
-	"github.com/filearr/filearr/agent/internal/outbox"
+	"github.com/filearr/filearr/agent/internal/extract"
 	"github.com/filearr/filearr/agent/internal/history"
 	"github.com/filearr/filearr/agent/internal/index"
+	"github.com/filearr/filearr/agent/internal/inventory"
 	"github.com/filearr/filearr/agent/internal/localapi"
+	"github.com/filearr/filearr/agent/internal/outbox"
 	"github.com/filearr/filearr/agent/internal/query"
 )
 
@@ -186,17 +187,32 @@ func webSettingsSnapshot(
 	}
 	return func(ctx context.Context) (map[string]any, error) {
 		snap := map[string]any{
-			"agent_version":   Version,
-			"data_dir":        dataDir,
-			"web_addr":        addr,
-			"web_remote":      allowRemote,
-			"self_update":     !selfUpdateDisabled(),
-			"log_level":       os.Getenv("FILEARR_AGENT_LOG_LEVEL"),
-			"share_map":       os.Getenv(envShareMap),
-			"share_host":      os.Getenv(envShareHost),
-			"scan_roots_env":  os.Getenv("FILEARR_AGENT_SCAN_ROOTS"),
-			"ffmpeg":          inventory.HasFFmpeg(),
+			"agent_version":  Version,
+			"data_dir":       dataDir,
+			"web_addr":       addr,
+			"web_remote":     allowRemote,
+			"self_update":    !selfUpdateDisabled(),
+			"log_level":      os.Getenv("FILEARR_AGENT_LOG_LEVEL"),
+			"share_map":      os.Getenv(envShareMap),
+			"share_host":     os.Getenv(envShareHost),
+			"scan_roots_env": os.Getenv("FILEARR_AGENT_SCAN_ROOTS"),
+			// ffmpeg stays a top-level key (the panel has always shown it);
+			// the full matrix lives under "tools" below.
+			"ffmpeg": inventory.HasFFmpeg(),
+			// Agent-parity capability advertisement — the SAME object the
+			// command poll sends central, so the local page and the console
+			// can never disagree about what this host can do.
+			"capabilities": map[string]any{
+				"extract":        true,
+				"extract_schema": extract.Schema,
+				"formats":        inventory.ExtractFormats(),
+			},
+			"tools": inventory.Tools(),
 		}
+		// Effective extraction settings + the settings this host will ignore.
+		// This is the "never shell into a machine to answer what is this agent
+		// actually doing" surface from the parity design.
+		snap["extract"] = extractSnapshot(dataDir)
 		if st := readJSON("state.json"); st != nil {
 			// identity + endpoints only; state.json holds no secrets.
 			for _, k := range []string{"agent_id", "central_url", "rollout_group", "ca_url"} {

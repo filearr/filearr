@@ -71,6 +71,17 @@ type Policy struct {
 	// upload (documented). Additive — does not disturb the P7-T4 keys above.
 	UploadRatePerSec *int64 `json:"upload_rate_bytes_per_sec"`
 
+	// Agent-side extraction pass (agent-parity design contract, 2026-08-09).
+	// All four are additive and default OFF, so an existing fleet's behaviour is
+	// unchanged until an operator opts in. extract_body_text / extract_ocr /
+	// extract_max_bytes are only consulted when extract_enabled is true — a set
+	// sub-key with the master switch off is reported as an ignored setting
+	// (see IgnoredSettings) rather than silently doing nothing.
+	ExtractEnabled  *bool  `json:"extract_enabled"`
+	ExtractBodyText *bool  `json:"extract_body_text"`
+	ExtractOCR      *bool  `json:"extract_ocr"`
+	ExtractMaxBytes *int64 `json:"extract_max_bytes"`
+
 	// W8-E central File Extension Similarity Taxonomy version. Central injects this
 	// computed key into every policy doc; the daemon version-gates its compact
 	// taxonomy fetch off it (fetch when this exceeds the cached snapshot's
@@ -78,6 +89,54 @@ type Policy struct {
 	// baked-in seed. Not operator-authored — central always sets the authoritative
 	// value.
 	TaxonomyVersion *int `json:"taxonomy_version"`
+}
+
+// DefaultExtractMaxBytes is the absent-key default for extract_max_bytes
+// (32 MiB), per the agent-parity design contract's policy table. It bounds the
+// per-file cost of the extraction pass: a bigger file is skipped, not failed.
+const DefaultExtractMaxBytes int64 = 33_554_432
+
+// ExtractEnabledValue reports whether the agent-side extraction pass runs at
+// all. The absent (never-contacted / older central) default is FALSE: a fleet
+// that has never been told to extract must not start reading file CONTENT on
+// its own.
+func (p Policy) ExtractEnabledValue() bool {
+	if p.ExtractEnabled == nil {
+		return false
+	}
+	return *p.ExtractEnabled
+}
+
+// ExtractBodyTextValue reports whether document body text rides the extraction
+// result. Absent default FALSE — body text makes replication events materially
+// bigger, so it is a deliberate second opt-in on top of extract_enabled.
+func (p Policy) ExtractBodyTextValue() bool {
+	if p.ExtractBodyText == nil {
+		return false
+	}
+	return *p.ExtractBodyText
+}
+
+// ExtractOCRValue reports whether images are OCR'd. Absent default FALSE. Note
+// this is policy INTENT only: a host with no tesseract cannot honour it (see
+// IgnoredSettings).
+func (p Policy) ExtractOCRValue() bool {
+	if p.ExtractOCR == nil {
+		return false
+	}
+	return *p.ExtractOCR
+}
+
+// ExtractMaxBytesOr resolves the per-file size ceiling: the policy's
+// extract_max_bytes when present and positive, else def (callers pass
+// DefaultExtractMaxBytes). A zero or negative policy value is treated as absent
+// rather than as "unlimited" — an accidental 0 must not turn every scan into a
+// full-content read of every multi-gigabyte file on the host.
+func (p Policy) ExtractMaxBytesOr(def int64) int64 {
+	if p.ExtractMaxBytes == nil || *p.ExtractMaxBytes <= 0 {
+		return def
+	}
+	return *p.ExtractMaxBytes
 }
 
 // TaxonomyVersionValue reports the central taxonomy version the policy advertises,

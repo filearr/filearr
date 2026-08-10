@@ -246,6 +246,7 @@ now*; results are cached for 6 hours.
 | `FILEARR_AGENT_REPLICATION_STALL_ALERT_SECONDS` | `21600` | Replication-stall alert threshold (6h). |
 | `FILEARR_AGENT_DIST_DIR` | `/app/agent-dist` | First-install agent binaries + install scripts served by `/api/v1/agent-dist` (baked into the image; the API 404s gracefully when absent). |
 | `FILEARR_AGENT_ASSOCIATE_DEBOUNCE_SECONDS` | `120` | Debounce for the post-replication sidecar-association pass on agent-backed libraries. |
+| `FILEARR_AGENT_EXTRACTED_MAX_BYTES` | `262144` | Cap on the `extracted` object one replication event may carry ([agent-side extraction](../agents.md#agent-extraction)). Oversize is dropped with a warning and the event still applies. |
 | `FILEARR_AGENT_RELEASES_DIR` | `{config_dir}/agent-releases` | Uploaded signed-release artifact binaries (manifests live in Postgres). |
 | `FILEARR_AGENT_CANARY_GROUP` | `canary` | Rollout group that receives `canary`-stage releases before promotion. |
 

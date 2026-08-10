@@ -51,6 +51,13 @@ type Options struct {
 	// created/modified file. Nil = no discovery (hints omitted). Best-effort: a
 	// nil Hint for an uncovered path is normal, never an error.
 	Shares ShareResolver
+	// Extract (optional, agent parity 2026-08-09) runs the agent-side extraction
+	// pass for each NEW or CHANGED non-sidecar file, attaching the result to that
+	// file's replication event. Nil = no extraction (the default: the pass is
+	// gated on the central policy's extract_enabled). It runs at DECISION time,
+	// with no transaction open, for the same reason hashing does — an extraction
+	// over a FUSE mount must never hold the SQLite write lock.
+	Extract ExtractFn
 }
 
 // Result summarises a completed scan. Stopped marks a graceful stop (Missing and
@@ -173,7 +180,7 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 			return nil // file_category/file_group excluded for this library
 		}
 		seen[e.Rel] = true
-		apply := diffEntry(root, rootID, existing, e, category, group, sidecar, policy, &res, &newItems, opts.Shares)
+		apply := diffEntry(ctx, root, rootID, existing, e, category, group, sidecar, policy, &res, &newItems, opts.Shares, opts.Extract)
 		if apply != nil {
 			pending = append(pending, apply)
 		}
@@ -240,9 +247,10 @@ type applyFn func(context.Context, *sql.Tx) error
 // churn local_seq_no and flood the P5-T4 replication delta; the in-memory
 // `seen` set (not last_seen) drives tombstoning here.
 func diffEntry(
+	ctx context.Context,
 	libraryRef, rootID string, existing map[string]*index.Item,
 	e WalkEntry, category, group string, sidecar bool, policy HashPolicy,
-	res *Result, newItems *[]*index.Item, sh ShareResolver,
+	res *Result, newItems *[]*index.Item, sh ShareResolver, ex ExtractFn,
 ) applyFn {
 	now := time.Now().UTC()
 	item := existing[e.Rel]
@@ -266,8 +274,12 @@ func diffEntry(
 			FirstSeen:    now,
 			LastSeen:     now,
 		}
+		var extracted *outbox.Extracted
 		if !sidecar {
 			it.QuickHash, it.ContentHash = hashFile(e.Path, e.Size, policy)
+			// Sidecars are excluded for the same reason they are not hashed:
+			// they are pointers to a primary item, not content in their own right.
+			extracted = runExtract(ctx, ex, e.Path, category)
 		}
 		hint := shareHint(sh, e.Path)
 		existing[e.Rel] = it
@@ -281,7 +293,7 @@ func diffEntry(
 			}
 			// A brand-new file → created (central collapses created/modified to
 			// an upsert). Sidecars are emitted too: plain items on the wire.
-			return emit(ctx, tx, libraryRef, outbox.OpCreated, it, "", hint)
+			return emit(ctx, tx, libraryRef, outbox.OpCreated, it, "", hint, extracted)
 		}
 	}
 	if item.Size != e.Size || item.MtimeNs != e.MtimeNs {
@@ -291,8 +303,12 @@ func diffEntry(
 		item.FileGroup = group
 		item.Status = index.StatusActive
 		item.LastSeen = now
+		var extracted *outbox.Extracted
 		if !sidecar {
 			item.QuickHash, item.ContentHash = hashFile(e.Path, e.Size, policy)
+			// The bytes changed, so any prior extraction for this item is stale;
+			// re-extract so central overwrites it with the newer result.
+			extracted = runExtract(ctx, ex, e.Path, category)
 		}
 		hint := shareHint(sh, e.Path)
 		res.Changed++
@@ -300,7 +316,7 @@ func diffEntry(
 			if err := index.UpdateItem(ctx, tx, item); err != nil {
 				return err
 			}
-			return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint)
+			return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint, extracted)
 		}
 	}
 	// Unchanged: self-heal only. A missing row reappearing goes back to active; a
@@ -325,7 +341,13 @@ func diffEntry(
 		}
 		// Self-heal (missing→active, or a late hash fill) is a real change
 		// central must see → modified. A healthy row emits nothing (above).
-		return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint)
+		//
+		// No extraction here on purpose: the file's BYTES are unchanged, so any
+		// extraction central already holds is still valid, and re-reading every
+		// reappearing file would make a self-heal sweep as expensive as a full
+		// content pass. Backfilling items scanned before extract_enabled was
+		// turned on is a separate (later) reconcile concern.
+		return emit(ctx, tx, libraryRef, outbox.OpModified, item, "", hint, nil)
 	}
 }
 
@@ -377,7 +399,7 @@ func detectAndTombstone(
 			// Tombstone → deleted. Central tombstones (library_ref, rel_path); a
 			// late delete against an already-purged central row is an idempotent
 			// no-op there (agentsync R2).
-			if err := emit(ctx, tx, libraryRef, outbox.OpDeleted, item, "", nil); err != nil {
+			if err := emit(ctx, tx, libraryRef, outbox.OpDeleted, item, "", nil, nil); err != nil {
 				return err
 			}
 			missing++

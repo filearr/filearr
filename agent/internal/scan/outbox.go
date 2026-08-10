@@ -17,6 +17,27 @@ type ShareResolver interface {
 	Hint(absPath string) *shares.Hint
 }
 
+// ExtractFn is the agent-side extraction seam (agent parity, 2026-08-09): given
+// a file's absolute path and the taxonomy category the walk already computed, it
+// returns the `extracted` wire object, or nil when extraction is disabled,
+// unsupported for the category, or produced nothing. It is a func (not an
+// interface) because there is exactly one implementation and the scan needs it
+// injectable in tests.
+//
+// It MUST be best-effort and self-contained: a nil return is the normal outcome
+// and an internal failure is recorded in the result's errors map, never
+// propagated — a file the agent cannot parse must not fail its scan.
+type ExtractFn func(ctx context.Context, absPath, category string) *outbox.Extracted
+
+// runExtract invokes ex when configured. Kept as a helper so diffEntry's two
+// call sites stay symmetric with shareHint's.
+func runExtract(ctx context.Context, ex ExtractFn, absPath, category string) *outbox.Extracted {
+	if ex == nil {
+		return nil
+	}
+	return ex(ctx, absPath, category)
+}
+
 // emit writes one replication event into tx, alongside the item mutation that
 // produced it (same transaction => atomic: a rolled-back scan batch leaves
 // neither). libraryRef is the scan root's absolute path verbatim — the central
@@ -30,7 +51,7 @@ type ShareResolver interface {
 // sentinel-parking dance (a U+FFFF placeholder rel_path, a duplicate-row delete)
 // whose intermediate states must never reach the wire. Emitting here keeps a
 // rename to exactly one moved event and never leaks a sentinel path.
-func emit(ctx context.Context, tx *sql.Tx, libraryRef, op string, it *index.Item, fromRel string, hint *outbox.ShareHint) error {
+func emit(ctx context.Context, tx *sql.Tx, libraryRef, op string, it *index.Item, fromRel string, hint *outbox.ShareHint, ext *outbox.Extracted) error {
 	_, err := outbox.Write(ctx, tx, outbox.Event{
 		ItemID:      it.ID,
 		Op:          op,
@@ -42,6 +63,7 @@ func emit(ctx context.Context, tx *sql.Tx, libraryRef, op string, it *index.Item
 		QuickHash:   it.QuickHash,
 		ContentHash: it.ContentHash,
 		ShareHint:   hint,
+		Extracted:   ext,
 	})
 	return err
 }

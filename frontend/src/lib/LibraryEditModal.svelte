@@ -105,10 +105,15 @@
   let showPatterns = $state<Record<string, boolean>>({});
 
   // Agent-owned libraries hold their content on a remote machine central cannot
-  // open, so central-side text extraction never runs for them (agentsync
-  // replicates identity/stat only). OCR and RAG chunking both consume that
-  // extracted text, so both toggles are inert here — disable them rather than
-  // let an operator switch on something that silently does nothing.
+  // open, so no CENTRAL extraction pass runs for them. OCR is therefore still
+  // inert here (the central OCR job would have to read the file) — the agent
+  // does its own via the `extract_ocr` policy key instead, so the toggle stays
+  // disabled rather than silently doing nothing.
+  //
+  // RAG chunking is NOT inert any more (2026-08-09 agent extraction parity): the
+  // agent extracts locally and ships `body_text`/`ocr_text` on its replication
+  // events, and `chunk_missing` selects purely on that text plus this flag. It
+  // must stay operator-settable or agent items could never be chunked.
   const agentOwned = $derived(library.source_agent_id != null);
 
   const rootChanged = $derived(rootPath !== library.root_path);
@@ -342,10 +347,12 @@
         {#if agentOwned}
           <p class="mb-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600
                     dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-            This library's files live on a remote agent, which replicates their
-            identity (path, size, times, hashes) but not their contents. Central
-            never opens the files, so it cannot extract document text — OCR and
-            RAG chunking have nothing to work on and are disabled here.
+            This library's files live on a remote agent. Central never opens
+            them, so <b>central-side OCR cannot run</b> — turn on
+            <code class="font-mono">extract_ocr</code> in the agent's policy
+            instead (Agents → Agent policy → Content extraction), on hosts that
+            have tesseract. RAG chunking below <em>does</em> work: it consumes
+            whatever text the agent extracted and replicated.
           </p>
         {/if}
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
@@ -362,11 +369,16 @@
           <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
             RAG chunking <Help text={HELP.chunking_enabled} label="RAG chunking" />
           </label>
-          <label class="inline-flex items-start gap-2 {agentOwned ? 'opacity-50' : ''}">
-            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} disabled={agentOwned} />
+          <label class="inline-flex items-start gap-2">
+            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} />
             <span class="text-slate-500">
               Chunk extracted document text for LLM passage retrieval (retrieve_passages).
               Off by default; after enabling, run &ldquo;Chunk documents for RAG&rdquo; on the Jobs page.
+              {#if agentOwned}
+                For this agent-owned library the text comes from the agent's own
+                extraction pass, so it needs <code class="font-mono">extract_enabled</code>
+                + <code class="font-mono">extract_body_text</code> in the agent's policy too.
+              {/if}
             </span>
           </label>
 

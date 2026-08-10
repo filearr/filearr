@@ -14,8 +14,9 @@ import (
 	"context"
 	"io/fs"
 	"os"
-	"os/exec"
 	"sort"
+
+	"github.com/filearr/filearr/agent/internal/extract"
 )
 
 // CapabilityVersion is the inventory contract version the agent advertises. Bump
@@ -86,9 +87,17 @@ func DefaultRegistry() *Registry {
 // Capabilities is the additive advertisement the agent attaches to its command
 // poll so central can store what this agent supports (and the UI can offer only
 // composable collectors). Shape: {inventory_collectors: [...], inventory_version: N,
-// ffmpeg: bool}. ``ffmpeg`` (roadmap §20) lets the fleet console show which
-// agents can produce video poster-frames — a missing binary used to be silently
-// absent thumbs with no operator-visible signal.
+// ffmpeg: bool, container: bool, extract: bool, extract_schema: N,
+// tools: {...}, formats: [...]}. ``ffmpeg`` (roadmap §20) lets the fleet console
+// show which agents can produce video poster-frames — a missing binary used to be
+// silently absent thumbs with no operator-visible signal.
+//
+// The extract/tools/formats block is the agent-parity design contract's runtime
+// capability advertisement (2026-08-09). It is the whole reason there is ONE
+// agent binary instead of an essentials/full split: the heavy capabilities are
+// host tools, so a build degrades PER CAPABILITY at runtime and central's console
+// can tell an operator exactly which policy keys this agent will ignore, and why.
+// ``ffmpeg`` stays a top-level key for the older centrals that read it there.
 func Capabilities() map[string]any {
 	names := DefaultRegistry().Names()
 	sorted := make([]string, len(names))
@@ -101,6 +110,12 @@ func Capabilities() map[string]any {
 		// Containerized agents update by image pull — central flags a newer
 		// build in the console but never offers them the self-update channel.
 		"container": InContainer(),
+		// This build carries the extraction pass; extract_schema is the
+		// `extracted.schema` version its events will stamp.
+		"extract":        true,
+		"extract_schema": extract.Schema,
+		"tools":          Tools(),
+		"formats":        ExtractFormats(),
 	}
 }
 
@@ -116,17 +131,4 @@ func InContainer() bool {
 		return true
 	}
 	return false
-}
-
-// HasFFmpeg reports whether an ffmpeg binary is resolvable, mirroring exactly
-// how the thumbnailer resolves it: the FILEARR_AGENT_FFMPEG_PATH override wins
-// (checked for existence), else a PATH lookup. Shared by the capability
-// advertisement above and the install-time requirements check.
-func HasFFmpeg() bool {
-	if p := os.Getenv("FILEARR_AGENT_FFMPEG_PATH"); p != "" {
-		_, err := exec.LookPath(p)
-		return err == nil
-	}
-	_, err := exec.LookPath("ffmpeg")
-	return err == nil
 }

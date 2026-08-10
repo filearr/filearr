@@ -492,6 +492,37 @@
         kvRow(dl, "Categories", (sc.enabled_categories || []).join(", "));
         kvRow(dl, "Share map", s.share_map);
         kvRow(dl, "ffmpeg available", s.ffmpeg ? "yes" : "no (video thumbs skipped)");
+        kvSection(dl, "Extraction");
+        var caps = s.capabilities || {};
+        var tools = s.tools || {};
+        var ex = s.extract || {};
+        var eff = ex.effective || {};
+        var src = ex.source || {};
+        // Each effective value carries its source, because "is this central's
+        // setting or a default?" is the first question an operator has.
+        function exRow(label, key, text) {
+          kvRow(dl, label, text + "  (" + (src[key] || "default") + ")");
+        }
+        exRow("Extraction enabled", "extract_enabled", eff.extract_enabled ? "yes" : "no");
+        exRow("Document body text", "extract_body_text", eff.extract_body_text ? "yes" : "no");
+        exRow("OCR images", "extract_ocr", eff.extract_ocr ? "yes" : "no");
+        exRow("Max file size", "extract_max_bytes", fmtSize(eff.extract_max_bytes));
+        kvRow(dl, "Extractable here", (caps.formats || []).join(", ") || "—");
+        kvRow(dl, "Extract schema", caps.extract_schema);
+        // The tool matrix IS the capability matrix: an operator upgrades this
+        // agent by installing a binary, not by swapping the build.
+        var toolNames = Object.keys(tools).sort();
+        kvRow(dl, "Host tools", toolNames.length
+          ? toolNames.map(function (t) { return t + ": " + (tools[t] ? "yes" : "no"); }).join(", ")
+          : "—");
+        var ignored = ex.ignored_settings || [];
+        if (!ignored.length) {
+          kvRow(dl, "Ignored settings", "none — every policy setting applies here");
+        } else {
+          ignored.forEach(function (it) {
+            kvRow(dl, "Ignored: " + it.key, it.reason);
+          });
+        }
         kvSection(dl, "Policy (from central)");
         var pv = s.policy || {};
         kvRow(dl, "Web UI enabled", pv.web_ui_enabled ? "yes" : "no");

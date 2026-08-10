@@ -176,6 +176,10 @@ func runScan(args []string) error {
 		// created/modified item when a local share covers its path. A single
 		// resolver (5-min TTL cache) is shared across all roots.
 		Shares: newShareResolver(),
+		// Agent-side extraction (2026-08-09 parity contract), gated on the cached
+		// policy's extract_enabled. Nil when disabled — the default — so a fleet
+		// that has not opted in never reads file CONTENT for metadata.
+		Extract: scanExtractFn(cfg.DataDir),
 	}
 
 	scanAll := func() {

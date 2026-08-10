@@ -13,9 +13,11 @@ What is *pure and implemented here*:
 - :class:`AgentEvent` / :class:`ReplicationBatch` — the on-the-wire event shape
   (brief §7.3 replication-batch body). Per Architect ruling **R1**, an event
   carries only ``rel_path`` / ``size`` / ``mtime`` / ``quick_hash`` /
-  ``content_hash`` (filename-derived title stays agent-local). Full extraction
-  remains central and post-replication; the local index answers "where is it",
-  not "what's in it".
+  ``content_hash`` (filename-derived title stays agent-local) — plus, since the
+  2026-08-09 extraction-parity pass, an OPTIONAL :class:`ExtractedPayload` the
+  agent produced ITSELF (``archive/docs/agent-parity-design.md``). Central still
+  never opens a remote file: extraction either happens on the agent and rides
+  the event, or it does not happen for that item at all.
 - :func:`check_batch` — the ``seq_no`` gap/continuation guard behind the
   ``409 {expected_seq_no}`` contract (brief §4.2 / §7.3). Server tracks the
   highest contiguous ``seq_no`` per agent (``agents.last_contiguous_seq_no``);
@@ -67,6 +69,155 @@ _log = logging.getLogger("filearr.agentsync")
 
 EventType = Literal["created", "modified", "deleted", "moved"]
 
+#: Provenance stamps central writes into ``Item.metadata_`` for an agent-supplied
+#: extraction (design "Central applies ``meta`` into ``Item.metadata_`` … stamping
+#: provenance"). They live in the ``_``-prefixed namespace that
+#: :func:`merge_extracted_metadata` reserves for central, so an agent can neither
+#: forge nor clear them.
+EXTRACTED_BY_KEY = "_extracted_by"
+EXTRACT_SCHEMA_KEY = "_extract_schema"
+EXTRACTED_AT_KEY = "_extracted_at"
+
+#: Value of :data:`EXTRACTED_BY_KEY` for an agent-produced extraction (central's
+#: own extractors leave the key absent).
+EXTRACTED_BY_AGENT = "agent"
+
+
+class ExtractedPayload(BaseModel):
+    """The agent's extraction result for ONE file, riding on its change event.
+
+    Frozen wire contract (``archive/docs/agent-parity-design.md`` §"Wire
+    contract"):
+
+    * ``schema`` — the extraction vocabulary version the agent produced. Wire key
+      is ``schema``; the attribute is :attr:`schema_version` because a field
+      literally named ``schema`` shadows a ``BaseModel`` attribute.
+    * ``meta`` — FLAT metadata keys in CENTRAL's existing vocabulary (``width`` /
+      ``duration`` / ``title`` / ``ocr_text`` / …), so no translation layer is
+      needed. Applied into ``Item.metadata_`` (the EXTRACTED column — invariant 2,
+      never ``user_metadata``).
+    * ``body_text`` / ``body_text_truncated`` — document text, already truncated
+      agent-side to central's own body-text cap.
+
+    Extras are tolerated (pydantic's default) so a NEWER agent's additional field
+    never 422s an otherwise-valid batch; only the modelled fields are applied."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    schema_version: int = Field(alias="schema", ge=0)
+    meta: dict[str, Any] = Field(default_factory=dict)
+    body_text: str | None = None
+    body_text_truncated: bool = False
+
+
+def extracted_json_len(payload: ExtractedPayload) -> int:
+    """Compact-JSON byte length of a whole ``extracted`` object — the measure the
+    ``FILEARR_AGENT_EXTRACTED_MAX_BYTES`` gate applies (mirrors
+    :func:`filearr.policy.policy_json_len`). Serialized ``by_alias`` so the count
+    is over the bytes the agent actually sent (``schema``, not
+    ``schema_version``)."""
+    return len(
+        json.dumps(
+            payload.model_dump(by_alias=True),
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    )
+
+
+def _derive_archive_members(merged: dict[str, Any]) -> None:
+    """Project the flat, searchable ``archive_members`` string from an agent's
+    ``archive.members`` list, in place.
+
+    The agent ships only the structured ``archive`` object (member records); the
+    flat newline-joined names string is what the Meili projection indexes
+    (:func:`filearr.search.build_doc` reads ``metadata_.archive_members``), so
+    without this an agent-extracted archive's contents would be stored but not
+    searchable — the one asymmetry between the agent's archive listing and
+    :func:`filearr.tasks.archives.list_archive_members`. Deriving it centrally
+    (rather than making every agent build emit it) keeps the char cap under
+    central's ``archive_members_index_chars`` setting and fixes older agents too.
+    """
+    archive = merged.get("archive")
+    if not isinstance(archive, dict) or "archive_members" in merged:
+        return
+    members = archive.get("members")
+    if not isinstance(members, list) or not members:
+        return
+    names = [
+        str(m.get("name"))
+        for m in members
+        if isinstance(m, dict) and m.get("name")
+    ]
+    if not names:
+        return
+    from filearr.config import get_settings
+
+    cap = get_settings().archive_members_index_chars
+    flat = "\n".join(names)
+    merged["archive_members"] = flat[:cap] if cap and len(flat) > cap else flat
+
+
+def merge_extracted_metadata(
+    existing: dict[str, Any] | None, payload: ExtractedPayload, *, now: Any
+) -> dict[str, Any]:
+    """Fold an agent :class:`ExtractedPayload` into an item's ``metadata_``.
+
+    Returns a **new dict** — ``metadata_`` is a plain JSONB dict column with no
+    mutation tracking, so the caller must assign the result (``item.metadata_ =
+    merge_extracted_metadata(...)``); mutating in place would never flush. This is
+    the same pattern :mod:`filearr.tasks.chunks` uses.
+
+    Semantics:
+
+    * Start from the EXISTING dict, so every key central already stamped survives
+      unless this extraction explicitly supplies it.
+    * Apply ``payload.meta``, minus any ``_``-prefixed key: that namespace is
+      CENTRAL bookkeeping (``_extract_error`` / ``_extract_error_kind`` from
+      ``tasks/extract``, ``_sniffed_mime`` from ``tasks/sniff``, ``_ocr_error``,
+      ``_exif_error``, ``_validation_errors``, ``_embedding``/``_embedding_fp``
+      from :mod:`filearr.embed`, ``_chunks_fp`` from :mod:`filearr.chunking`, and
+      the provenance stamps below). A buggy or hostile agent must not be able to
+      forge an embedding fingerprint or clear an error flag.
+    * Set ``body_text`` / ``body_text_truncated`` only when the payload carries
+      body text (a media-only extraction must not blank a document's text).
+    * Stamp provenance: :data:`EXTRACTED_BY_KEY` = ``"agent"``,
+      :data:`EXTRACT_SCHEMA_KEY` = the payload schema, :data:`EXTRACTED_AT_KEY` =
+      ``now`` as ISO-8601.
+    * **Drop the stale derivation fingerprints when the source text changed.**
+      ``_embedding``/``_embedding_fp`` and ``_chunks_fp`` are keyed to the text
+      they were derived from; if this extraction changes what
+      :func:`filearr.chunking.source_text` would return (``body_text`` else
+      ``ocr_text``), leaving them current would pin the item to a vector and a
+      chunk set for text it no longer has. Dropping them is what makes the
+      backfills re-select it: ``embed_missing`` selects on a missing/mismatched
+      ``_embedding_fp`` and ``chunk_missing`` on a missing ``_chunks_fp``. Text
+      unchanged → the fingerprints stay, and neither backfill does needless work.
+    """
+    from filearr.chunking import CHUNKS_FP_KEY, source_text
+    from filearr.embed import strip_embedding
+
+    old = dict(existing or {})
+    merged = dict(old)
+    for key, value in payload.meta.items():
+        if key.startswith("_"):
+            continue  # central-owned namespace; never agent-writable
+        merged[key] = value
+    if payload.body_text is not None:
+        merged["body_text"] = payload.body_text
+        merged["body_text_truncated"] = bool(payload.body_text_truncated)
+
+    merged[EXTRACTED_BY_KEY] = EXTRACTED_BY_AGENT
+    merged[EXTRACT_SCHEMA_KEY] = payload.schema_version
+    merged[EXTRACTED_AT_KEY] = now.isoformat() if hasattr(now, "isoformat") else str(now)
+    _derive_archive_members(merged)
+
+    if source_text(merged) != source_text(old):
+        merged = dict(strip_embedding(merged))
+        merged.pop(CHUNKS_FP_KEY, None)
+    return merged
+
 
 class AgentEvent(BaseModel):
     """A single filesystem change an agent reports for one item.
@@ -100,6 +251,11 @@ class AgentEvent(BaseModel):
     # the field is unaffected (unknown-field-absent), and a NEW agent's extra hint
     # keys ride through into JSONB untouched.
     share_hint: dict[str, Any] | None = None
+    # Agent extraction parity phase 1 (archive/docs/agent-parity-design.md): the
+    # agent's own extraction result for this file. Purely ADDITIVE — absent/null on
+    # older agents, on files the agent cannot extract, and whenever policy
+    # (``extract_enabled``) says not to. See :class:`ExtractedPayload`.
+    extracted: ExtractedPayload | None = None
 
 
 class ReplicationBatch(BaseModel):
@@ -765,8 +921,14 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
       ``items.source_agent_id`` is stamped on every agent-touched row. A create
       derives ``(file_category, file_group)`` via the DB taxonomy and ``path_scope``
       via the SAME ``rbac.path_to_ltree`` the scanner uses. ``mtime`` (float epoch) →
-      UTC datetime (scan.py convention). NO extract is deferred (central cannot
-      open agent files); agent-side sidecars simply arrive as plain items.
+      UTC datetime (scan.py convention). No central extract job is deferred —
+      central still cannot open a file on a remote host — but an event MAY now
+      carry the agent's OWN extraction result (:class:`ExtractedPayload`), which
+      is folded into ``Item.metadata_`` here by :func:`merge_extracted_metadata`
+      (extraction parity phase 1). An ``extracted`` object whose compact JSON
+      exceeds ``FILEARR_AGENT_EXTRACTED_MAX_BYTES`` is DROPPED with a warning and
+      the event still applies (replication must never wedge on enrichment).
+      Agent-side sidecars simply arrive as plain items.
     - **Tombstone** — a deleted event (and the delete half of a moved) sets an
       existing row ``missing`` (never hard-delete, invariant 4); a tombstone
       against an ABSENT row is the R2 counted no-op (``noop_tombstones``).
@@ -785,9 +947,11 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from filearr import rbac, taxonomy
+    from filearr.config import get_settings
     from filearr.models import AgentReplicationLog, Item, ItemStatus
 
     now = datetime.now(UTC)
+    extracted_cap = get_settings().agent_extracted_max_bytes
     plan = plan_upserts(batch.entries)
     # W8-A: load the (cached) taxonomy snapshot ONCE for the batch so a create can
     # stamp (file_category, file_group) alongside media_type (pure lookups after).
@@ -849,6 +1013,21 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
         mtime = (
             datetime.fromtimestamp(ev.mtime, tz=UTC) if ev.mtime is not None else now
         )
+        # Agent-side extraction (additive; None on older agents). Oversize is
+        # dropped, never fatal: the identity half of the event must still apply.
+        extracted = ev.extracted
+        if extracted is not None:
+            payload_len = extracted_json_len(extracted)
+            if payload_len > extracted_cap:
+                _log.warning(
+                    "agent %s: dropped oversize extracted payload for %r "
+                    "(%d bytes > %d cap); the event still applies without it",
+                    agent.id,
+                    ev.rel_path,
+                    payload_len,
+                    extracted_cap,
+                )
+                extracted = None
         if row is None:
             filename = ev.rel_path.replace("\\", "/").rsplit("/", 1)[-1]
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else None
@@ -876,6 +1055,14 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
                 # P10-T11: stamp the agent's share hint verbatim (None → NULL is
                 # the normal case). A create sets it unconditionally.
                 share_hint=ev.share_hint,
+                # Extraction parity: seed metadata_ (the EXTRACTED column) from the
+                # agent's payload when it carried one; otherwise leave the column's
+                # server default ({}) alone — unchanged pre-extraction behaviour.
+                **(
+                    {"metadata_": merge_extracted_metadata({}, extracted, now=now)}
+                    if extracted is not None
+                    else {}
+                ),
             )
             session.add(row)
             existing[key] = row
@@ -896,6 +1083,12 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
             # convenience; the central mapping is the deterministic fallback).
             if ev.share_hint is not None:
                 row.share_hint = ev.share_hint
+            if extracted is not None:
+                # Assign a NEW dict: metadata_ is a plain JSONB dict column with no
+                # mutation tracking, so an in-place update would not be flushed.
+                row.metadata_ = merge_extracted_metadata(
+                    row.metadata_, extracted, now=now
+                )
         await session.flush()  # assign id
         item_id_by_rel[ev.rel_path] = row.id
         touched_ids.append(str(row.id))

@@ -963,6 +963,14 @@ class Settings(BaseSettings):
     # (413) so a hostile/buggy agent cannot force an unbounded single-transaction
     # apply. The agent's outbox drains in bounded slices anyway (§4.2).
     agent_replication_max_entries: int = 1000
+    # Agent extraction parity (2026-08-09): hard cap (bytes of compact JSON) on the
+    # additive ``extracted`` object ONE replication event may carry (the agent-side
+    # extraction result: flat metadata keys + already-truncated body text). An
+    # oversize object is DROPPED with a warning and the event still applies —
+    # extraction is best-effort enrichment and must never wedge replication the way
+    # a 413 on the whole batch would. 256 KiB is comfortably above central's own
+    # ``body_text_max_chars`` slice for normal documents.
+    agent_extracted_max_bytes: int = 262_144
     # T3-for-agents: debounce window for the post-replication sidecar-association
     # defer. A scanning agent streams batches every few seconds; the per-library
     # queueing lock plus this delay collapse them into at most one association

@@ -3,8 +3,16 @@
   import { copyText } from "./clipboard";
   import AgentPolicyEditor from "./AgentPolicyEditor.svelte";
   import {
+    CAPABILITY_TOOLS,
+    POLICY_FIELDS,
+    SOURCE_LABELS,
+    ignoredPolicySettings,
+    type AgentCapabilities,
+  } from "./agentPolicyDoc";
+  import {
     ApiError,
     getAgentSummary,
+    getEffectivePolicy,
     listAgents,
     listEnrollmentTokens,
     mintEnrollmentToken,
@@ -34,6 +42,7 @@
     type PermissionsConfig,
     type AuditConfig,
     type InstallerConfigOut,
+    type EffectivePolicyOut,
   } from "./api";
 
   // W6-D4 — the agent management page: fleet status header, the agents table
@@ -249,6 +258,46 @@
     } finally {
       maintaining[a.id] = false;
     }
+  }
+
+  // --- per-agent detail: capabilities vs. effective policy -------------------
+  // "Which of my settings does THIS agent actually honour?" Extraction capability
+  // is a property of the agent HOST (ffprobe/tesseract/exiftool on PATH), not of
+  // the build, so a fleet-wide `extract_ocr: true` can be silently dead on some
+  // machines. The effective document is fetched LAZILY on expand — one request per
+  // agent an operator actually opens, never one per table row.
+  const EXTRACTION_FIELDS = POLICY_FIELDS.filter((f) => f.section === "extraction");
+
+  let expanded = $state<string | null>(null);
+  let effective = $state<Record<string, EffectivePolicyOut>>({});
+  let effLoading = $state<Record<string, boolean>>({});
+  let effError = $state<Record<string, string>>({});
+
+  const capsOf = (a: AgentOut): AgentCapabilities | null =>
+    (a.capabilities as AgentCapabilities | null) ?? null;
+
+  async function toggleDetail(a: AgentOut) {
+    if (expanded === a.id) {
+      expanded = null;
+      return;
+    }
+    expanded = a.id;
+    if (effective[a.id] || effLoading[a.id]) return;
+    effLoading[a.id] = true;
+    effError[a.id] = "";
+    try {
+      effective[a.id] = await getEffectivePolicy(a.id);
+    } catch (e) {
+      effError[a.id] = errDetail(e);
+    } finally {
+      effLoading[a.id] = false;
+    }
+  }
+
+  function fmtPolicyValue(v: unknown): string {
+    if (v === undefined) return "not set";
+    if (Array.isArray(v) || (v && typeof v === "object")) return JSON.stringify(v);
+    return String(v);
   }
 
   async function dropAgent(id: string, name: string) {
@@ -684,6 +733,101 @@ ${detail}
     <p class="mt-1 text-xs text-slate-400">{summary.total} agent(s) total.</p>
   {/if}
 
+  <!-- Per-agent detail row: what this agent can DO (its advertised capability +
+       host-tool matrix) versus what its effective policy asks of it, and — the
+       point of the whole surface — the settings it will therefore ignore. -->
+  {#snippet agentDetail(a: AgentOut)}
+    {@const caps = capsOf(a)}
+    <div class="flex flex-col gap-3 rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-800">
+      <!-- Capability advertisement -->
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="font-medium text-slate-500">Capabilities</span>
+        {#if caps === null}
+          <span class="text-slate-400">
+            Not reported yet — an agent advertises its capabilities on its command
+            poll (about a minute after it starts).
+          </span>
+        {:else}
+          {#if caps.extract === true}
+            <span
+              class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+              title="This agent runs the content-extraction pass locally and ships the result with its replication events. Central never opens a file on an agent host.">
+              extraction{caps.extract_schema ? ` · schema ${caps.extract_schema}` : ""}
+            </span>
+          {:else}
+            <span
+              class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+              title="This agent advertises no extraction pass — either an older build, or extraction is unavailable on the host. Its items carry identity only (path/size/mtime/hashes).">
+              no extraction
+            </span>
+          {/if}
+          {#each CAPABILITY_TOOLS as tool (tool)}
+            {@const present = caps.tools?.[tool] === true}
+            <span
+              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {present
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}"
+              title={present
+                ? `${tool} was found on this agent host's PATH.`
+                : `${tool} is NOT on this agent host's PATH — capabilities that need it are unavailable here. Install it on the machine; no new agent build is required.`}>
+              {tool} {present ? "✓" : "✕"}
+            </span>
+          {/each}
+          {#if caps.formats?.length}
+            <span class="text-slate-400">formats:</span>
+            {#each caps.formats as f (f)}
+              <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{f}</span>
+            {/each}
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Effective extraction policy + the ignored-settings verdict -->
+      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+        <span class="font-medium text-slate-500">Effective content-extraction policy</span>
+        {#if effLoading[a.id]}
+          <p class="mt-1 text-slate-400">Loading…</p>
+        {:else if effError[a.id]}
+          <p class="mt-1 text-red-600">Could not load the effective policy: {effError[a.id]}</p>
+        {:else if effective[a.id]}
+          {@const eff = effective[a.id]}
+          {@const ignored = ignoredPolicySettings(eff.policy, caps)}
+          <div class="mt-1 flex flex-wrap gap-x-5 gap-y-1">
+            {#each EXTRACTION_FIELDS as f (f.key)}
+              <span class="text-slate-500">
+                <code class="font-mono text-[11px]">{f.key}</code>
+                <b class="text-slate-700 dark:text-slate-200">{fmtPolicyValue(eff.policy[f.key])}</b>
+                <span class="text-slate-400">
+                  ({SOURCE_LABELS[eff.source_keys[f.key]] ?? "agent default"})
+                </span>
+              </span>
+            {/each}
+          </div>
+          {#if ignored.length}
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <span class="text-slate-500">This agent will ignore:</span>
+              {#each ignored as ig (ig.key)}
+                <span
+                  class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                  title={`${ig.key} is set in this agent's effective policy, but ${ig.reason}. The agent logs the ignored setting once and carries on.`}>
+                  {ig.key} — {ig.reason}
+                </span>
+              {/each}
+            </div>
+          {:else if caps !== null}
+            <p class="mt-2 text-emerald-600 dark:text-emerald-400">
+              Nothing in this agent's effective policy is beyond what it advertises.
+            </p>
+          {/if}
+          <p class="mt-2 text-slate-400">
+            Winning document: <b>{eff.scope}</b>{eff.version ? ` (version ${eff.version})` : ""}.
+            Edit it in the Agent policy card above.
+          </p>
+        {/if}
+      </div>
+    </div>
+  {/snippet}
+
   <!-- Registered agents renders at the BOTTOM of the page (below enrollment +
        config groups): in a big fleet it is the longest element, and it pages
        server-side (AGENTS_PAGE per window) so thousands of agents never land
@@ -774,10 +918,14 @@ ${detail}
                 {/if}
               </td>
               <td class="py-2 text-right whitespace-nowrap">
+                <button
+                  class="text-slate-600 dark:text-slate-300"
+                  title="Show what this agent can actually do (advertised capabilities + host tools) and which of its effective policy settings it will ignore."
+                  onclick={() => toggleDetail(a)}>{expanded === a.id ? "hide" : "details"}</button>
                 {#if a.status !== "revoked"}
                   {#if a.update_available && !a.update_pending && !a.capabilities?.container}
                     <button
-                      class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
+                      class="ml-3 text-sky-600 disabled:opacity-50 dark:text-sky-400"
                       disabled={updating[a.id]}
                       title={`Queue an update to ${a.update_target} — applied at the agent's next check-in (~1 min)`}
                       onclick={() => updateAgentNow(a.id, a.name)}>update</button>
@@ -802,6 +950,11 @@ ${detail}
                   onclick={() => purgeAgent(a.id, a.name)}>delete</button>
               </td>
             </tr>
+            {#if expanded === a.id}
+              <tr class="bg-slate-50/60 dark:bg-slate-900/40">
+                <td colspan="8" class="px-1 py-2">{@render agentDetail(a)}</td>
+              </tr>
+            {/if}
           {/each}
           </tbody>
         </table>

@@ -14,11 +14,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  POLICY_FIELDS,
   blankPolicyForm,
   buildPolicyDoc,
   cronShapeError,
   describeScope,
   formFromDoc,
+  ignoredPolicySettings,
   passthroughFromDoc,
   unknownPolicyKeys,
   unparsedPolicyKeys,
@@ -146,6 +148,104 @@ test("formFromDoc / buildPolicyDoc round-trip every field kind", () => {
   assert.equal(form.watch_mode.value, "false");
 
   assert.deepEqual(buildPolicyDoc(form, passthroughFromDoc(stored, form)), stored);
+});
+
+// --------------------------------------------------------------------------- //
+// Content-extraction keys (2026-08-09 agent extraction parity)                  //
+// --------------------------------------------------------------------------- //
+test("the four extraction keys round-trip and respect inherit-vs-set", () => {
+  const stored: AgentPolicyDoc = {
+    extract_enabled: true,
+    extract_body_text: true,
+    extract_ocr: false,
+    extract_max_bytes: 33554432,
+  };
+  const form = formFromDoc(stored);
+  const passthrough = passthroughFromDoc(stored, form); // as the editor does: at load
+  assert.equal(form.extract_enabled.value, "true");
+  assert.equal(form.extract_ocr.value, "false"); // an explicit false, not inherit
+  assert.equal(form.extract_ocr.set, true);
+  assert.equal(form.extract_max_bytes.value, "33554432");
+  assert.deepEqual(buildPolicyDoc(form, passthrough), stored);
+
+  // Inherit means the key is ABSENT — an agent-default OFF, not an explicit false.
+  form.extract_ocr = { set: false, value: "false" };
+  const saved = buildPolicyDoc(form, passthrough);
+  assert.equal("extract_ocr" in saved, false);
+  assert.equal(saved.extract_enabled, true);
+});
+
+test("extraction keys are grouped in their own editor section, with bounds", () => {
+  const keys = POLICY_FIELDS.filter((f) => f.section === "extraction").map((f) => f.key);
+  assert.deepEqual(keys.sort(), [
+    "extract_body_text",
+    "extract_enabled",
+    "extract_max_bytes",
+    "extract_ocr",
+  ]);
+  const form = blankPolicyForm();
+  form.extract_max_bytes = { set: true, value: "-1" };
+  assert.match(validatePolicyForm(form).extract_max_bytes, /≥ 0/);
+  form.extract_max_bytes = { set: true, value: "0" }; // 0 = extract nothing, valid
+  assert.equal(validatePolicyForm(form).extract_max_bytes, undefined);
+});
+
+// --------------------------------------------------------------------------- //
+// Capability advertisement vs. effective policy                                 //
+// --------------------------------------------------------------------------- //
+test("ignoredPolicySettings stays silent when capabilities are unknown", () => {
+  const policy = { extract_enabled: true, extract_ocr: true };
+  assert.deepEqual(ignoredPolicySettings(policy, null), []);
+  assert.deepEqual(ignoredPolicySettings(null, { extract: true }), []);
+});
+
+test("an agent with no extraction pass ignores every extraction key that does something", () => {
+  const out = ignoredPolicySettings(
+    {
+      extract_enabled: true,
+      extract_body_text: true,
+      extract_ocr: false, // an explicit off asks nothing of the agent
+      extract_max_bytes: 1024,
+    },
+    { container: true }, // an older advertisement: no `extract` key at all
+  );
+  assert.deepEqual(
+    out.map((i) => i.key).sort(),
+    ["extract_body_text", "extract_enabled", "extract_max_bytes"],
+  );
+  assert.match(out[0].reason, /no extraction pass/);
+});
+
+test("extraction keys with the pass switched off are flagged once, by root cause", () => {
+  const out = ignoredPolicySettings(
+    { extract_ocr: true, extract_body_text: true },
+    { extract: true, tools: { tesseract: true } },
+  );
+  assert.deepEqual(out.map((i) => i.key).sort(), ["extract_body_text", "extract_ocr"]);
+  for (const i of out) assert.match(i.reason, /extract_enabled is not on/);
+});
+
+test("extract_ocr is flagged when the host has no tesseract, and only then", () => {
+  const caps = {
+    extract: true,
+    extract_schema: 1,
+    tools: { ffmpeg: true, ffprobe: true, tesseract: false, exiftool: false },
+  };
+  const policy = { extract_enabled: true, extract_body_text: true, extract_ocr: true };
+  assert.deepEqual(ignoredPolicySettings(policy, caps), [
+    { key: "extract_ocr", reason: "no tesseract on the agent host" },
+  ]);
+
+  // Same policy, a host that has tesseract: nothing is ignored.
+  assert.deepEqual(
+    ignoredPolicySettings(policy, { ...caps, tools: { ...caps.tools, tesseract: true } }),
+    [],
+  );
+  // OCR not requested: the missing tool is irrelevant.
+  assert.deepEqual(
+    ignoredPolicySettings({ extract_enabled: true, extract_ocr: false }, caps),
+    [],
+  );
 });
 
 // --------------------------------------------------------------------------- //

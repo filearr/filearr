@@ -169,6 +169,28 @@ class PolicyModel(BaseModel):
     # self_update command bypasses this gate (the click IS the authorization).
     auto_update: bool | None = None
 
+    # --- agent-side content extraction (2026-08-09 parity pass) -------------
+    # archive/docs/agent-parity-design.md §"Policy keys". The agent runs the
+    # extraction pass itself and ships the result on its replication events
+    # (``AgentEvent.extracted``); central never opens a remote file. Capability is
+    # a HOST property, not a build property — an agent whose host lacks the tool
+    # (tesseract for OCR, ffprobe for the media probe) logs the ignored key once
+    # and the console flags it against the agent's advertised ``capabilities``.
+    #: Run the agent-side extraction pass at all. Absent = agent default OFF, so
+    #: enabling extraction is always a deliberate operator act (events grow).
+    extract_enabled: bool | None = None
+    #: Include document BODY TEXT in the extraction payload. Absent = OFF. This is
+    #: the key that makes agent items chunkable/embeddable on content rather than
+    #: filename alone, and also the one that makes events materially larger.
+    extract_body_text: bool | None = None
+    #: OCR images / scanned PDFs (``ocr_text`` in the payload). Absent = OFF.
+    #: Requires ``tesseract`` on the agent host; an agent without it ignores this.
+    extract_ocr: bool | None = None
+    #: Skip files larger than this many bytes during the extraction pass (the
+    #: identity half of the event is unaffected). Absent = the agent's built-in
+    #: cap (32 MiB). 0 = extract nothing by size.
+    extract_max_bytes: int | None = Field(default=None, ge=0)
+
     @field_validator("scan_cron")
     @classmethod
     def _valid_scan_cron(cls, v: str | None) -> str | None:

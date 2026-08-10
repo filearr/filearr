@@ -64,6 +64,30 @@ type Event struct {
 	// its absolute path. Nil = no hint (the normal case, R1) — omitted from the
 	// wire body entirely so an OLD central that predates the field is unaffected.
 	ShareHint *ShareHint
+	// Extracted (agent parity, 2026-08-09) is the agent-side extraction result
+	// for this file, attached only on created/modified when the policy enables
+	// the pass and it produced something. Nil = absent, and absent is the normal
+	// case (extraction is default-off).
+	Extracted *Extracted
+}
+
+// Extracted is the additive `extracted` object an agent attaches to a replicated
+// event — the wire half of the agent-parity contract. Central applies Meta into
+// Item.metadata_ (the EXTRACTED column, invariant 2), stamping its own
+// provenance. It rides the EXISTING event shape as one optional field: a central
+// that predates it ignores it (pydantic default), and an agent that extracted
+// nothing omits it wholesale, so the field is purely additive in both directions.
+//
+// Meta keys are CENTRAL's existing metadata vocabulary (see internal/extract) —
+// no translation layer on either side. BodyText is already truncated agent-side
+// to central's own body-text cap; central additionally size-caps the WHOLE
+// object and drops an oversize one (the event still applies), so replication can
+// never wedge on an extraction result.
+type Extracted struct {
+	Schema            int            `json:"schema"`
+	Meta              map[string]any `json:"meta,omitempty"`
+	BodyText          string         `json:"body_text,omitempty"`
+	BodyTextTruncated bool           `json:"body_text_truncated,omitempty"`
 }
 
 // ShareHint is the additive share_hint object an agent attaches to a replicated
@@ -96,6 +120,11 @@ type eventBody struct {
 	QuickHash   *string    `json:"quick_hash"`
 	ContentHash *string    `json:"content_hash"`
 	ShareHint   *ShareHint `json:"share_hint,omitempty"`
+	// extracted uses omitempty for the same additive-field reason share_hint
+	// does. It is also why rows written by OLDER agent builds keep draining
+	// correctly: the stored payload simply has no "extracted" key, unmarshals to
+	// nil, and re-marshals without it.
+	Extracted *Extracted `json:"extracted,omitempty"`
 }
 
 // wireEvent is a full AgentEvent (seq_no + body). The embedded eventBody's JSON
@@ -140,6 +169,11 @@ func (ev Event) body() eventBody {
 		// nothing (ev.ShareHint == nil), keeping share_hint truly absent.
 		if ev.ShareHint != nil {
 			b.ShareHint = ev.ShareHint
+		}
+		// Likewise an extraction result only describes a file that EXISTS; a
+		// tombstone carries nothing to extract.
+		if ev.Extracted != nil {
+			b.Extracted = ev.Extracted
 		}
 	}
 	return b

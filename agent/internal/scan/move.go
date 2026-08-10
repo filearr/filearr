@@ -192,7 +192,7 @@ func detectMoves(ctx context.Context, tx *sql.Tx, libraryRef string, candidates,
 		// Exactly ONE moved event per confirmed rename: from_rel_path = old
 		// location, rel_path = new location, payload = the survivor's post-move
 		// state. Central applies it as delete(old) + upsert(new) (plan_upserts).
-		if err := emit(ctx, tx, libraryRef, outbox.OpMoved, s, fromRel[i], nil); err != nil {
+		if err := emit(ctx, tx, libraryRef, outbox.OpMoved, s, fromRel[i], nil, nil); err != nil {
 			return 0, 0, nil, err
 		}
 	}

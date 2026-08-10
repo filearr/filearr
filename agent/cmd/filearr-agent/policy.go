@@ -22,6 +22,12 @@ import (
 type daemonApplier struct {
 	sup *reconcile.Supervisor
 	log *slog.Logger
+	// ignored reports policy keys this host cannot honour, ONCE per distinct
+	// change. It lives on the applier (not in ApplyPolicy) precisely so the
+	// last-logged fingerprint survives across applies — an unfixable condition
+	// like "no tesseract on this NAS" must be said clearly once, not on every
+	// policy version bump forever.
+	ignored *agentcfg.IgnoredLogger
 }
 
 func (a *daemonApplier) ApplyPolicy(p agentcfg.Policy) error {
@@ -32,6 +38,11 @@ func (a *daemonApplier) ApplyPolicy(p agentcfg.Policy) error {
 	if allowed, set := p.WatchAllowed(); set {
 		a.log.Info("policy applied: watch_mode", "watch_mode", allowed)
 	}
+	// Extraction is consumed by the scan PROCESS (which re-reads the persisted
+	// policy), so there is nothing live to reconfigure here — but this is the
+	// seam that sees every policy change, and therefore the right place to tell
+	// an operator which extraction settings will not apply on this host.
+	a.ignored.Log(agentcfg.IgnoredSettings(p, hostExtractCapabilities()))
 	return nil
 }
 
@@ -69,7 +80,7 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 	poller := agentcfg.NewPoller(agentcfg.PollerConfig{
 		Client:     newPolicyClient(certStore, centralURL, agentID, httpClient),
 		Cache:      agentcfg.NewETagCache(dataDir),
-		Applier:    &daemonApplier{sup: sup, log: newLogger()},
+		Applier:    &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger())},
 		Logger:     newLogger(),
 		AfterFetch: taxonomyRefreshHook(taxCache, taxClient, newLogger()),
 	})
