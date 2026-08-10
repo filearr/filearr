@@ -95,14 +95,16 @@ func TestExtractFormatsFollowsFFprobe(t *testing.T) {
 
 	t.Setenv(EnvFFprobePath, filepath.Join(dir, "absent-ffprobe"))
 	got := ExtractFormats()
-	want := []string{"archive", "audio", "document", "image"}
+	// three-d-cad is compiled-in (pure-Go geometry parsers), so it is listed
+	// whether or not a host tool exists; only video depends on ffprobe.
+	want := []string{"archive", "audio", "document", "image", "three-d-cad"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("formats without ffprobe = %v, want %v", got, want)
 	}
 
 	t.Setenv(EnvFFprobePath, fakeTool(t, dir, "probe"))
 	got = ExtractFormats()
-	want = []string{"archive", "audio", "document", "image", "video"}
+	want = []string{"archive", "audio", "document", "image", "three-d-cad", "video"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("formats with ffprobe = %v, want %v", got, want)
 	}

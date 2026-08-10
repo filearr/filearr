@@ -433,6 +433,7 @@ EXTRACT_POLICY = {
     "extract_enabled": True,
     "extract_body_text": True,
     "extract_ocr": False,
+    "extract_exif": True,
     "extract_max_bytes": 33_554_432,
 }
 
@@ -546,3 +547,81 @@ def test_archive_members_is_capped_to_the_index_ceiling(monkeypatch):
         now=datetime.now(UTC),
     )
     assert len(merged["archive_members"]) == 10
+
+
+# --------------------------------------------------------------------------- #
+# Agent-writable diagnostics (phase 2)                                          #
+# --------------------------------------------------------------------------- #
+def test_agent_diagnostic_keys_are_applied_and_sanitised():
+    """The four allow-listed ``_`` keys ARE the agent's only way to say "my
+    ffprobe/exiftool/pdftotext pass failed on this file". Before the allow-list
+    they were dropped with the rest of the namespace, which made every partial
+    extraction failure look like a file that simply had no metadata."""
+    merged = merge_extracted_metadata(
+        None,
+        _payload(
+            {
+                "pages": 3,
+                "_extract_error": "pdf: pdftotext failed: \x07boom\nsecond line",
+                "_extract_error_kind": "agent",
+                "_exif_error": "exiftool timed out after 30s",
+                "_ocr_error": "tesseract failed: exit 1",
+            }
+        ),
+        now=datetime.now(UTC),
+    )
+    assert merged["pages"] == 3
+    # Control characters stripped, newlines collapsed to one line.
+    assert merged["_extract_error"] == "pdf: pdftotext failed: boom second line"
+    assert merged["_extract_error_kind"] == "agent"
+    assert merged["_exif_error"] == "exiftool timed out after 30s"
+    assert merged["_ocr_error"] == "tesseract failed: exit 1"
+
+
+def test_agent_diagnostics_are_length_capped():
+    merged = merge_extracted_metadata(
+        None, _payload({"_extract_error": "x" * 5000}), now=datetime.now(UTC)
+    )
+    assert len(merged["_extract_error"]) == 500
+
+
+def test_the_rest_of_the_underscore_namespace_is_still_central_only():
+    """Widening the rule to four diagnostic keys must not widen it to the keys
+    the rule exists for: the derivation fingerprints and the provenance stamps."""
+    prior = {
+        "_sniffed_mime": "application/pdf",
+        FINGERPRINT_KEY: "real",
+        CHUNKS_FP_KEY: "real",
+        "body_text": "same",
+    }
+    merged = merge_extracted_metadata(
+        prior,
+        _payload(
+            {
+                "_sniffed_mime": "text/plain",  # attempted overwrite
+                FINGERPRINT_KEY: "forged",
+                CHUNKS_FP_KEY: "forged",
+                EMBEDDING_KEY: [0.1, 0.2],
+                "_extracted_by": "central",  # attempted provenance forgery
+                "body_text": "same",
+            }
+        ),
+        now=datetime.now(UTC),
+    )
+    assert merged["_sniffed_mime"] == "application/pdf"
+    assert merged[FINGERPRINT_KEY] == "real"
+    assert merged[CHUNKS_FP_KEY] == "real"
+    assert EMBEDDING_KEY not in merged
+    assert merged["_extracted_by"] == "agent"  # stamped by central, not the agent
+
+
+def test_an_empty_diagnostic_cannot_clear_an_existing_one():
+    """``None``/blank normalises to nothing and is DROPPED rather than stored, so
+    the allow-list cannot be used to wipe an error flag central already set."""
+    for blank in (None, "", "   ", "\x00\x01"):
+        merged = merge_extracted_metadata(
+            {"_extract_error": "boom"},
+            _payload({"_extract_error": blank}),
+            now=datetime.now(UTC),
+        )
+        assert merged["_extract_error"] == "boom"

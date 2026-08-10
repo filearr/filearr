@@ -28,6 +28,15 @@ type ExtractCapabilities struct {
 	// FFprobe / Tesseract are host-tool presence on THIS machine.
 	FFprobe   bool
 	Tesseract bool
+	// Exiftool backs the deep-EXIF pass over images (camera/lens/exposure/GPS).
+	Exiftool bool
+	// PDFInfo / PDFToText / PDFToPPM are the poppler-utils binaries: PDF
+	// properties, PDF body text, and page rasterisation for scanned-PDF OCR.
+	// Separate flags because a partial poppler install is a real configuration
+	// and "PDFs work here" is only true per capability.
+	PDFInfo   bool
+	PDFToText bool
+	PDFToPPM  bool
 }
 
 // IgnoredSettings computes, in a stable order, every extraction policy key p
@@ -37,7 +46,7 @@ type ExtractCapabilities struct {
 //  2. any extract_* sub-key SET while extract_enabled is false/absent — the
 //     master switch gates them, so they are inert. Only keys the policy actually
 //     specifies are reported; a defaulted key is not an ignored setting.
-//  3. extract_ocr true with no tesseract on the host.
+//  3. a tool-backed opt-in (extract_ocr, extract_exif) true with the tool absent.
 //  4. extract_enabled true with no ffprobe — extraction still runs, but the
 //     technical probe (video codec/resolution/duration, audio duration/bitrate/
 //     samplerate/channels) is skipped. Reported as a PARTIAL non-application,
@@ -61,6 +70,7 @@ func IgnoredSettings(p Policy, caps ExtractCapabilities) []IgnoredSetting {
 		}{
 			{"extract_body_text", p.ExtractBodyText != nil},
 			{"extract_ocr", p.ExtractOCR != nil},
+			{"extract_exif", p.ExtractEXIF != nil},
 			{"extract_max_bytes", p.ExtractMaxBytes != nil},
 		} {
 			if sub.set {
@@ -73,8 +83,22 @@ func IgnoredSettings(p Policy, caps ExtractCapabilities) []IgnoredSetting {
 	if p.ExtractOCRValue() && !caps.Tesseract {
 		add("extract_ocr", "no tesseract on this host (install it or unset extract_ocr)")
 	}
+	if p.ExtractOCRValue() && caps.Tesseract && !caps.PDFToPPM {
+		add("extract_ocr", "no pdftoppm (poppler-utils) on this host — scanned PDFs are not OCR'd; images still are (install poppler-utils)")
+	}
 	if !caps.FFprobe {
 		add("extract_enabled", "no ffprobe on this host — video/audio technical probe (codec, resolution, duration, bitrate) is skipped; the rest of extraction still runs (install ffmpeg/ffprobe)")
+	}
+	if p.ExtractEXIFValue() && !caps.Exiftool {
+		add("extract_exif", "no exiftool on this host (install it or unset extract_exif)")
+	}
+	if !caps.PDFInfo {
+		add("extract_enabled", "no pdfinfo (poppler-utils) on this host — PDF page count and document properties are skipped (install poppler-utils)")
+	}
+	// Only worth saying when body text was actually asked for: without
+	// extract_body_text, pdftotext would not be run for text anyway.
+	if p.ExtractBodyTextValue() && !caps.PDFToText {
+		add("extract_body_text", "no pdftotext (poppler-utils) on this host — PDF body text is skipped; other document formats still extract text (install poppler-utils)")
 	}
 	return out
 }

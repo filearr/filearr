@@ -40,6 +40,7 @@ export interface AgentPolicyDoc {
   extract_enabled?: boolean;
   extract_body_text?: boolean;
   extract_ocr?: boolean;
+  extract_exif?: boolean;
   extract_max_bytes?: number;
   [key: string]: unknown;
 }
@@ -65,8 +66,8 @@ export const POLICY_SECTIONS: { id: PolicySection; label: string; blurb: string 
       "What the agent extracts from the files it catalogs, and ships up with its " +
       "change events. Central never opens a file on an agent host, so this is the " +
       "only way agent items get real content metadata. Capability is a property of " +
-      "the AGENT HOST (ffprobe / tesseract / exiftool on PATH), not of the build — " +
-      "the agents table flags any setting a given agent cannot honour.",
+      "the AGENT HOST (ffprobe / exiftool / poppler-utils / tesseract on PATH), not " +
+      "of the build — the agents table flags any setting a given agent cannot honour.",
   },
   {
     id: "scheduling",
@@ -173,7 +174,7 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     label: "Include document body text",
     kind: "bool",
     section: "extraction",
-    hint: "Extract text from documents (txt/md/docx/xlsx/odf/epub…). This is what makes agent items chunkable and content-embeddable instead of filename-only — and what makes replication events materially larger. Oversize payloads are dropped by central, not retried.",
+    hint: "Extract text from documents (txt/md/docx/xlsx/odf/epub…, and PDF where pdftotext is installed on the agent host). This is what makes agent items chunkable and content-embeddable instead of filename-only — and what makes replication events materially larger. Oversize payloads are dropped by central, not retried.",
     fallback: "off — metadata only, no body text",
     enforcedBy: "agent",
   },
@@ -182,8 +183,17 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     label: "OCR images and scanned PDFs",
     kind: "bool",
     section: "extraction",
-    hint: "Needs tesseract installed on the AGENT host. An agent without it logs the ignored setting and carries on; the agents table shows which agents those are.",
+    hint: "Needs tesseract installed on the AGENT host, plus pdftoppm (poppler-utils) for the scanned-PDF half. A PDF that already has a usable text layer is never OCR'd. An agent missing a tool logs the ignored setting and carries on; the agents table shows which agents those are.",
     fallback: "off",
+    enforcedBy: "agent",
+  },
+  {
+    key: "extract_exif",
+    label: "Deep EXIF for images",
+    kind: "bool",
+    section: "extraction",
+    hint: "Camera, lens, exposure, focal length and GPS, read with exiftool on the AGENT host. Off by default even though central does this automatically: on an agent it costs one subprocess per image inside the scan, and it sends GPS coordinates to central (where they stay hidden unless the library sets expose_gps). Image dimensions and format do not need it.",
+    fallback: "off — dimensions and format only",
     enforcedBy: "agent",
   },
   {
@@ -560,6 +570,12 @@ export const CAPABILITY_TOOLS: readonly string[] = [
   "ffprobe",
   "tesseract",
   "exiftool",
+  // poppler-utils, detected per binary: a host can ship a partial install, and
+  // the three back different capabilities (PDF properties / PDF text / scanned-
+  // PDF rasterisation for OCR).
+  "pdfinfo",
+  "pdftotext",
+  "pdftoppm",
 ];
 
 export interface IgnoredSetting {
@@ -595,7 +611,12 @@ export function ignoredPolicySettings(
       ? typeof policy[key] === "number"
       : policy[key] === true;
   const tools = caps.tools ?? {};
-  const dependents = ["extract_body_text", "extract_ocr", "extract_max_bytes"];
+  const dependents = [
+    "extract_body_text",
+    "extract_ocr",
+    "extract_exif",
+    "extract_max_bytes",
+  ];
 
   if (caps.extract !== true) {
     for (const key of ["extract_enabled", ...dependents]) {
@@ -619,8 +640,45 @@ export function ignoredPolicySettings(
     }
     return out;
   }
+  // Rule order mirrors the agent's own IgnoredSettings (internal/config/
+  // unsupported.go) exactly: the console's computed view and the agent-reported
+  // one are shown in the same place, and a different order would read as a
+  // disagreement between them.
+  //
+  // The poppler trio was added to the advertisement after the first extraction
+  // build shipped, so an ABSENT key means "this agent is too old to say" while an
+  // explicit false means "the host really does not have it". Only the latter is a
+  // host problem worth telling the operator to fix.
+  const missing = (tool: string) => tools[tool] === false;
+
   if (active("extract_ocr") && tools.tesseract !== true)
     out.push({ key: "extract_ocr", reason: "no tesseract on the agent host" });
+  if (active("extract_ocr") && tools.tesseract === true && missing("pdftoppm"))
+    out.push({
+      key: "extract_ocr",
+      reason:
+        "no pdftoppm (poppler-utils) on the agent host — scanned PDFs are skipped; images still OCR",
+    });
+  if (tools.ffprobe !== true)
+    out.push({
+      key: "extract_enabled",
+      reason:
+        "no ffprobe on the agent host — the video/audio technical probe is skipped",
+    });
+  if (active("extract_exif") && tools.exiftool !== true)
+    out.push({ key: "extract_exif", reason: "no exiftool on the agent host" });
+  if (missing("pdfinfo"))
+    out.push({
+      key: "extract_enabled",
+      reason:
+        "no pdfinfo (poppler-utils) on the agent host — PDF page count and properties are skipped",
+    });
+  if (active("extract_body_text") && missing("pdftotext"))
+    out.push({
+      key: "extract_body_text",
+      reason:
+        "no pdftotext (poppler-utils) on the agent host — PDF text is skipped; other documents still extract",
+    });
   return out;
 }
 

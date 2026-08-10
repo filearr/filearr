@@ -47,7 +47,9 @@ you enable it, and what an agent can actually do depends on which tools exist on
       will — there is no retrieve-then-extract fallback.
     - **A capability the agent host lacks is silently unavailable.** OCR needs
       `tesseract`, the media technical probe needs `ffprobe`, deep EXIF needs
-      `exiftool`. These are **host tools on `PATH`**, not compiled-in features:
+      `exiftool`, and PDFs need poppler-utils (`pdfinfo` for properties,
+      `pdftotext` for text, `pdftoppm` to rasterise scanned pages for OCR).
+      These are **host tools on `PATH`**, not compiled-in features:
       an operator upgrades an agent's capability by installing a package on the
       machine, not by swapping binaries. An agent asked to do something it
       cannot logs the ignored setting once and carries on — and the console
@@ -56,14 +58,20 @@ you enable it, and what an agent can actually do depends on which tools exist on
       `extracted` object at `FILEARR_AGENT_EXTRACTED_MAX_BYTES` (256 KiB). Over
       that, the object is discarded with a warning and the change event still
       applies — replication is never allowed to wedge on enrichment.
-    - **Not every format is covered yet.** PDF text, deep EXIF and the more
-      exotic 3D formats are later phases; the agent advertises the `formats` it
-      can actually handle.
+    - **Only new and changed files are extracted.** The pass runs inside the
+      scan, on the files that scan reports — so items catalogued *before* you
+      turned `extract_enabled` on keep their identity-only metadata until they
+      change or you force a full rescan. There is no fleet-wide backfill yet.
+    - **A few formats stay out of reach.** The agent covers images, audio,
+      video (via ffprobe), documents including PDF, archives and 3D geometry
+      (`stl`/`obj`/`ply`/`off`/`gltf`/`glb`/`3mf`); other CAD and mesh formats
+      report `unsupported`, exactly as central's own extractor does for them.
+      The agent advertises the `formats` it can actually handle.
 
     **How to turn it on:** set `extract_enabled: true` in the policy scope you
     want (Agents page → *Agent policy* → *Content extraction*), plus
-    `extract_body_text` for document text and `extract_ocr` where the hosts have
-    tesseract. Remember that a narrower scope **replaces** a broader one, so an
+    `extract_body_text` for document text, `extract_exif` for camera/GPS
+    metadata, and `extract_ocr` where the hosts have tesseract. Remember that a narrower scope **replaces** a broader one, so an
     `agent:` document must repeat every key it needs. Then install the host
     tools on the machines that need them. Existing items pick the new metadata
     up on their next change event or the next full reconcile; RAG chunking and
@@ -80,14 +88,61 @@ you enable it, and what an agent can actually do depends on which tools exist on
 
 Each agent reports a **capability advertisement** on its command poll — whether
 this build has the extraction pass (`extract`, `extract_schema`), which host
-tools it found (`tools.ffmpeg` / `ffprobe` / `tesseract` / `exiftool`), and the
-`formats` it can handle. The Agents table exposes it per row behind
+tools it found (`tools.ffmpeg` / `ffprobe` / `tesseract` / `exiftool` /
+`pdfinfo` / `pdftotext` / `pdftoppm`), and the `formats` it can handle. The Agents table exposes it per row behind
 **details**, together with the agent's effective content-extraction policy and,
 most usefully, a list of the settings **this agent will ignore** — for example
 an amber `extract_ocr — no tesseract on the agent host` chip when the policy
 asks for OCR on a machine that has none. The check is deliberately conservative:
 an agent that has not yet advertised anything is reported as unknown rather than
 flagged.
+
+#### Host tools: what each one buys {#agent-host-tools}
+
+Every one of these is optional. Install only what the libraries on *that* host
+need — the agent re-detects on start, and the console's matrix confirms it.
+
+| Tool | Unlocks | Without it |
+| --- | --- | --- |
+| `ffprobe` (ffmpeg) | Video and audio technical probe: container, codecs, resolution, duration, bitrate, frame rate, HDR, sample rate, channels | Video items carry identity only; audio keeps its tags but loses duration/bitrate |
+| `exiftool` | Deep EXIF: camera make/model, lens, ISO, exposure, aperture, focal length, GPS — plus the flat `camera`/`taken_at` fields. **Also needs `extract_exif` in the policy**, which is off by default | Images keep width/height/format/mode from the file header |
+| `pdfinfo` (poppler-utils) | PDF page count, title/author/subject/creator/producer, created/modified, encryption flag | PDFs carry identity only |
+| `pdftotext` (poppler-utils) | PDF body text — the input to RAG chunking and content embeddings | PDFs are searchable by name only |
+| `pdftoppm` (poppler-utils) | Scanned-PDF OCR (rasterise, then tesseract) | Image OCR still works; scanned PDFs are skipped |
+| `tesseract` | OCR of images and scanned pages | No OCR anywhere on that host |
+| `ffmpeg` | Video poster-frame thumbnails (pre-existing capability) | Video items fall back to the placeholder icon |
+
+Typical installs:
+
+```bash
+# Debian/Ubuntu
+sudo apt install ffmpeg poppler-utils libimage-exiftool-perl tesseract-ocr
+# Alpine
+apk add ffmpeg poppler-utils exiftool tesseract-ocr tesseract-ocr-data-eng
+# macOS
+brew install ffmpeg poppler exiftool tesseract
+# Windows
+winget install Gyan.FFmpeg && winget install OliverBetz.ExifTool
+# poppler + tesseract on Windows: install the UB-Mannheim tesseract build and a
+# poppler release zip, then either put their bin\ dirs on PATH or point the agent
+# at them directly (FILEARR_AGENT_PDFTOTEXT_PATH, FILEARR_AGENT_TESSERACT_PATH, …).
+```
+
+Each tool also honours an explicit path override, which wins over `PATH`:
+`FILEARR_AGENT_FFMPEG_PATH`, `FILEARR_AGENT_FFPROBE_PATH`,
+`FILEARR_AGENT_TESSERACT_PATH`, `FILEARR_AGENT_EXIFTOOL_PATH`,
+`FILEARR_AGENT_PDFINFO_PATH`, `FILEARR_AGENT_PDFTOTEXT_PATH`,
+`FILEARR_AGENT_PDFTOPPM_PATH`.
+
+The **container agent ships all of them** — ffmpeg, poppler-utils, exiftool and
+tesseract with English data — so a containerized host has no capability gaps and
+nothing to install. None of them run unless a policy enables extraction. Extra
+OCR languages are a one-line derived image:
+
+```dockerfile
+FROM ghcr.io/pwsh/filearr-agent:latest
+RUN apk add --no-cache tesseract-ocr-data-deu
+```
 
 ## Installing the agent (service + sidecar config)
 
@@ -629,8 +684,9 @@ same as `false`. "Enforced by" says who actually acts on the value.
 | `content_hash_max_bytes` | int ≥ 0 | agent's built-in cap | agent | Files larger than this are cataloged unhashed; `0` disables content hashing. |
 | `watch_mode` | bool | off (polling) | agent | Filesystem-event watching. Local disks only — inotify is unreliable over SMB/NFS. |
 | `extract_enabled` | bool | **off** | agent | Run the agent-side [content-extraction pass](#agent-extraction) and ship the result with each change event. Off = identity-only replication, and the three keys below do nothing. |
-| `extract_body_text` | bool | **off** | agent | Include document body text (txt/md/docx/xlsx/odf/epub…). This is what makes agent items chunkable and content-embeddable rather than filename-only — and what makes events materially larger. |
-| `extract_ocr` | bool | **off** | agent | OCR images and scanned PDFs. **Needs `tesseract` on the agent host**; an agent without it logs the ignored setting and continues. |
+| `extract_body_text` | bool | **off** | agent | Include document body text (txt/md/docx/xlsx/odf/epub…, and PDF where `pdftotext` exists). This is what makes agent items chunkable and content-embeddable rather than filename-only — and what makes events materially larger. |
+| `extract_ocr` | bool | **off** | agent | OCR images and scanned PDFs. **Needs `tesseract` on the agent host** (plus `pdftoppm` for the PDF half); an agent without them logs the ignored setting and continues. A PDF that already has a usable text layer (≥100 characters) is never OCR'd — the same cheap-native-text-first rule central applies. |
+| `extract_exif` | bool | **off** | agent | Deep EXIF for images — camera, lens, ISO, exposure, focal length, GPS. **Needs `exiftool` on the agent host.** Off by default even though central does this automatically: on an agent it costs one subprocess per image *inside the scan*, and it sends GPS coordinates to central (where they stay hidden unless the library sets `expose_gps`). Image dimensions and format do not need it. |
 | `extract_max_bytes` | int ≥ 0 | agent's built-in cap (32 MiB) | agent | Skip extraction for files larger than this. The identity half of the event is unaffected; `0` = extract nothing. |
 | `scan_cron` | 5-field cron | no cron schedule | agent | In-daemon scan schedule in **agent-local time**. Wins over `scan_interval_seconds`. |
 | `scan_interval_seconds` | int ≥ 300 | no interval schedule | agent | Fixed-interval scanning; ignored when `scan_cron` is set. |
@@ -682,7 +738,7 @@ The Agents page carries a full **Agent policy** editor:
 Setting a key is only half the story for anything host-dependent. Expand an
 agent's **details** row in the agents table to see its
 [capability advertisement](#agent-capabilities) — extraction support and
-schema, the `ffmpeg` / `ffprobe` / `tesseract` / `exiftool` matrix, the supported
+schema, the `ffmpeg` / `ffprobe` / `tesseract` / `exiftool` / poppler matrix, the supported
 `formats` — next to its effective content-extraction policy, plus an explicit
 list of the settings **that agent will ignore** and why. That is the answer to
 "I turned OCR on fleet-wide; why is nothing happening on this box".

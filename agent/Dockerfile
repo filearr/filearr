@@ -38,10 +38,32 @@ RUN V="${VERSION}"; case "$V" in *@*) V="${V%%@*}-$(echo "${V#*@}" | cut -c1-7)"
     -o /out/filearr-agent ./cmd/filearr-agent
 
 FROM alpine:3.22
-# ffmpeg: optional at runtime (only video poster-frame thumbnails need it) but
-# cheap to ship and exactly what a media-heavy Unraid box wants. tzdata: honor
-# TZ. su-exec: drop root to PUID/PGID after fixing /config ownership.
-RUN apk add --no-cache ca-certificates tzdata ffmpeg su-exec
+# ffmpeg: optional at runtime (video poster-frame thumbnails, and ffprobe backs
+# the media technical probe in the extraction pass) but cheap to ship and exactly
+# what a media-heavy Unraid box wants. poppler-utils: pdfinfo/pdftotext/pdftoppm —
+# PDF properties, PDF body text, and page rasterisation; PDFs are the single most
+# common document type and their text is what makes semantic search and RAG
+# chunking meaningful for agent libraries. exiftool: curated camera/lens/exposure/
+# GPS metadata for photo libraries. tesseract-ocr + tesseract-ocr-data-eng: OCR of
+# images and — together with pdftoppm above — of scanned PDFs. tzdata: honor TZ.
+# su-exec: drop root to PUID/PGID after fixing /config ownership.
+#
+# The policy here is COMPLETENESS: the container agent ships every tool the
+# extraction pass can use, so a containerized host never has a capability gap and
+# an operator never has to build a derived image to get one. exiftool (perl) and
+# tesseract (language data) are the bulky ones and that cost is accepted, because
+# a partially-capable agent is the more expensive problem — it makes policy
+# settings look applied when they are not. None of these run unless a policy
+# enables extraction, so the only price on an unused install is image size.
+#
+# Extra OCR LANGUAGES are still a derived image (the -data-* packages are per
+# language and shipping them all would be gratuitous):
+#   FROM ghcr.io/pwsh/filearr-agent:latest
+#   RUN apk add --no-cache tesseract-ocr-data-deu
+# The console's per-agent capability matrix shows which tools each host actually
+# resolved, so a missing one is visible rather than mysterious.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg poppler-utils exiftool \
+    tesseract-ocr tesseract-ocr-data-eng su-exec
 
 COPY --from=build /out/filearr-agent /usr/local/bin/filearr-agent
 COPY docker/entrypoint.sh /entrypoint.sh

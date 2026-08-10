@@ -21,6 +21,10 @@ func hostExtractCapabilities() agentcfg.ExtractCapabilities {
 		Extract:   true, // this build carries the pass (see inventory.Capabilities)
 		FFprobe:   inventory.HasFFprobe(),
 		Tesseract: inventory.HasTesseract(),
+		Exiftool:  inventory.HasExiftool(),
+		PDFInfo:   inventory.HasPDFInfo(),
+		PDFToText: inventory.HasPDFToText(),
+		PDFToPPM:  inventory.HasPDFToPPM(),
 	}
 }
 
@@ -35,9 +39,21 @@ func extractOptions(pol agentcfg.Policy) extract.Options {
 		OCR:         pol.ExtractOCRValue(),
 		MaxBytes:    pol.ExtractMaxBytesOr(agentcfg.DefaultExtractMaxBytes),
 		FFprobePath: inventory.FFprobePath(),
+		// PDF properties ride extract_enabled — they are cheap curated metadata,
+		// the same posture central takes. pdftotext is resolved regardless of
+		// extract_body_text because the scanned-PDF OCR gate needs to know how
+		// much native text a PDF already has before deciding to rasterise it.
+		PDFInfoPath:   inventory.PDFInfoPath(),
+		PDFToTextPath: inventory.PDFToTextPath(),
+	}
+	// EXIF is its own opt-in (see Policy.ExtractEXIF): one subprocess per image
+	// inside the scan, and GPS coordinates leaving the host.
+	if pol.ExtractEXIFValue() {
+		opts.ExiftoolPath = inventory.ExiftoolPath()
 	}
 	if opts.OCR {
 		opts.TesseractPath = inventory.TesseractPath()
+		opts.PDFToPPMPath = inventory.PDFToPPMPath()
 	}
 	return opts
 }
@@ -156,12 +172,14 @@ func extractSnapshotFor(
 			"extract_enabled":   pol.ExtractEnabledValue(),
 			"extract_body_text": pol.ExtractBodyTextValue(),
 			"extract_ocr":       pol.ExtractOCRValue(),
+			"extract_exif":      pol.ExtractEXIFValue(),
 			"extract_max_bytes": pol.ExtractMaxBytesOr(agentcfg.DefaultExtractMaxBytes),
 		},
 		"source": map[string]any{
 			"extract_enabled":   from("extract_enabled"),
 			"extract_body_text": from("extract_body_text"),
 			"extract_ocr":       from("extract_ocr"),
+			"extract_exif":      from("extract_exif"),
 			"extract_max_bytes": from("extract_max_bytes"),
 		},
 		"ignored_settings": list,

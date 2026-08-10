@@ -121,7 +121,40 @@ func runInstall(args []string) error {
 		fmt.Println("           brew install ffmpeg) or set FILEARR_AGENT_FFMPEG_PATH; image,")
 		fmt.Println("           audio-cover and STL thumbnails work without it.")
 	}
+	printMissingExtractTools()
 	return nil
+}
+
+// printMissingExtractTools reports, at install time, which optional extraction
+// tools this host lacks and what each one would have bought. Same posture as the
+// ffmpeg note above: a WARN, never a failure — extraction is opt-in per policy
+// and degrades per capability, so an install on a machine with none of these is
+// perfectly valid. Saying it here saves the operator a round trip through the
+// console's capability matrix to find out why a policy key looks inert.
+func printMissingExtractTools() {
+	missing := []struct{ tool, buys string }{}
+	add := func(present bool, tool, buys string) {
+		if !present {
+			missing = append(missing, struct{ tool, buys string }{tool, buys})
+		}
+	}
+	add(inventory.HasFFprobe(), "ffprobe", "video/audio technical probe (codec, resolution, duration, bitrate)")
+	add(inventory.HasExiftool(), "exiftool", "deep EXIF (camera, lens, exposure, GPS)")
+	add(inventory.HasPDFInfo(), "pdfinfo", "PDF page count and document properties")
+	add(inventory.HasPDFToText(), "pdftotext", "PDF body text (RAG chunking + content embeddings)")
+	add(inventory.HasTesseract(), "tesseract", "OCR of images and scanned pages")
+	add(inventory.HasPDFToPPM(), "pdftoppm", "rasterising scanned PDFs for OCR")
+	if len(missing) == 0 {
+		return
+	}
+	fmt.Println("  note   : optional content-extraction tools missing from PATH")
+	fmt.Println("           (extraction is off until a policy enables it; each tool is independent):")
+	for _, m := range missing {
+		fmt.Printf("           - %-10s %s\n", m.tool, m.buys)
+	}
+	fmt.Println("           apt install ffmpeg poppler-utils libimage-exiftool-perl tesseract-ocr")
+	fmt.Println("           (or brew install ffmpeg poppler exiftool tesseract; on Windows set")
+	fmt.Println("           FILEARR_AGENT_<TOOL>_PATH if the binaries are not on PATH).")
 }
 
 // runUninstall stops + deregisters the service and removes the installed binary.

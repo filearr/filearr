@@ -76,6 +76,16 @@ const (
 	// OCRMaxPixels mirrors config.py ocr_max_pixels (~40 MP): an image declaring
 	// more pixels than this is not handed to tesseract at all.
 	OCRMaxPixels = 40_000_000
+
+	// OCRDPI / OCRMaxPages / OCRMinTextChars mirror config.py ocr_dpi (200),
+	// ocr_max_pages (10) and ocr_min_text_chars (100) — the scanned-PDF rules of
+	// ocr.should_ocr. MinTextChars is the "cheap native text first" gate every
+	// PDF-touching tool applies: a PDF whose pdftotext layer already yields that
+	// many characters is NOT rasterised, because OCR would only produce a worse
+	// copy of text we already have.
+	OCRDPI          = 200
+	OCRMaxPages     = 10
+	OCRMinTextChars = 100
 )
 
 // normalizeBodyText sanitises, whitespace-normalises and char-caps untrusted

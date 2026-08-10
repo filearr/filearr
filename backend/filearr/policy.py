@@ -186,6 +186,11 @@ class PolicyModel(BaseModel):
     #: OCR images / scanned PDFs (``ocr_text`` in the payload). Absent = OFF.
     #: Requires ``tesseract`` on the agent host; an agent without it ignores this.
     extract_ocr: bool | None = None
+    #: Deep EXIF for images (``exif.*`` keys). Absent = OFF, and deliberately so:
+    #: central runs its own EXIF pass unconditionally, but on an agent the same
+    #: pass costs one exiftool subprocess per image INSIDE the scan walk and sends
+    #: GPS coordinates off the machine. Requires ``exiftool`` on the agent host.
+    extract_exif: bool | None = None
     #: Skip files larger than this many bytes during the extraction pass (the
     #: identity half of the event is unaffected). Absent = the agent's built-in
     #: cap (32 MiB). 0 = extract nothing by size.

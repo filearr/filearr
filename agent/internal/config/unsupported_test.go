@@ -20,7 +20,17 @@ func policyFrom(t *testing.T, body string) Policy {
 }
 
 func TestIgnoredSettings(t *testing.T) {
-	full := ExtractCapabilities{Extract: true, FFprobe: true, Tesseract: true}
+	// A host with every optional tool installed — the only configuration in
+	// which nothing at all is reported. Each case below removes exactly one.
+	full := ExtractCapabilities{
+		Extract: true, FFprobe: true, Tesseract: true, Exiftool: true,
+		PDFInfo: true, PDFToText: true, PDFToPPM: true,
+	}
+	without := func(mut func(*ExtractCapabilities)) ExtractCapabilities {
+		c := full
+		mut(&c)
+		return c
+	}
 
 	tests := []struct {
 		name   string
@@ -46,14 +56,55 @@ func TestIgnoredSettings(t *testing.T) {
 		{
 			name: "ocr without tesseract",
 			body: `{"extract_enabled":true,"extract_ocr":true}`,
-			caps: ExtractCapabilities{Extract: true, FFprobe: true},
+			caps: without(func(c *ExtractCapabilities) { c.Tesseract = false }),
 			want: []IgnoredSetting{{Key: "extract_ocr", Reason: "no tesseract on this host (install it or unset extract_ocr)"}},
+		},
+		{
+			name: "ocr with tesseract but no pdftoppm still OCRs images",
+			body: `{"extract_enabled":true,"extract_ocr":true}`,
+			caps: without(func(c *ExtractCapabilities) { c.PDFToPPM = false }),
+			want: []IgnoredSetting{{Key: "extract_ocr"}},
+			// The tesseract line must NOT fire — this host can OCR, just not
+			// the scanned-PDF half.
+			reason: "pdftoppm",
 		},
 		{
 			name: "no ffprobe degrades the technical probe",
 			body: `{"extract_enabled":true}`,
-			caps: ExtractCapabilities{Extract: true, Tesseract: true},
+			caps: without(func(c *ExtractCapabilities) { c.FFprobe = false }),
 			want: []IgnoredSetting{{Key: "extract_enabled", Reason: "no ffprobe on this host — video/audio technical probe (codec, resolution, duration, bitrate) is skipped; the rest of extraction still runs (install ffmpeg/ffprobe)"}},
+		},
+		{
+			name: "no exiftool is silent until EXIF is asked for",
+			body: `{"extract_enabled":true}`,
+			caps: without(func(c *ExtractCapabilities) { c.Exiftool = false }),
+			want: nil,
+		},
+		{
+			name: "extract_exif without exiftool",
+			body: `{"extract_enabled":true,"extract_exif":true}`,
+			caps: without(func(c *ExtractCapabilities) { c.Exiftool = false }),
+			want: []IgnoredSetting{{Key: "extract_exif", Reason: "no exiftool on this host (install it or unset extract_exif)"}},
+		},
+		{
+			name:   "no pdfinfo drops PDF properties",
+			body:   `{"extract_enabled":true}`,
+			caps:   without(func(c *ExtractCapabilities) { c.PDFInfo = false }),
+			want:   []IgnoredSetting{{Key: "extract_enabled"}},
+			reason: "no pdfinfo",
+		},
+		{
+			name: "pdftotext is only mentioned when body text was asked for",
+			body: `{"extract_enabled":true}`,
+			caps: without(func(c *ExtractCapabilities) { c.PDFToText = false }),
+			want: nil,
+		},
+		{
+			name:   "no pdftotext with body text on",
+			body:   `{"extract_enabled":true,"extract_body_text":true}`,
+			caps:   without(func(c *ExtractCapabilities) { c.PDFToText = false }),
+			want:   []IgnoredSetting{{Key: "extract_body_text"}},
+			reason: "no pdftotext",
 		},
 		{
 			name: "sub-keys set while the master switch is off",
@@ -174,6 +225,7 @@ func TestExtractPolicyAccessors(t *testing.T) {
 		wantEnabled  bool
 		wantBody     bool
 		wantOCR      bool
+		wantEXIF     bool
 		wantMaxBytes int64
 	}{
 		{
@@ -183,10 +235,11 @@ func TestExtractPolicyAccessors(t *testing.T) {
 		},
 		{
 			name:         "explicit values win",
-			body:         `{"extract_enabled":true,"extract_body_text":true,"extract_ocr":true,"extract_max_bytes":4096}`,
+			body:         `{"extract_enabled":true,"extract_body_text":true,"extract_ocr":true,"extract_exif":true,"extract_max_bytes":4096}`,
 			wantEnabled:  true,
 			wantBody:     true,
 			wantOCR:      true,
+			wantEXIF:     true,
 			wantMaxBytes: 4096,
 		},
 		{
@@ -211,6 +264,9 @@ func TestExtractPolicyAccessors(t *testing.T) {
 			}
 			if p.ExtractOCRValue() != tc.wantOCR {
 				t.Errorf("ExtractOCRValue = %v, want %v", p.ExtractOCRValue(), tc.wantOCR)
+			}
+			if p.ExtractEXIFValue() != tc.wantEXIF {
+				t.Errorf("ExtractEXIFValue = %v, want %v", p.ExtractEXIFValue(), tc.wantEXIF)
 			}
 			if got := p.ExtractMaxBytesOr(DefaultExtractMaxBytes); got != tc.wantMaxBytes {
 				t.Errorf("ExtractMaxBytesOr = %d, want %d", got, tc.wantMaxBytes)

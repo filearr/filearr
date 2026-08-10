@@ -144,6 +144,35 @@ file:
   backlog count, local index size, and scan status/counters — operational
   numbers only, never paths beyond the scan roots you configured and never
   file contents
+- **when you enable agent-side extraction** (`extract_enabled`, off by default),
+  an additional compact `extracted` object per file — see below
+
+**Extraction changes what leaves the machine, which is why it is opt-in.**
+Central cannot open a file on an agent host, so an agent library stays
+identity-only until you turn extraction on in the agent's policy. Once you do,
+each event also carries the metadata the agent parsed locally:
+
+- technical properties — image dimensions/format, audio tags, video codec and
+  duration, document page counts and properties, 3D geometry counts, archive
+  member names
+- **document text** (`extract_body_text`, separately opt-in) — up to 100 000
+  characters of the actual text of your documents and PDFs. This is what makes
+  agent items chunkable and content-embeddable, and it is genuinely your
+  documents' words travelling to central.
+- **OCR text** (`extract_ocr`, separately opt-in) — the text tesseract read out
+  of images and scanned pages, under the same cap.
+- **EXIF, including GPS coordinates** (`extract_exif`, separately opt-in and
+  needing `exiftool` on the agent host). GPS is stored raw in the item's
+  extracted metadata and then hidden
+  everywhere by default: it is stripped from the API and the search index unless
+  the owning library sets `expose_gps`. That gate is the same one central's own
+  photo libraries use, but if you would rather the coordinates never leave the
+  machine at all, do not install exiftool on that host — capability is per host,
+  and the console's agent details show which hosts have it.
+
+None of this is retained anywhere else on the way: the object rides the existing
+replication batch, is size-capped, and lands in the item's *extracted* metadata
+column (never `user_metadata`).
 
 **What never leaves the agent machine:**
 
@@ -154,9 +183,9 @@ file:
   copy.
 - The filename-derived **title** and any local-only fields stay agent-side until
   central enriches the item itself.
-
-Full/heavy metadata extraction happens **centrally** after replication, from the
-lightweight events — not on the agent.
+- **Anything extraction is not turned on for.** With `extract_enabled` off — the
+  default — no content metadata, no text and no EXIF is produced at all, and the
+  events are exactly the identity fields listed above.
 
 ## What the search index stores
 

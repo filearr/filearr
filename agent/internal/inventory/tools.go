@@ -20,6 +20,13 @@ const (
 	EnvFFprobePath   = "FILEARR_AGENT_FFPROBE_PATH"
 	EnvTesseractPath = "FILEARR_AGENT_TESSERACT_PATH"
 	EnvExiftoolPath  = "FILEARR_AGENT_EXIFTOOL_PATH"
+	// The three poppler-utils binaries the PDF story rides on. They are detected
+	// SEPARATELY rather than as one "poppler" capability because a host can ship
+	// a partial install (Windows zip drops, minimal distro packages), and the
+	// honest answer to "will PDF text work here" is per binary.
+	EnvPDFInfoPath   = "FILEARR_AGENT_PDFINFO_PATH"
+	EnvPDFToTextPath = "FILEARR_AGENT_PDFTOTEXT_PATH"
+	EnvPDFToPPMPath  = "FILEARR_AGENT_PDFTOPPM_PATH"
 )
 
 // toolKey memoizes a lookup by BOTH the tool name and the override value in
@@ -65,9 +72,20 @@ func FFprobePath() string { return ResolveTool("ffprobe", EnvFFprobePath) }
 // at any quality, so this tool IS the capability.
 func TesseractPath() string { return ResolveTool("tesseract", EnvTesseractPath) }
 
-// ExiftoolPath resolves the host exiftool (deep EXIF), or "". Detected and
-// advertised now; the EXIF extractor itself is a later phase.
+// ExiftoolPath resolves the host exiftool (deep EXIF), or "". Central invokes
+// the same binary per file (never in-process linking — the exiv2 GPL-linking
+// ambiguity), so this is exact parity, not an approximation of it.
 func ExiftoolPath() string { return ResolveTool("exiftool", EnvExiftoolPath) }
+
+// PDFInfoPath resolves poppler's pdfinfo (PDF page count + document properties).
+func PDFInfoPath() string { return ResolveTool("pdfinfo", EnvPDFInfoPath) }
+
+// PDFToTextPath resolves poppler's pdftotext (PDF body text).
+func PDFToTextPath() string { return ResolveTool("pdftotext", EnvPDFToTextPath) }
+
+// PDFToPPMPath resolves poppler's pdftoppm (page rasterisation for scanned-PDF
+// OCR — the same binary central's ocr.py drives).
+func PDFToPPMPath() string { return ResolveTool("pdftoppm", EnvPDFToPPMPath) }
 
 // HasFFmpeg reports whether an ffmpeg binary is resolvable. Shared by the
 // capability advertisement and the install-time requirements check.
@@ -82,6 +100,11 @@ func HasTesseract() bool { return TesseractPath() != "" }
 // HasExiftool reports whether an exiftool binary is resolvable.
 func HasExiftool() bool { return ExiftoolPath() != "" }
 
+// HasPDFInfo / HasPDFToText / HasPDFToPPM report poppler-utils presence.
+func HasPDFInfo() bool   { return PDFInfoPath() != "" }
+func HasPDFToText() bool { return PDFToTextPath() != "" }
+func HasPDFToPPM() bool  { return PDFToPPMPath() != "" }
+
 // Tools is the host-tool matrix the agent advertises (and the local status page
 // renders). Keys are stable identifiers central's console gates on; a false
 // value means "this host cannot do the capability that tool backs".
@@ -91,6 +114,9 @@ func Tools() map[string]bool {
 		"ffprobe":   HasFFprobe(),
 		"tesseract": HasTesseract(),
 		"exiftool":  HasExiftool(),
+		"pdfinfo":   HasPDFInfo(),
+		"pdftotext": HasPDFToText(),
+		"pdftoppm":  HasPDFToPPM(),
 	}
 }
 

@@ -47,12 +47,19 @@ const (
 	CategoryVideo    = "video"
 	CategoryDocument = "document"
 	CategoryArchive  = "archive"
+	// CategoryModel3D is central's `three-d-cad` category (file_groups.py rolls
+	// both the 3d-model and cad groups into it, extractor "model3d"). The token
+	// is the taxonomy value, NOT the extractor name — internal/taxonomy already
+	// mirrors it, and internal/thumbs keys 3D previews off the same string.
+	CategoryModel3D = "three-d-cad"
 )
 
 // builtinCategories are the categories this BUILD can extract with compiled-in
 // code alone — no host tool required (stdlib image/zip/tar/xml + the already
 // vendored dhowden/tag).
-var builtinCategories = []string{CategoryArchive, CategoryAudio, CategoryDocument, CategoryImage}
+var builtinCategories = []string{
+	CategoryArchive, CategoryAudio, CategoryDocument, CategoryImage, CategoryModel3D,
+}
 
 // Formats reports the categories the agent can actually extract on this host:
 // the compiled-in set, plus "video" when ffprobe is present (video carries no
@@ -85,6 +92,17 @@ type Options struct {
 	// failed.
 	FFprobePath   string
 	TesseractPath string
+	// ExiftoolPath enables the deep-EXIF pass over images. It rides
+	// extract_enabled rather than a policy key of its own: it is cheap curated
+	// metadata (central runs it unconditionally for images), not body text.
+	ExiftoolPath string
+	// PDFInfoPath / PDFToTextPath / PDFToPPMPath are the three poppler-utils
+	// binaries the PDF story needs — properties, text, and rasterisation for
+	// scanned-page OCR. They are detected INDEPENDENTLY (a host may ship a
+	// partial poppler), so each capability degrades on its own.
+	PDFInfoPath   string
+	PDFToTextPath string
+	PDFToPPMPath  string
 
 	// MaxBodyChars caps stored body text; 0 => BodyTextMaxChars.
 	MaxBodyChars int
@@ -96,6 +114,14 @@ type Options struct {
 	OCRTimeout     time.Duration
 	// OCRLang is the tesseract -l value; "" => OCRLang.
 	OCRLang string
+	// OCRDPI / OCRMaxPages / OCRMinTextChars mirror central's scanned-PDF OCR
+	// policy (config.py ocr_dpi / ocr_max_pages / ocr_min_text_chars): the
+	// rasterisation DPI, the page ceiling past which a PDF is not OCR'd at all,
+	// and the native-text length at or above which OCR is skipped because the
+	// file already has a usable text layer. 0 => the central-mirrored defaults.
+	OCRDPI          int
+	OCRMaxPages     int
+	OCRMinTextChars int
 }
 
 // withDefaults fills the zero knobs with the central-mirrored constants, so a
@@ -115,6 +141,15 @@ func (o Options) withDefaults() Options {
 	}
 	if o.OCRLang == "" {
 		o.OCRLang = OCRLang
+	}
+	if o.OCRDPI <= 0 {
+		o.OCRDPI = OCRDPI
+	}
+	if o.OCRMaxPages <= 0 {
+		o.OCRMaxPages = OCRMaxPages
+	}
+	if o.OCRMinTextChars <= 0 {
+		o.OCRMinTextChars = OCRMinTextChars
 	}
 	return o
 }
@@ -205,6 +240,12 @@ func Extract(ctx context.Context, path, category string, opts Options) (*Result,
 	switch category {
 	case CategoryImage:
 		res.run("image", func() error { return extractImage(path, res) })
+		// EXIF runs BEFORE OCR: it can supply exif.width/exif.height, which the
+		// OCR pixel gate falls back on (ocr_run.py _pixels) when the header
+		// decoder could not read the dimensions itself.
+		if opts.ExiftoolPath != "" {
+			res.run("exif", func() error { return extractEXIF(ctx, path, opts, res) })
+		}
 		if opts.OCR && opts.TesseractPath != "" {
 			res.run("ocr", func() error { return ocrImage(ctx, path, opts, res) })
 		}
@@ -223,9 +264,20 @@ func Extract(ctx context.Context, path, category string, opts Options) (*Result,
 		}
 		res.run("ffprobe", func() error { return probeVideo(ctx, path, opts, res) })
 	case CategoryDocument:
+		if ext == "pdf" {
+			// PDF is its own reader (poppler-utils), not part of the zip+XML
+			// document family, and it is the ONE document type central also OCRs.
+			res.run("pdf", func() error { return extractPDF(ctx, path, opts, res) })
+			if opts.OCR && opts.TesseractPath != "" {
+				res.run("ocr", func() error { return ocrPDF(ctx, path, opts, res) })
+			}
+			break
+		}
 		res.run("document", func() error { return extractDocument(ctx, path, ext, opts, res) })
 	case CategoryArchive:
 		res.run("archive", func() error { return listArchive(ctx, path, opts, res) })
+	case CategoryModel3D:
+		res.run("model3d", func() error { return extractModel3D(ctx, path, ext, opts, res) })
 	default:
 		return nil, nil
 	}

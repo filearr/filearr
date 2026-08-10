@@ -72,15 +72,23 @@ type Policy struct {
 	UploadRatePerSec *int64 `json:"upload_rate_bytes_per_sec"`
 
 	// Agent-side extraction pass (agent-parity design contract, 2026-08-09).
-	// All four are additive and default OFF, so an existing fleet's behaviour is
-	// unchanged until an operator opts in. extract_body_text / extract_ocr /
-	// extract_max_bytes are only consulted when extract_enabled is true — a set
-	// sub-key with the master switch off is reported as an ignored setting
-	// (see IgnoredSettings) rather than silently doing nothing.
+	// All are additive and default OFF, so an existing fleet's behaviour is
+	// unchanged until an operator opts in. The sub-keys are only consulted when
+	// extract_enabled is true — a set sub-key with the master switch off is
+	// reported as an ignored setting (see IgnoredSettings) rather than silently
+	// doing nothing.
 	ExtractEnabled  *bool  `json:"extract_enabled"`
 	ExtractBodyText *bool  `json:"extract_body_text"`
 	ExtractOCR      *bool  `json:"extract_ocr"`
 	ExtractMaxBytes *int64 `json:"extract_max_bytes"`
+	// ExtractEXIF is a separate opt-in even though CENTRAL runs its own EXIF pass
+	// unconditionally for images, because on an agent the same pass has two costs
+	// central does not pay: one exiftool subprocess per image INSIDE the scan
+	// walk (a photo library is usually the largest file count on the host), and
+	// GPS coordinates leaving the machine. An operator who wants dimensions and
+	// document text but not location data now has a lever other than "uninstall
+	// exiftool", which would also cost them camera and lens.
+	ExtractEXIF *bool `json:"extract_exif"`
 
 	// W8-E central File Extension Similarity Taxonomy version. Central injects this
 	// computed key into every policy doc; the daemon version-gates its compact
@@ -125,6 +133,17 @@ func (p Policy) ExtractOCRValue() bool {
 		return false
 	}
 	return *p.ExtractOCR
+}
+
+// ExtractEXIFValue reports whether images get the deep-EXIF pass. Absent default
+// FALSE — see the field comment for why this is opt-in on an agent when it is
+// automatic centrally. Policy INTENT only: a host with no exiftool cannot honour
+// it (see IgnoredSettings).
+func (p Policy) ExtractEXIFValue() bool {
+	if p.ExtractEXIF == nil {
+		return false
+	}
+	return *p.ExtractEXIF
 }
 
 // ExtractMaxBytesOr resolves the per-file size ceiling: the policy's

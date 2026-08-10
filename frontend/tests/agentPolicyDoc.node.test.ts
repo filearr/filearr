@@ -180,6 +180,7 @@ test("extraction keys are grouped in their own editor section, with bounds", () 
   assert.deepEqual(keys.sort(), [
     "extract_body_text",
     "extract_enabled",
+    "extract_exif",
     "extract_max_bytes",
     "extract_ocr",
   ]);
@@ -225,11 +226,22 @@ test("extraction keys with the pass switched off are flagged once, by root cause
   for (const i of out) assert.match(i.reason, /extract_enabled is not on/);
 });
 
+/** A host with every optional tool present — the "nothing is ignored" baseline. */
+const FULL_TOOLS = {
+  ffmpeg: true,
+  ffprobe: true,
+  tesseract: true,
+  exiftool: true,
+  pdfinfo: true,
+  pdftotext: true,
+  pdftoppm: true,
+};
+
 test("extract_ocr is flagged when the host has no tesseract, and only then", () => {
   const caps = {
     extract: true,
     extract_schema: 1,
-    tools: { ffmpeg: true, ffprobe: true, tesseract: false, exiftool: false },
+    tools: { ...FULL_TOOLS, tesseract: false },
   };
   const policy = { extract_enabled: true, extract_body_text: true, extract_ocr: true };
   assert.deepEqual(ignoredPolicySettings(policy, caps), [
@@ -238,7 +250,7 @@ test("extract_ocr is flagged when the host has no tesseract, and only then", () 
 
   // Same policy, a host that has tesseract: nothing is ignored.
   assert.deepEqual(
-    ignoredPolicySettings(policy, { ...caps, tools: { ...caps.tools, tesseract: true } }),
+    ignoredPolicySettings(policy, { ...caps, tools: FULL_TOOLS }),
     [],
   );
   // OCR not requested: the missing tool is irrelevant.
@@ -246,6 +258,57 @@ test("extract_ocr is flagged when the host has no tesseract, and only then", () 
     ignoredPolicySettings({ extract_enabled: true, extract_ocr: false }, caps),
     [],
   );
+});
+
+test("a missing host tool is only called out when the agent actually reported it", () => {
+  // A phase-1 agent advertises four tools and knows nothing about poppler. An
+  // ABSENT key must not be read as "the host lacks it" — that would tell an
+  // operator to install something the build could not use anyway.
+  const oldAgent = {
+    extract: true,
+    extract_schema: 1,
+    tools: { ffmpeg: true, ffprobe: true, tesseract: true, exiftool: true },
+  };
+  assert.deepEqual(
+    ignoredPolicySettings(
+      { extract_enabled: true, extract_body_text: true, extract_ocr: true },
+      oldAgent,
+    ),
+    [],
+  );
+
+  // The same host, reporting the poppler trio as genuinely absent.
+  const out = ignoredPolicySettings(
+    { extract_enabled: true, extract_body_text: true, extract_ocr: true },
+    {
+      ...oldAgent,
+      tools: { ...FULL_TOOLS, pdfinfo: false, pdftotext: false, pdftoppm: false },
+    },
+  );
+  assert.deepEqual(out.map((i) => i.key), [
+    "extract_ocr",
+    "extract_enabled",
+    "extract_body_text",
+  ]);
+  assert.match(out[0].reason, /pdftoppm/);
+  assert.match(out[1].reason, /pdfinfo/);
+  assert.match(out[2].reason, /pdftotext/);
+});
+
+test("a missing ffprobe is a partial extraction; exiftool only matters when asked for", () => {
+  const caps = {
+    extract: true,
+    tools: { ...FULL_TOOLS, exiftool: false, ffprobe: false },
+  };
+  // EXIF is its own opt-in, so a host without exiftool is only flagged for it
+  // when the policy actually asked for EXIF.
+  let out = ignoredPolicySettings({ extract_enabled: true }, caps);
+  assert.deepEqual(out.map((i) => i.key), ["extract_enabled"]);
+  assert.match(out[0].reason, /ffprobe/);
+
+  out = ignoredPolicySettings({ extract_enabled: true, extract_exif: true }, caps);
+  assert.deepEqual(out.map((i) => i.key), ["extract_enabled", "extract_exif"]);
+  assert.match(out[1].reason, /exiftool/);
 });
 
 // --------------------------------------------------------------------------- //

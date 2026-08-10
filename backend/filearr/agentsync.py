@@ -82,6 +82,28 @@ EXTRACTED_AT_KEY = "_extracted_at"
 #: own extractors leave the key absent).
 EXTRACTED_BY_AGENT = "agent"
 
+#: The ONLY ``_``-prefixed keys an agent may write. Everything else in that
+#: namespace stays central-owned (see :func:`merge_extracted_metadata`).
+#:
+#: These four are diagnostic strings the agent's own extractors produce for files
+#: central cannot open, and they are the whole point of the agent reporting a
+#: partial failure: without them a file whose ffprobe/exiftool/pdftotext pass blew
+#: up is indistinguishable from one that simply had no metadata. Allowing them is
+#: not the risk the namespace rule guards against — that rule exists so an agent
+#: cannot forge an embedding fingerprint (``_embedding_fp``), clear a chunk
+#: fingerprint (``_chunks_fp``), or fake its own provenance stamps. Setting an
+#: error flag on ITS OWN library's item can, at worst, make that item look failed.
+#: Values are sanitised and length-capped on the way in.
+AGENT_WRITABLE_UNDERSCORE_KEYS = frozenset(
+    {"_extract_error", "_extract_error_kind", "_exif_error", "_ocr_error"}
+)
+
+#: Cap for an agent-supplied diagnostic string, mirroring
+#: :data:`filearr.errors.MAX_ERROR_CHARS` (500) — the same ceiling central applies
+#: to its own ``sanitize_error`` output, so the two sources cannot be told apart
+#: by length.
+AGENT_ERROR_MAX_CHARS = 500
+
 
 class ExtractedPayload(BaseModel):
     """The agent's extraction result for ONE file, riding on its change event.
@@ -124,6 +146,32 @@ def extracted_json_len(payload: ExtractedPayload) -> int:
             default=str,
         ).encode("utf-8")
     )
+
+
+def _agent_error_text(value: Any) -> str:
+    """Coerce an allow-listed agent diagnostic into a storable string.
+
+    Anything the agent sends here is untrusted text that ends up in the console
+    and (via the item document) the search index, so it gets the same treatment
+    central gives its own extractor exceptions: stringify, strip C0/C1 control
+    characters, collapse to a single line, and cap at
+    :data:`AGENT_ERROR_MAX_CHARS`. Returns ``""`` for anything that normalises to
+    nothing, which the caller drops rather than storing an empty flag.
+    """
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    # Whitespace controls become a space and the rest are dropped — the same
+    # split central's own text normaliser makes (documents._normalize_body_text),
+    # so a two-line parser message collapses to one readable line instead of
+    # having its words glued together.
+    text = "".join(
+        " " if ch in "\t\n\v\f\r" else ch
+        for ch in text
+        if ch in "\t\n\v\f\r" or (ch >= " " and not ("\x7f" <= ch <= "\x9f"))
+    )
+    text = " ".join(text.split())
+    return text[:AGENT_ERROR_MAX_CHARS]
 
 
 def _derive_archive_members(merged: dict[str, Any]) -> None:
@@ -173,13 +221,16 @@ def merge_extracted_metadata(
 
     * Start from the EXISTING dict, so every key central already stamped survives
       unless this extraction explicitly supplies it.
-    * Apply ``payload.meta``, minus any ``_``-prefixed key: that namespace is
-      CENTRAL bookkeeping (``_extract_error`` / ``_extract_error_kind`` from
-      ``tasks/extract``, ``_sniffed_mime`` from ``tasks/sniff``, ``_ocr_error``,
-      ``_exif_error``, ``_validation_errors``, ``_embedding``/``_embedding_fp``
-      from :mod:`filearr.embed`, ``_chunks_fp`` from :mod:`filearr.chunking`, and
-      the provenance stamps below). A buggy or hostile agent must not be able to
-      forge an embedding fingerprint or clear an error flag.
+    * Apply ``payload.meta``, minus any ``_``-prefixed key outside
+      :data:`AGENT_WRITABLE_UNDERSCORE_KEYS`: that namespace is CENTRAL
+      bookkeeping (``_sniffed_mime`` from ``tasks/sniff``, ``_validation_errors``,
+      ``_embedding``/``_embedding_fp`` from :mod:`filearr.embed`, ``_chunks_fp``
+      from :mod:`filearr.chunking`, and the provenance stamps below). A buggy or
+      hostile agent must not be able to forge an embedding fingerprint or clear a
+      chunk fingerprint. The four allow-listed diagnostic keys ARE applied, coerced
+      to a sanitised string capped at :data:`AGENT_ERROR_MAX_CHARS`; an agent whose
+      ffprobe/exiftool/pdftotext pass failed has no other way to say so, and
+      dropping them silently made every partial failure look like an empty file.
     * Set ``body_text`` / ``body_text_truncated`` only when the payload carries
       body text (a media-only extraction must not blank a document's text).
     * Stamp provenance: :data:`EXTRACTED_BY_KEY` = ``"agent"``,
@@ -202,7 +253,12 @@ def merge_extracted_metadata(
     merged = dict(old)
     for key, value in payload.meta.items():
         if key.startswith("_"):
-            continue  # central-owned namespace; never agent-writable
+            if key not in AGENT_WRITABLE_UNDERSCORE_KEYS:
+                continue  # central-owned namespace; never agent-writable
+            text = _agent_error_text(value)
+            if text:
+                merged[key] = text
+            continue
         merged[key] = value
     if payload.body_text is not None:
         merged["body_text"] = payload.body_text

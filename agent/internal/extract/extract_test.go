@@ -354,12 +354,14 @@ func TestExtractODSHasNoBodyText(t *testing.T) {
 	}
 }
 
-func TestExtractPDFIsOutOfScope(t *testing.T) {
+func TestDispatchPDFWithoutPopplerIsSkipped(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "paper.pdf", []byte("%PDF-1.7\n"))
 
-	// PDF text is explicitly a later phase. It must be a SKIP (nil, nil), not a
-	// recurring per-file error on every scan of a document library.
+	// PDF support is a HOST TOOL capability (poppler-utils). bodyOpts() resolves
+	// no tool paths, which is the "poppler is not installed here" configuration:
+	// it must be a SKIP (nil, nil), not a recurring per-file error on every scan
+	// of a document library.
 	res, err := Extract(context.Background(), p, CategoryDocument, bodyOpts())
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
