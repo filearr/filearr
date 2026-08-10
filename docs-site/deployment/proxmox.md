@@ -36,7 +36,46 @@ The wizard saves your answers so redeploys never re-ask. It prompts once for:
   (`THUMBS_STORAGE` + size in GB): pick a storage to keep a large cache off
   the CT rootfs, or leave blank to share the rootfs. The cache is disposable
   either way (bounded by the thumbnail GC).
+- **Optional app settings** — the optional feature knobs (semantic search,
+  content sniffing, update check, log recorder, thumbnail budget, and — only
+  when agents are enabled — the agent auth mode). See below.
 - **Storage definitions** — one or more network shares (see below).
+
+### The "Optional app settings" step {#optional-app-settings}
+
+Optional features ship **off**, and used to be visible only inside the
+container's `.env`. The wizard now asks about them and writes the answers into
+`deploy.conf`, where you can see and edit them on the host:
+
+```text
+── Optional app settings ──
+Configure optional app settings (semantic search, thumbnail budget, ...)? [y/N]
+```
+
+- **Answer `N` (the default)** and the deploy still **records the current
+  effective values** as `FILEARR_*=VALUE` lines in `deploy.conf` — the knobs
+  become explicit without any interrogation. Values you already answered are
+  never rewritten.
+- **Answer `y`** and it walks the knobs one at a time, each with a one-line
+  explanation. The default offered for each is the **current effective value**:
+  an existing line in `deploy.conf`, else a line in `env.overrides`, else the
+  shipped default. Press Enter to keep it. Booleans accept only `true`/`false`.
+
+| Prompt | Default | What it does |
+|---|---|---|
+| `FILEARR_SEMANTIC_ENABLED` | `false` | Semantic/hybrid search. The worker loads a local embedding model (~500 MB RSS) and backfilling 1M+ items takes hours. |
+| `FILEARR_CONTENT_SNIFF_ENABLED` | `false` | libmagic reclassification of extensionless files. |
+| `FILEARR_UPDATE_CHECK_AUTO` | `false` | Auto-refresh the GitHub update check (outbound network call). |
+| `FILEARR_LOG_DB_ENABLED` | `true` | The database log recorder behind the console Logs panel. |
+| `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory thumbnail-cache budget; `0` disables the advisory. |
+| `FILEARR_AGENT_AUTH_MODE` | `fingerprint` | **Only asked when distributed agents are enabled.** `fingerprint` = interim bearer; `both` = accept both during migration; `mtls-header` = mTLS only — flip after every agent shows the mTLS badge. |
+
+Every answer (including an accepted default) is written to `deploy.conf`, so
+after any wizard or `--reconfigure` run the knobs are literally **set** there —
+and applied to the container's `.env` on that same deploy. An ordinary
+redeploy with saved answers never re-asks; `--reconfigure` always re-offers the
+section. If `env.overrides` pins a different value for a key, the deploy says
+so — that file still wins (see the precedence rules below).
 
 ### The prompt-once model, and where secrets go
 
@@ -243,12 +282,16 @@ bash proxmox/deploy-proxmox.sh        # applied on this and every future deploy
     knob](../reference/configuration.md#optional-features) —
     `FILEARR_SEMANTIC_ENABLED`, `FILEARR_CONTENT_SNIFF_ENABLED`,
     `FILEARR_UPDATE_CHECK_AUTO`, `FILEARR_THUMBNAIL_BUDGET_GB`,
-    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED` — into the CT's `.env`
-    with its default value, so `cat /opt/filearr/.env` shows what exists
-    instead of leaving it implicit. This happens **only when the key is
-    absent**: your in-CT edits, the agents wizard's
-    `FILEARR_AGENTS_ENABLED=true`, and your host-side lines are never
+    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED`,
+    `FILEARR_AGENT_AUTH_MODE` — into the CT's `.env` with its default value, so
+    `cat /opt/filearr/.env` shows what exists instead of leaving it implicit.
+    This happens **only when the key is absent**: your in-CT edits, the agents
+    wizard's `FILEARR_AGENTS_ENABLED=true`, and your host-side lines are never
     overwritten.
+
+    To set them on the **host** instead — visible and editable in
+    `deploy.conf`, surviving a CT rebuild — use the wizard's [Optional app
+    settings step](#optional-app-settings) (`--reconfigure` re-offers it).
 
 **In-CT (immediate, no redeploy needed):** edit `.env` directly with the
 duplicate-safe remove-then-append pattern, then recreate the stack (compose

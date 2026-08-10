@@ -27,7 +27,9 @@
 # re-applied on every redeploy, so the CT is fully disposable.
 #
 # App settings: deploy.conf may ALSO carry plain `FILEARR_*=VALUE` setting lines
-# (single-file management — wizard answers and app settings in one place); the
+# (single-file management — wizard answers and app settings in one place). The
+# wizard's "Optional app settings" step writes them for you (first run and
+# --reconfigure; see configure_optional_settings); the
 # dedicated ~/.config/filearr/env.overrides file still works and WINS on a
 # duplicate key. Both are upserted into the CT's /opt/filearr/.env last, so they
 # outrank everything the deploy writes. Secrets are container-managed and are
@@ -113,6 +115,11 @@ json_str() {
 
 save_conf() {
   mkdir -p "$CONF_DIR"
+  # This rewrites deploy.conf wholesale, so carry over the app-setting lines the
+  # file may also hold (configure_optional_settings' answers, or an operator's
+  # own FILEARR_* lines) — losing them would silently revert app settings.
+  local keep=""
+  [[ -f "$CONF" ]] && keep="$(grep -E '^FILEARR_[A-Z0-9_]+=' "$CONF" 2>/dev/null || true)"
   cat > "$CONF" <<EOF
 VMID_START=$VMID_START
 VMID=$VMID
@@ -138,6 +145,7 @@ THUMBS_SIZE_GB=${THUMBS_SIZE_GB:-64}
 TEMPLATE=$TEMPLATE
 PRIVILEGED=$PRIVILEGED
 EOF
+  [[ -n "$keep" ]] && printf '%s\n' "$keep" >> "$CONF"
   chmod 600 "$CONF"
   echo "saved defaults -> $CONF"
 }
@@ -527,6 +535,167 @@ fi"
   echo "    ✓ agent platform configured"
 }
 
+# ---------- optional app settings (FILEARR_* knobs in deploy.conf) ----------
+# The optional feature knobs used to be visible ONLY inside the CT's .env (the
+# if-absent defaults pass in deploy_stack): the wizard never asked about them and
+# deploy.conf never mentioned them, so an operator could not tell they existed
+# (live report 2026-08-09). This section ASKS, then writes plain
+# `FILEARR_KEY=VALUE` lines into deploy.conf — which every deploy already merges
+# into the CT .env (see stage-the-overrides in deploy_stack). deploy.conf is
+# `source`d, so the values stay bare/unquoted (booleans, a number, one enum word).
+#
+# Ask-vs-reuse mirrors the other ensure_* sections, with one twist: the answers
+# ARE the FILEARR_* lines, so "already answered" = at least one optional key is
+# present in deploy.conf. A plain redeploy with saved answers never prompts;
+# --reconfigure (RECONFIGURE=1) always re-offers the section. Precedence is
+# unchanged — env.overrides still wins over deploy.conf on a duplicate key.
+OPTIONAL_SETTING_KEYS='FILEARR_SEMANTIC_ENABLED FILEARR_CONTENT_SNIFF_ENABLED FILEARR_UPDATE_CHECK_AUTO FILEARR_LOG_DB_ENABLED FILEARR_THUMBNAIL_BUDGET_GB FILEARR_AGENT_AUTH_MODE'
+
+# Shipped defaults — keep in sync with the in-CT if-absent list in deploy_stack.
+optional_setting_shipped() {
+  case "$1" in
+    FILEARR_SEMANTIC_ENABLED)      echo "false" ;;
+    FILEARR_CONTENT_SNIFF_ENABLED) echo "false" ;;
+    FILEARR_UPDATE_CHECK_AUTO)     echo "false" ;;
+    FILEARR_LOG_DB_ENABLED)        echo "true" ;;
+    FILEARR_THUMBNAIL_BUDGET_GB)   echo "5" ;;
+    FILEARR_AGENT_AUTH_MODE)       echo "fingerprint" ;;
+    *)                             echo "" ;;
+  esac
+}
+
+# Last `KEY=` line of a host file, minus one matching pair of surrounding quotes
+# (deploy.conf is shell-sourced, so an operator's own line may be quoted — the
+# same unquoting stage_env_overrides does). Returns 1 when the key is absent.
+_setting_from_file() {
+  local key="$1" file="$2" val
+  [[ -f "$file" ]] || return 1
+  val="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -1 || true)"
+  [[ -n "$val" ]] || return 1
+  val="${val#*=}"
+  case "$val" in
+    '"'*'"') val="${val#\"}"; val="${val%\"}" ;;
+    "'"*"'") val="${val#\'}"; val="${val%\'}" ;;
+  esac
+  printf '%s' "$val"
+}
+
+# Current EFFECTIVE value: deploy.conf -> env.overrides -> shipped default.
+optional_setting_current() {
+  local val
+  val="$(_setting_from_file "$1" "$CONF")" && { printf '%s' "$val"; return 0; }
+  val="$(_setting_from_file "$1" "$ENV_OVERRIDES")" && { printf '%s' "$val"; return 0; }
+  optional_setting_shipped "$1"
+}
+
+# Upsert one FILEARR_* line into deploy.conf (same idiom as persist_tls_config).
+# Also flags the case where env.overrides pins a DIFFERENT value for the key —
+# that file still wins at deploy time, so a silent no-op would be baffling.
+persist_optional_setting() {
+  mkdir -p "$CONF_DIR"; touch "$CONF"
+  local tmp; tmp="$(mktemp)"
+  grep -v "^$1=" "$CONF" 2>/dev/null > "$tmp" || true
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$CONF"; chmod 600 "$CONF"
+  local ovr
+  if ovr="$(_setting_from_file "$1" "$ENV_OVERRIDES")" && [[ "$ovr" != "$2" ]]; then
+    echo "    note: env.overrides sets $1=$ovr and WINS over deploy.conf for this key"
+  fi
+}
+
+# Prompt for a true/false knob; the answer lands in REPLY (like ask()).
+ask_optional_bool() {
+  local key="$1" why="$2" def
+  def="$(optional_setting_current "$key")"
+  case "$def" in true|false) ;; *) def="$(optional_setting_shipped "$key")" ;; esac
+  echo "  $why"
+  while true; do
+    ask "  $key (true/false)" "$def"
+    [[ "$REPLY" == "true" || "$REPLY" == "false" ]] && return 0
+    echo "    must be 'true' or 'false'"
+  done
+}
+
+configure_optional_settings() {
+  # deduped across the wizard + main-flow call sites (mirrors CF_TOKEN_HANDLED)
+  [[ "${OPTIONAL_SETTINGS_HANDLED:-0}" == 1 ]] && return 0
+  OPTIONAL_SETTINGS_HANDLED=1
+  local answered=0 k
+  for k in $OPTIONAL_SETTING_KEYS; do
+    if _setting_from_file "$k" "$CONF" >/dev/null; then answered=1; break; fi
+  done
+  # saved answers + ordinary redeploy -> reuse silently, like every other section
+  [[ "$answered" == 1 && "${RECONFIGURE:-0}" != 1 ]] && return 0
+
+  local do_ask=0 _ans=""
+  if [[ -t 0 ]]; then
+    echo
+    echo "── Optional app settings ──"
+    echo "  Optional features ship OFF and are otherwise only visible inside the CT"
+    echo "  .env. Answering here records them in $CONF, so they survive"
+    echo "  a CT rebuild and can be edited on the host."
+    read -r -p "Configure optional app settings (semantic search, thumbnail budget, ...)? [y/N] " _ans || _ans=""
+    [[ "$_ans" == "y" || "$_ans" == "Y" ]] && do_ask=1
+  fi
+
+  if [[ "$do_ask" == 0 ]]; then
+    # Default path: no interrogation, but still make the knobs SET+visible in
+    # deploy.conf by recording the values that are already in effect. Existing
+    # answers are never rewritten (answered=1 -> nothing to do).
+    if [[ "$answered" == 0 ]]; then
+      for k in $OPTIONAL_SETTING_KEYS; do
+        if [[ "$k" == "FILEARR_AGENT_AUTH_MODE" && "${AGENTS_ENABLED:-no}" != "yes" ]]; then continue; fi
+        persist_optional_setting "$k" "$(optional_setting_current "$k")"
+      done
+      echo "  recorded the current optional settings in $CONF (edit there, or rerun with --reconfigure)"
+    fi
+    return 0
+  fi
+
+  ask_optional_bool FILEARR_SEMANTIC_ENABLED \
+    "semantic/hybrid search; the worker loads a local embedding model (~500 MB RSS) and backfilling 1M+ items takes hours"
+  persist_optional_setting FILEARR_SEMANTIC_ENABLED "$REPLY"
+
+  ask_optional_bool FILEARR_CONTENT_SNIFF_ENABLED \
+    "libmagic content sniffing — reclassifies extensionless files by their bytes"
+  persist_optional_setting FILEARR_CONTENT_SNIFF_ENABLED "$REPLY"
+
+  ask_optional_bool FILEARR_UPDATE_CHECK_AUTO \
+    "auto-refresh the GitHub update check (a periodic outbound network call)"
+  persist_optional_setting FILEARR_UPDATE_CHECK_AUTO "$REPLY"
+
+  ask_optional_bool FILEARR_LOG_DB_ENABLED \
+    "database log recorder behind the console Logs panel"
+  persist_optional_setting FILEARR_LOG_DB_ENABLED "$REPLY"
+
+  local tdef; tdef="$(optional_setting_current FILEARR_THUMBNAIL_BUDGET_GB)"
+  [[ "$tdef" =~ ^[0-9]+([.][0-9]+)?$ ]] || tdef="$(optional_setting_shipped FILEARR_THUMBNAIL_BUDGET_GB)"
+  echo "  thumbnail cache budget in GB — advisory (drives the cache warning/GC target); 0 disables it"
+  while true; do
+    ask "  FILEARR_THUMBNAIL_BUDGET_GB (0 = disable)" "$tdef"
+    [[ "$REPLY" =~ ^[0-9]+([.][0-9]+)?$ ]] && break
+    echo "    must be a number >= 0"
+  done
+  persist_optional_setting FILEARR_THUMBNAIL_BUDGET_GB "$REPLY"
+
+  # Agent auth mode is meaningless without the agent platform.
+  if [[ "${AGENTS_ENABLED:-no}" == "yes" ]]; then
+    local adef; adef="$(optional_setting_current FILEARR_AGENT_AUTH_MODE)"
+    case "$adef" in fingerprint|both|mtls-header) ;; *) adef="$(optional_setting_shipped FILEARR_AGENT_AUTH_MODE)" ;; esac
+    echo "  agent auth mode:"
+    echo "    fingerprint  = interim bearer token (today's default)"
+    echo "    both         = accept bearer AND mTLS during the migration"
+    echo "    mtls-header  = mTLS only — flip after every agent shows the mTLS badge"
+    while true; do
+      ask "  FILEARR_AGENT_AUTH_MODE (fingerprint/both/mtls-header)" "$adef"
+      case "$REPLY" in fingerprint|both|mtls-header) break ;; esac
+      echo "    must be 'fingerprint', 'both' or 'mtls-header'"
+    done
+    persist_optional_setting FILEARR_AGENT_AUTH_MODE "$REPLY"
+  fi
+  echo "  optional settings saved -> $CONF (applied to the CT .env on this deploy)"
+}
+
 next_free_vmid() { local id=$1; while pct status "$id" >/dev/null 2>&1 || qm status "$id" >/dev/null 2>&1; do id=$((id+1)); done; echo "$id"; }
 detect_bridges() { ls /sys/class/net 2>/dev/null | grep -E '^vmbr' | tr '\n' ' '; }
 
@@ -698,6 +867,9 @@ wizard() {
   ensure_public_base_url
   ensure_tls_config
   ensure_agents_config
+  # after the agents answer (it decides whether the auth-mode knob is relevant)
+  # and before anything is deployed; save_conf below preserves the FILEARR_* lines.
+  configure_optional_settings
 
   wizard_storages
 
@@ -1129,7 +1301,7 @@ mv .env.agv .env
 # what exists without reading config.py. Written ONLY when the key is absent:
 # an operator's own edit, configure_agents' FILEARR_AGENTS_ENABLED=true, and the
 # host-side deploy.conf / env.overrides lines (applied below, LAST) all win.
-for kv in FILEARR_SEMANTIC_ENABLED=false FILEARR_CONTENT_SNIFF_ENABLED=false FILEARR_UPDATE_CHECK_AUTO=false FILEARR_THUMBNAIL_BUDGET_GB=5 FILEARR_LOG_DB_ENABLED=true FILEARR_AGENTS_ENABLED=false; do
+for kv in FILEARR_SEMANTIC_ENABLED=false FILEARR_CONTENT_SNIFF_ENABLED=false FILEARR_UPDATE_CHECK_AUTO=false FILEARR_THUMBNAIL_BUDGET_GB=5 FILEARR_LOG_DB_ENABLED=true FILEARR_AGENTS_ENABLED=false FILEARR_AGENT_AUTH_MODE=fingerprint; do
   grep -q \"^\${kv%%=*}=\" .env || printf '%s\n' \"\$kv\" >> .env
 done
 # Host-managed setting overrides (~/.config/filearr/env.overrides + any
@@ -1421,6 +1593,9 @@ ct_ip() { pct exec "$VMID" -- hostname -I 2>/dev/null | awk '{print $1}'; }
 # ---------- main ----------
 need pct; need pveam; need pvesm
 MODE="${1:-deploy}"
+# --reconfigure re-offers the sections that are otherwise "answered once"; the
+# optional-settings section keys off this (set -u: always defined).
+RECONFIGURE=0
 # legacy migration: project was renamed catalarr -> filearr
 if [[ ! -f "$CONF" && -f "$HOME/.config/catalarr/deploy.conf" ]]; then
   mkdir -p "$CONF_DIR"
@@ -1436,7 +1611,7 @@ WEB_PORT="${WEB_PORT:-8484}"
 WEB_TLS_PORT="${WEB_TLS_PORT:-8443}"
 
 case "$MODE" in
-  --reconfigure) wizard ;;
+  --reconfigure) RECONFIGURE=1; wizard ;;
   --storages)
     wizard_storages
     if storages_need_privileged && [[ "${PRIVILEGED:-0}" != 1 ]]; then
@@ -1484,6 +1659,11 @@ ensure_agents_config
 # Same prompt-once discipline for the dedicated thumbnail volume (applied at CT
 # create; drift-checked against an existing CT in the redeploy branch below).
 ensure_thumbs_config
+# Optional FILEARR_* app settings: prompts on a first run / --reconfigure (deduped
+# against the wizard's call via OPTIONAL_SETTINGS_HANDLED), and on a conf that
+# predates this feature it records the current effective values so they are SET
+# and visible in deploy.conf. A redeploy with saved answers is never nagged.
+configure_optional_settings
 
 if [[ -n "${VMID:-}" ]] && pct status "$VMID" >/dev/null 2>&1; then
   echo "── redeploying to existing CT $VMID with saved defaults ──"
