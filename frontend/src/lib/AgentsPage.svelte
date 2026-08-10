@@ -13,9 +13,11 @@
     ApiError,
     getAgentSummary,
     getEffectivePolicy,
+    listAgentCommands,
     listAgents,
     listEnrollmentTokens,
     mintEnrollmentToken,
+    reextractAgent,
     revokeAgent,
     runAgentMaintenance,
     suspendAgent,
@@ -111,7 +113,7 @@
       }
       tokens = toks;
       groups = grps;
-      await refreshSummary();
+      await Promise.all([refreshSummary(), refreshSweeps()]);
     } catch (e) {
       error = errDetail(e);
     }
@@ -120,7 +122,12 @@
   let summaryTimer: ReturnType<typeof setInterval>;
   onMount(() => {
     refresh();
-    summaryTimer = setInterval(refreshSummary, 15000); // status header auto-refresh
+    // Status header auto-refresh; the sweep set rides the same tick so a
+    // finished re-extract clears its badge without a manual reload.
+    summaryTimer = setInterval(() => {
+      refreshSummary();
+      refreshSweeps();
+    }, 15000);
   });
   onDestroy(() => clearInterval(summaryTimer));
 
@@ -158,6 +165,23 @@
       const scan = h.scan as Record<string, unknown> | undefined;
       if (scan && typeof scan.status === "string") {
         lines.push(`scan: ${scan.status}${typeof scan.seen === "number" ? ` (${scan.seen} seen)` : ""}`);
+      }
+      // Parity phase 3: the last re-extraction sweep. This tooltip is a FIXED
+      // key list, so an agent-reported key that is not named here is collected
+      // and stored and then never seen by anyone — the reason to render it is
+      // that "has the backfill finished on this box" is otherwise only
+      // answerable from the command history.
+      const rx = h.reextract as Record<string, unknown> | undefined;
+      if (rx && typeof rx.started === "string") {
+        const enriched =
+          typeof rx.extracted === "number" && typeof rx.seen === "number"
+            ? ` (${rx.extracted.toLocaleString()} enriched of ${rx.seen.toLocaleString()} seen)`
+            : "";
+        const when =
+          rx.complete && typeof rx.finished === "string"
+            ? `completed ${new Date(rx.finished).toLocaleString()}`
+            : `in progress since ${new Date(rx.started).toLocaleString()}`;
+        lines.push(`re-extract: ${when}${enriched}`);
       }
       if (a.health_at) lines.push(`health as of ${new Date(a.health_at).toLocaleString()}`);
     }
@@ -257,6 +281,56 @@
       error = `maintenance ${a.name}: ${errDetail(e)}`;
     } finally {
       maintaining[a.id] = false;
+    }
+  }
+
+  // Re-extract (extraction parity phase 3, 2026-08-10): the agent sweeps its
+  // EXISTING local index and re-runs extraction over items a scan will never
+  // touch again — everything catalogued before `extract_enabled` was on, or
+  // before that host gained ffprobe/exiftool/poppler/tesseract. Central holds
+  // no cursor: it enqueues the command and the agent resumes its own sweep.
+  let reextracting: Record<string, boolean> = $state({});
+  // Agent ids with a queued/in-flight `reextract`. The equivalent flag for
+  // self_update (`update_pending`) is computed on the agents list; there is no
+  // per-kind flag for this one, so the page asks the command endpoint directly —
+  // TWO requests for the whole table (pending + picked_up), not one per row.
+  let sweeping = $state<Set<string>>(new Set());
+  async function refreshSweeps() {
+    try {
+      const [queued, running] = await Promise.all([
+        listAgentCommands(undefined, 200, { kind: "reextract", state: "pending" }),
+        listAgentCommands(undefined, 200, { kind: "reextract", state: "picked_up" }),
+      ]);
+      sweeping = new Set([...queued, ...running].map((c) => c.agent_id));
+    } catch {
+      /* transient — keep the last-known sweep set (the badge is advisory) */
+    }
+  }
+
+  async function reextract(a: AgentOut) {
+    // Fleet-visible and potentially hours long on a large index, so it confirms
+    // first — same idiom as suspend/revoke (a plain confirm() naming the agent
+    // and stating the cost).
+    if (
+      !confirm(
+        `Re-extract metadata on agent "${a.name}"? It sweeps every item in that agent's index and can run for hours on a large library. The sweep is resumable and re-emits metadata only — file contents never leave the agent.`,
+      )
+    )
+      return;
+    reextracting[a.id] = true;
+    try {
+      await reextractAgent(a.id);
+      await refresh();
+    } catch (e) {
+      // 409 = the single-sweep guard (two sweeps would fight over one cursor).
+      // Say that plainly instead of surfacing the raw endpoint detail.
+      error =
+        e instanceof ApiError && e.status === 409
+          ? `re-extract ${a.name}: a sweep is already running on this agent`
+          : `re-extract ${a.name}: ${errDetail(e)}`;
+      await refreshSweeps(); // resync the badge — a 409 means one IS in flight
+    } finally {
+      reextracting[a.id] = false;
     }
   }
 
@@ -875,6 +949,10 @@ ${detail}
                   <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
                     title="Operator-suspended: this agent is not scanning or replicating (self-reported at its last check-in). It still polls for commands — resume it with the actions on the right.">suspended</span>
                 {/if}
+                {#if sweeping.has(a.id)}
+                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+                    title="A re-extract sweep is queued or running: the agent is re-running extraction over its existing index and re-emitting the metadata. It resumes across restarts, so this can stay up for hours on a large library.">re-extracting</span>
+                {/if}
                 {#if a.health?.central_maintenance}
                   <span class="ml-1 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
                     title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends.">backing off</span>
@@ -942,6 +1020,11 @@ ${detail}
                     disabled={maintaining[a.id]}
                     title="Queue a local maintenance pass: compact the agent's index (VACUUM), prune already-replicated outbox rows, sweep stale temp files. Runs at its next check-in; the result appears in the command history."
                     onclick={() => maintainAgent(a)}>maintain</button>
+                  <button
+                    class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
+                    disabled={reextracting[a.id] || sweeping.has(a.id)}
+                    title="Re-run extraction across this agent's EXISTING index and re-emit the metadata — the catch-up for items scanned before extraction (or before ffprobe/exiftool/poppler/tesseract) was available on that host. Only extracted metadata is re-sent; file contents never leave the agent. Resumable, and a repeat run at an unchanged extraction configuration does nothing."
+                    onclick={() => reextract(a)}>{sweeping.has(a.id) ? "sweeping…" : "re-extract"}</button>
                   <button class="ml-3 text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
                 {/if}
                 <button

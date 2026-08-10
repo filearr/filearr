@@ -58,10 +58,10 @@ you enable it, and what an agent can actually do depends on which tools exist on
       `extracted` object at `FILEARR_AGENT_EXTRACTED_MAX_BYTES` (256 KiB). Over
       that, the object is discarded with a warning and the change event still
       applies — replication is never allowed to wedge on enrichment.
-    - **Only new and changed files are extracted.** The pass runs inside the
-      scan, on the files that scan reports — so items catalogued *before* you
-      turned `extract_enabled` on keep their identity-only metadata until they
-      change or you force a full rescan. There is no fleet-wide backfill yet.
+    - **Only new and changed files are extracted** by a scan. Items catalogued
+      *before* you turned `extract_enabled` on, or before their host gained a
+      tool, keep identity-only metadata — no scan will ever revisit them. Use
+      the [Re-extract action](#agent-reextract) once to fill them in.
     - **A few formats stay out of reach.** The agent covers images, audio,
       video (via ffprobe), documents including PDF, archives and 3D geometry
       (`stl`/`obj`/`ply`/`off`/`gltf`/`glb`/`3mf`); other CAD and mesh formats
@@ -543,6 +543,59 @@ per-row actions), applied at the agent's next check-in (~1 min):
   update downloads) older than a day. The result — bytes reclaimed, rows
   pruned, per-pass errors — lands in the command history. 409 while one is
   already queued or running.
+- **re-extract** (`reextract`) — sweep the agent's existing index and re-emit
+  its items with a fresh extraction result. See below; this is the one that
+  fills in metadata for files catalogued before extraction was possible.
+
+### Re-extracting already-catalogued items {#agent-reextract}
+
+Extraction runs *inside* the scan, over the files that scan reports as new or
+changed. That keeps an unchanged tree free, but it leaves a gap you will hit
+exactly once per agent: items catalogued **before** you enabled
+`extract_enabled`, or before that host gained `ffprobe` / `exiftool` /
+poppler / `tesseract`, are never enriched — nothing about those files will ever
+change again, so no scan will ever revisit them.
+
+The **Re-extract** action on the agent's row closes it. The agent walks its own
+index and, for every item it can still see unchanged on disk, re-runs extraction
+and re-emits the item through the normal replication path. Only metadata moves:
+identity (size, mtime, hashes) is copied verbatim from the index, and file
+contents never leave the machine.
+
+What makes it safe to press:
+
+- **Idempotent per configuration.** The agent records the extraction
+  *configuration* it last completed a sweep under — the schema, the four
+  `extract_*` policy values, and which host tools resolved. Running it again at
+  the same configuration is a no-op. Change a policy key or install a tool and
+  the next sweep is real work again, which is precisely the "this host just
+  gained a capability" case.
+- **Resumable.** Progress is a durable cursor, so a sweep interrupted by a
+  restart, a suspend, or central entering maintenance continues from where it
+  stopped rather than starting over.
+- **Chunkable.** Each run is bounded; send the command again to continue. On a
+  large agent that lets you spread a full sweep across several quiet periods.
+- **Never a substitute for a scan.** A file whose size or mtime no longer
+  matches the index is skipped, not re-emitted — a changed file is the scan's
+  job, and re-emitting it from stale index identity would push wrong hashes to
+  central.
+- It stops while the agent is suspended or central is in maintenance mode, and
+  it refuses outright if `extract_enabled` is off in the effective policy (there
+  would be nothing to produce).
+
+Budget for it like a scan, not like a settings change: every re-emitted item is
+a replication event central applies and re-projects into the search index, and
+the agent is running real parsers (and `ffprobe`/`tesseract` subprocesses) over
+files it has not read in a long time. On a large agent, prefer several bounded
+runs during quiet hours over one unbounded one.
+
+Counters — seen, extracted, skipped, failed, whether it completed — land in the
+command history, and the agent's health snapshot carries the last sweep's
+outcome so the console can show it without opening the history.
+
+Once the metadata lands, the rest follows on its own: RAG chunking and content
+embeddings select on `body_text`, so the backfills pick those items up without
+any further action.
 
 Separately, when **central** enters [maintenance mode](operations.md#maintenance-mode),
 every agent observes it on its next command poll and pauses its replication

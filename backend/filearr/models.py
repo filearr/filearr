@@ -1942,7 +1942,7 @@ class AgentCommand(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('stat_check','rehash_check','stage_upload','inventory',"
-            "'self_update','suspend','agent_maintenance')",
+            "'self_update','suspend','agent_maintenance','reextract')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(

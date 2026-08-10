@@ -82,6 +82,7 @@ func startWebUI(ctx context.Context, dataDir, webAddr string, idx *index.Store, 
 			func(ctx context.Context) (map[string][2]int64, error) {
 				return indexRootAggregates(ctx, idx)
 			},
+			idx.ExtractState,
 		),
 		// Full multi-process log when a log dir is active (the container
 		// default): the daemon's ring only sees its OWN lines, but scans run as
@@ -173,6 +174,7 @@ func webSettingsSnapshot(
 	dataDir, addr string, allowRemote bool, policy func() localapi.PolicyView,
 	outboxPending func(ctx context.Context) (int, error),
 	rootAggregates func(ctx context.Context) (map[string][2]int64, error),
+	reextractState func(ctx context.Context) (index.ExtractState, error),
 ) func(ctx context.Context) (map[string]any, error) {
 	readJSON := func(name string) map[string]any {
 		b, err := os.ReadFile(filepath.Join(dataDir, name))
@@ -213,6 +215,27 @@ func webSettingsSnapshot(
 		// This is the "never shell into a machine to answer what is this agent
 		// actually doing" surface from the parity design.
 		snap["extract"] = extractSnapshot(dataDir)
+		// Parity phase 3: the last re-extraction sweep. Reported next to the
+		// effective settings because the two answer one question together — what
+		// this agent extracts, and whether the items it already holds have been
+		// brought up to that configuration yet. Absent until a sweep has run.
+		if reextractState != nil {
+			if st, err := reextractState(ctx); err == nil && st.StartedAt != "" {
+				rx := map[string]any{
+					"fp":        st.FP,
+					"started":   st.StartedAt,
+					"seen":      st.Seen,
+					"extracted": st.Extracted,
+					"skipped":   st.Skipped,
+					"cursor":    st.CursorRowID,
+					"complete":  st.FinishedAt != "",
+				}
+				if st.FinishedAt != "" {
+					rx["finished"] = st.FinishedAt
+				}
+				snap["reextract"] = rx
+			}
+		}
 		if st := readJSON("state.json"); st != nil {
 			// identity + endpoints only; state.json holds no secrets.
 			for _, k := range []string{"agent_id", "central_url", "rollout_group", "ca_url"} {

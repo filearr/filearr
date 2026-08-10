@@ -70,6 +70,10 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		RunMaintenance: func(mctx context.Context) (map[string]any, error) {
 			return runLocalMaintenance(mctx, idx, dataDir, log)
 		},
+		// 2026-08-10 parity phase 3: the operator-triggered sweep that re-emits
+		// already-indexed items with a fresh extraction, for the files no scan
+		// will ever report as changed again.
+		RunReextract: reextractRunner(idx, dataDir, ops, log),
 	})
 	done := make(chan struct{})
 	go func() {
@@ -126,6 +130,29 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, 
 		}
 		if n, err := countActiveItems(ctx, idx); err == nil {
 			h["index_items"] = n
+		}
+		// Parity phase 3: the last re-extraction sweep's outcome, so an operator
+		// can answer "did the backfill finish on this box, and under which
+		// extraction configuration" from the console without opening the command
+		// history or shelling in. Omitted entirely until a sweep has run.
+		if st, err := idx.ExtractState(ctx); err == nil && st.StartedAt != "" {
+			rx := map[string]any{
+				"fp":        st.FP,
+				"started":   st.StartedAt,
+				"seen":      st.Seen,
+				"extracted": st.Extracted,
+				"skipped":   st.Skipped,
+				"cursor":    st.CursorRowID,
+				// An empty FinishedAt is the durable "this sweep is partway
+				// through" state the next command resumes from — the single most
+				// useful bit here, so it is reported as a flag rather than left
+				// to be inferred from a missing timestamp.
+				"complete": st.FinishedAt != "",
+			}
+			if st.FinishedAt != "" {
+				rx["finished"] = st.FinishedAt
+			}
+			h["reextract"] = rx
 		}
 		if st := readJSON("scan-status.json"); st != nil {
 			h["scan"] = st

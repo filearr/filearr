@@ -2646,6 +2646,22 @@ export const suspendAgent = (id: string, suspended: boolean) =>
 export const runAgentMaintenance = (id: string) =>
   request<AgentCommandOut>(`/agents/${id}/maintenance`, { method: "POST" });
 
+/** Queue a `reextract` command (extraction parity phase 3): the agent sweeps
+ *  its EXISTING local index, re-runs extraction over items that never got one
+ *  (catalogued before `extract_enabled`, or before the host gained ffprobe/
+ *  exiftool/poppler/tesseract) and re-emits them through replication. The sweep
+ *  is resumable and short-circuits at an unchanged extraction configuration —
+ *  `force` re-sweeps anyway; `max_items` bounds one run (omit = everything).
+ *  409 while a sweep is already queued or running for that agent. */
+export const reextractAgent = (
+  id: string,
+  opts: { force?: boolean; max_items?: number } = {},
+) =>
+  request<AgentCommandOut>(`/agents/${id}/reextract`, {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+
 /** HARD delete an agent row — the cleanup path for failed enrollments and
  *  data-free decommissions. 409 while any library/item references the agent. */
 /** Hard-delete an agent. `deleteLibraries` also removes every library it
@@ -2676,13 +2692,15 @@ export type AgentCommandKind =
   | "inventory"
   | "self_update"
   | "suspend"
-  | "agent_maintenance";
+  | "agent_maintenance"
+  | "reextract";
 
 export interface AgentCommandOut {
   id: string;
   agent_id: string;
   kind: AgentCommandKind;
-  /** Null for agent-scoped kinds (self_update / suspend / agent_maintenance). */
+  /** Null for agent-scoped kinds (self_update / suspend / agent_maintenance /
+   *  reextract). */
   item_id: string | null;
   payload: Record<string, unknown>;
   status: AgentCommandStatus;
@@ -2703,10 +2721,21 @@ export const AGENT_COMMAND_TERMINAL: AgentCommandStatus[] = [
   "cancelled",
 ];
 
-export const listAgentCommands = (agentId?: string, limit = 50) =>
+/** Newest-first command listing. `kind` / `state` are the server-side filters
+ *  the endpoint already exposes — the fleet console uses them to answer "is a
+ *  sweep in flight on this agent?" in ONE request for the whole page instead of
+ *  one per row (`update_pending` is the equivalent answer for self_update, but
+ *  it is computed per-kind on the agents list). */
+export const listAgentCommands = (
+  agentId?: string,
+  limit = 50,
+  filters: { kind?: AgentCommandKind; state?: AgentCommandStatus } = {},
+) =>
   request<AgentCommandOut[]>(
     `/agent-commands?${new URLSearchParams({
       ...(agentId ? { agent_id: agentId } : {}),
+      ...(filters.kind ? { kind: filters.kind } : {}),
+      ...(filters.state ? { state: filters.state } : {}),
       limit: String(limit),
     })}`,
   );

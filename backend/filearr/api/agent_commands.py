@@ -58,11 +58,12 @@ CommandKind = Literal[
     "self_update",
     "suspend",
     "agent_maintenance",
+    "reextract",
 ]
 
 # Kinds that target the AGENT itself rather than one of its items: item_id is
 # absent for these (nullable since the self_update migration).
-_AGENT_SCOPED_KINDS = {"self_update", "suspend", "agent_maintenance"}
+_AGENT_SCOPED_KINDS = {"self_update", "suspend", "agent_maintenance", "reextract"}
 
 
 # --------------------------------------------------------------------------- #
@@ -357,10 +358,29 @@ async def _live_agent(session: AsyncSession, agent_id: uuid.UUID) -> Agent:
 
 
 def _enqueue_agent_scoped(
-    agent_id: uuid.UUID, kind: str, payload: dict[str, Any], request: Request
+    agent_id: uuid.UUID,
+    kind: str,
+    payload: dict[str, Any],
+    request: Request,
+    *,
+    ttl_seconds: int | None = None,
 ) -> AgentCommand:
+    """Build one agent-scoped command row.
+
+    ``ttl_seconds`` overrides the global default for the kinds whose RUNTIME —
+    not just their pickup delay — can outlast it. That distinction matters
+    because :func:`filearr.agentsync.sweep_decision` expires on ``expires_at``
+    unconditionally: TTL outranks the lease, so a command whose agent is
+    faithfully heartbeating is still marked ``expired`` the moment its window
+    lapses. For a command that finishes in seconds the TTL is purely "how long
+    we will wait for an offline agent to come back"; for a long sweep it is also
+    a ceiling on the work itself. Clamped to the same maximum an operator-
+    supplied TTL is clamped to, so this can never outlive the sweep's own bound.
+    """
     settings = get_settings()
     ttl = settings.agent_command_ttl_seconds
+    if ttl_seconds is not None:
+        ttl = min(max(ttl_seconds, ttl), settings.agent_command_ttl_max_seconds)
     now = datetime.now(UTC)
     return AgentCommand(
         agent_id=agent_id,
@@ -471,6 +491,135 @@ async def run_agent_maintenance(
             "command_id": str(cmd.id),
             "agent_id": str(agent_id),
             "kind": "agent_maintenance",
+        },
+    )
+    return CommandOut.of(cmd)
+
+
+# A sweep bound, not a page size: the agent stops after this many candidate items
+# and leaves its cursor where it stopped, so the next command resumes there. The
+# ceiling only exists to reject nonsense (a stray 1e18 from a fat-fingered
+# operator or a buggy caller) — a genuine "sweep everything" is expressed by
+# OMITTING the knob, which is also the default. Ten million is comfortably past
+# the largest catalogue we have observed (~1.09M items on the live LXC).
+REEXTRACT_MAX_ITEMS_CEILING = 10_000_000
+
+# TTL for a queued sweep. Unlike every other agent-scoped command, this one's TTL
+# has to cover the RUN, not just the wait for pickup (see _enqueue_agent_scoped),
+# and a sweep over a million files that runs ffprobe/tesseract per candidate is a
+# multi-hour job. 24h is the settings clamp (agent_command_ttl_max_seconds), i.e.
+# the longest window the server is willing to hold any command open, and past it
+# an operator should be using max_items to chunk the work rather than asking for
+# one unbounded run.
+REEXTRACT_TTL_SECONDS = 86_400
+
+
+class ReextractIn(BaseModel):
+    # Both knobs are optional and both are simply forwarded in the payload: the
+    # agent owns every other decision (which items qualify, in what order, with
+    # which extractors) from its own cached policy + local index state. Central
+    # holds no cursor and must not pretend to.
+    force: bool = False
+    # Validated as a positive bound with a ceiling; anything else is a 422 rather
+    # than a silent clamp. Enqueue is a fire-and-forget operator action whose
+    # effect is not visible for minutes — normalising 0 to "all items" or
+    # 10**18 to the ceiling would hand back a 201 for a request the operator did
+    # not make. (The TTL clamp in enqueue_command is the opposite case: a
+    # machine-set knob with a server-owned safe range.)
+    max_items: int | None = Field(default=None, ge=1, le=REEXTRACT_MAX_ITEMS_CEILING)
+
+
+@router.post(
+    "/agents/{agent_id}/reextract",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def reextract_agent(
+    agent_id: uuid.UUID,
+    # Defaulted so a bare POST works like the sibling ``/maintenance`` action —
+    # "sweep everything, honour the fingerprint" is the overwhelmingly common
+    # request and should not require a body. Never mutated, so the shared
+    # instance is safe.
+    request: Request,
+    body: ReextractIn = ReextractIn(),
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue a ``reextract`` command: the agent sweeps its EXISTING local index,
+    re-runs the extraction pass over items that never got one, and re-emits them
+    through the normal replication path (extraction parity phase 3).
+
+    Why the command exists: extraction runs inside the agent's scan, over the
+    files that scan reports as new or changed. That is the right default — a
+    steady-state rescan of an unchanged tree costs nothing — but it leaves a
+    permanent gap. An item catalogued before ``extract_enabled`` was turned on,
+    or before its host gained ffprobe/exiftool/poppler/tesseract, is never
+    enriched, because nothing about that file will ever change again. Only an
+    explicit sweep closes it.
+
+    The sweep is RESUMABLE and IDEMPOTENT per extraction configuration: the
+    agent keeps a cursor across command invocations (a run interrupted by a
+    restart, a suspend, or ``max_items`` continues where it stopped) and
+    fingerprints the configuration that would produce the metadata — extractor
+    schema, the extraction policy knobs, and which host tools actually resolved.
+    A repeat sweep at an unchanged fingerprint short-circuits, so re-firing this
+    endpoint after a config change is real work while re-firing it for no reason
+    is nearly free. Installing exiftool changes the fingerprint, which is exactly
+    the "my agent gained a capability" case this exists for.
+
+    ``force`` is the operator's escape hatch for the remaining case: re-sweep at
+    an UNCHANGED configuration (a partial run whose failures are worth retrying,
+    or a host whose tools changed in a way the fingerprint cannot see).
+
+    409 while a sweep is already queued or running for this agent — the
+    ``agent_maintenance`` guard, not the ``suspend`` collapse. Collapsing is
+    right for a *desired state* (the last write of "suspended: true/false" wins
+    and a superseded one was never worth delivering); a sweep is a *job* with
+    per-agent cursor state, and two of them would fight over that cursor and
+    double-emit the items they raced on. The knobs also don't merge: silently
+    overwriting a pending ``max_items: 1000`` with an unbounded run is not what
+    either operator asked for. Invariant 2 still holds throughout — the sweep
+    only ever refreshes extracted ``metadata``; ``user_metadata`` edits are
+    untouched, and no file CONTENT leaves the agent."""
+    await _live_agent(session, agent_id)
+    in_flight = (
+        await session.execute(
+            select(AgentCommand.id).where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "reextract",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+        )
+    ).first()
+    if in_flight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "reextract sweep already queued or running"
+        )
+    payload: dict[str, Any] = {"force": body.force, "max_items": body.max_items}
+    # A sweep is the one command whose RUNTIME is measured in hours: it re-reads
+    # and re-parses every file the agent already holds. The 1h default TTL would
+    # expire it mid-run — TTL outranks the lease in ``sweep_decision``, so even a
+    # faithfully heartbeating agent would have its command marked ``expired``,
+    # the console's in-flight badge would clear while the sweep was still going,
+    # and the history would report a failure for work that actually completed.
+    # None of the sweep's OUTPUT is lost when that happens (the events are
+    # already replicated and the cursor is durable), but the report is a lie, so
+    # the row gets the long window instead.
+    cmd = _enqueue_agent_scoped(
+        agent_id, "reextract", payload, request, ttl_seconds=REEXTRACT_TTL_SECONDS
+    )
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "reextract",
+            "force": body.force,
+            "max_items": body.max_items,
         },
     )
     return CommandOut.of(cmd)

@@ -53,6 +53,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Drop the rows holding the kinds this revision introduced BEFORE narrowing
+    # the constraint. Postgres validates a new CHECK against the existing rows,
+    # so without this the downgrade fails outright on any database that has ever
+    # queued a suspend or maintenance command — which is every database the
+    # feature was actually used on. (Fixed 2026-08-10, following the self_update
+    # revision's pattern; the omission was latent because nothing had downgraded
+    # a database with those rows in it yet.) Command rows are transient by design
+    # — TTL'd and swept — so deleting them loses nothing durable: an agent's own
+    # suspended flag lives in its data dir, not here.
+    op.execute("DELETE FROM agent_commands WHERE kind IN ('suspend','agent_maintenance')")
     op.drop_constraint("agent_commands_kind_valid", "agent_commands", type_="check")
     op.create_check_constraint("agent_commands_kind_valid", "agent_commands", _KIND_OLD)
     op.drop_table("maintenance_mode")

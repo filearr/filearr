@@ -154,6 +154,35 @@ CREATE TABLE IF NOT EXISTS thumb_markers (
     uploaded_at TEXT NOT NULL,
     PRIMARY KEY (item_id, tier)
 );
+
+-- Re-extraction cursor (agent parity phase 3). Extraction runs inside the scan,
+-- over the files THAT scan reports as new or changed, so an item catalogued
+-- before extraction was enabled — or before its host gained ffprobe/exiftool/
+-- poppler — keeps identity-only metadata forever. The reextract command sweeps
+-- the existing index and re-emits those items; this singleton row is what makes
+-- the sweep resumable (cursor_rowid) and idempotent (fp = the extraction
+-- CONFIGURATION it last completed under, so a repeat run at the same
+-- configuration is a no-op unless forced).
+--
+-- Deliberately does NOT bump schemaVersion. A version bump means "rebuild the
+-- index from a fresh walk" (invariant 1, disposable index), which for an
+-- additive, local-only, empty-on-create table would cost a full re-walk and a
+-- re-emission of every item on every deployed agent — a catastrophic price for a
+-- cursor. CREATE TABLE IF NOT EXISTS in this DDL is applied to existing stores
+-- by migrate() on the next open, which is exactly the cheap additive upgrade
+-- this needs. Bump the version only when an EXISTING column's meaning changes.
+CREATE TABLE IF NOT EXISTS extract_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    fp           TEXT NOT NULL DEFAULT '',
+    cursor_rowid INTEGER NOT NULL DEFAULT 0,
+    started_at   TEXT,
+    finished_at  TEXT,
+    seen         INTEGER NOT NULL DEFAULT 0,
+    extracted    INTEGER NOT NULL DEFAULT 0,
+    skipped      INTEGER NOT NULL DEFAULT 0,
+    failed       INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO extract_state(id) VALUES(1);
 `
 
 // migrate applies the schema idempotently and stamps the version.

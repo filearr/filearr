@@ -112,6 +112,16 @@ type Config struct {
 	// VACUUM, outbox prune, temp-file sweep. Returns the result map posted to
 	// central (bytes reclaimed etc.). Nil => the kind completes ok=false.
 	RunMaintenance func(ctx context.Context) (map[string]any, error)
+
+	// RunReextract applies a `reextract` command: sweep the existing local index
+	// and re-emit items with a fresh extraction result (agent parity phase 3 —
+	// extraction otherwise only ever runs over files a scan reports as new or
+	// changed, so items catalogued before extraction was enabled, or before the
+	// host gained a tool, are never enriched). Takes the command payload
+	// verbatim ({"force": bool, "max_items": int}) and returns the counters
+	// posted back to central. Nil => the kind completes ok=false, so an older
+	// agent degrades cleanly against a central that enqueues one.
+	RunReextract func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // Poller drains central's per-agent command queue and executes each command.
@@ -137,6 +147,7 @@ type Poller struct {
 	onMaintenance func(active bool)
 	setSuspended  func(ctx context.Context, suspended bool) error
 	runMaint      func(ctx context.Context) (map[string]any, error)
+	runReextract  func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // NewPoller wires a Poller, applying defaults.
@@ -163,6 +174,7 @@ func NewPoller(cfg Config) *Poller {
 		onMaintenance: cfg.OnMaintenance,
 		setSuspended:  cfg.SetSuspended,
 		runMaint:      cfg.RunMaintenance,
+		runReextract:  cfg.RunReextract,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -264,6 +276,8 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processSuspend(ctx, cmd)
 	case KindAgentMaintenance:
 		p.processAgentMaintenance(ctx, cmd)
+	case KindReextract:
+		p.processReextract(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}
