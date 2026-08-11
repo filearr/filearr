@@ -96,6 +96,19 @@ jobs:
           # wall time; mode=max also caches arm64 for the next release.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # No inline buildx attestations. build-push-action turns provenance
+          # on by default when pushing, which publishes the tag as a 4-entry
+          # index: amd64, arm64, and TWO `unknown/unknown` attestation
+          # manifests. Container update-checkers walk that index looking for an
+          # entry matching the host architecture, and the unknown/unknown rows
+          # break the match — Unraid reported a permanent "update available" on
+          # 2026-08-11 against an image whose revision label was already the
+          # running commit. Nothing is lost: build provenance still ships, via
+          # actions/attest-build-provenance below, which is the STRONGER of the
+          # two (Sigstore keyless, publicly logged in Rekor) and attaches as an
+          # OCI referrer rather than as an entry in the tag's index.
+          provenance: false
+          sbom: false
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -154,6 +167,19 @@ jobs:
           # build and the two would evict each other's layers.
           cache-from: type=gha,scope=agent-image
           cache-to: type=gha,mode=max,scope=agent-image
+          # No inline buildx attestations. build-push-action turns provenance
+          # on by default when pushing, which publishes the tag as a 4-entry
+          # index: amd64, arm64, and TWO `unknown/unknown` attestation
+          # manifests. Container update-checkers walk that index looking for an
+          # entry matching the host architecture, and the unknown/unknown rows
+          # break the match — Unraid reported a permanent "update available" on
+          # 2026-08-11 against an image whose revision label was already the
+          # running commit. Nothing is lost: build provenance still ships, via
+          # actions/attest-build-provenance below, which is the STRONGER of the
+          # two (Sigstore keyless, publicly logged in Rekor) and attaches as an
+          # OCI referrer rather than as an entry in the tag's index.
+          provenance: false
+          sbom: false
       - uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository }}-agent

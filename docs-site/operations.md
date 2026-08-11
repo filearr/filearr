@@ -398,6 +398,50 @@ spikes into reclaim storms), and expect a busy minute at the start of every
 redeploy — the quiesce step deliberately triggers the wrap-up flush *before*
 containers are replaced.
 
+## Unraid says an update is available when there isn't one {#phantom-update}
+
+**Symptom.** The Unraid Docker page shows *update ready* for `filearr` (or
+`filearr-agent`) immediately after updating, and it comes straight back if you
+apply it.
+
+**Confirm you really are current** before chasing anything. The image records the
+commit it was built from, and the console's About page shows the commit it is
+running — if the two agree, the update flag is wrong:
+
+```bash
+# what the tag points at, and what commit that image was built from
+docker image inspect ghcr.io/pwsh/filearr:latest   --format '{{index .RepoDigests 0}}{{"
+"}}{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+**Cause.** `docker buildx` attaches provenance attestations by default when
+pushing, and they ride along *inside the tag's manifest index* as extra entries
+whose platform is literally `unknown/unknown`:
+
+```text
+amd64 · arm64 · unknown/unknown (attestation) · unknown/unknown (attestation)
+```
+
+An update checker walks that index looking for the entry matching the host
+architecture and compares its digest against the local image. The
+`unknown/unknown` rows break that match, so the comparison comes out unequal
+forever. It is not specific to Unraid — Watchtower and Portainer report the same
+phantom updates against attested images.
+
+**Fix.** Builds from 2026-08-11 onward publish with `provenance: false` and
+`sbom: false`, so each tag is a clean two-entry index. Build provenance is
+unaffected: it still ships via Sigstore keyless attestation (publicly logged in
+Rekor), which attaches as an OCI *referrer* rather than as an index entry, and is
+the stronger of the two —
+
+```bash
+gh attestation verify oci://ghcr.io/pwsh/filearr:latest -R pwsh/filearr
+```
+
+You will see one *legitimate* update after this lands (dropping the attestation
+entries changes the index digest). Apply it once; the flag should stay quiet
+afterwards.
+
 ## The dashboard shows "unavailable" for a section {#stats-degraded}
 
 **Symptom.** A panel on the dashboard reads *unavailable* with a reason instead
