@@ -172,7 +172,26 @@ shows which document currently supplies each effective value.
 
 Configuration groups carry a separate, stricter settings object (unknown keys are
 rejected with a 422 rather than stored): see
-[Group settings schema](../agents.md#group-settings-schema).
+[Group settings schema](../agents.md#group-settings-schema). One exception to the
+strictness: `inventory.collectors` is free-form. The four shipped collectors
+(`stat`, `owner`, `perms`, `placeholder`) are a **catalogue the console renders as
+a checkbox list**, not a whitelist — a newer agent build's collector still works,
+and a stored name central cannot describe is preserved rather than dropped. Table
+and rationale: [Group settings schema](../agents.md#group-settings-schema).
+
+!!! important "`group:<rollout_group>` is not the configuration group"
+    An agent has **two independent group assignments** and only one of them takes
+    part in policy resolution. The **policy group** (`agents.rollout_group`) is
+    what `group:<name>` scopes match — and it doubles as the release-canary
+    selector. The **configuration group** (`agents.config_group_id`) carries log
+    level, scan selections, inventory collectors and `scan_schedule_cron`, and
+    policy resolution never consults it. Both are editable per agent from the
+    Agents table; changing one does not change the other.
+
+    Full contrast table, plus the worked "desktops inventory but don't capture
+    GPS EXIF / filers do everything" example:
+    [Two groupings](../agents.md#two-groupings) and
+    [Worked example](../agents.md#policy-group-example).
 
 ---
 

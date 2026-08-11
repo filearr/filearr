@@ -142,6 +142,76 @@ offline box degrades to a "could not reach GitHub" note. Commits newer than
 the running build are marked with a dot; click a subject to read the full
 message. The API is `GET`/`POST /api/v1/system/update-check`.
 
+## The About page — what this deployment is actually running {#about-page}
+
+The footer **About** link (`#/about`) answers the first question of nearly every
+support conversation: *which versions is this instance running?* It is the page
+to open before filing a bug, before checking whether an advisory applies to you,
+and after a deploy that you are not certain landed.
+
+Everything on it is read from the **running system**, never from a configuration
+file. A pin in `pyproject.toml` says what the image was asked to install; the
+About page reports what it *did* install, and those two disagree exactly when it
+matters (a stale layer cache, a hand-patched container, a redeploy that did not
+take). Anything that cannot be determined is shown as an explicit
+"unreachable" / "not installed" / "not downloaded" with the reason — never as a
+blank cell or a zero.
+
+Sections:
+
+| Section | Where the numbers come from |
+|---|---|
+| **Application** | The running process: app version, the deploy **build stamp** (the same value the deploy verifier checks), licence, Python version, kernel/architecture. |
+| **Services** | Probed live. Meilisearch reports its own engine version through the same client every search uses; PostgreSQL reports `SELECT version()`; Procrastinate and SQLAlchemy report the version of the code this process imported. Each probe degrades **independently** — a Meilisearch outage shows as one "unreachable" row, not a broken page. |
+| **Backend dependencies** | Every direct Python dependency with the version actually importable in this process, plus a link to its documentation (taken from the package's own metadata, so it cannot drift). |
+| **Frontend bundle** | Recorded when the bundle was compiled — the image ships only built assets, so these are the resolved versions baked into the JavaScript you are running, along with the Node that built it. |
+| **Extraction tools** | ffprobe, ffmpeg, exiftool, tesseract and the poppler trio **on the central server**: present or absent, and the version each one reports. Agents report their own tools on the Agents page. |
+| **Agent fleet** | Distinct `agent_version` values with a count each, so a rollout still in flight is visible at a glance. Hidden when `FILEARR_AGENTS_ENABLED` is off. |
+| **Embedding model** | See below. |
+
+**No outbound network calls.** The page links to upstream projects; it never
+fetches from them, so it renders identically on an air-gapped box. (The
+Meilisearch and PostgreSQL probes talk to this stack's own services, the same
+peers every search already uses.) The one page that *can* reach the internet is
+the [Updates card](#update-check), and only when you click it.
+
+**Copy as Markdown** dumps the whole stack as Markdown tables — paste it
+straight into a bug report rather than transcribing versions by hand.
+
+### The embedding-model section, and what its date means
+
+The semantic-search section reports the configured Hugging Face repository and
+file, whether the model is actually **cached on this machine**, the size of the
+cached file, and a link to the model page.
+
+Two things are worth reading carefully:
+
+- **Revision.** `huggingface_hub` stores a cached repository as
+  `models--{org}--{name}/snapshots/{commit_sha}/`, so the snapshot directory
+  name *is* the upstream commit these exact weights came from. The page shows
+  that sha and links to it on the Hub — much stronger provenance than any date.
+- **"Downloaded here" is a LOCAL time.** It is the modification time of the
+  cached file: **when this machine downloaded it**, not when the model was
+  published. The publication date is not knowable without asking Hugging Face,
+  and this page makes no outbound requests, so it is not guessed. Use the
+  revision link for the upstream history.
+
+On a default install semantic search is off and the model has never been
+fetched. That is the normal state, and the page says so plainly rather than
+presenting it as a fault — see
+[Semantic search](reference/configuration.md#semantic-search-opt-in) to turn it
+on.
+
+The API behind the page is `GET /api/v1/system/about` (read scope).
+
+!!! note "Why read scope, not admin"
+    The page is a version fingerprint, which is mildly useful to an attacker who
+    already holds a read key. It is read scope anyway: an AGPL §13 deployment
+    already publishes its source and app version, and the people who need this
+    page are usually the ones looking at a broken instance without an admin key.
+    If your threat model disagrees, restrict the `read` scope itself — that is
+    the control that decides who sees it.
+
 ## The console is a PWA — stale UI after an upgrade {#pwa-service-worker}
 
 The web console installs a service worker (it is an installable PWA) that

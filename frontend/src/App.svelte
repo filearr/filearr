@@ -11,6 +11,7 @@
   import TaxonomyPage from "./lib/TaxonomyPage.svelte";
   import FilterBuilderPage from "./lib/FilterBuilderPage.svelte";
   import HelpPage from "./lib/HelpPage.svelte";
+  import AboutPage from "./lib/AboutPage.svelte";
   import LoginPage from "./lib/LoginPage.svelte";
   import { getVersion, authStatus, authMe, authLogout, type AuthMode, type AuthPrincipal } from "./lib/api";
   import { theme, applyTheme } from "./lib/theme.svelte";
@@ -21,7 +22,7 @@
   // UI-T9 — hash-based routing so a refresh keeps the current tab and
   // back/forward toggles between them. `#/search` (default), `#/admin`,
   // `#/jobs` (UI-T10 jobs dashboard).
-  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help";
+  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
@@ -34,6 +35,9 @@
     if (location.hash === "#/taxonomy") return { page: "taxonomy", browseLib: "", browsePath: "" };
     if (location.hash === "#/filter-builder") return { page: "filter-builder", browseLib: "", browsePath: "" };
     if (location.hash === "#/help") return { page: "help", browseLib: "", browsePath: "" };
+    // #/about — the running build stack (versions of everything). Footer-linked
+    // rather than a nav tab: it is a reference surface, not a daily workflow.
+    if (location.hash === "#/about") return { page: "about", browseLib: "", browsePath: "" };
     return { page: "search", browseLib: "", browsePath: "" };
   }
 
@@ -214,6 +218,8 @@
     <FilterBuilderPage />
   {:else if page === "help"}
     <HelpPage {sourceUrl} />
+  {:else if page === "about"}
+    <AboutPage />
   {:else}
     <SearchPage />
   {/if}
@@ -226,6 +232,10 @@
     </span>
     <span class="px-1">·</span>
     <a class="underline hover:text-[var(--accent)]" href="#/help">Help</a>
+    <span class="px-1">·</span>
+    <!-- The running build stack: every dependency version this deployment is
+         actually running, for pasting into a bug report. -->
+    <a class="underline hover:text-[var(--accent)]" href="#/about">About</a>
     <span class="px-1">·</span>
     <!-- Bundled mkdocs manual served by this instance (main.py /docs mount). -->
     <a

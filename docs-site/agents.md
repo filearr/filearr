@@ -427,6 +427,151 @@ binary; the data directory is pinned to `/config`.
     unhashed and a WARN in the agent log names the path so you can repair or
     exclude it.
 
+## Two groupings: policy group vs configuration group {#two-groupings}
+
+Every agent carries **two independent group assignments**. They are not
+alternatives and neither is a superset of the other — they drive different
+channels, and the single most common mistake is assuming the one you can see in
+a dropdown is the one your policies key off.
+
+| | **Policy group** (rollout group) | **Configuration group** |
+| --- | --- | --- |
+| Column in the DB | `agents.rollout_group` (free text) | `agents.config_group_id` (FK to a group row) |
+| What it selects | The `group:<name>` **policy document** — extraction, `extract_exif`, `extract_ocr`, `extract_body_text`, watch mode, `scan_cron`, path scope, the local-access gates, `auto_update`. See [Every policy key](#every-policy-key). | A **settings bundle**: log level, scan selections/paths, inventory collectors + permissions, `scan_schedule_cron`. See [Group settings schema](#group-settings-schema). |
+| Also controls | **Release-canary membership** — only agents in `FILEARR_AGENT_CANARY_GROUP` (default `canary`) are offered un-promoted builds. | Nothing else. |
+| Where it is set | Enrollment token (`rollout_group` when minting), then editable per agent: Agents page → **Policy group** column, or `PATCH /api/v1/agents/{id}`. | Installer sidecar (`config_group` by name), then editable per agent: Agents page → **Config group** column, or `PUT /api/v1/agents/{id}/config-group`. |
+| Where the document lives | Agents page → **Agent policy** card, scope *Rollout group*. Created by writing it — a group needs no row. | Agents page → **Configuration groups** card. A real row you create, name, and delete. |
+| Unknown keys | Preserved verbatim (`extra="allow"`). | **Rejected with 422.** |
+| Changing it | Replaces the agent's whole effective policy (below) **and** flips canary membership. | Swaps the settings bundle only; the policy document is untouched. |
+| Takes effect | Next policy poll (~1 min). No restart. | Next policy poll (~1 min). No restart. |
+
+Both ride the same delivery channel (`GET /agents/{id}/policy`) — the config
+group's settings arrive folded in under a top-level `group` section — but only
+`rollout_group` participates in [scope resolution](#policy-scopes).
+
+The Agents table shows both columns side by side, each with a tooltip naming
+what it controls, plus the scope the agent **actually resolves today**
+(`resolves group:filers`). The policy editor shows the reverse view: how many
+agents are in the group whose document you are editing.
+
+!!! note "This used to be impossible after enrollment"
+    Before 2026-08-10 `agents.rollout_group` was written exactly once, at
+    registration, from the consumed enrollment token — no endpoint could change
+    it. An agent's policy group was frozen for life, and the documented
+    workaround was to **re-enroll the machine** into a new group. That is no
+    longer necessary: re-assign it in place from the Agents table.
+
+### Worked example: desktops inventory, filers extract {#policy-group-example}
+
+The question this answers: *"On user desktops I want to inventory files but not
+capture GPS EXIF, and not run OCR/text extraction on low-powered machines. On the
+filer I want all of it."*
+
+That is a **policy group** job. Three steps.
+
+**1 — Put each agent in the right policy group.** On the Agents page, edit the
+**Policy group** cell (free text; the input suggests groups that already exist).
+Give the desktops `desktops` and the file servers `filers`. Confirm the prompt —
+it names the document the agent will start resolving and whether the move changes
+canary membership. Or by API:
+
+```bash
+curl -X PATCH http://central:8000/api/v1/agents/$AGENT_ID \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"rollout_group":"filers"}'
+# -> {..., "rollout_group":"filers",
+#     "policy_scope":"group:filers", "policy_version":3,
+#     "canary_releases":false}
+```
+
+`policy_scope` is the recomputed answer to "which document does it get now" —
+`group:filers` if that document exists, otherwise `global`, otherwise `none`.
+
+**2 — Author `group:desktops`.** Agents page → **Agent policy** → scope
+*Rollout group* → `desktops`. Inventory everything, extract the cheap stuff, and
+explicitly refuse the expensive/sensitive passes:
+
+```json
+{
+  "extract_enabled": true,
+  "extract_body_text": false,
+  "extract_ocr": false,
+  "extract_exif": false,
+  "extract_max_bytes": 33554432,
+  "content_hash_max_bytes": 1073741824,
+  "watch_mode": false,
+  "scan_cron": "30 2 * * *",
+  "poll_interval_seconds": 300,
+  "local_access_enabled": true,
+  "web_ui_enabled": false
+}
+```
+
+With `extract_enabled: true` the desktop still catalogs identity plus the
+metadata that costs nothing extra (image dimensions, container format), but
+`extract_exif: false` means **`exiftool` is never run**, so no GPS coordinates
+leave the machine, and `extract_ocr` / `extract_body_text` are off so no
+`tesseract` or `pdftotext` subprocess ever starts inside the scan.
+
+**3 — Author `group:filers`.** Same editor, scope `filers`:
+
+```json
+{
+  "extract_enabled": true,
+  "extract_body_text": true,
+  "extract_ocr": true,
+  "extract_exif": true,
+  "extract_max_bytes": 268435456,
+  "content_hash_max_bytes": 0,
+  "watch_mode": true,
+  "scan_cron": "0 3 * * *",
+  "poll_interval_seconds": 60,
+  "local_access_enabled": true,
+  "web_ui_enabled": true
+}
+```
+
+!!! danger "Repeat every key — a group document does not inherit"
+    Resolution is [most-specific-wins with **no key merging**](#policy-scopes).
+    The winning document *is* the policy: keys it omits fall back to the agent's
+    **built-in default**, not to whatever `global` was providing. So the two
+    documents above deliberately repeat `content_hash_max_bytes`, `watch_mode`,
+    `scan_cron`, `poll_interval_seconds` and the local-access gates even though
+    only the `extract_*` keys differ between them. Writing
+    `{"extract_exif": false}` alone into `group:desktops` would silently drop
+    every other setting your `global` document was applying to those machines.
+    The console's editor lists the exact keys a save would stop applying, and the
+    agents table's **details** row shows the resolved value of each key with the
+    document it came from.
+
+Verify with `GET /api/v1/agent-policies/effective/{agent_id}` (admin scope), or
+the **details** expander on the agent's row — it shows each effective extraction
+key next to its source (`rollout-group policy`, `global policy`, `agent default`)
+and flags settings that agent will ignore because the host lacks the tool.
+
+!!! warning "Renaming your groups can orphan canary releases"
+    `rollout_group` has a second job: it selects the release-canary cohort.
+    Central offers a `stage='canary'` release only to agents whose policy group
+    equals `FILEARR_AGENT_CANARY_GROUP` (default `canary`). If every agent is in
+    `desktops` or `filers`, **no agent is in `canary`** and un-promoted releases
+    reach nobody — canary testing silently stops working. Either keep one machine
+    in a `canary` group (it then also resolves `group:canary` for policy, so
+    author that document too), or point
+    `FILEARR_AGENT_CANARY_GROUP` at one of your real groups (e.g. `desktops`).
+    The Agents page warns when the configured canary group has no members, and
+    the roster endpoint always returns it with `agent_count: 0` so the warning is
+    possible.
+
+    The two jobs are not being split: one field, two consumers, documented. If
+    you need canary membership independent of policy, make the canary group one
+    of your policy groups rather than a fourth grouping concept.
+
+**Machine-level exceptions.** One laptop that must never extract at all? Write an
+`agent:<uuid>` document for it rather than inventing a group — it outranks the
+group document (and, again, must carry every key that machine needs). The
+console's confirmation says so explicitly when you move an agent that already has
+its own document: its effective policy will not change until that document goes.
+
 ## Configuration groups (remote configuration)
 
 Agents can be assigned to **configuration groups** managed on the Agents
@@ -471,6 +616,32 @@ scaffold.
 max 64 × 128 chars; central deliberately does not hard-code the vocabulary), and
 the optional typed `permissions` block.
 
+The collectors this release ships descriptions for:
+
+| Collector | Collects | Platforms | Cost |
+| --- | --- | --- | --- |
+| `stat` | Size, timestamps and basic file attributes. The cheapest collector, and the one every other inventory answer builds on. | Linux, macOS, Windows | low |
+| `owner` | The owning user and group — uid/gid resolved to names on POSIX, the owning security principal on Windows. | Linux, macOS, Windows | low |
+| `perms` | Permission bits / ACL summary per file. Dearer than `stat`: a second syscall per entry, and an ACL read on Windows. The detailed knobs are the [`inventory.permissions`](#group-settings-schema) block below. | Linux, macOS, Windows | medium |
+| `placeholder` | Whether a file is a cloud placeholder (OneDrive / Files On-Demand and friends) rather than resident on disk. A no-op that reports nothing elsewhere. | Windows | low |
+
+!!! note "The list is a catalogue, not a whitelist"
+    `GET /api/v1/agents/inventory-collectors` (admin) returns the **union** of
+    that table and every collector name your enrolled agents advertise in their
+    capabilities — which is what the console's checkbox list renders. Each entry
+    carries `described` (false = an agent reports it but this Filearr release has
+    no prose for it, i.e. a newer agent build) and `advertised_by` (how many
+    enrolled agents support it; `0` on a described collector usually means a
+    platform mismatch, such as `placeholder` on a Linux-only fleet).
+
+    Storage stays free-form: **central never validates the vocabulary**, so a
+    newer agent's collector works without a central release, and a name that no
+    agent implements is ignored by the fleet rather than rejected on save. The
+    console reflects that — unadvertised and unrecognised collectors are flagged
+    but still selectable, an "add another" box takes a name nothing knows yet,
+    and a stored name absent from the catalogue is preserved verbatim across an
+    edit instead of being dropped.
+
 **`inventory.permissions`** (W7) — only takes effect when `"permissions"` is
 *also* named in `collectors`; an admin must both name the collector and configure
 it. Defaults make a first run highlight only explicit, non-baseline grants:
@@ -492,10 +663,14 @@ false), `watch_paths` (path specs, max 200). Central validates and stores this
 ahead of the collector; the snapshot-diff and alert routing are agent-side
 scaffold.
 
-The console's group dialog covers all of the above; the permissions and audit
-blocks sit behind an **Advanced** disclosure and are omitted from the saved
+The console's group dialog covers all of the above. Collectors are a **checkbox
+list** built from the catalogue endpoint above, with the description, platforms
+and fleet-support count on each row; with `inventory.enabled` unticked the
+selection dims and says so — it is still saved, just inert. The permissions and
+audit blocks sit behind an **Advanced** disclosure and are omitted from the saved
 document entirely unless you tick "include" — so "never configured" stays
-distinguishable from "configured, all off".
+distinguishable from "configured, all off". (`permissions` itself has no checkbox
+until an agent advertises it; name it with **+ add another**.)
 
 !!! warning "Stored and delivered, but not acted on yet"
     `log_level`, `scan_selections` and everything under `inventory` are
@@ -513,7 +688,8 @@ Beyond media scanning, agents accept generic **inventory commands**: a
 composition of *collectors* over a preset or path selection. Built-in
 collectors: `stat` (sizes/timestamps), `owner` (POSIX uid/gid or Windows
 owner account), `perms` (POSIX mode + xattr names, or a compact Windows ACL
-summary), and `placeholder` (cloud-placeholder detection). Each agent
+summary), and `placeholder` (cloud-placeholder detection) — see the
+[collector table](#group-settings-schema) for what each one collects. Each agent
 advertises the collectors it supports, and new **compositions** — for
 example adding permission enumeration to a documents sweep — need no agent
 redeployment; genuinely new collectors arrive through the signed self-update
@@ -733,7 +909,7 @@ A policy document is written at one of three scopes:
 | Scope string | Applies to |
 | --- | --- |
 | `global` | every agent |
-| `group:<rollout_group>` | agents whose enrollment put them in that **rollout group** (not the same thing as a *configuration group*) |
+| `group:<rollout_group>` | agents in that **policy (rollout) group** — set at enrollment and re-assignable per agent from the Agents table; [not the same thing as a *configuration group*](#two-groupings) |
 | `agent:<uuid>` | one agent |
 
 Resolution is **most-specific-wins**: `agent:` beats `group:` beats `global`.
@@ -802,7 +978,10 @@ them, and lists them for you.
 The Agents page carries a full **Agent policy** editor:
 
 - a **scope selector** (Global / Rollout group / Specific agent) that loads that
-  scope's stored document, or tells you it has none and what it inherits today;
+  scope's stored document, or tells you it has none and what it inherits today —
+  and, for a group scope, **how many agents are in that group** across the whole
+  fleet (`0` meaning the document you are writing is not delivered to anything
+  yet);
 - a grouped, **tri-state** form for every key above — *Inherit (not set)* versus
   an explicit value — so you never accidentally write `false` where you meant
   "say nothing";
@@ -816,6 +995,13 @@ The Agents page carries a full **Agent policy** editor:
   `taxonomy_version`, and never stamps the agent's `last_seen_at`;
 - a **raw JSON** escape hatch that round-trips forward-compat keys;
 - a read-only **recent versions** list per scope.
+
+The other direction is on the agents table itself: each row's **Policy group**
+cell is editable (free text, suggesting the groups that exist) and shows the
+scope that agent resolves *today* — `resolves group:filers`, or `global` when the
+group has no document, or `agent:<uuid>` when a per-agent document outranks the
+group. Changing it asks for confirmation first, because the same field also
+decides [canary-release membership](#two-groupings).
 
 Setting a key is only half the story for anything host-dependent. Expand an
 agent's **details** row in the agents table to see its

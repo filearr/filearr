@@ -737,6 +737,90 @@ export function describeScope(scope: string): string {
   return scope;
 }
 
+/** The scope string an agent resolves, given the CURRENT policy rows.
+ *
+ *  A faithful mirror of `filearr.policy.resolve_effective_policy`: walk
+ *  `agent:<id>` > `group:<rollout_group>` > `global` and return the first scope
+ *  that has a document, or `"none"` when there is no document anywhere. The
+ *  console can answer this from the rows it already loaded (`GET
+ *  /agent-policies` returns one CURRENT row per scope), so the agents table shows
+ *  `group:filers` per row without one effective-policy request per agent — the
+ *  authoritative per-agent view stays the lazily-fetched details row.
+ *
+ *  Keep this in step with the backend resolver; the ordering is the contract. */
+export function resolvedPolicyScope(
+  scopes: readonly string[],
+  agent: { id: string; rollout_group: string },
+): string {
+  const have = new Set(scopes);
+  const agentScope = `agent:${agent.id}`;
+  if (have.has(agentScope)) return agentScope;
+  const groupScope = `group:${agent.rollout_group}`;
+  if (agent.rollout_group && have.has(groupScope)) return groupScope;
+  if (have.has("global")) return "global";
+  return "none";
+}
+
+/** The confirmation text for moving an agent between POLICY (rollout) groups.
+ *
+ *  Extracted as pure logic because it is the one place the console has to state
+ *  BOTH consequences of a single field, and getting either wrong is how an
+ *  operator ends up surprised:
+ *
+ *   1. the agent starts resolving a different policy document — and resolution
+ *      is whole-document with NO key merging, so "it only changes EXIF" is never
+ *      true if the target document omits the other keys;
+ *   2. `rollout_group` doubles as the release-canary selector, so the same click
+ *      adds or removes the machine from the canary cohort.
+ */
+export function describePolicyGroupChange(opts: {
+  agentName: string;
+  from: string;
+  to: string;
+  /** Scope strings that currently have a policy document (GET /agent-policies). */
+  scopes: readonly string[];
+  /** The configured canary group (FILEARR_AGENT_CANARY_GROUP, default "canary"). */
+  canaryGroup: string;
+  /** Set when the agent has its OWN `agent:` document, which keeps winning. */
+  agentId: string;
+}): string {
+  const { agentName, from, to, scopes, canaryGroup, agentId } = opts;
+  const have = new Set(scopes);
+  const lines = [
+    `Move agent "${agentName}" from policy group "${from}" to "${to}"?`,
+    "",
+  ];
+  if (have.has(`agent:${agentId}`)) {
+    lines.push(
+      `This agent has its own agent: policy document, which outranks any group — its effective policy will NOT change until that document is removed.`,
+    );
+  } else if (have.has(`group:${to}`)) {
+    lines.push(
+      `It will resolve the group:${to} policy document instead of ${
+        have.has(`group:${from}`) ? `group:${from}` : "the global document"
+      }. The winning document replaces the previous one WHOLE — keys it does not set fall back to the agent's built-in default, not to the old group.`,
+    );
+  } else {
+    lines.push(
+      `There is no group:${to} policy document yet, so the agent falls back to ${
+        have.has("global") ? "the global document" : "its built-in defaults"
+      } until you author one.`,
+    );
+  }
+  const wasCanary = from === canaryGroup;
+  const willBeCanary = to === canaryGroup;
+  if (wasCanary !== willBeCanary) {
+    lines.push(
+      "",
+      willBeCanary
+        ? `It also JOINS the release-canary group "${canaryGroup}": it will be offered un-promoted canary agent builds.`
+        : `It also LEAVES the release-canary group "${canaryGroup}": it will only be offered promoted (general) agent builds.`,
+    );
+  }
+  lines.push("", "The change lands on the agent's next policy poll (~1 min).");
+  return lines.join("\n");
+}
+
 /** Human label for a `source_keys` entry from GET /agent-policies/effective. */
 export const SOURCE_LABELS: Record<string, string> = {
   agent: "agent policy",

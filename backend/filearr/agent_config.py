@@ -51,6 +51,88 @@ SCAN_PRESET_NAMES: frozenset[str] = frozenset(
 
 LOG_LEVELS = ("error", "warn", "info", "verbose", "debug")
 
+
+# --- Inventory-collector CATALOGUE (2026-08-10) -----------------------------
+#: What the console renders as a checkbox list instead of asking an operator to
+#: type collector names from memory.
+#:
+#: This is deliberately a UI catalogue and NOT a validation whitelist. The stored
+#: vocabulary stays free-form on purpose (see :class:`InventoryConfig`): a newer
+#: agent build may register a collector this central release has never heard of,
+#: and refusing it would make central the thing that blocks an agent upgrade.
+#: So: describe what we know, keep accepting what we do not, and let the console
+#: union these entries with whatever the fleet actually advertises in its
+#: ``capabilities.inventory_collectors`` — a collector nobody has described still
+#: shows up, just without prose.
+#:
+#: Names mirror the agent's registry (agent/internal/inventory/collector.go
+#: DefaultRegistry -> stat / owner / perms / placeholder). Keep them in step; a
+#: name that matches nothing on the agent is silently inert, which is exactly the
+#: failure this catalogue exists to prevent.
+COLLECTOR_CATALOGUE: tuple[dict[str, Any], ...] = (
+    {
+        "name": "stat",
+        "label": "File stat",
+        "description": (
+            "Size, timestamps and basic file attributes. The cheapest collector "
+            "and the one every other inventory answer is built on."
+        ),
+        "platforms": ["linux", "darwin", "windows"],
+        "cost": "low",
+    },
+    {
+        "name": "owner",
+        "label": "Owner / group",
+        "description": (
+            "The file's owning user and group. On POSIX these are uid/gid "
+            "resolved to names; on Windows the owning security principal."
+        ),
+        "platforms": ["linux", "darwin", "windows"],
+        "cost": "low",
+    },
+    {
+        "name": "perms",
+        "label": "Permissions",
+        "description": (
+            "Permission bits / ACL summary for each file. More expensive than "
+            "stat because it may need a second syscall per entry, and on Windows "
+            "an ACL read. See the Permissions section for the detailed W7 config."
+        ),
+        "platforms": ["linux", "darwin", "windows"],
+        "cost": "medium",
+    },
+    {
+        "name": "permissions",
+        "label": "Permissions audit (W7) — not implemented yet",
+        "description": (
+            "The detailed ACL enumeration the Permissions block below configures. "
+            "It is listed here because PermissionsConfig only takes effect when "
+            "'permissions' is ALSO named here (defense in depth: an admin must "
+            "both name the collector and configure it), so leaving it out of the "
+            "catalogue would mean the one setting that REQUIRES this name has no "
+            "way to select it. Distinct from 'perms' above, which is the shipped "
+            "permission-bit collector. The agent side is scaffold only — naming "
+            "it is harmless and authors the intent, but nothing collects yet."
+        ),
+        "platforms": [],
+        "cost": "unknown",
+    },
+    {
+        "name": "placeholder",
+        "label": "Cloud placeholder state",
+        "description": (
+            "Whether a file is a cloud placeholder (OneDrive / Files On-Demand "
+            "and friends) rather than resident on disk. Windows reports this "
+            "natively; elsewhere the collector is a no-op that reports nothing."
+        ),
+        "platforms": ["windows"],
+        "cost": "low",
+    },
+)
+
+#: Just the names, for callers that only need membership.
+KNOWN_COLLECTORS: frozenset[str] = frozenset(c["name"] for c in COLLECTOR_CATALOGUE)
+
 # --- Size / count caps (payload-size guards) --------------------------------
 #: Whole-settings byte ceiling (compact JSON). Mirrors the per-agent policy cap.
 MAX_SETTINGS_BYTES = 65536

@@ -6,6 +6,16 @@
 // silently discarding an operator's forward-compat key are unit-testable on
 // Node). Imported + re-exported here so callers keep one types import site.
 import type { AgentPolicyDoc } from "./agentPolicyDoc";
+// Same split, same reason, for the inventory-collector catalogue: the merge /
+// unknown-name-preservation rules behind the config-group dialog's checkbox
+// list are DOM-free so they can be unit-tested on Node.
+import type { CollectorCatalogueEntry } from "./inventoryCollectors";
+// The About page's response shape lives in ./about alongside the pure render
+// helpers that consume it; re-exported here so callers keep one types import.
+import type { About } from "./about";
+
+export type { About } from "./about";
+export type { CollectorCatalogueEntry } from "./inventoryCollectors";
 
 // A single search hit is an untyped Meili document plus, for document results,
 // P3-T5 ``snippet`` (cropped body text with <em>…</em> match markers) and
@@ -1295,6 +1305,12 @@ export type SystemFeature = {
 export const systemFeatures = () =>
   request<{ features: SystemFeature[] }>("/system/features");
 
+/** The whole running build stack (About page, read scope). Every version in
+ *  the response is read from the live process/database/service — see the
+ *  endpoint docstring. The row shapes live in ./about (DOM-free, so the
+ *  "unknown value" rendering rules are unit-testable). */
+export const systemAbout = () => request<About>("/system/about");
+
 /** One row of the unified app+worker log stream (Jobs page Logs panel). */
 export type LogRow = {
   id: number;
@@ -2524,6 +2540,55 @@ export interface AgentPage {
 export const listAgents = (limit = 50, offset = 0) =>
   request<AgentPage>(`/agents?limit=${limit}&offset=${offset}`);
 
+/** PATCH /agents/{id} — the operator-mutable fields of an ENROLLED agent.
+ *
+ *  `rollout_group` is the POLICY group (the middle scope: agent > group >
+ *  global) AND the release-canary selector. Before this endpoint it was written
+ *  once at enrollment and never again, so an agent's policy group was frozen for
+ *  life. It is deliberately NOT the same thing as the *config* group
+ *  (`assignConfigGroup`), which policy resolution never consults. */
+export interface AgentPatchIn {
+  rollout_group?: string;
+  name?: string;
+}
+
+/** The patched agent plus the CONSEQUENCE of the patch: the policy scope it now
+ *  resolves (recomputed server-side after the write) and whether it is now in
+ *  the release-canary cohort. Both change together when the group moves. */
+export interface AgentPatchOut extends AgentOut {
+  /** `agent:<uuid>` | `group:<name>` | `global` | `none`. */
+  policy_scope: string;
+  policy_version: number;
+  canary_releases: boolean;
+}
+
+export const updateAgent = (id: string, body: AgentPatchIn) =>
+  request<AgentPatchOut>(`/agents/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+/** One distinct POLICY (rollout) group across enrolled agents, with its member
+ *  count. Server-side aggregate on purpose: the agents list pages (≤200 rows),
+ *  so counting the loaded window would under-report any larger fleet. */
+export interface RolloutGroupOut {
+  name: string;
+  agent_count: number;
+  /** True for the configured release-canary group (FILEARR_AGENT_CANARY_GROUP). */
+  canary: boolean;
+}
+
+/** The roster plus the canary group's NAME — the name is served explicitly
+ *  because a canary group with zero members carries no row-level flag, and that
+ *  zero ("canary releases reach nobody") is exactly what needs surfacing. */
+export interface RolloutGroupsOut {
+  canary_group: string;
+  groups: RolloutGroupOut[];
+}
+
+export const listRolloutGroups = () =>
+  request<RolloutGroupsOut>("/agents/rollout-groups");
+
 /** One CURRENT agent-policy row (P5-T6/P7-T4 policy channel). Scopes:
  *  `global` | `group:<rollout_group>` | `agent:<uuid>`; resolution is
  *  most-specific-wins with NO key merging — the winning scope's whole
@@ -2930,6 +2995,16 @@ export interface ConfigGroupUpdateIn {
 
 export const listConfigGroups = () =>
   request<ConfigGroupOut[]>("/agents/config-groups");
+
+/** The inventory-collector vocabulary for the config-group dialog's checkbox
+ *  list: the UNION of the shipped catalogue and every collector name the
+ *  enrolled fleet advertises. A UI catalogue, NEVER a validation whitelist —
+ *  `inventory.collectors` stays free-form so a newer agent's collector works
+ *  without a central release. Admin scope; fetched when the dialog opens (not
+ *  on page load) because it costs a query over the agents table.
+ *  Shapes + merge rules live in ./inventoryCollectors. */
+export const listInventoryCollectors = () =>
+  request<CollectorCatalogueEntry[]>("/agents/inventory-collectors");
 
 export const createConfigGroup = (body: ConfigGroupIn) =>
   request<ConfigGroupOut>("/agents/config-groups", {

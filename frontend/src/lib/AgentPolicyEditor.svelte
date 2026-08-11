@@ -26,6 +26,7 @@
     type AgentOut,
     type AgentPolicyRow,
     type EffectivePolicyOut,
+    type RolloutGroupOut,
   } from "./api";
   import {
     POLICY_FIELDS,
@@ -45,7 +46,21 @@
     type PolicyFormState,
   } from "./agentPolicyDoc";
 
-  let { agents = [] }: { agents?: AgentOut[] } = $props();
+  // `rolloutGroups` is the server-side GROUP BY roster (GET /agents/rollout-groups)
+  // the parent already loaded. It is passed in rather than re-derived because
+  // `agents` is only the CURRENT PAGE of a paged fleet — counting it would tell an
+  // operator that the `group:filers` document they are writing reaches 3 agents
+  // when it reaches 300. `canaryGroup` comes along because a group's canary status
+  // is the second, easily-forgotten consequence of the same field.
+  let {
+    agents = [],
+    rolloutGroups = [],
+    canaryGroup = "canary",
+  }: {
+    agents?: AgentOut[];
+    rolloutGroups?: RolloutGroupOut[];
+    canaryGroup?: string;
+  } = $props();
 
   function errDetail(e: unknown): string {
     if (e instanceof ApiError) {
@@ -96,12 +111,16 @@
   let saveError = $state("");
   let saved = $state("");
 
-  /** Rollout groups observed on the loaded agents page, plus any group that
-   *  already has a policy document (so a group whose members are on another
-   *  page — or none — stays reachable). Free text is still allowed. */
-  const rolloutGroups = $derived(
+  /** Every policy-group name worth suggesting: the server-side roster (all
+   *  groups, whole fleet), the groups on the loaded agents page, and any group
+   *  that already has a policy document (so a group with no members at all — a
+   *  document authored ahead of the machines — stays reachable). Free text is
+   *  still allowed: a rollout group exists because agents are in it, not because
+   *  a row was created. */
+  const groupSuggestions = $derived(
     [
       ...new Set([
+        ...rolloutGroups.map((g) => g.name),
         ...agents.map((a) => a.rollout_group).filter(Boolean),
         ...rows.filter((r) => r.scope_type === "group").map((r) => r.scope_id ?? ""),
       ]),
@@ -109,6 +128,15 @@
       .filter(Boolean)
       .sort(),
   );
+
+  /** How many agents the `group:` document being edited actually reaches, or
+   *  null when the roster has not loaded. `0` is a real and important answer —
+   *  a document nothing reads yet — so it must not collapse into "unknown". */
+  const editedGroupMembers = $derived.by<number | null>(() => {
+    if (scopeKind !== "group" || !groupName.trim()) return null;
+    if (!rolloutGroups.length) return null;
+    return rolloutGroups.find((g) => g.name === groupName.trim())?.agent_count ?? 0;
+  });
 
   const errors = $derived(validatePolicyForm(form, { knownPresets: presetNames }));
   const hasErrors = $derived(Object.keys(errors).length > 0);
@@ -198,7 +226,7 @@
 
   function pickScopeKind(kind: ScopeKind) {
     scopeKind = kind;
-    if (kind === "group" && !groupName) groupName = rolloutGroups[0] ?? "";
+    if (kind === "group" && !groupName) groupName = groupSuggestions[0] ?? "";
     if (kind === "agent" && !agentId) agentId = agents[0]?.id ?? "";
     loadScope();
   }
@@ -370,16 +398,33 @@
         <input
           list="filearr-rollout-groups"
           class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-          title="Rollout group name, assigned at enrollment. Existing groups are offered as suggestions; a name that matches no agent stores a document that nothing reads yet."
-          placeholder="rollout group name"
+          title="Policy (rollout) group name. Set at enrollment and re-assignable per agent from the Registered agents table below. Existing groups are offered as suggestions; a name that matches no agent stores a document that nothing reads yet."
+          placeholder="policy group name"
           value={groupName}
           onchange={(e) => {
             groupName = (e.currentTarget as HTMLInputElement).value;
             loadScope();
           }} />
         <datalist id="filearr-rollout-groups">
-          {#each rolloutGroups as g (g)}<option value={g}></option>{/each}
+          {#each groupSuggestions as g (g)}<option value={g}></option>{/each}
         </datalist>
+        <!-- The other half of the round trip: from the agents table you can see
+             which document an agent resolves; from here you can see how many
+             agents a document reaches. Whole-fleet count, not the loaded page. -->
+        {#if editedGroupMembers !== null}
+          <span
+            class="text-[11px] {editedGroupMembers === 0
+              ? 'text-amber-600 dark:text-amber-400'
+              : 'text-slate-400'}"
+            title={editedGroupMembers === 0
+              ? "No enrolled agent is in this policy group, so this document is not delivered to anything yet. Assign agents to it in the Registered agents table below (Policy group column)."
+              : "Enrolled agents currently in this policy group, across the whole fleet — not just the page of the table below. Each of them resolves this document unless it has its own agent: document."}>
+            {editedGroupMembers} agent{editedGroupMembers === 1 ? "" : "s"} in this group
+            {#if groupName.trim() === canaryGroup}
+              · release-canary group
+            {/if}
+          </span>
+        {/if}
       {:else if scopeKind === "agent"}
         <select
           class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700 dark:bg-slate-800"

@@ -33,11 +33,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import agentsync, audit
+from filearr import policy as policy_mod
 from filearr.agentsync import EnrollmentError
 from filearr.config import get_settings
 from filearr.db import get_session
@@ -204,6 +205,112 @@ class AgentPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class AgentPatchIn(BaseModel):
+    """The operator-mutable fields of an ENROLLED agent (2026-08-10).
+
+    Until this existed, ``agents.rollout_group`` was written exactly once — at
+    register, from the consumed enrollment token — and nothing else in the
+    backend ever assigned it. That froze an agent's POLICY group for life
+    (``policy.resolve_effective_policy`` resolves ``agent:<id>`` >
+    ``group:<rollout_group>`` > ``global``), so the only way to move a machine
+    from, say, ``desktops`` to ``filers`` was to re-enroll it. Meanwhile the
+    grouping the console *could* edit — ``config_group_id`` — is a deliberately
+    ORTHOGONAL dimension (see :class:`filearr.models.AgentConfigGroup`) that
+    policy resolution never consults. Operators reasonably assumed the editable
+    one was the one policies used; it is not. This endpoint closes that gap
+    without merging the two concepts.
+
+    Both fields are optional; omitting one (or sending ``null``, which is not
+    distinguishable here and means the same thing — neither column is nullable)
+    leaves it untouched. A body that changes nothing is a 422 rather than a
+    silent no-op, so a typo'd field name cannot look like a successful edit."""
+
+    # Same constraints as TokenMintIn.rollout_group — the enrollment path and the
+    # re-assignment path must agree on what a group name may be, or an operator
+    # could create via PATCH a group that a token could never mint into.
+    rollout_group: str | None = Field(default=None, min_length=1, max_length=128)
+    # The console display name. Mutable: identity is ``agents.id`` (R3) and the
+    # hostname is the machine fact — ``name`` is decoration. One non-retroactive
+    # caveat, documented rather than prevented: agent-owned library names bake in
+    # ``agent.name`` at library-creation time (agentsync.ensure_agent_library), so
+    # a rename here does not re-title libraries created before it.
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def _strip_and_require_one(self) -> AgentPatchIn:
+        # Group names become policy scope_ids (``group:<name>``), which are
+        # compared byte-for-byte in resolve_effective_policy. A stray copy-paste
+        # space would silently resolve to a DIFFERENT (empty) policy document, so
+        # normalise here rather than debug it later.
+        if self.rollout_group is not None:
+            self.rollout_group = self.rollout_group.strip()
+            if not self.rollout_group:
+                raise ValueError("rollout_group must not be blank")
+        if self.name is not None:
+            self.name = self.name.strip()
+            if not self.name:
+                raise ValueError("name must not be blank")
+        if self.rollout_group is None and self.name is None:
+            raise ValueError("supply at least one of: rollout_group, name")
+        return self
+
+
+class AgentPatchOut(AgentOut):
+    """The patched agent PLUS the consequence of the patch.
+
+    Changing ``rollout_group`` changes two unrelated things at once, and an
+    operator cannot be expected to hold both in their head:
+
+    * **which policy document the agent resolves** — ``policy_scope`` /
+      ``policy_version`` are recomputed with
+      :func:`policy.resolve_effective_policy` right after the write, so the
+      response says ``group:filers`` (or ``global``, or ``none``) rather than
+      leaving the caller to infer it;
+    * **release-canary membership** — ``rollout_group`` doubles as the
+      canary selector (``agent_updates._covers`` / ``FILEARR_AGENT_CANARY_GROUP``),
+      so ``canary_releases`` reports whether this agent now receives
+      un-promoted ``stage='canary'`` builds.
+
+    Neither is a separate round-trip for the console, and both are cheap: one
+    indexed query per scope level and a settings read."""
+
+    # The scope string the agent will resolve on its NEXT policy poll —
+    # "agent:<uuid>" | "group:<name>" | "global" | "none" (no document anywhere).
+    policy_scope: str
+    policy_version: int
+    # True when this agent's rollout group is the configured canary group.
+    canary_releases: bool
+
+
+class RolloutGroupOut(BaseModel):
+    """One distinct POLICY (rollout) group observed across enrolled agents.
+
+    Exists so the console can show a group's real member count and offer the
+    groups that actually exist. It cannot be derived client-side: ``GET /agents``
+    pages server-side (≤200 rows), so counting the loaded window would under-
+    report every fleet larger than a page."""
+
+    name: str
+    agent_count: int
+    # Whether this group is the configured release-canary cohort. Surfaced next
+    # to the count because naming your groups "desktops"/"filers" quietly leaves
+    # the default canary group ("canary") matching nobody.
+    canary: bool
+
+
+class RolloutGroupsOut(BaseModel):
+    """The policy-group roster plus the canary group's NAME.
+
+    The name is part of the payload rather than something the console infers
+    from the ``canary`` flag: when the configured canary group has no members
+    (the common outcome of naming every group ``desktops``/``filers``) no row
+    would carry the flag, and the console could not warn about it or say which
+    group a move joins/leaves."""
+
+    canary_group: str
+    groups: list[RolloutGroupOut]
 
 
 def _ca_bootstrap(settings) -> CaBootstrap:
@@ -634,6 +741,133 @@ async def agent_fleet_summary(
         pending=row.pending,
         revoked=row.revoked,
     )
+
+
+@router.get(
+    "/agents/rollout-groups",
+    response_model=RolloutGroupsOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def list_rollout_groups(
+    session: AsyncSession = Depends(get_session),
+) -> RolloutGroupsOut:
+    """Every distinct POLICY (rollout) group across enrolled agents, with its
+    member count — one GROUP BY, no N+1, no page-window skew.
+
+    Declared BEFORE any ``/agents/{agent_id}`` route so the literal path wins the
+    match (same reason ``/agents/summary`` sits where it does). Revoked agents are
+    counted too: a revoked row keeps its group and still shows in the fleet table,
+    so hiding it here would make the count disagree with the list.
+
+    The configured canary group is ALWAYS present in ``groups`` — with
+    ``agent_count: 0`` when nothing is in it. That zero is the point: the default
+    canary group is ``"canary"``, so an operator who names their groups
+    ``desktops``/``filers`` has silently left canary releases reaching nobody, and
+    the console can only say so if the row exists."""
+    settings = get_settings()
+    counts = dict(
+        (
+            await session.execute(
+                select(Agent.rollout_group, func.count()).group_by(
+                    Agent.rollout_group
+                )
+            )
+        ).all()
+    )
+    counts.setdefault(settings.agent_canary_group, 0)
+    return RolloutGroupsOut(
+        canary_group=settings.agent_canary_group,
+        groups=[
+            RolloutGroupOut(
+                name=name,
+                agent_count=counts[name],
+                canary=(name == settings.agent_canary_group),
+            )
+            for name in sorted(counts)
+        ],
+    )
+
+
+@router.patch(
+    "/agents/{agent_id}",
+    response_model=AgentPatchOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def update_agent(
+    agent_id: uuid.UUID,
+    body: AgentPatchIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> AgentPatchOut:
+    """Re-assign an enrolled agent's POLICY (rollout) group and/or rename it.
+
+    **This is the only writer of ``agents.rollout_group`` after registration.**
+    Before it existed the column was set once from the enrollment token and never
+    again, which froze an agent's policy group permanently — operators worked
+    around it by re-enrolling the machine. That is no longer necessary.
+
+    **Two consequences, both deliberate, both reported in the response.**
+    ``rollout_group`` has two jobs and this endpoint does not try to split them
+    (the model documents the separation on purpose — see
+    :class:`filearr.models.AgentConfigGroup`):
+
+    1. It is the middle POLICY scope. ``policy.resolve_effective_policy`` walks
+       ``agent:<id>`` > ``group:<rollout_group>`` > ``global`` and the winner
+       supplies the WHOLE document — there is NO key merging — so moving an agent
+       into a group that has a ``group:`` document replaces its entire effective
+       policy with that document, not just the keys that differ. The recomputed
+       ``policy_scope``/``policy_version`` in the response is the honest answer to
+       "what does it get now".
+    2. It is the release-canary selector (``agent_updates._covers`` against
+       ``FILEARR_AGENT_CANARY_GROUP``, default ``"canary"``). Moving an agent out
+       of the canary group stops offering it un-promoted builds; moving one in
+       starts. ``canary_releases`` reports which side it landed on.
+
+    **Timing:** nothing is pushed. The agent picks the new policy up on its next
+    poll (``poll_interval_seconds``, default ~60 s) — the policy ETag is derived
+    from ``<scope>/<version>``, so a scope change alone invalidates its cache and
+    forces a 200 rather than a 304. No restart, no command queue.
+
+    404 unknown agent; 409 revoked (a denylisted agent receives no policy at all,
+    so re-grouping it would be a lie); 422 on a blank/oversized name or a body
+    that changes nothing. Audited as ``agent_updated`` with old→new values."""
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
+    if agent.revoked_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "agent is revoked")
+
+    changes: dict[str, dict[str, str]] = {}
+    if body.rollout_group is not None and body.rollout_group != agent.rollout_group:
+        changes["rollout_group"] = {"old": agent.rollout_group, "new": body.rollout_group}
+        agent.rollout_group = body.rollout_group
+    if body.name is not None and body.name != agent.name:
+        changes["name"] = {"old": agent.name, "new": body.name}
+        agent.name = body.name
+    if changes:
+        await session.commit()
+        await audit.emit(
+            audit.AGENT_UPDATED,
+            request=request,
+            principal_id=audit.actor_id(request),
+            details={
+                "agent_id": str(agent_id),
+                "hostname": agent.hostname,
+                "changes": changes,
+            },
+        )
+
+    # Resolve AFTER the commit so the reported scope is what the agent's next
+    # poll will actually see, not a pre-write guess.
+    scope, version, _policy = await policy_mod.resolve_effective_policy(session, agent)
+    settings = get_settings()
+    out = AgentPatchOut(
+        **_agent_out(agent).model_dump(),
+        policy_scope=scope,
+        policy_version=version,
+        canary_releases=agent.rollout_group == settings.agent_canary_group,
+    )
+    return out
 
 
 @router.get(

@@ -6,17 +6,32 @@
     CAPABILITY_TOOLS,
     POLICY_FIELDS,
     SOURCE_LABELS,
+    describePolicyGroupChange,
     ignoredPolicySettings,
+    resolvedPolicyScope,
     type AgentCapabilities,
   } from "./agentPolicyDoc";
+  import {
+    MAX_COLLECTORS,
+    addCollectorName,
+    collectorEditorFromFetch,
+    collectorStanding,
+    collectorsToSave,
+    preservedUnknownCollectors,
+    toggleCollector,
+    type CollectorEditor,
+  } from "./inventoryCollectors";
   import {
     ApiError,
     getAgentSummary,
     getEffectivePolicy,
     listAgentCommands,
+    listAgentPolicies,
     listAgents,
     listEnrollmentTokens,
+    listRolloutGroups,
     mintEnrollmentToken,
+    updateAgent,
     reextractAgent,
     revokeAgent,
     runAgentMaintenance,
@@ -25,6 +40,7 @@
     deleteAgent,
     revokeEnrollmentToken,
     listConfigGroups,
+    listInventoryCollectors,
     createConfigGroup,
     updateConfigGroup,
     deleteConfigGroup,
@@ -45,6 +61,7 @@
     type AuditConfig,
     type InstallerConfigOut,
     type EffectivePolicyOut,
+    type RolloutGroupOut,
   } from "./api";
 
   // W6-D4 — the agent management page: fleet status header, the agents table
@@ -102,6 +119,10 @@
         listAgents(AGENTS_PAGE, agentsOffset),
         listEnrollmentTokens(),
         listConfigGroups(),
+        // Policy groups + the CURRENT policy documents. Both feed the per-row
+        // "policy group / resolves" cell, and both degrade to a blank cell
+        // rather than failing the whole page (reloadPolicyContext swallows).
+        reloadPolicyContext(),
       ]);
       agents = page.items;
       agentsTotal = page.total;
@@ -221,6 +242,92 @@
     if (s === "active") return "text-emerald-600";
     if (s === "consumed") return "text-slate-400";
     return "text-amber-600";
+  }
+
+  // --- agents table: the TWO groupings, side by side -------------------------
+  // The whole reason this pair is rendered together: an operator asked how to
+  // give desktops and filers different extraction rules, assumed the *config*
+  // group (the only one the console used to expose) was what policies keyed on,
+  // and was wrong. Policy resolution reads `rollout_group`; the config group is
+  // an orthogonal dimension it never consults (backend models.py says so
+  // deliberately). Showing one and hiding the other IS the confusion, so both
+  // are editable here, labelled, and each says what it actually controls.
+  // The bundled manual is served at /docs/ by this instance; the Vite dev server
+  // has no such mount, so dev points at the public site (same rule as HelpPage).
+  const DOCS_URL = import.meta.env.DEV ? "https://pwsh.github.io/filearr/" : "/docs/";
+  let rolloutGroups = $state<RolloutGroupOut[]>([]);
+  let canaryGroup = $state("canary");
+  // Scope strings that currently HAVE a policy document (GET /agent-policies
+  // returns one CURRENT row per scope). Enough to mirror the backend resolver
+  // per row without an effective-policy request per agent.
+  let policyScopes = $state<string[]>([]);
+
+  async function reloadPolicyContext() {
+    try {
+      const [roster, rows] = await Promise.all([
+        listRolloutGroups(),
+        listAgentPolicies(),
+      ]);
+      rolloutGroups = roster.groups;
+      canaryGroup = roster.canary_group;
+      policyScopes = rows.map((r) => r.scope);
+    } catch {
+      /* keep last-known: a policy-read failure must not blank the fleet table */
+    }
+  }
+
+  /** The policy document THIS agent resolves today, mirroring the backend's
+   *  agent > group > global walk against the loaded rows. */
+  const scopeOf = (a: AgentOut): string => resolvedPolicyScope(policyScopes, a);
+
+  // Free-text on purpose: a rollout group is created by USE (enrollment or this
+  // assignment), there is no group table to pick from — so the control is an
+  // input backed by a datalist of the groups that exist, not a closed select.
+  let policyGroupDraft = $state<Record<string, string>>({});
+  let regrouping = $state<Record<string, boolean>>({});
+
+  const draftFor = (a: AgentOut): string => policyGroupDraft[a.id] ?? a.rollout_group;
+
+  async function applyPolicyGroup(a: AgentOut) {
+    const next = draftFor(a).trim();
+    if (!next || next === a.rollout_group) {
+      policyGroupDraft[a.id] = a.rollout_group; // snap the input back
+      return;
+    }
+    // Consequential in two independent ways (policy document + canary cohort),
+    // so it confirms like suspend/revoke rather than applying on blur.
+    if (
+      !confirm(
+        describePolicyGroupChange({
+          agentName: a.name,
+          from: a.rollout_group,
+          to: next,
+          scopes: policyScopes,
+          canaryGroup,
+          agentId: a.id,
+        }),
+      )
+    ) {
+      policyGroupDraft[a.id] = a.rollout_group;
+      return;
+    }
+    regrouping[a.id] = true;
+    error = "";
+    try {
+      const patched = await updateAgent(a.id, { rollout_group: next });
+      a.rollout_group = patched.rollout_group;
+      policyGroupDraft[a.id] = patched.rollout_group;
+      agents = agents; // trigger reactivity
+      await Promise.all([reloadPolicyContext(), refreshSummary()]);
+    } catch (e) {
+      error = `policy group for ${a.name}: ${errDetail(e)}`;
+      // Drop the draft before resyncing, or the input keeps showing a value the
+      // server rejected as though it had been applied.
+      delete policyGroupDraft[a.id];
+      await refresh(); // resync to server truth
+    } finally {
+      regrouping[a.id] = false;
+    }
   }
 
   // --- agents table: inline config-group assignment --------------------------
@@ -567,6 +674,58 @@ ${detail}
   let dialogError = $state("");
   let dialogBusy = $state(false);
 
+  // --- inventory-collector picker (see ./inventoryCollectors) ----------------
+  // The vocabulary used to be an operator's guess: a comma-separated box whose
+  // legal values only existed in the agent's Go source. It is now a checkbox
+  // list built from GET /agents/inventory-collectors — admin-only and a query
+  // over the agents table, so it is fetched when the dialog OPENS, never on page
+  // load. `dialog.collectorsText` stays the live value while the request is in
+  // flight and permanently if it fails, so a failure degrades to the old
+  // free-text editing instead of an empty list that would read as "none exist".
+  let collectorEditor = $state<CollectorEditor>({ mode: "loading" });
+  let collectorAdd = $state("");
+  let collectorAddError = $state("");
+
+  // Guards against a slow response for a dialog the operator already closed
+  // landing on top of the next one's (which would merge the WRONG group's
+  // stored names, i.e. write group A's collectors into group B).
+  let collectorReq = 0;
+
+  async function loadCollectorCatalogue(stored: string[]) {
+    const req = ++collectorReq;
+    collectorEditor = { mode: "loading" };
+    collectorAdd = "";
+    collectorAddError = "";
+    try {
+      const catalogue = await listInventoryCollectors();
+      if (req !== collectorReq) return;
+      collectorEditor = collectorEditorFromFetch(stored, { ok: true, catalogue });
+    } catch (e) {
+      if (req !== collectorReq) return;
+      collectorEditor = collectorEditorFromFetch(stored, {
+        ok: false,
+        error: errDetail(e),
+      });
+    }
+  }
+
+  function setCollector(name: string, checked: boolean) {
+    if (collectorEditor.mode !== "list") return;
+    collectorEditor = {
+      mode: "list",
+      choices: toggleCollector(collectorEditor.choices, name, checked),
+    };
+  }
+
+  function addCollector() {
+    if (collectorEditor.mode !== "list") return;
+    const res = addCollectorName(collectorEditor.choices, collectorAdd);
+    collectorAddError = res.error;
+    if (res.error) return;
+    collectorEditor = { mode: "list", choices: res.choices };
+    collectorAdd = "";
+  }
+
   function emptySel(): SelRow {
     return { preset: "", pathsText: "", includeText: "", excludeText: "", enabled: true };
   }
@@ -607,6 +766,7 @@ ${detail}
       authRequired: "",
       ...PERMS_DEFAULTS,
     };
+    void loadCollectorCatalogue([]);
   }
 
   function openEdit(g: ConfigGroupOut) {
@@ -648,6 +808,9 @@ ${detail}
       auditAlertOnChange: a?.alert_on_change ?? PERMS_DEFAULTS.auditAlertOnChange,
       auditWatchPathsText: (a?.watch_paths ?? []).join("\n"),
     };
+    // The STORED names drive the merge: any of them the catalogue does not know
+    // comes back as a ticked "unrecognised" row, so an edit can never drop it.
+    void loadCollectorCatalogue(s.inventory?.collectors ?? []);
   }
 
   const toTri = (v: boolean | null | undefined): string => (v === true ? "on" : v === false ? "off" : "");
@@ -659,17 +822,25 @@ ${detail}
 
   // Build the typed settings object, omitting empty keys so the doc stays minimal
   // (the backend rejects unknown keys — we only ever send the four known ones).
-  function buildSettings(f: GroupForm): GroupSettings {
+  //
+  // `collectors` is computed by the caller from the checkbox editor (or, when
+  // the catalogue never loaded, from the free-text field) — see
+  // ./inventoryCollectors.collectorsToSave. Passed in rather than derived here
+  // so the payload rule stays in the DOM-free, unit-tested module.
+  function buildSettings(f: GroupForm, collectors: string[]): GroupSettings {
     const settings: GroupSettings = {};
     if (f.logLevel) settings.log_level = f.logLevel as GroupSettings["log_level"];
     if (f.webUI) settings.web_ui_enabled = f.webUI === "on";
     if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
     if (f.authRequired) settings.auth_required = f.authRequired === "on";
     if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
-    if (f.inventoryEnabled || f.collectorsText.trim() || f.permsConfigured) {
+    if (f.inventoryEnabled || collectors.length || f.permsConfigured) {
       const inventory: InventoryConfig = {
         enabled: f.inventoryEnabled,
-        collectors: splitTags(f.collectorsText),
+        // Unticking every box emits `[]`, NOT a dropped key: "inventory on,
+        // no collectors" is a real (and different) document from "inventory
+        // never configured".
+        collectors,
       };
       // `settings` is extra="forbid" but every optional field accepts null;
       // we still OMIT unconfigured blocks so a group's doc stays minimal (and
@@ -732,10 +903,15 @@ ${detail}
       dialogError = `Audit "retain snapshots" must be a whole number from 1 to ${MAX_RETAIN_SNAPSHOTS}.`;
       return;
     }
+    const collectors = collectorsToSave(collectorEditor, dialog.collectorsText);
+    if (collectors.length > MAX_COLLECTORS) {
+      dialogError = `At most ${MAX_COLLECTORS} inventory collectors can be selected (${collectors.length} selected).`;
+      return;
+    }
     dialogBusy = true;
     dialogError = "";
     try {
-      const settings = buildSettings(dialog);
+      const settings = buildSettings(dialog, collectors);
       if (dialog.id === null) {
         const body: ConfigGroupIn = {
           name: dialog.name.trim(),
@@ -936,11 +1112,43 @@ ${detail}
        in one response. Defined as a snippet here, rendered at the end. -->
   {#snippet registeredAgents()}
     <h3 class="mt-8 font-medium">Registered agents</h3>
+    <!-- The legend exists because the two group columns are the single most
+         misread thing on this page: "how do I let filers read GPS EXIF but not
+         desktops" is a POLICY-group question, and the config group — the only
+         grouping the console used to expose — cannot answer it. -->
+    <p class="mt-1 text-xs text-slate-500">
+      Each agent carries <b>two independent groupings</b>.
+      <b>Policy group</b> picks the <code class="font-mono">group:&lt;name&gt;</code>
+      policy document it resolves — extraction, EXIF, OCR, watch mode, scheduling,
+      local access — and doubles as the release-canary selector.
+      <b>Config group</b> carries log level, scan selections/paths, inventory
+      collectors and the group scan cron. Changing one never changes the other.
+      Both apply at the agent's next policy poll.
+      <a class="underline" href="{DOCS_URL}agents/#two-groupings" target="_blank" rel="noreferrer">Which one do I want?</a>
+    </p>
+    {#if rolloutGroups.length && !rolloutGroups.some((g) => g.canary && g.agent_count > 0)}
+      <p class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+        title="Canary coverage is selected by the POLICY group, so renaming your groups (desktops/filers/…) without keeping one called by the configured canary name leaves un-promoted releases reaching nobody. Either keep an agent in it, or set FILEARR_AGENT_CANARY_GROUP to one of your real groups.">
+        No agent is in the release-canary policy group
+        <code class="font-mono">{canaryGroup}</code> — canary releases currently
+        reach nobody.
+      </p>
+    {/if}
     {#if agentsTotal === 0}
       <p class="py-2 text-slate-400">No agents registered.</p>
     {:else}
+      <!-- Suggestions for the free-text policy-group input. Rollout groups have
+           no table of their own — they exist because agents are in them — so the
+           roster comes from the server-side GROUP BY (a client-side tally over
+           the loaded page would miss every group whose members are elsewhere in
+           a paged fleet). -->
+      <datalist id="filearr-policy-groups-roster">
+        {#each rolloutGroups as g (g.name)}
+          <option value={g.name}></option>
+        {/each}
+      </datalist>
       <div class="mt-1 overflow-x-auto">
-        <table class="w-full min-w-[56rem] text-sm">
+        <table class="w-full min-w-[64rem] text-sm">
           <thead class="text-left text-slate-500">
             <tr class="border-b border-slate-200 dark:border-slate-800">
               <th class="py-2 pr-3 font-medium">Name</th>
@@ -948,7 +1156,21 @@ ${detail}
               <th class="py-2 pr-3 font-medium">Platform</th>
               <th class="py-2 pr-3 font-medium">Status</th>
               <th class="py-2 pr-3 font-medium">Online</th>
-              <th class="py-2 pr-3 font-medium">Config group</th>
+              <!-- Two groupings, deliberately adjacent and deliberately named
+                   differently. They are orthogonal: one selects a POLICY
+                   document (and the canary cohort), the other a settings
+                   bundle. Showing only the second is what made operators think
+                   policies keyed off it. -->
+              <th
+                class="py-2 pr-3 font-medium"
+                title="POLICY group (agents.rollout_group). Selects which group:<name> policy document this agent resolves — extraction, EXIF, OCR, watch mode, scan schedule, local-access gates — under the precedence agent > group > global, where the winning document REPLACES the others whole (no key merging). It is ALSO the release-canary selector: only agents in the canary group are offered un-promoted builds. Free text; assigning a name that has no document yet is allowed.">
+                Policy group
+              </th>
+              <th
+                class="py-2 pr-3 font-medium"
+                title="CONFIGURATION group (agents.config_group_id) — a different, orthogonal dimension that policy resolution never consults. Carries log level, scan selections/paths, inventory collectors and the group scan cron. Changing it does NOT change which policy document applies.">
+                Config group
+              </th>
               <th class="py-2 pr-3 font-medium">Version</th>
               <th class="py-2 text-right font-medium">Actions</th>
             </tr>
@@ -1002,9 +1224,48 @@ ${detail}
                 {/if}
               </td>
               <td class="py-2 pr-3">
+                <input
+                  class="w-32 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
+                  list="filearr-policy-groups-roster"
+                  title="POLICY group. Decides which group:<name> policy document this agent resolves (agent > group > global; the winner replaces the whole document, keys it omits fall back to the agent's built-in default) AND whether it receives canary releases. Free text — a group exists because agents are in it. Applies at the agent's next policy poll; confirmed first because both consequences land together."
+                  disabled={regrouping[a.id] || a.status === "revoked"}
+                  value={draftFor(a)}
+                  oninput={(e) =>
+                    (policyGroupDraft[a.id] = (e.currentTarget as HTMLInputElement).value)}
+                  onblur={() => applyPolicyGroup(a)}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    if (e.key === "Escape") policyGroupDraft[a.id] = a.rollout_group;
+                  }} />
+                <!-- The document it ACTUALLY resolves today. Mirrors the backend
+                     walk against the loaded policy rows, so an operator reads
+                     "group:filers" instead of inferring it from the group name
+                     (which is wrong whenever that group has no document, or the
+                     agent has its own agent: override). -->
+                {#if policyScopes.length}
+                  {@const sc = scopeOf(a)}
+                  <div
+                    class="mt-0.5 truncate text-[10px] text-slate-400"
+                    title={sc === "none"
+                      ? "No policy document exists at any scope — this agent runs entirely on its built-in defaults."
+                      : sc.startsWith("agent:")
+                        ? "This agent has its OWN agent: policy document, which outranks any group policy. Changing the policy group will not change its effective policy until that document is removed."
+                        : sc === "global"
+                          ? "No policy document exists for this agent's policy group, so it falls back to the global document."
+                          : `This agent resolves the ${sc} policy document. Edit it in the Agent policy card above.`}>
+                    resolves <span class="font-mono">{sc}</span>
+                  </div>
+                {/if}
+                {#if a.rollout_group === canaryGroup}
+                  <span
+                    class="mt-0.5 inline-block rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                    title="This is the configured release-canary group (FILEARR_AGENT_CANARY_GROUP), so this agent is offered un-promoted canary agent builds before the rest of the fleet.">canary</span>
+                {/if}
+              </td>
+              <td class="py-2 pr-3">
                 <select
                   class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
-                  title="Which configuration group's settings this agent receives over the policy channel. Applies immediately — the change invalidates the agent's policy cache, so it lands on the agent's next poll with no restart. Default (built-in) means no group settings at all, not an empty group."
+                  title="CONFIGURATION group — orthogonal to the policy group on the left, and NOT what policy documents key off. Which configuration group's settings this agent receives over the policy channel. Applies immediately — the change invalidates the agent's policy cache, so it lands on the agent's next poll with no restart. Default (built-in) means no group settings at all, not an empty group."
                   disabled={assigning[a.id] || a.status === "revoked"}
                   value={a.config_group_id ?? ""}
                   onchange={(e) => assignGroup(a, (e.currentTarget as HTMLSelectElement).value)}>
@@ -1072,7 +1333,7 @@ ${detail}
             </tr>
             {#if expanded === a.id}
               <tr class="bg-slate-50/60 dark:bg-slate-900/40">
-                <td colspan="8" class="px-1 py-2">{@render agentDetail(a)}</td>
+                <td colspan="9" class="px-1 py-2">{@render agentDetail(a)}</td>
               </tr>
             {/if}
           {/each}
@@ -1299,7 +1560,10 @@ ${detail}
   <!-- Full policy editor (P7-T4 policy channel, every scope + every key). The
        three local-access toggles that used to live in their own card are the
        "Local access" section of this editor. -->
-  <AgentPolicyEditor {agents} />
+  <!-- The roster + canary name are passed down so the editor can tell you how
+       many agents a `group:` document you are about to write actually reaches.
+       It cannot compute that itself: `agents` is one page of a paged fleet. -->
+  <AgentPolicyEditor {agents} {rolloutGroups} {canaryGroup} />
 
   {@render registeredAgents()}
 </div>
@@ -1419,12 +1683,108 @@ ${detail}
             </label>
             {@render notEnforced("Central validates, stores and delivers these keys, but no shipped agent build reads them yet — the inventory collectors are agent-side scaffold. Authoring them now is safe and forward-looking; it changes nothing on the fleet today.")}
           </div>
-          <label class="mt-2 block text-xs text-slate-500"
-            title="Which inventory collectors to run, by name. Central deliberately does not hard-code the vocabulary — a new agent build can add a collector without a central redeploy — so a name that no agent implements is simply ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs.">Collectors (comma or newline separated)
-            <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-              title="Which inventory collectors to run, by name. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs."
-              placeholder="os, hardware, packages" bind:value={dialog.collectorsText} />
-          </label>
+          <!-- Collectors. The master switch above gates whether ANY of this runs,
+               so the block dims (the page-family idiom — cf. AlertsPage's
+               hash-only checkbox) and says so. It is deliberately NOT hard-
+               disabled: this dialog's whole posture is that configuration can be
+               authored inert and switched on later ("unticking keeps it authored
+               but inert" on scan selections), and locking the list behind the
+               master switch would force a fleet-visible toggle just to edit it. -->
+          <div class="mt-3" class:opacity-50={!dialog.inventoryEnabled}>
+            <div class="flex flex-wrap items-baseline gap-2">
+              <span class="text-xs font-medium text-slate-500"
+                title="Which inventory collectors this group's members should run. The list below is a CATALOGUE, not a whitelist: it is the union of the collectors this Filearr release can describe and every collector name your enrolled agents advertise. Central deliberately does not hard-code the vocabulary, so a newer agent build's collector still works — use 'add another' for a name nothing here knows yet. Max 64.">Collectors</span>
+              {#if !dialog.inventoryEnabled}
+                <span class="text-[11px] text-slate-400"
+                  title="Inventory collection is switched off for this group, so nothing below runs. The selection is still saved — author it now and tick the master switch when you want it live.">inventory collection is off — this selection is saved but inert</span>
+              {/if}
+            </div>
+
+            {#if collectorEditor.mode === "loading"}
+              <p class="mt-1 text-xs text-slate-400"
+                title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">Loading the collector catalogue…</p>
+            {:else if collectorEditor.mode === "list"}
+              <div class="mt-1 flex flex-col gap-1.5">
+                {#each collectorEditor.choices as c (c.name)}
+                  {@const st = collectorStanding(c)}
+                  <label class="flex items-start gap-2 rounded-lg border border-slate-200 p-2 dark:border-slate-800"
+                    title={st.note}>
+                    <input type="checkbox" class="mt-1" checked={c.checked}
+                      title={st.note}
+                      onchange={(e) => setCollector(c.name, e.currentTarget.checked)} />
+                    <span class="min-w-0">
+                      <span class="flex flex-wrap items-center gap-1.5">
+                        <span class="text-sm">{c.label}</span>
+                        <code class="font-mono text-[11px] text-slate-500">{c.name}</code>
+                        {#if st.kind === "active"}
+                          <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                            title={st.note}>{c.advertisedBy} agent{c.advertisedBy === 1 ? "" : "s"}</span>
+                        {:else if st.kind === "unmatched"}
+                          <!-- Amber, not disabled: "nothing in your fleet reports
+                               this" is a warning, never a prohibition — the host
+                               that supports it may enroll tomorrow. -->
+                          <span class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                            title={st.note}>{st.chip}</span>
+                        {:else}
+                          <span class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                            title={st.note}>{st.chip}</span>
+                        {/if}
+                      </span>
+                      <span class="mt-0.5 block text-xs text-slate-500">{c.description}</span>
+                      {#if c.described}
+                        <span class="mt-0.5 block text-[11px] text-slate-400"
+                          title={st.note}>{c.platforms.length ? c.platforms.join(" · ") : "platform not recorded"} — cost: {c.cost}</span>
+                      {/if}
+                    </span>
+                  </label>
+                {/each}
+              </div>
+
+              {#if preservedUnknownCollectors(collectorEditor).length}
+                <p class="mt-1.5 text-[11px] text-sky-700 dark:text-sky-300"
+                  title="These names are stored on this group but are neither described by this Filearr release nor advertised by any enrolled agent. They are kept exactly as stored and re-sent on save — dropping them would silently discard configuration. Untick one to actually remove it.">
+                  Kept from this group's saved settings, unrecognised here:
+                  <code class="font-mono">{preservedUnknownCollectors(collectorEditor).join(", ")}</code>
+                </p>
+              {/if}
+
+              <!-- Escape hatch: the checkbox list must not be a cage. Naming a
+                   collector for an agent build that has not rolled out yet is a
+                   legitimate thing to want, and central stores free strings. -->
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                  class="w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                  title="Add a collector name that is neither in this release's catalogue nor advertised by any enrolled agent — for example when pre-configuring a group for an agent build you have not rolled out yet. Stored verbatim; an agent that does not implement it simply ignores it. Max 128 characters."
+                  placeholder="other-collector" bind:value={collectorAdd}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCollector(); } }} />
+                <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700"
+                  title="Add the typed name to the list as a ticked, unrecognised collector. Central never validates the vocabulary, so this always works; the name only does something on an agent build that implements it."
+                  onclick={addCollector}>+ add another</button>
+              </div>
+              {#if collectorAddError}
+                <p class="mt-1 text-xs text-red-600 dark:text-red-400">{collectorAddError}</p>
+              {/if}
+            {:else}
+              <!-- Catalogue fetch failed. Falling back to the free-text field is
+                   the honest degradation: an empty checkbox list would read as
+                   "no collectors exist" and invite saving an emptied group. -->
+              <p class="mt-1 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                title="GET /agents/inventory-collectors failed, so the console cannot show the checkbox list. Your stored collectors are unchanged and still editable as text below — nothing has been dropped. Reopen the dialog to retry.">
+                Could not load the collector list ({collectorEditor.reason}) — editing
+                as text instead. Known names: <code class="font-mono">stat</code>,
+                <code class="font-mono">owner</code>, <code class="font-mono">perms</code>,
+                <code class="font-mono">placeholder</code>, plus anything a newer agent
+                build implements. Nothing has been dropped.
+              </p>
+              <label class="mt-1 block text-xs text-slate-500"
+                title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs.">
+                Collectors (comma or newline separated)
+                <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+                  title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names."
+                  placeholder="stat, owner, perms" bind:value={dialog.collectorsText} />
+              </label>
+            {/if}
+          </div>
 
           <!-- W7 permissions collector (advanced, collapsed by default) -->
           <button
@@ -1439,7 +1799,8 @@ ${detail}
                 Detailed knobs for the <code class="font-mono">permissions</code>
                 collector. Only takes effect when <code class="font-mono">permissions</code>
                 is <em>also</em> named in Collectors above — an admin must both name
-                the collector and configure it.
+                the collector and configure it. It has no checkbox of its own unless
+                an agent advertises it; use <em>+ add another</em> to name it.
               </p>
               <label class="mt-2 inline-flex items-center gap-2 text-sm"
                 title="Whether a permissions object is written into this group's settings at all. Unticked omits the whole block, which keeps 'never configured' distinguishable from 'configured, everything off'.">

@@ -699,6 +699,61 @@ async def features_view(session: AsyncSession = Depends(get_session)) -> dict:
     return {"features": features}
 
 
+# --- About page: the whole running stack, version by version ----------------
+#
+# WHY (user request, 2026-08-10): the console had nowhere to answer "which
+# versions is this deployment actually running". Every number below is read
+# from the LIVE process, the LIVE database or the LIVE service — never from a
+# pin in pyproject.toml, which states intent rather than fact and disagrees
+# with reality exactly when it matters. Anything undeterminable is reported as
+# null with a reason. Assembly lives in ``filearr.about``; this is the HTTP
+# layer plus the one genuinely async section (the service probes).
+
+
+@router.get(
+    "/system/about",
+    dependencies=[Depends(require_scope("read"))],
+)
+async def about_view(session: AsyncSession = Depends(get_session)) -> dict:
+    """The complete running build stack (read scope).
+
+    Sections: ``application`` (version, deploy build stamp, licence, Python and
+    platform), ``services`` (Meilisearch/PostgreSQL probed live, Procrastinate
+    and SQLAlchemy from package metadata), ``python_packages`` (every DIRECT
+    dependency with its INSTALLED version and a documentation link),
+    ``host_tools`` (ffprobe/ffmpeg/exiftool/tesseract/poppler on this machine),
+    ``agents`` (fleet ``agent_version`` histogram; null when agents are off) and
+    ``embedding`` (the configured HF model, whether it is cached here, and the
+    commit sha of the cached revision).
+
+    Makes NO outbound network calls: it links to upstream projects, never
+    fetches from them, so the page renders identically on an air-gapped box.
+    Each service is probed independently and degrades to ``version: null`` plus
+    an ``error`` reason — "Meilisearch: unreachable" IS the useful answer, and a
+    down projection must never turn this page into a 500.
+
+    SCOPE TRADEOFF, stated honestly: ``read`` rather than ``admin``. This is a
+    version fingerprint, and a fingerprint helps an attacker who already has a
+    read key match this deployment against a CVE list. It is nonetheless read
+    scope because (a) an AGPL §13 deployment already publishes its Corresponding
+    Source and its app version via ``/version`` and the footer, so the marginal
+    disclosure is the dependency patch levels, and (b) the page's whole purpose
+    is to be reachable by whoever is looking at a broken instance, which is
+    routinely someone without an admin key. Deployments that disagree can gate
+    ``read`` itself — which is the control that actually decides who sees this."""
+    from starlette.concurrency import run_in_threadpool
+
+    from filearr import about
+
+    stamp = await run_in_threadpool(_read_stamp)
+    # One hop to the threadpool for the whole blocking half (dependency metadata
+    # scan, host-tool subprocesses, HF cache stat) rather than one per section.
+    payload = await run_in_threadpool(about.sync_sections, stamp)
+    payload["services"] = await about.services_section(session)
+    payload["agents"] = await about.agent_fleet(session)
+    return payload
+
+
 # --- Jobs-page maintenance schedules (registry: filearr.maintenance) --------
 
 

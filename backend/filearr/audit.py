@@ -79,6 +79,12 @@ AGENT_CONFIG_GROUP_CREATED = "agent_config_group_created"
 AGENT_CONFIG_GROUP_UPDATED = "agent_config_group_updated"
 AGENT_CONFIG_GROUP_DELETED = "agent_config_group_deleted"
 AGENT_CONFIG_GROUP_ASSIGNED = "agent_config_group_assigned"
+# 2026-08-10: an operator re-assigned an enrolled agent's POLICY (rollout) group
+# or renamed it via PATCH /agents/{id}. Distinct from the config-group assignment
+# above because the consequences are different and both are worth reconstructing
+# from the trail: a rollout-group change moves which `group:` policy document the
+# agent resolves AND whether it is in the release-canary cohort.
+AGENT_UPDATED = "agent_updated"
 AGENT_INSTALLER_CONFIG_ISSUED = "agent_installer_config_issued"
 # P10-T1 on-demand agent command primitive (admin enqueue/cancel; NOT per-poll)
 AGENT_COMMAND_ENQUEUED = "agent_command_enqueued"

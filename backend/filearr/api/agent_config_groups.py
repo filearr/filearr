@@ -155,6 +155,106 @@ def _validate_settings_or_422(settings: Any) -> None:
 # --------------------------------------------------------------------------- #
 # Config-group CRUD (admin)                                                    #
 # --------------------------------------------------------------------------- #
+class CollectorOut(BaseModel):
+    """One inventory collector the console can offer as a checkbox."""
+
+    name: str
+    label: str
+    description: str
+    platforms: list[str]
+    cost: str
+    #: True when this name came from the shipped catalogue; False when it was
+    #: only discovered from an agent's advertisement (a newer build's collector
+    #: this central release has no prose for). The console still offers it — it
+    #: just cannot explain it.
+    described: bool
+    #: How many enrolled agents advertise supporting it. 0 with described=True
+    #: means "we know what this is, but nothing in your fleet reports it" —
+    #: usually a platform mismatch, occasionally an agent too old to advertise.
+    advertised_by: int
+
+
+@router.get(
+    "/agents/inventory-collectors",
+    response_model=list[CollectorOut],
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def list_inventory_collectors(
+    session: AsyncSession = Depends(get_session),
+) -> list[CollectorOut]:
+    """The inventory-collector vocabulary, for rendering a checkbox list.
+
+    Why this exists: ``InventoryConfig.collectors`` is stored as FREE strings and
+    that is deliberate — a newer agent build can register a collector this
+    central release has never heard of, and central refusing it would make the
+    server the thing that blocks an agent upgrade. The cost of that flexibility
+    landed entirely on the operator, who got a comma-separated text box and had
+    to know the vocabulary from the agent's Go source. This endpoint pays that
+    cost back without giving up the flexibility.
+
+    The result is a UNION of two sources, and the ``described`` / ``advertised_by``
+    flags say which:
+
+    * the shipped catalogue (:data:`filearr.agent_config.COLLECTOR_CATALOGUE`) —
+      names we can explain, with platform and cost;
+    * every distinct name the enrolled fleet advertises in
+      ``capabilities.inventory_collectors`` — so a collector added by a newer
+      agent appears in the console the moment one agent reports it, with no
+      central release required.
+
+    Storage and validation are unchanged: this is a UI catalogue, never a
+    whitelist. A stored name that appears in neither source must still round-trip
+    (the console preserves unknown entries the same way the policy editor
+    preserves unknown keys — dropping them would be silent data loss)."""
+    rows = (
+        await session.execute(
+            select(Agent.capabilities).where(Agent.capabilities.is_not(None))
+        )
+    ).scalars().all()
+
+    advertised: dict[str, int] = {}
+    for caps in rows:
+        if not isinstance(caps, dict):
+            continue
+        names = caps.get("inventory_collectors")
+        if not isinstance(names, list):
+            continue
+        # A hostile/buggy agent could advertise anything; count only sane strings
+        # and let the caps size cap upstream bound the rest.
+        for n in {x for x in names if isinstance(x, str) and x}:
+            advertised[n] = advertised.get(n, 0) + 1
+
+    out: list[CollectorOut] = [
+        CollectorOut(
+            name=c["name"],
+            label=c["label"],
+            description=c["description"],
+            platforms=list(c["platforms"]),
+            cost=c["cost"],
+            described=True,
+            advertised_by=advertised.get(c["name"], 0),
+        )
+        for c in agent_config.COLLECTOR_CATALOGUE
+    ]
+    for name in sorted(set(advertised) - agent_config.KNOWN_COLLECTORS):
+        out.append(
+            CollectorOut(
+                name=name,
+                label=name,
+                description=(
+                    "Reported by an agent in this fleet but not described by this "
+                    "Filearr release — probably a newer agent build. It can be "
+                    "enabled; consult that agent's documentation for what it collects."
+                ),
+                platforms=[],
+                cost="unknown",
+                described=False,
+                advertised_by=advertised[name],
+            )
+        )
+    return out
+
+
 @router.get(
     "/agents/config-groups",
     response_model=list[ConfigGroupOut],
