@@ -891,6 +891,48 @@ Two things to know before triggering one by hand:
   job. Set `FILEARR_MEILI_COMPACTION_ENABLED=false` to switch the weekly job off
   entirely; the Jobs page then shows it with a "will no-op" chip.
 
+## Upgrading Meilisearch (the pin moved) {#meili-upgrade}
+
+**A newer Meilisearch refuses to open an older database.** It does not
+auto-migrate and it does not start degraded — it prints the version mismatch and
+exits, which in a container means a restart loop, search down, and a failing
+deploy smoke test. This is the single thing to know before changing the pinned
+tag:
+
+```text
+Your database version (1.49.0) is incompatible with your current engine
+version (1.53.0). ... you can set the `--upgrade-db` flag (or the
+MEILI_UPGRADE_DB environment variable) to upgrade the database on startup.
+```
+
+**The stack already handles this.** `docker-compose.yml` sets
+`MEILI_UPGRADE_DB=true`, and the Unraid template exposes it as an advanced
+variable defaulting to `true`, so a version bump migrates in place on first
+start. Leaving it on is deliberate and safe: once the database matches the
+engine it is a **no-op** — no second migration task, no warning. (Verified by
+running the real binaries against a real database: 1.49.0 → 1.53.0 migrated with
+documents and settings intact, and a restart with the variable still set
+produced no further upgrade task.)
+
+**Before bumping a pin:**
+
+1. **Snapshot first.** Meilisearch's own documentation warns the in-place
+   upgrade "may partially fail and result in a corrupted database". The index is
+   a disposable projection — a rebuild from Postgres is always the fallback — but
+   on a large catalogue a rebuild is hours and a snapshot restore is minutes.
+2. Expect **new task processing to pause** while the `UpgradeDatabase` task runs.
+   Search keeps answering. Watch it with
+   `GET /tasks?types=upgradeDatabase`.
+3. How long it takes on a million-item catalogue **is not published anywhere and
+   we have not measured it**. The mechanism is a format migration rather than a
+   re-index (a two-document test took 12 ms), which suggests short — but treat
+   that as an expectation, not a promise, and keep the snapshot.
+4. Re-read the **full** advisory list for every version you are traversing, not
+   just the one that set your current floor. Meilisearch does not publish through
+   GitHub Security Advisories and its CVE ids do not resolve in NVD or MITRE, so
+   a scanner will come back clean and tell you nothing — the release notes are
+   the only authoritative source.
+
 ## Recycle-bin / tombstone recovery {#recycle-bin-tombstone-recovery}
 
 **Model.** Scans never hard-delete. A file gone from disk is tombstoned `missing`;

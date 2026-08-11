@@ -206,7 +206,7 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 ## 8. Meilisearch feature adoption plan (verified against v1.48.3)
 
 > **STATUS (2026-08-05):** adopt-now list done — tenant tokens, ≥1.48.2 pin
-> (now v1.49.0), facet search, index-swap (shadow-index reaper), per-attribute
+> (now v1.53.0), facet search, index-swap (shadow-index reaper), per-attribute
 > typo tolerance, cutoff guard — EXCEPT **task webhooks**, which stay
 > unadopted on purpose (the v1.8–v1.34 webhook SSRF advisory made polling the
 > conservative choice; revisit deliberately). Adopt-later: hybrid/vector +

@@ -61,7 +61,7 @@ dependencies = [
     "httpx==0.28.1",
     # Phase 8 alerting (P8-T4): AES-GCM envelope encryption of channel secrets
     # (SMTP password, webhook HMAC secret). Apache-2.0/BSD, no AGPL friction.
-    "cryptography==48.0.0",
+    "cryptography==50.0.0",
     # Phase 6 identity/auth (P6-T1): argon2id password hashing for LOCAL
     # accounts only (federated providers delegate credential checks to the IdP).
     # Distinct trust model from API keys (research §1.1): a human password is

@@ -246,11 +246,59 @@ services:
       start_period: 30s
 
   meilisearch:
-    image: getmeili/meilisearch:v1.49.0   # pin exact patch; >=1.48.2 for CVE-2026-57823/4; 1.49.0 verified live 2026-07-09
+    # Pin an exact patch. FLOOR is >=1.48.2 — never regress below it: that is
+    # where CVE-2026-57823 (tenant-token info disclosure, needs an embedder or
+    # chat workspace configured) and CVE-2026-57824 (privilege escalation via an
+    # index-scoped key with broad actions) are fixed, and THIS deployment sits in
+    # the named highest-risk shape for both — it issues tenant tokens
+    # (tenant_tokens.py) and configures an embedder (search.py).
+    #
+    # Full advisory re-check on the 1.49.0 -> 1.53.0 bump (2026-08-10), per the
+    # standing rule that a version bump re-reads the WHOLE list rather than the
+    # tenant-token pair alone. Nothing new affects product code across the span;
+    # 1.53.0's only "security" entries are GitHub-Actions hardening and a
+    # quinn-proto dependency bump. Two SSRF fixes predate our floor: v1.34.1
+    # (webhooks/embedders/network) and — newly surfaced by this pass, previously
+    # uncatalogued here — v1.43.1 (authenticated SSRF, reported by Sion Park).
+    # NOTE: Meilisearch does not publish through GHSA; its release notes are the
+    # only authoritative source, and neither CVE id above resolves in NVD/MITRE.
+    #
+    # Why 1.53.0 and not 1.52.3: 1.52.0-1.52.2 shipped SSE task routes and a
+    # search speedup and then fully REVERTED both, so 1.52.3 is the tail of a
+    # churn cycle. 1.53.0 was branched from the 1.51 lineage instead. The cost of
+    # that divergence: 1.53.0 never received 1.52.1's "make the health route
+    # checks blocking" fix, which we care about more than most because the
+    # healthcheck below polls /health every 5s. Not a regression — 1.49.0 lacks
+    # it too — but re-check whether the 1.5x lines have merged at the next bump.
+    #
+    # Breaking changes in the span are confined to the dynamicSearchRules and
+    # network EXPERIMENTAL features; this stack sets no MEILI_EXPERIMENTAL_* at
+    # all. meilisearch-python-sdk 7.2.3 and the frontend's meilisearch 0.59.0
+    # both stay compatible (new 1.5x response fields are additive and ignored).
+    # Upgrade is in-place and dumpless, but NOT atomic — snapshot first.
+    image: getmeili/meilisearch:v1.53.0
     restart: unless-stopped
     environment:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
       MEILI_NO_ANALYTICS: "true"
+      # In-place database upgrade on a version bump. NOT optional and NOT
+      # cosmetic: a newer engine REFUSES to open an older database and exits 1,
+      # so bumping the image tag without this crash-loops the container, takes
+      # search down, and fails the deploy's smoke test. Verified locally on
+      # 2026-08-10 by running the real binaries against a real 1.49 database:
+      #   * 1.53.0 on a 1.49.0 db, no flag -> exit 1, "Your database version
+      #     (1.49.0) is incompatible with your current engine version (1.53.0)"
+      #   * with this variable            -> upgradeDatabase task succeeds,
+      #                                      documents and settings intact
+      #   * set again on an ALREADY-CURRENT db -> starts normally, no second
+      #     upgrade task; it is a no-op, which is why it is safe to leave on
+      #     permanently rather than being a one-shot an operator must remember.
+      # The upgrade is NOT atomic (Meilisearch's own docs warn it can partially
+      # fail) — snapshot before a bump. Duration on a ~1M-item catalogue is not
+      # published anywhere and was not measured here; the 2-document test took
+      # 12ms, which tells you the mechanism is a format migration, not a
+      # re-index, but not how long yours will take.
+      MEILI_UPGRADE_DB: ${MEILI_UPGRADE_DB:-true}
       # Bound the indexing spike. Unset, Meili budgets ~2/3 of ALL visible RAM
       # for an indexing task; at ≥1M docs one scan wrap-up flush ballooned RSS
       # past 6 GiB and swap-thrashed a 12 GiB host into a load-90 / 93%-sys

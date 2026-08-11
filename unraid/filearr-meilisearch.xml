@@ -1,14 +1,14 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>filearr-meilisearch</Name>
-  <Repository>getmeili/meilisearch:v1.49.0</Repository>
+  <Repository>getmeili/meilisearch:v1.53.0</Repository>
   <Registry>https://hub.docker.com/r/getmeili/meilisearch</Registry>
   <Network>filearr</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/pwsh/filearr/discussions</Support>
   <Project>https://www.meilisearch.com/</Project>
-  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.49.0 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;Install before the filearr container. Requires the user-defined Docker network 'filearr':  docker network create filearr</Overview>
+  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.53.0 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;UPGRADING from an older pin: leave MEILI_UPGRADE_DB=true. A newer Meilisearch REFUSES to open an older database and the container will restart-loop without it; with it, the database is migrated in place on first start (verified 1.49.0 -&gt; 1.53.0). It is a no-op once the database is current, so it is safe to leave on.&#13;&#10;&#13;&#10;Install before the filearr container. Requires the user-defined Docker network 'filearr':  docker network create filearr</Overview>
   <Category>Other:</Category>
   <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-meilisearch.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/meilisearch/meilisearch/main/assets/logo.svg</Icon>
@@ -17,6 +17,7 @@
   <Config Name="Data" Target="/meili_data" Default="/mnt/cache/appdata/filearr-meilisearch" Mode="rw" Description="Index data (LMDB, mmap-based). Use the DIRECT pool path (/mnt/cache/appdata/...) — mmap through the /mnt/user FUSE layer is unreliable, and search latency depends on the fast pool." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/filearr-meilisearch</Config>
   <Config Name="MEILI_MASTER_KEY" Target="MEILI_MASTER_KEY" Default="" Mode="" Description="Master key (16+ chars) — must match FILEARR_MEILI_MASTER_KEY in filearr and filearr-worker" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="MEILI_NO_ANALYTICS" Target="MEILI_NO_ANALYTICS" Default="true" Mode="" Description="Disable telemetry" Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="MEILI_UPGRADE_DB" Target="MEILI_UPGRADE_DB" Default="true" Mode="" Description="Migrate the index database in place when the pinned version moves forward. REQUIRED on a version bump: a newer engine refuses to open an older database and the container restart-loops without it. A no-op once the database matches the engine, so leave it on. The migration is not atomic — back up the appdata path before changing the pin." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
   <Config Name="MEILI_ENV" Target="MEILI_ENV" Default="production" Mode="" Description="production hides the built-in preview UI; requires master key" Type="Variable" Display="advanced" Required="false" Mask="false">production</Config>
   <Config Name="Port (optional)" Target="7700" Default="" Mode="tcp" Description="Only map for direct debugging of the search engine. Leave empty otherwise." Type="Port" Display="advanced" Required="false" Mask="false"/>
 </Container>

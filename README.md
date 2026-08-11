@@ -48,7 +48,7 @@ configuration reference are in the **[documentation site](https://pwsh.github.io
 | API | Python 3.14 · FastAPI 0.139 (native SSE) · uvicorn |
 | DB | PostgreSQL 18.4 — native `uuidv7()` PKs, async I/O |
 | Jobs | Procrastinate 3.9 (Postgres-native queue — no Redis) |
-| Search | Meilisearch v1.49.0 (pin ≥ 1.48.2 for tenant-token CVEs) |
+| Search | Meilisearch v1.53.0 (pin ≥ 1.48.2 for tenant-token CVEs) |
 | Frontend | Svelte 5 + Vite 8 (Rolldown) + Tailwind v4 SPA, PWA |
 | Agent | Go ≥ 1.26, single static binary (no cgo) |
 
