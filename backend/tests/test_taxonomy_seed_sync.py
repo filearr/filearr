@@ -27,7 +27,11 @@ from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import FileGroupExtension
 
-BACKEND_DIR = Path(__file__).resolve().parent
+# ``tests/`` sits under ``backend/``, so the alembic.ini this module drives is
+# one level up. Derived, never hardcoded: an absolute dev-box path passes
+# locally and dies on CI with a baffling "No 'script_location' key found in
+# configuration" (it happened, 2026-08-11).
+BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 def _psycopg3(uri): return uri.replace("postgresql://", "postgresql+psycopg://", 1)
@@ -35,7 +39,7 @@ def _psycopg3(uri): return uri.replace("postgresql://", "postgresql+psycopg://",
 
 @pytest.fixture
 async def client(pg_uri, monkeypatch):
-    cfg = Config(str(Path("d:/repos/filearr/backend") / "alembic.ini"))
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
     command.upgrade(cfg, "head")
     engine = create_async_engine(_psycopg3(pg_uri))
     maker = async_sessionmaker(engine, expire_on_commit=False)
