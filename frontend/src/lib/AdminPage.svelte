@@ -105,6 +105,11 @@
   // T11 error surfacing: live per-library extraction-error counts (from /stats),
   // an expandable per-library failing-items list, and a failed-jobs table.
   let errorCounts = $state<Record<string, number>>({});
+  // /stats bounds each of its aggregates and reports the ones it had to give up
+  // on (2026-08-11). Without this the extraction-error column would read as a
+  // confident "0 errors" when the truth is "we could not count them" — the two
+  // demand opposite reactions from an operator.
+  let statsDegraded = $state<Record<string, string>>({});
   let retrying = $state<Record<string, boolean>>({});
   let expanded = $state<Record<string, boolean>>({});
   let failing = $state<Record<string, FailingItem[]>>({});
@@ -229,6 +234,7 @@
       shareMap = smap;
       scans = scs;
       errorCounts = (st.extract_errors as Record<string, number>) ?? {};
+      statsDegraded = (st.degraded as Record<string, string>) ?? {};
       if (jobs) {
         failedJobsList = jobs.items;
         failedTotal = jobs.total;
@@ -688,6 +694,13 @@
   </div>
 
   {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
+  {#if statsDegraded.extract_errors}
+    <p class="mt-2 text-sm text-amber-600 dark:text-amber-500">
+      Extraction-error counts unavailable ({statsDegraded.extract_errors}) — the
+      Errors column below is blank because it could not be read, not because
+      there are none.
+    </p>
+  {/if}
 
   <div class="mt-3 overflow-x-auto">
     <table class="w-full min-w-[64rem] text-sm">

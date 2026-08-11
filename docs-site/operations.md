@@ -398,6 +398,50 @@ spikes into reclaim storms), and expect a busy minute at the start of every
 redeploy — the quiesce step deliberately triggers the wrap-up flush *before*
 containers are replaced.
 
+## The dashboard shows "unavailable" for a section {#stats-degraded}
+
+**Symptom.** A panel on the dashboard reads *unavailable* with a reason instead
+of a number, or the deploy smoke test logs `DEGRADED sections: ...` next to an
+otherwise passing `/api/v1/stats` check.
+
+This is the endpoint working as designed. `/api/v1/stats` fans out to seven
+independent aggregates (item counts by category, job queues, extraction errors,
+Meilisearch health, semantic coverage, thumbnail cache, disk headroom). Each one
+runs under three bounds: a 5 s Postgres `statement_timeout`, an 8 s client-side
+backstop for the parts a statement timeout can't reach (the Meilisearch HTTP
+call, the `statvfs` thread), and a 10 s deadline shared across all of them. A
+section that overruns is reported in a top-level `degraded` map and the rest of
+the payload is served normally.
+
+The distinction matters: a degraded section is **not** the same as a zero.
+"No extraction errors" and "we could not count the extraction errors" call for
+opposite reactions, so the console labels the gap rather than rendering a
+confident `0`.
+
+**Finding the culprit.** The app log names it:
+
+```bash
+docker compose logs app | grep 'stats: section'
+```
+
+**Why it exists.** Before this was bounded, any single slow aggregate hung the
+whole endpoint indefinitely. On a ~1.09M-item instance `/api/v1/stats` connected
+instantly and then timed out past 15 s on every attempt — with `/health`,
+`/version` and `/search` all answering 200 — which failed the deploy's smoke gate
+while the stack was otherwise healthy and gave the operator nothing but
+`HTTP 000` to work with.
+
+**If `semantic` is the degraded section.** The semantic-coverage counts are the
+one aggregate whose cost scales with how much text extraction you run: OCR and
+PDF text are stored in `items.metadata`, which pushes those JSONB values over
+Postgres' TOAST threshold, and a query that reads the value of every active row
+has to reconstruct each one. The counts are now written so the value read is
+confined to rows that already carry an embedding fingerprint (the existence test
+is answered from the GIN index instead), so this should stay fast; if it still
+degrades on your catalogue, `VACUUM ANALYZE items` first — a stale plan on a
+table that has grown by a million rows is the usual reason the planner stops
+using the index.
+
 ## Extraction throughput and adaptive backpressure {#extract-backpressure}
 
 Extraction is the greediest stage of the pipeline: one job per file, each one

@@ -184,7 +184,16 @@ v_version() {
 
 v_stats() {
   if [[ "$HTTP_CODE" == "200" ]] && grep -Eq '"healthy"[[:space:]]*:[[:space:]]*true' <<<"$BODY"; then
-    DETAIL="200, meili.healthy true"; return 0
+    DETAIL="200, meili.healthy true"
+    # /stats bounds each aggregate and names the ones it gave up on. A degraded
+    # section is not a deploy failure — the stack is up and serving — but it IS
+    # the thing an operator wants in the log, because the alternative history is
+    # what happened on 2026-08-11: the endpoint simply hung and the report said
+    # only "HTTP 000".
+    local d
+    d=$(sed -n 's/.*"degraded"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p' <<<"$BODY")
+    [[ -n "$d" ]] && DETAIL="$DETAIL; DEGRADED sections: $d"
+    return 0
   fi
   return 1
 }

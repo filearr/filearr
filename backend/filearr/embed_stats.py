@@ -39,16 +39,36 @@ async def semantic_snapshot(session: AsyncSession) -> dict:
     fp = embedder_fingerprint(s.embedder_config)
     has_fp = Item.metadata_.has_key(FINGERPRINT_KEY)
     fp_col = Item.metadata_[FINGERPRINT_KEY].astext
-    row = (
-        await session.execute(
-            select(
-                func.count().filter(has_fp & (fp_col == fp)),
-                func.count().filter(~has_fp),
-                func.count().filter(has_fp & (fp_col != fp)),
-            ).where(Item.status == ItemStatus.active)
-        )
-    ).one()
-    embedded, pending, mismatches = (int(row[0]), int(row[1]), int(row[2]))
+    active = Item.status == ItemStatus.active
+
+    # Two queries rather than the one obvious three-way FILTER, because the
+    # obvious one hung /stats on the live instance (2026-08-11): reading
+    # ``metadata -> key`` forces Postgres to materialize the WHOLE metadata blob
+    # for EVERY active row, and OCR/PDF-text extraction pushes many of those
+    # blobs over the TOAST threshold. At ~1.09M items that is a million
+    # de-TOASTs per dashboard load — minutes, not milliseconds.
+    #
+    # Three separate counts, and the separation is the whole point: the tests
+    # have to sit in WHERE, not in an aggregate FILTER. A FILTER is evaluated
+    # per row AFTER the scan, so ``count(*) FILTER (WHERE metadata ? key)``
+    # re-reads every blob exactly like the version this replaces — only a WHERE
+    # predicate can be answered from ix_items_metadata (GIN jsonb_ops, which
+    # indexes ``?``). That is why the sibling extract-error count is fast.
+    #
+    #   * total  — no JSONB touched at all.
+    #   * with_fp — bitmap index scan; still no VALUE read.
+    #   * drift  — the only query that reads values, and the GIN predicate has
+    #     already narrowed it to embedded rows (empty until something is
+    #     embedded, never larger than the embedded corpus).
+    # pending and embedded then fall out by subtraction instead of by scanning.
+    async def _count(*where) -> int:
+        return int((await session.execute(select(func.count()).where(*where))).scalar_one())
+
+    total_active = await _count(active)
+    with_fp = await _count(active, has_fp)
+    mismatches = await _count(active, has_fp, fp_col != fp)
+    pending = total_active - with_fp
+    embedded = with_fp - mismatches
     return {
         "enabled": True,
         "model": s.embed_model,

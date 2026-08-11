@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Literal
 
@@ -6,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import __version__
+from filearr import __version__, errors
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.embed_stats import semantic_snapshot
@@ -137,38 +138,162 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
     }
 
 
-@router.get("/stats", dependencies=[Depends(require_scope("read"))])
-async def stats(session: AsyncSession = Depends(get_session)) -> dict:
+#: Per-section bounds for :func:`stats`. The dashboard endpoint fans out to seven
+#: independent aggregates, and before 2026-08-11 ANY of them could hang the whole
+#: response indefinitely — which is exactly what happened on the live LXC:
+#: /api/v1/stats timed out four times at 15s while /health, /version and /search
+#: all answered 200, and the deploy smoke gate failed with the stack otherwise up.
+#: Which section blocks is not knowable in advance (a JSONB aggregate that has to
+#: de-TOAST a million metadata blobs, a statvfs against a wedged network mount, a
+#: procrastinate_jobs table grown past its purge), so the fix is structural: bound
+#: every section and degrade the ones that overrun.
+#:
+#: Three layers, because they fail differently:
+#:  * ``STATS_STATEMENT_TIMEOUT_MS`` — server-side, via SET LOCAL. Postgres aborts
+#:    the query itself and raises a normal DBAPI error we can catch and recover
+#:    from. This is the CLEAN path and it fires first.
+#:  * ``STATS_SECTION_TIMEOUT_S`` — client-side backstop for the parts a statement
+#:    timeout cannot reach (the Meili HTTP call, the threadpool statvfs).
+#:  * ``STATS_TOTAL_BUDGET_S`` — a deadline shared by all sections. Per-section
+#:    bounds alone are NOT enough: the sections run in sequence, so seven of them
+#:    at 8s apiece is still a 56s response, and the deploy gate would fail exactly
+#:    as it did. The deadline is what actually caps the endpoint.
+#:
+#: The total sits well under the 15s the deploy smoke test allows, so slow
+#: sections cost their own fields instead of the whole gate.
+STATS_STATEMENT_TIMEOUT_MS = 5000
+STATS_SECTION_TIMEOUT_S = 8.0
+STATS_TOTAL_BUDGET_S = 10.0
+
+
+async def _bound_statements(session: AsyncSession) -> None:
+    """Arm the per-transaction statement timeout for this request's session.
+
+    ``SET`` takes no bind parameters, hence ``set_config(..., is_local=true)``,
+    which is the parameterizable spelling of ``SET LOCAL``. Transaction-scoped:
+    it dies with a rollback, so :func:`_section` re-arms after one."""
+    await session.execute(
+        text("SELECT set_config('statement_timeout', :ms, true)"),
+        {"ms": str(STATS_STATEMENT_TIMEOUT_MS)},
+    )
+
+
+async def _section(
+    session: AsyncSession,
+    degraded: dict[str, str],
+    name: str,
+    coro,
+    fallback,
+    deadline: float | None = None,
+):
+    """Await one stats section under a bound, degrading instead of hanging.
+
+    A section that overruns or errors returns ``fallback`` and records its reason
+    in ``degraded``, which /stats surfaces as a top-level map so the dashboard can
+    show a gap WITH an explanation rather than a spinner forever or a silent zero.
+    A zero would be a lie: "no extraction errors" and "we could not count the
+    extraction errors" are different facts and an operator acts differently on
+    each. The reason lands OUT of band rather than inside the section because some
+    sections (extract_errors) are open key spaces where an injected marker key
+    would be indistinguishable from data.
+
+    The failure path rolls back before returning. A statement timeout leaves the
+    transaction aborted, and every LATER section shares this session — without
+    the rollback one slow aggregate would cascade into ``InFailedSqlTransaction``
+    for all of them. Rolling back is safe here because /stats is read-only."""
+    budget = STATS_SECTION_TIMEOUT_S
+    if deadline is not None:
+        # Never below a small floor: at zero remaining we would cancel a section
+        # that might have answered instantly, turning one slow aggregate into a
+        # cascade of empty ones.
+        budget = max(0.25, min(budget, deadline - asyncio.get_running_loop().time()))
+    try:
+        return await asyncio.wait_for(coro, timeout=budget)
+    except Exception as exc:  # noqa: BLE001 - one bad section must not 500 the page
+        if isinstance(exc, TimeoutError):
+            reason = f"timed out after {budget:g}s"
+            log.warning("stats: section %r degraded: %s", name, reason)
+        else:
+            reason = errors.sanitize_error(exc)
+            log.warning("stats: section %r failed: %s", name, exc, exc_info=True)
+        try:
+            await session.rollback()
+            await _bound_statements(session)
+        except Exception:  # noqa: BLE001 - best effort; later sections degrade too
+            log.warning("stats: could not recover the session after %r", name)
+        degraded[name] = reason
+        return fallback
+
+
+async def _by_type(session: AsyncSession) -> dict:
     rows = await session.execute(
         select(Item.file_category, func.count(), func.coalesce(func.sum(Item.size), 0))
         .where(Item.status == "active")
         .group_by(Item.file_category)
     )
+    return {(cat or "unclassified"): {"count": c, "bytes": int(b)} for cat, c, b in rows}
+
+
+@router.get("/stats", dependencies=[Depends(require_scope("read"))])
+async def stats(session: AsyncSession = Depends(get_session)) -> dict:
+    await _bound_statements(session)
+    degraded: dict[str, str] = {}
+    deadline = asyncio.get_running_loop().time() + STATS_TOTAL_BUDGET_S
+
+    async def section(name, coro, fallback):
+        return await _section(session, degraded, name, coro, fallback, deadline)
+
     # W8-B: keyed by taxonomy file_category (the successor to media_type). A NULL
-    # category (a not-yet-(re)scanned row) buckets under "unclassified".
-    by_type = {(cat or "unclassified"): {"count": c, "bytes": int(b)} for cat, c, b in rows}
+    # category (a not-yet-(re)scanned row) buckets under "unclassified". Bounded
+    # like the rest: it is a full grouped pass over active items, and once the
+    # statement timeout is armed an unbounded call here would 500 the endpoint
+    # rather than degrade it.
+    by_type = await section("by_type", _by_type(session), {})
     # T8: extraction throughput / queue-depth observability (single aggregate
     # read over procrastinate_jobs; cheap, read-only). Exposes extract backlog
     # depth + done/failed counts so operators can watch a large scan drain.
-    queues = await queue_snapshot(session)
+    queues = await section("queues", queue_snapshot(session), {"queues": {}, "extract": {}})
     # T11: live per-library extraction-error counts (single GIN-indexed aggregate
     # over items.metadata ? '_extract_error'). Authoritative, cheap, read-only.
-    errors_by_lib = await extract_error_counts_by_library(session)
+    errors_by_lib = await section("extract_errors", extract_error_counts_by_library(session), {})
     # P9-T7/T8: live Meili health + projection drift (postgres active count vs
     # Meili numberOfDocuments) — the same cheap signal the hourly reconcile sweep
     # acts on. Total/read-only: degrades to healthy=false if Meili is down.
-    meili = await meili_snapshot(session)
+    meili = await section("meili", meili_snapshot(session), {"healthy": False})
     # P3-T8: semantic-search coverage (embedded/pending/drift). Off => all zeros.
-    semantic = await semantic_snapshot(session)
+    # The section that blew up live on 2026-08-11 — see embed_stats for why, and
+    # for the narrowing that keeps the expensive half off the un-embedded rows.
+    # The fallback keeps enabled/model REAL (they are config reads that cannot
+    # fail) and zeroes only the counts, so the UI affordances that key off
+    # `semantic.enabled` behave identically on a degraded read.
+    _s = get_settings()
+    semantic = await section(
+        "semantic",
+        semantic_snapshot(session),
+        {
+            "enabled": _s.semantic_enabled,
+            "model": _s.embed_model,
+            "embedded_count": 0,
+            "pending": 0,
+            "fp_mismatches": 0,
+        },
+    )
     # P12-T12: thumbnail-cache storage stats (count/bytes/by_source) + soft budget
     # alarm. Cheap grouped aggregate over the disposable manifest projection.
-    thumbs = await _thumbnail_stats(session)
+    thumbs = await section(
+        "thumbs", _thumbnail_stats(session), {"count": 0, "bytes": 0, "by_source": {}}
+    )
     # FIX-11: filesystem headroom for every watch path + the worst rollup status.
     # os.statvfs on a handful of paths — cheap, synchronous, offloaded so a slow
     # network mount cannot block the event loop.
     from starlette.concurrency import run_in_threadpool
 
-    disk = await run_in_threadpool(_disk_section)
+    # statvfs against a wedged network mount blocks in the KERNEL — status_for_path
+    # fails open on OSError, but an uninterruptible mount never raises one, so the
+    # threadpool hop protects the event loop and nothing protects the request.
+    disk = await section(
+        "disk", run_in_threadpool(_disk_section), {"status": "unknown", "paths": []}
+    )
     return {
         "by_type": by_type,
         "queues": queues["queues"],
@@ -178,6 +303,9 @@ async def stats(session: AsyncSession = Depends(get_session)) -> dict:
         "semantic": semantic,
         "thumbs": thumbs,
         "disk": disk,
+        # Empty on a healthy instance. {section: reason} for anything that was
+        # bounded out, so the UI can label the gap instead of rendering a zero.
+        "degraded": degraded,
     }
 
 
