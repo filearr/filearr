@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,6 +121,27 @@ def embedder_fingerprint(cfg: EmbedderConfig) -> str:
 # are imported only inside ``_load_engine`` so importing this module (as the
 # whole test suite does) never pulls them, and tests monkeypatch ``embed_texts``.
 # ---------------------------------------------------------------------------
+
+# huggingface_hub ships with telemetry ENABLED (``HF_HUB_DISABLE_TELEMETRY``
+# defaults to False) and reports usage alongside a download. Filearr's promise is
+# "no external telemetry, ever" (docs-site/data-collection.md): the one-time
+# model FETCH is a disclosed, opt-in network call, but analytics riding along
+# with it is not something an operator agreed to. Opting out here rather than
+# only in compose means it holds however the app is launched — a bare `uvicorn`
+# run, a test, someone's own container.
+#
+# Set BEFORE huggingface_hub is imported anywhere: the library snapshots these
+# into ``huggingface_hub.constants`` at import time, so a later assignment is
+# read too late to have any effect. setdefault, not assignment, so an operator
+# who deliberately re-enables it keeps that choice.
+#
+# NOT set here: HF_TOKEN (optional — see below) and HF_HUB_OFFLINE (would break
+# the very first download; an operator can set it once the cache is warm to
+# guarantee the worker never reaches the network again).
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+# The generic opt-out several tools honour, including HF's own client. Cheap to
+# set and it covers libraries that read it instead of the HF-specific flag.
+os.environ.setdefault("DO_NOT_TRACK", "1")
 
 # Only the first N chars of an item's body text feed the embedding — the model has
 # a bounded context and the benchmark used a short filename-shaped input. Larger

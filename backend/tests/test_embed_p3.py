@@ -675,3 +675,44 @@ async def test_similar_returns_hits_excluding_self(sim_api, db, monkeypatch):
     # the endpoint asked Meili with the right embedder + sidecar filter
     assert sink["embedder"] == "default"
     assert sink["filter"] == "is_sidecar = false"
+
+
+# --------------------------------------------------------------------------- #
+# huggingface_hub telemetry opt-out (2026-08-10)                               #
+# --------------------------------------------------------------------------- #
+def test_hf_telemetry_is_disabled_by_importing_embed():
+    """``huggingface_hub`` enables telemetry by DEFAULT and reports usage along
+    with a download. The one-time model fetch is a disclosed, opt-in network call
+    (docs-site/data-collection.md); analytics riding along with it is not.
+
+    Importing :mod:`filearr.embed` must be enough to opt out, because that is the
+    only thing guaranteed to have happened before the hub client is constructed —
+    relying on compose env alone would leave a bare ``uvicorn`` run, a test, or
+    someone's own container silently reporting.
+    """
+    import os
+
+    import filearr.embed  # noqa: F401  (import is the thing under test)
+
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert os.environ["DO_NOT_TRACK"] == "1"
+
+    # The library snapshots the env into constants AT IMPORT TIME, so the opt-out
+    # is only real if it reaches that snapshot — assert the parsed value, not just
+    # the variable we set.
+    import huggingface_hub.constants as hf_constants
+
+    assert hf_constants.HF_HUB_DISABLE_TELEMETRY is True
+
+
+def test_hf_telemetry_optout_respects_an_operator_override(monkeypatch):
+    """setdefault, not assignment: an operator who deliberately re-enables
+    telemetry keeps that choice rather than having it silently overridden."""
+    import importlib
+    import os
+
+    monkeypatch.setitem(os.environ, "HF_HUB_DISABLE_TELEMETRY", "0")
+    import filearr.embed
+
+    importlib.reload(filearr.embed)
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "0"

@@ -104,6 +104,22 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
       when enabled it computes dense vectors locally (never a cloud API — private
       files never leave the box) and downloads a ~130 MB model once.
 
+        That download is the only outbound call, it happens once per model into
+        the persistent cache volume, and inference is local forever after.
+        `huggingface_hub` ships with **telemetry enabled by default**, so Filearr
+        sets `HF_HUB_DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1` before the client
+        loads — the fetch happens, the analytics do not. Set them to `0` if you
+        want the library's default behaviour back.
+
+        You may see `You are sending unauthenticated requests to the HF Hub` in
+        the log while it downloads. That is Hugging Face's own notice, not an
+        error: anonymous downloads work and are only rate-limited by IP. Set
+        `HF_TOKEN` in the environment if you hit a limit — the client picks it up
+        automatically. **If that line appears repeatedly rather than once, the
+        model cache is not persisting** (check the `/config` volume), because a
+        warm cache never reaches the network. Once it is warm you can set
+        `HF_HUB_OFFLINE=1` to guarantee the worker never tries.
+
 ## Sidecar files (.nfo, .xmp, artwork) {#sidecar-files}
 
 Media collections are full of files that *describe* other files: Kodi/Emby
