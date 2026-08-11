@@ -37,19 +37,23 @@ const envShareHost = "FILEARR_AGENT_SHARE_HOST"
 // override a discovered export of the same path.
 const envShareMap = "FILEARR_AGENT_SHARE_MAP"
 
-// newShareResolver builds the scan's share resolver: OS discovery plus any
-// static FILEARR_AGENT_SHARE_MAP entries. Malformed map entries are skipped
-// with a warning (hints are best-effort; a bad pair must not fail a scan).
-func newShareResolver() *shares.Resolver {
-	r := shares.New(os.Getenv(envShareHost))
-	if spec := os.Getenv(envShareMap); spec != "" {
-		applied, bad := r.SetStaticMap(spec)
-		logger := newLogger()
-		agentlog.Verbose(logger, "share map configured", "entries", applied)
-		for _, b := range bad {
-			logger.Warn("share map: skipping malformed entry", "entry", b,
-				"want", "localpath=smb://host/share (or \\\\host\\share, nfs://host/export)")
-		}
+// newShareResolver builds the scan's share resolver: OS discovery plus the
+// static mappings from BOTH configuration surfaces — FILEARR_AGENT_SHARE_MAP and
+// the locally-authored share_mappings in local-settings.json — in the precedence
+// order staticShareMappings documents (the environment wins an exact conflict).
+// Malformed entries are skipped with a warning (hints are best-effort, R1; a bad
+// pair must not fail a scan) and are ALSO surfaced per root in the local web UI,
+// because a warning in a log nobody reads is how a typo'd mapping survives for
+// months.
+func newShareResolver(dataDir string) *shares.Resolver {
+	r, rejects := shareResolverFor(dataDir, os.Getenv)
+	logger := newLogger()
+	if mappings, _ := staticShareMappings(dataDir, os.Getenv); len(mappings) > 0 {
+		agentlog.Verbose(logger, "share map configured", "entries", len(mappings))
+	}
+	for _, rj := range rejects {
+		logger.Warn("share map: skipping malformed entry", "entry", rj.Entry, "source", rj.Source,
+			"want", "localpath=smb://host/share (or \\\\host\\share, nfs://host/export)")
 	}
 	return r
 }
@@ -175,7 +179,7 @@ func runScan(args []string) error {
 		// P10-T11 best-effort share discovery: attach a network-open hint to each
 		// created/modified item when a local share covers its path. A single
 		// resolver (5-min TTL cache) is shared across all roots.
-		Shares: newShareResolver(),
+		Shares: newShareResolver(cfg.DataDir),
 		// Agent-side extraction (2026-08-09 parity contract), gated on the cached
 		// policy's extract_enabled. Nil when disabled — the default — so a fleet
 		// that has not opted in never reads file CONTENT for metadata.

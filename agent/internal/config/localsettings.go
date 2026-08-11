@@ -50,6 +50,22 @@ type LocalSettings struct {
 	ScanIntervalSeconds *int    `json:"scan_interval_seconds,omitempty"`
 	ScanOnStart         *bool   `json:"scan_on_start,omitempty"`
 
+	// ShareMappings are locally-authored network-share locations, keyed by the
+	// LOCAL absolute path each covers, valued with the location a remote client
+	// opens (smb://host/share[/sub], \\host\share[\sub], nfs://host/export).
+	// They are the editable half of the share map: FILEARR_AGENT_SHARE_MAP is
+	// the machine's own configuration and cannot be rewritten from a web page,
+	// so an operator with local_roots_control fills in the paths the environment
+	// does NOT mention (see staticShareMappings in cmd/filearr-agent for the
+	// precedence rule and why it is that way round).
+	//
+	// A map, not a list: one local path can have exactly one location, and the
+	// key form makes that structurally true instead of a validation rule. Values
+	// are validated with shares.ValidateLocation before they are written, but a
+	// hand-edited file may still contain a malformed one — the resolver skips it
+	// (R1: hints are best-effort) and the local UI shows it as rejected.
+	ShareMappings map[string]string `json:"share_mappings,omitempty"`
+
 	// RootsEditedAt stamps the last local scan-root add/remove (RFC3339 UTC).
 	RootsEditedAt string `json:"roots_edited_at,omitempty"`
 	// UpdatedAt stamps the last write of any kind (RFC3339 UTC).
@@ -58,7 +74,9 @@ type LocalSettings struct {
 
 // HasOverrides reports whether any SCHEDULE knob is overridden locally (the
 // pause flag and the roots stamp are reported separately — they are state and
-// provenance, not precedence participants).
+// provenance, not precedence participants). Share mappings are excluded too:
+// they have no central key to be overridden against, so they are host
+// configuration this file happens to store, not an override of a policy value.
 func (s LocalSettings) HasOverrides() bool {
 	return s.ScanCron != nil || s.ScanIntervalSeconds != nil || s.ScanOnStart != nil
 }

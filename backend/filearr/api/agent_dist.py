@@ -136,16 +136,23 @@ _INSTALL_SH = r"""#!/bin/sh
 #       and runs the service install
 #   -n  friendly agent name (defaults to the hostname)
 #   -d  download only (skip the service install)
+#   -T  skip the extraction host tools (ffmpeg/poppler/exiftool/tesseract)
+#   -F  reinstall those tools even when already present (upgrades a copy the
+#       package manager does not manage — e.g. a hand-dropped old tesseract)
 set -eu
 BASE="__CENTRAL_URL__"
 TOKEN=""
 NAME=""
 DL_ONLY=""
+SKIP_TOOLS=""
+FORCE_TOOLS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -t) TOKEN="$2"; shift 2 ;;
     -n) NAME="$2"; shift 2 ;;
     -d) DL_ONLY=1; shift ;;
+    -T|--skip-tools) SKIP_TOOLS=1; shift ;;
+    -F|--force-tools) FORCE_TOOLS=1; shift ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -206,6 +213,72 @@ if [ "$(id -u)" != "0" ]; then
   SUDO="sudo"
   echo "service install needs root — using sudo"
 fi
+
+# --- extraction host tools (default ON, -T to skip) --------------------------
+#
+# These are what let the agent read CONTENT rather than just cataloguing names:
+# ffprobe for the media probe, poppler for PDFs, exiftool for camera metadata,
+# tesseract for OCR. Extraction itself stays off until a policy enables it, so
+# installing them is preparation, not activation.
+#
+# Deliberate design: we install through the PLATFORM PACKAGE MANAGER and nothing
+# else. The alternative — fetching zips of third-party binaries and unpacking
+# them — would mean this script downloads and installs arbitrary executables,
+# and would put the burden of signature/hash verification on us for every tool
+# on every platform. Package managers already do exactly that verification, from
+# the distro's own signed repositories. When no package manager is available we
+# PRINT the instructions and carry on rather than inventing a download path;
+# a missing optional tool is a degraded capability, never a failed install.
+install_tools() {
+  missing=""
+  for t in ffprobe pdftotext exiftool tesseract; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+  done
+  # -F reinstalls everything even when present. The case it exists for: a tool
+  # installed by hand (an unpacked tarball, an old vendor build) that the
+  # package manager does not know about and therefore never upgrades — a
+  # hand-installed tesseract 4.x reads scans materially worse than 5.x and is
+  # invisible to `apt upgrade`.
+  if [ -n "$FORCE_TOOLS" ]; then
+    missing=" ffprobe pdftotext exiftool tesseract (forced)"
+  fi
+  if [ -z "$missing" ]; then
+    echo "extraction tools: already present"
+    return 0
+  fi
+  echo "extraction tools: missing$missing — installing via the system package manager"
+  # Package NAMES differ from binary names: ffprobe ships in ffmpeg, pdftotext in
+  # poppler-utils, and exiftool is perl-image-exiftool almost everywhere.
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO apt-get update -qq \
+      && $SUDO apt-get install -y ffmpeg poppler-utils libimage-exiftool-perl tesseract-ocr
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y ffmpeg poppler-utils perl-Image-ExifTool tesseract
+  elif command -v zypper >/dev/null 2>&1; then
+    $SUDO zypper --non-interactive install ffmpeg poppler-tools exiftool tesseract-ocr
+  elif command -v pacman >/dev/null 2>&1; then
+    pac="ffmpeg poppler perl-image-exiftool tesseract tesseract-data-eng"
+    # shellcheck disable=SC2086  # deliberate word splitting: a package list
+    $SUDO pacman -S --noconfirm --needed $pac
+  elif command -v apk >/dev/null 2>&1; then
+    $SUDO apk add --no-cache ffmpeg poppler-utils exiftool tesseract-ocr tesseract-ocr-data-eng
+  elif command -v brew >/dev/null 2>&1; then
+    # Homebrew refuses to run as root, so this deliberately does NOT use $SUDO.
+    brew install ffmpeg poppler exiftool tesseract
+  else
+    echo "  no supported package manager found — install these yourself:" >&2
+    echo "    ffmpeg (ffprobe) · poppler-utils · exiftool · tesseract" >&2
+    return 0
+  fi
+}
+if [ -n "$SKIP_TOOLS" ]; then
+  echo "skipping extraction tools (-T); the agent will report them as absent"
+else
+  # Never let an optional tool take the install down with it: extraction is
+  # opt-in, and an agent with no tools is a perfectly valid inventory agent.
+  install_tools     || echo "extraction tools: install failed — continuing without them" >&2
+fi
+
 $SUDO ./filearr-agent install --config filearr-agent.json
 """
 
@@ -218,7 +291,12 @@ _INSTALL_PS1 = r"""#requires -version 5
 param(
   [string]$Token,
   [string]$Name,
-  [switch]$DownloadOnly
+  [switch]$DownloadOnly,
+  # Extraction host tools are installed by DEFAULT via winget; -SkipTools opts out.
+  [switch]$SkipTools,
+  # Reinstall them even when present — upgrades a hand-installed copy that
+  # winget does not manage and therefore never upgrades.
+  [switch]$ForceTools
 )
 $ErrorActionPreference = "Stop"
 $base = "__CENTRAL_URL__"
@@ -243,6 +321,81 @@ if (-not (Test-Path filearr-agent.json)) {
   Write-Host "downloaded .\filearr-agent.exe - no -Token given and no filearr-agent.json here."
   Write-Host "next: mint a token in Admin -> Agents, then re-run with -Token <token>."
   exit 0
+}
+
+# --- extraction host tools (default ON, -SkipTools to opt out) ---------------
+#
+# ffprobe (media probe), poppler (PDF), exiftool (camera metadata) and tesseract
+# (OCR) are what let the agent read CONTENT rather than only cataloguing names.
+# Extraction stays off until a policy enables it, so this is preparation.
+#
+# winget ONLY, deliberately. The alternative is downloading third-party zips and
+# unpacking them, which would make this script an installer of arbitrary
+# executables and put hash/signature verification on us for four tools. winget
+# validates package manifests against publisher hashes already. No winget (older
+# Windows 10, or a locked-down image) means we PRINT the links and continue —
+# a missing optional tool is a degraded capability, never a failed install.
+function Install-ExtractionTools {
+  $wanted = @(
+    @{ Cmd = "ffprobe";   Id = "Gyan.FFmpeg";               Name = "ffmpeg (ffprobe)" },
+    @{ Cmd = "pdftotext"; Id = "oschwartz10612.Poppler";    Name = "poppler-utils" },
+    @{ Cmd = "exiftool";  Id = "OliverBetz.ExifTool";       Name = "exiftool" },
+    @{ Cmd = "tesseract"; Id = "UB-Mannheim.TesseractOCR";  Name = "tesseract" }
+  )
+  # The agent finds tools in their well-known install directories as well as on
+  # PATH, so "already installed" must be checked the same generous way rather
+  # than by Get-Command alone — otherwise a re-run reinstalls Tesseract every
+  # time (its installer does not add itself to PATH).
+  $wellKnown = @(
+    "$env:ProgramFiles\Tesseract-OCR", "$env:ProgramFiles\ExifTool",
+    "$env:ProgramFiles\ffmpeg\bin", "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+  )
+  $missing = @()
+  foreach ($t in $wanted) {
+    $found = [bool](Get-Command $t.Cmd -ErrorAction SilentlyContinue)
+    if (-not $found) {
+      foreach ($d in $wellKnown) {
+        if (Test-Path (Join-Path $d ($t.Cmd + ".exe"))) { $found = $true; break }
+      }
+    }
+    if (-not $found -or $ForceTools) { $missing += $t }
+  }
+  if ($missing.Count -eq 0) { Write-Host "extraction tools: already present"; return }
+
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Warning "winget not available - install these yourself, then restart the service:"
+    Write-Host "  ffmpeg     https://www.gyan.dev/ffmpeg/builds/"
+    Write-Host "  poppler    https://github.com/oschwartz10612/poppler-windows/releases"
+    Write-Host "  exiftool   https://exiftool.org/  (rename exiftool(-k).exe to exiftool.exe)"
+    Write-Host "  tesseract  https://github.com/UB-Mannheim/tesseract/wiki"
+    return
+  }
+  foreach ($t in $missing) {
+    Write-Host "extraction tools: installing $($t.Name) via winget"
+    # --accept-*-agreements keeps this non-interactive; a failure is reported and
+    # skipped, never fatal.
+    $wa = @("install", "--id", $t.Id, "--exact", "--silent",
+            "--accept-package-agreements", "--accept-source-agreements",
+            "--disable-interactivity")
+    # --force is what makes -ForceTools mean anything: without it winget no-ops
+    # on an id it already considers installed.
+    if ($ForceTools) { $wa += "--force" }
+    & winget @wa 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "  $($t.Name) failed (winget exit $LASTEXITCODE) - reported absent"
+    }
+  }
+  Write-Host "extraction tools: done. A new PATH entry needs a service restart to be seen."
+}
+
+if ($SkipTools) {
+  Write-Host "skipping extraction tools (-SkipTools); the agent will report them as absent"
+} else {
+  # $ErrorActionPreference is Stop for the install itself; tools must not inherit
+  # that, because an optional capability failing is not an install failure.
+  try { $ErrorActionPreference = "Continue"; Install-ExtractionTools }
+  catch { Write-Warning "extraction tools: $_ - continuing" }
+  finally { $ErrorActionPreference = "Stop" }
 }
 
 # The installer stops/creates the Windows service and copies the binary into

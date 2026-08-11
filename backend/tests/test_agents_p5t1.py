@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr import agentsync
+from filearr import agentsync, toolversions
 from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
@@ -276,6 +276,60 @@ async def test_list_and_revoke_agent(client):
     # idempotent
     d2 = await c.delete(f"/api/v1/agents/{aid}")
     assert d2.status_code == 200 and d2.json()["status"] == "revoked"
+
+
+# --------------------------------------------------------------------------- #
+# Host-tool minimum-version awareness (2026-08-11)                             #
+# --------------------------------------------------------------------------- #
+async def test_agent_row_carries_host_tool_verdicts(client):
+    """The console must be able to colour a chip without knowing the minimums:
+    the judgement is central's, recomputed per response so revising a minimum is
+    a central release rather than a fleet rollout."""
+    c, maker, _ = client
+    async with maker() as s:
+        s.add(
+            Agent(
+                name="nas",
+                hostname="nas",
+                platform="linux",
+                capabilities={
+                    "tools": {"tesseract": True, "ffmpeg": True, "exiftool": False},
+                    "tool_versions": {
+                        "tesseract": "4.1.1",  # below the 5.0.0 minimum
+                        "ffmpeg": "N-113579-g1c2d3e4",  # a git build: unjudgeable
+                    },
+                },
+            )
+        )
+        await s.commit()
+
+    row = (await c.get("/api/v1/agents")).json()["items"][0]
+    assert row["tool_verdicts"]["tesseract"] == "outdated"
+    assert row["tool_verdicts"]["ffmpeg"] == "unknown"
+    assert row["tool_verdicts"]["exiftool"] == "absent"
+
+
+async def test_agent_that_never_advertised_gets_no_verdicts(client):
+    """Empty, not seven 'absent' — the console says "not reported yet" and must
+    not be handed a verdict for an observation nobody made."""
+    c, maker, _ = client
+    await _seed_agent(maker, name="fresh")
+    assert (await c.get("/api/v1/agents")).json()["items"][0]["tool_verdicts"] == {}
+
+
+async def test_host_tool_minimums_endpoint(client):
+    """The prose behind a verdict. Also pins the route order: declared before
+    ``/agents/{agent_id}``, which would 422 trying to read the literal path as a
+    UUID if the two were the other way round."""
+    c, _, _ = client
+    rows = {r["name"]: r for r in (await c.get("/api/v1/agents/host-tool-minimums")).json()}
+    assert set(rows) == set(toolversions.HOST_TOOLS)
+    assert rows["tesseract"]["minimum_version"] == "5.0.0"
+    # Every published number ships its justification and its consequence — a
+    # threshold an operator cannot interrogate is one they will route around.
+    for row in rows.values():
+        if row["minimum_version"] is not None:
+            assert row["reason"] and row["impact"]
 
 
 # --------------------------------------------------------------------------- #

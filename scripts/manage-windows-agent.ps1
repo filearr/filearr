@@ -51,6 +51,22 @@
 .PARAMETER Force
   Update path only: reinstall central's binary even when versions match
   (e.g. to recover a corrupted binary).
+
+.PARAMETER SkipTools
+  Do not touch the extraction host tools (ffmpeg/poppler/exiftool/tesseract).
+  By default BOTH paths check them: provisioning installs what is missing, and
+  an update installs anything a newer agent release has started needing. That
+  matters because a self-updating agent otherwise keeps whatever tool set it was
+  provisioned with forever, and a capability added in a later release (poppler
+  arrived this way) just silently reports as unavailable.
+
+.PARAMETER ForceTools
+  Reinstall the extraction tools through winget even when they are already
+  present. The default is to leave an existing tool alone, which is right for a
+  package-manager install but wrong for one someone dropped in by hand years
+  ago: a hand-installed tesseract 4.x is invisible to winget's upgrade and reads
+  scanned pages materially worse than 5.x. This is the escape hatch — it
+  replaces whatever is there with the current packaged build.
 #>
 param(
   [string]$CentralUrl = "__CENTRAL_URL__",
@@ -60,7 +76,9 @@ param(
   [string]$MtlsUrl,
   [string]$RolloutGroup = "default",
   [ValidateRange(1, 1440)] [int]$TokenTtlMinutes = 60,
-  [switch]$Force
+  [switch]$Force,
+  [switch]$SkipTools,
+  [switch]$ForceTools
 )
 $ErrorActionPreference = "Stop"
 
@@ -175,6 +193,85 @@ if ($MtlsUrl) {
   Merge-JsonFile (Join-Path $dataDir "filearr-agent.json") @{ central_url = $MtlsUrl.TrimEnd("/") }
   $configChanged = $true
   Write-Host "central_url switched to mTLS endpoint: $($MtlsUrl.TrimEnd('/'))"
+}
+
+
+# ==== EXTRACTION HOST TOOLS =================================================
+#
+# Runs on BOTH paths. Provisioning installs what is missing; an UPDATE installs
+# anything a newer agent release has started needing — without this, a
+# self-updating agent keeps its original tool set forever and a capability added
+# later (poppler, in the 2026-08 parity work) silently reports unavailable with
+# nothing to explain why.
+#
+# winget only, deliberately: the alternative is fetching third-party archives,
+# which would make this script an installer of arbitrary executables and put
+# hash/signature verification on us for four tools. winget validates manifests
+# against publisher hashes already. No winget => print the links and continue.
+function Sync-ExtractionTools {
+  param([switch]$ForceAll)
+  $wanted = @(
+    @{ Cmd = "ffprobe";   Id = "Gyan.FFmpeg";              Name = "ffmpeg (ffprobe)" },
+    @{ Cmd = "pdftotext"; Id = "oschwartz10612.Poppler";   Name = "poppler-utils" },
+    @{ Cmd = "exiftool";  Id = "OliverBetz.ExifTool";      Name = "exiftool" },
+    @{ Cmd = "tesseract"; Id = "UB-Mannheim.TesseractOCR"; Name = "tesseract" }
+  )
+  # Presence must be checked the same generous way the AGENT resolves tools —
+  # PATH plus the conventional install directories — or every run would reinstall
+  # Tesseract, whose installer never adds itself to PATH.
+  $wellKnown = @(
+    "$env:ProgramFiles\Tesseract-OCR", "$env:ProgramFiles\ExifTool",
+    "$env:ProgramFiles\ffmpeg\bin", "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+  ) + (Get-ChildItem "$env:ProgramFiles\poppler*\Library\bin" -Directory -EA SilentlyContinue |
+        ForEach-Object { $_.FullName })
+
+  $todo = @()
+  foreach ($t in $wanted) {
+    $found = [bool](Get-Command $t.Cmd -EA SilentlyContinue)
+    if (-not $found) {
+      foreach ($d in $wellKnown) {
+        if ($d -and (Test-Path (Join-Path $d ($t.Cmd + ".exe")))) { $found = $true; break }
+      }
+    }
+    # -ForceTools reinstalls a PRESENT tool: the case it exists for is a
+    # hand-installed copy that no package manager knows about and therefore
+    # never upgrades.
+    if (-not $found -or $ForceAll) { $todo += $t } 
+  }
+  if ($todo.Count -eq 0) { Write-Host "extraction tools: present and current"; return }
+
+  if (-not (Get-Command winget -EA SilentlyContinue)) {
+    Write-Warning "winget not available - install these yourself, then restart the service:"
+    Write-Host "  ffmpeg     https://www.gyan.dev/ffmpeg/builds/"
+    Write-Host "  poppler    https://github.com/oschwartz10612/poppler-windows/releases"
+    Write-Host "  exiftool   https://exiftool.org/  (rename exiftool(-k).exe to exiftool.exe)"
+    Write-Host "  tesseract  https://github.com/UB-Mannheim/tesseract/wiki"
+    return
+  }
+  foreach ($t in $todo) {
+    $verb = if ($ForceAll) { "reinstalling" } else { "installing" }
+    Write-Host "extraction tools: $verb $($t.Name) via winget"
+    # --force replaces a present package (that is the whole point of -ForceTools);
+    # without it winget no-ops on an already-installed id.
+    $args = @("install", "--id", $t.Id, "--exact", "--silent",
+              "--accept-package-agreements", "--accept-source-agreements",
+              "--disable-interactivity")
+    if ($ForceAll) { $args += "--force" }
+    & winget @args 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "  $($t.Name) failed (winget exit $LASTEXITCODE) - reported absent"
+    }
+  }
+  Write-Host "extraction tools: done (a new PATH entry needs a service restart to be seen)"
+}
+
+if ($SkipTools) {
+  Write-Host "skipping extraction tools (-SkipTools)"
+} else {
+  # Never fatal: extraction is opt-in and an agent with no tools is a perfectly
+  # good inventory agent, so a tool problem must not fail a binary update.
+  try { Sync-ExtractionTools -ForceAll:$ForceTools }
+  catch { Write-Warning "extraction tools: $_ - continuing" }
 }
 
 # ==== APPLY + VERIFY ========================================================

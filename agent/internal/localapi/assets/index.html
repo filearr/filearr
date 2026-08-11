@@ -186,17 +186,32 @@
         then the built-in default. Precedence:
         <code>central policy &gt; local override &gt; FILEARR_AGENT_* env &gt; sidecar &gt; default</code>.</p>
 
-      <h3 class="subhead">Scan roots</h3>
+      <h3 class="subhead">Scan roots &amp; share mappings</h3>
+      <div id="ctl-share-bad" class="banner banner-warn" hidden></div>
       <div class="table-scroll"><table id="ctl-roots-table" class="data-table">
-        <thead><tr><th>Root</th><th class="col-copy"></th></tr></thead>
+        <thead><tr><th>Root</th><th>Network share location</th><th class="col-copy"></th></tr></thead>
         <tbody id="ctl-roots-body"></tbody>
       </table></div>
       <p id="ctl-roots-empty" class="empty" hidden>No scan roots configured.</p>
       <div class="toolbar">
         <input id="ctl-root-new" type="text" spellcheck="false" placeholder="absolute path of a folder to scan">
+        <input id="ctl-root-new-share" type="text" spellcheck="false"
+               placeholder="share location (optional), e.g. smb://tower/media">
         <button type="button" id="ctl-root-add" class="btn">Add root</button>
       </div>
       <p id="ctl-roots-why" class="hint"></p>
+      <p class="hint">A <strong>share mapping</strong> tells central how a file under
+        this root is reached from another machine, so the catalog can offer a
+        network-open link. Accepted forms:
+        <code>smb://host/share[/sub]</code>, <code>\\host\share[\sub]</code>,
+        <code>nfs://host/export</code> — an Unraid host typically maps
+        <code>/mnt/user/media=smb://tower/media</code>. A root with no mapping is
+        cataloged normally; it just carries no network location.
+        Precedence: <code>FILEARR_AGENT_SHARE_MAP (this machine's environment) &gt;
+        mapping saved here &gt; share discovered on the host</code>. A path the
+        environment maps is shown read-only — it is set where this agent is
+        deployed (compose file, Unraid template), and a value saved here would
+        never be used.</p>
     </section>
 
     <section id="panel-status" hidden>
@@ -212,7 +227,7 @@
         <h3 class="subhead">Scan roots</h3>
         <div class="table-scroll"><table id="roots-table" class="data-table">
           <thead><tr>
-            <th>Root</th><th class="num">Items</th><th class="num">Size</th>
+            <th>Root</th><th>Share location</th><th class="num">Items</th><th class="num">Size</th>
             <th>Last scan</th><th>Status</th><th class="num">Seen</th>
             <th class="num">New</th><th class="num">Changed</th><th class="num">Duration</th>
           </tr></thead>

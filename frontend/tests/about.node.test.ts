@@ -21,8 +21,23 @@ import {
   toolCell,
   type About,
   type AboutEmbedding,
+  type AboutTool,
   type FrontendStack,
 } from "../src/lib/about.ts";
+
+/** A neutral host-tool row. Each test overrides only the fields it is about,
+ *  which keeps the verdict assertions readable. */
+const TOOL: AboutTool = {
+  name: "ffprobe",
+  purpose: "p",
+  present: true,
+  version: "7.1.1",
+  path: "/usr/bin/ffprobe",
+  url: "u",
+  minimum_version: "4.3",
+  verdict: "ok",
+  impact: null,
+};
 
 test("formatBytes: binary units, and an unknown size says so", () => {
   assert.equal(formatBytes(0), "0 B");
@@ -74,23 +89,61 @@ test("serviceCell: a version when there is one, the reason when there is not", (
 
 test("toolCell distinguishes absent from present-but-silent", () => {
   assert.equal(
-    toolCell({ name: "ffprobe", purpose: "p", present: false, version: null, path: null, url: "u" }).text,
+    toolCell({ ...TOOL, name: "ffprobe", present: false, version: null, path: null, verdict: "absent" }).text,
     "not installed",
   );
   const silent = toolCell({
+    ...TOOL,
     name: "tesseract",
-    purpose: "p",
     present: true,
     version: null,
     path: "/usr/bin/tesseract",
-    url: "u",
+    verdict: "unknown",
   });
   assert.equal(silent.text, "installed, version unknown");
   assert.equal(silent.hint, "/usr/bin/tesseract");
   assert.equal(
-    toolCell({ name: "ffmpeg", purpose: "p", present: true, version: "6.1.1", path: "/x", url: "u" }).text,
+    toolCell({ ...TOOL, name: "ffmpeg", present: true, version: "6.1.1", path: "/x", verdict: "ok" }).text,
     "6.1.1",
   );
+});
+
+test("toolCell renders an outdated tool amber, with the reason in the tooltip", () => {
+  // Amber, not red: the tool WORKS. The row has to say what is worse without
+  // upgrading, or an operator has no basis to decide whether to care.
+  const old = toolCell({
+    ...TOOL,
+    name: "tesseract",
+    version: "4.1.1",
+    minimum_version: "5.0.0",
+    verdict: "outdated",
+    impact: "OCR runs on an engine line upstream abandoned in 2021.",
+    path: "/usr/bin/tesseract",
+  });
+  assert.equal(old.tone, "warn");
+  assert.match(old.text, /4\.1\.1/);
+  assert.match(old.text, /below 5\.0\.0/);
+  assert.match(old.hint ?? "", /abandoned in 2021/);
+  assert.match(old.hint ?? "", /usr\/bin\/tesseract/);
+});
+
+test("toolCell never paints an unjudgeable version as a problem", () => {
+  // An ffmpeg built from git states no comparable release number and is usually
+  // NEWER than any tag. It must read as an ordinary value, not as a warning.
+  const git = toolCell({ ...TOOL, name: "ffmpeg", version: "N-113579-g1c2d3e4", verdict: "unknown" });
+  assert.equal(git.tone, "ok");
+  assert.notEqual(git.tone, "warn");
+  assert.equal(git.text, "N-113579-g1c2d3e4");
+  assert.match(git.hint ?? "", /cannot be compared/);
+
+  // A tool Filearr publishes no minimum for says exactly that.
+  const unjudged = toolCell({ ...TOOL, minimum_version: null, verdict: "unknown" });
+  assert.equal(unjudged.tone, "ok");
+  assert.match(unjudged.hint ?? "", /no minimum version/);
+});
+
+test("toolCell names the bar a healthy tool cleared", () => {
+  assert.match(toolCell(TOOL).hint ?? "", /Minimum recommended: 4\.3\./);
 });
 
 test("packageCell flags a declared dependency that is not installed", () => {
@@ -164,8 +217,8 @@ const ABOUT: About = {
     { name: "apprise", version: "1.12.0", url: "https://a", optional: true },
   ],
   host_tools: [
-    { name: "ffprobe", purpose: "Video metadata", present: true, version: "7.1.1", path: "/usr/bin/ffprobe", url: "https://ff" },
-    { name: "tesseract", purpose: "OCR", present: false, version: null, path: null, url: "https://t" },
+    { ...TOOL, name: "ffprobe", purpose: "Video metadata", present: true, version: "7.1.1", path: "/usr/bin/ffprobe", url: "https://ff", verdict: "ok", minimum_version: "4.3" },
+    { ...TOOL, name: "tesseract", purpose: "OCR", present: false, version: null, path: null, url: "https://t", verdict: "absent", minimum_version: "5.0.0" },
   ],
   agents: { total: 3, versions: [{ version: "0.4.1", count: 2 }, { version: null, count: 1 }], error: null },
   embedding: EMBED,
@@ -227,7 +280,7 @@ test("aboutMarkdown escapes pipes so a path cannot break the table", () => {
     {
       ...ABOUT,
       host_tools: [
-        { name: "ffprobe", purpose: "p", present: true, version: "1|2", path: "/od|d", url: "https://x" },
+        { ...TOOL, name: "ffprobe", purpose: "p", present: true, version: "1|2", path: "/od|d", url: "https://x" },
       ],
     },
     null,

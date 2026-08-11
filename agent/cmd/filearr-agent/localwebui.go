@@ -288,14 +288,41 @@ func webSettingsSnapshot(
 		for p := range lastScans {
 			paths[p] = true
 		}
+		// Each root's resolved network location (2026-08-10). The Status panel is
+		// the read-only view a CONTAINER operator lands on — where the mapping
+		// comes from the environment and cannot be edited here — so the answer to
+		// "what does this root look like from another machine?" belongs next to
+		// the root, not buried in a raw FILEARR_AGENT_SHARE_MAP string.
+		pathList := make([]string, 0, len(paths))
+		for p := range paths {
+			pathList = append(pathList, p)
+		}
+		shareViews, shareRejects := rootShareViews(dataDir, pathList, osGetenv)
+		shareByPath := make(map[string]localapi.RootShare, len(shareViews))
+		for _, v := range shareViews {
+			shareByPath[v.Path] = v
+		}
 		roots := make([]map[string]any, 0, len(paths))
 		for p := range paths {
 			row := map[string]any{"path": p, "items": agg[p][0], "bytes": agg[p][1]}
 			if ls, ok := lastScans[p]; ok {
 				row["last_scan"] = ls
 			}
+			if sv, ok := shareByPath[p]; ok {
+				row["share_location"] = sv.Location
+				row["share_source"] = sv.Source
+				row["share_inherited_from"] = sv.InheritedFrom
+				row["share_ambiguous"] = sv.Ambiguous
+			}
 			roots = append(roots, row)
 		}
+		// Malformed entries are skipped by the resolver, never fatal (R1) — so
+		// this list is the only place a typo ever becomes visible.
+		rejects := make([]map[string]any, 0, len(shareRejects))
+		for _, rj := range shareRejects {
+			rejects = append(rejects, map[string]any{"entry": rj.Entry, "source": rj.Source})
+		}
+		snap["share_map_rejects"] = rejects
 		sort.Slice(roots, func(i, j int) bool {
 			return roots[i]["path"].(string) < roots[j]["path"].(string)
 		})

@@ -110,7 +110,7 @@ class Taxonomy:
         current ``version`` so an offline agent can classify a path into
         ``(file_category, file_group)``, route extraction, and decide sidecar-parent
         eligibility with zero further round-trips. Version-gated on the agent side,
-        so shipping the full ~1271-entry ``ext_to_group`` map per fetch is fine.
+        so shipping the full ~1350-entry ``ext_to_group`` map per fetch is fine.
 
         Shape (FROZEN — the Go ``internal/taxonomy`` package parses it)::
 

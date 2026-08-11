@@ -61,6 +61,10 @@
   const TONE: Record<Cell["tone"], string> = {
     ok: "text-slate-800 dark:text-slate-100",
     bad: "text-red-600 dark:text-red-400",
+    // A host tool below its recommended minimum: working, but not doing what
+    // you think. Amber, matching the outdated chips on the Agents page — the
+    // two surfaces report the same tools and must look the same doing it.
+    warn: "text-amber-600 dark:text-amber-400",
     muted: "text-slate-400 dark:text-slate-500",
   };
 </script>
@@ -239,7 +243,10 @@
       <p class="mb-3 text-xs text-slate-500">
         External binaries the extractors shell out to. A missing tool disables
         only the capability that needs it; agents report their own tools
-        separately on the Agents page.
+        separately on the Agents page. A version shown in
+        <span class="text-amber-600 dark:text-amber-400">amber</span> is below the
+        minimum Filearr recommends — still working, but hover it for what that
+        costs.
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[36rem] text-left text-xs">
@@ -254,7 +261,7 @@
                   <a class="underline hover:text-[var(--accent)]" href={t.url} target="_blank" rel="noopener noreferrer">{t.name}</a>
                 </td>
                 <td class="py-1.5 pr-4 text-slate-500">{t.purpose}</td>
-                <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}">{cell.text}</td>
+                <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
                 <td class="py-1.5 font-mono break-all text-slate-400">{t.path ?? "—"}</td>
               </tr>
             {/each}

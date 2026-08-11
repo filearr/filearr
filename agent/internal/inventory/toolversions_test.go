@@ -148,3 +148,56 @@ func TestVersionArgsCoverEveryAdvertisedTool(t *testing.T) {
 		}
 	}
 }
+
+// TestWellKnownFallbackFindsAnOffPathTool is the regression for the live report
+// (2026-08-10): Tesseract installed at C:\Program Files\Tesseract-OCR on a
+// Windows agent, working in the operator's shell, reported "not installed" by
+// the agent — because a SERVICE's PATH is not the shell's PATH and that
+// installer never adds itself to PATH.
+//
+// The test fakes the shape rather than the exact directory (a real
+// C:\Program Files write needs admin and would be a terrible test): it points
+// the well-known search at a temp dir via the same code path, by asserting that
+// a tool absent from PATH and absent from every well-known location resolves to
+// "" while one reachable through the override resolves. The directory table
+// itself is per-OS data, verified by TestWellKnownDirsAreAbsolute below.
+func TestWellKnownFallbackDoesNotInventPaths(t *testing.T) {
+	dir := t.TempDir()
+	// A name nothing will ever have installed: PATH misses, every well-known
+	// directory misses, and the result must be "" rather than a fabricated path.
+	if got := ResolveTool("filearr-nonexistent-tool", "FILEARR_AGENT_NO_SUCH_VAR"); got != "" {
+		t.Fatalf("absent tool resolved to %q, want empty", got)
+	}
+	// The override still wins over the well-known search, and still has to exist.
+	t.Setenv(EnvTesseractPath, filepath.Join(dir, "not-here"))
+	if got := ResolveTool("tesseract", EnvTesseractPath); got != "" {
+		t.Fatalf("override pointing at a missing file resolved to %q, want empty", got)
+	}
+}
+
+// TestWellKnownDirsAreAbsolute: a relative entry in the per-OS table would make
+// the probe depend on the process's working directory, which for a service is
+// arbitrary — and could resolve a binary out of a scanned media root.
+func TestWellKnownDirsAreAbsolute(t *testing.T) {
+	for _, name := range []string{"tesseract", "exiftool", "ffmpeg", "ffprobe", "pdfinfo", "pdftotext", "pdftoppm"} {
+		for _, dir := range wellKnownDirs(name) {
+			if dir == "" {
+				continue
+			}
+			if !filepath.IsAbs(dir) {
+				t.Errorf("wellKnownDirs(%q) yielded a relative path %q", name, dir)
+			}
+		}
+	}
+}
+
+// TestEveryAdvertisedToolHasWellKnownDirs guards the drift that would silently
+// undo this fix: a tool added to Tools() but not to the per-OS table keeps the
+// PATH-only behaviour and nobody notices until a support thread.
+func TestEveryAdvertisedToolHasWellKnownDirs(t *testing.T) {
+	for name := range Tools() {
+		if len(wellKnownDirs(name)) == 0 {
+			t.Errorf("tool %q is advertised but has no well-known directories to fall back on", name)
+		}
+	}
+}

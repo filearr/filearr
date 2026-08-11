@@ -35,6 +35,7 @@
 package shares
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -71,6 +72,32 @@ type export struct {
 	kind string   // "smb" | "nfs"
 	host string   // static entries only: overrides the resolver host
 	sub  []string // static entries only: URL segments between share name and rel
+	// source labels the SURFACE this export came from ("FILEARR_AGENT_SHARE_MAP",
+	// "local override", "discovered smb export", …). It never affects matching;
+	// it exists so the local web UI can answer "which layer supplied the location
+	// I am looking at?" — the question an operator has the moment two surfaces
+	// can both configure a mapping (see Resolver.Resolve).
+	source string
+}
+
+// Mapping is one operator-authored static share mapping in the exact form it was
+// written, tagged with the surface that supplied it. Callers hand the resolver a
+// PRECEDENCE-ORDERED slice of these (see SetStaticMappings); the resolver never
+// decides which configuration surface outranks which.
+type Mapping struct {
+	Local    string // local absolute path the mapping covers
+	Location string // smb://host/share[/sub], \\host\share[\sub], or nfs://host/export[/sub]
+	Source   string // provenance label rendered in the local UI
+}
+
+// Reject is one malformed mapping entry kept VERBATIM, with the surface that
+// supplied it. Rejects are returned rather than swallowed because a typo in a
+// share map is otherwise invisible: hints stay best-effort (R1) and the entry is
+// skipped, so the only symptom is a root that silently never reports a location.
+// Surfacing the raw text lets the UI show exactly what was thrown away.
+type Reject struct {
+	Entry  string
+	Source string
 }
 
 // Resolver enumerates the host's network shares (cached) and maps a local
@@ -83,10 +110,14 @@ type Resolver struct {
 	enum     func() []export // injectable in tests; defaults to enumerateOS
 	static   []export        // SetStaticMap entries; win over enumeration
 
-	mu       sync.Mutex
-	cached   []export
-	loadedAt time.Time
-	loaded   bool
+	mu sync.Mutex
+	// enumerated caches ENUMERATION only, not the merge with static entries, so
+	// re-installing the static map (the local web UI does it on every render, as
+	// an operator may have just edited one) does not force the host to be
+	// re-enumerated — on Windows that means a PowerShell invocation per page load.
+	enumerated []export
+	loadedAt   time.Time
+	loaded     bool
 }
 
 // New builds a Resolver for host (the name rendered into every hint — normally
@@ -127,25 +158,114 @@ func New(host string) *Resolver {
 // many entries were applied plus the malformed ones (skipped, never fatal —
 // hints stay best-effort, R1).
 func (r *Resolver) SetStaticMap(spec string) (applied int, bad []string) {
-	var entries []export
+	mappings, rejects := ParseSpec(spec, StaticMapSource)
+	for _, rj := range rejects {
+		bad = append(bad, rj.Entry)
+	}
+	applied, _ = r.SetStaticMappings(mappings)
+	return applied, bad
+}
+
+// StaticMapSource is the default provenance label for entries parsed out of a
+// single `localpath=location,…` spec string — the shape the environment
+// variable uses.
+const StaticMapSource = "FILEARR_AGENT_SHARE_MAP"
+
+// ParseSpec splits a comma-separated localpath=location spec into mappings
+// tagged with source, plus the malformed entries verbatim. It is the ONLY spec
+// parser in the agent: the scan process, the local web UI's per-root display and
+// the local edit endpoint all validate through here (via ParseSpec or
+// ValidateLocation), so a value one of them accepts cannot be a value another
+// silently skips.
+func ParseSpec(spec, source string) (mappings []Mapping, bad []Reject) {
 	for _, pair := range strings.Split(spec, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
 		}
-		local, loc, ok := strings.Cut(pair, "=")
-		e, parsed := parseStaticLocation(strings.TrimSpace(local), strings.TrimSpace(loc))
-		if !ok || !parsed {
-			bad = append(bad, pair)
+		local, loc, cut := strings.Cut(pair, "=")
+		local, loc = strings.TrimSpace(local), strings.TrimSpace(loc)
+		if !cut || local == "" || ValidateLocation(loc) != nil {
+			bad = append(bad, Reject{Entry: pair, Source: source})
 			continue
 		}
+		mappings = append(mappings, Mapping{Local: local, Location: loc, Source: source})
+	}
+	return mappings, bad
+}
+
+// SetStaticMappings installs already-parsed mappings in CALLER PRECEDENCE ORDER:
+// the first mapping covering a given local path wins, and a later duplicate of
+// the same path is dropped. Which configuration SURFACE outranks which is
+// deliberately not decided here — the resolver honours the order it is handed —
+// so the agent's precedence chain stays stated in one place (see
+// staticShareMappings in cmd/filearr-agent) instead of being re-derived by every
+// caller. Entries that do not parse are returned (never fatal, R1).
+func (r *Resolver) SetStaticMappings(ms []Mapping) (applied int, bad []Mapping) {
+	var entries []export
+	seen := map[string]bool{}
+	for _, m := range ms {
+		e, ok := parseStaticLocation(strings.TrimSpace(m.Local), strings.TrimSpace(m.Location))
+		if !ok {
+			bad = append(bad, m)
+			continue
+		}
+		key := normPath(e.path, r.caseFold)
+		if seen[key] {
+			continue // a higher-precedence surface already mapped this exact path
+		}
+		seen[key] = true
+		e.source = m.Source
 		entries = append(entries, e)
 	}
 	r.mu.Lock()
 	r.static = entries
-	r.loaded = false // rebuild the merged cache on next use
 	r.mu.Unlock()
 	return len(entries), bad
+}
+
+// ValidateLocation reports why a share location cannot be used, or nil when it
+// parses. Callers validating operator input (the local web UI's share-location
+// field) MUST use this rather than a private regex: a location accepted by a
+// second, similar-looking check would be stored and then silently skipped by the
+// resolver — exactly the failure mode the reject list exists to expose.
+func ValidateLocation(location string) error {
+	if strings.TrimSpace(location) == "" {
+		return errors.New("share location is empty")
+	}
+	if _, _, ok := parseLocation(strings.TrimSpace(location)); !ok {
+		return errors.New(`share location must be smb://host/share[/sub], \\host\share[\sub], or nfs://host/export[/sub]`)
+	}
+	return nil
+}
+
+// SamePath reports whether two local paths denote the same location under this
+// platform's rules (slash direction, surrounding slashes, and case folding on
+// Windows). Exported because callers deciding "does a higher-precedence surface
+// already own this path?" must compare paths the way the resolver does, not with
+// a string ==.
+func SamePath(a, b string) bool {
+	fold := runtime.GOOS == "windows"
+	return normPath(a, fold) == normPath(b, fold)
+}
+
+// parseLocation splits a share location into its kind and URL segments. It is
+// the single point of truth for the accepted forms.
+func parseLocation(loc string) (kind string, segs []string, ok bool) {
+	switch {
+	case strings.HasPrefix(loc, "smb://"):
+		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, "smb://"), false))
+	case strings.HasPrefix(loc, `\\`):
+		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, `\\`), false))
+	case strings.HasPrefix(loc, "nfs://"):
+		kind, segs = "nfs", splitSegs(normPath(strings.TrimPrefix(loc, "nfs://"), false))
+	default:
+		return "", nil, false
+	}
+	if len(segs) < 2 { // need at least host + share/export root
+		return "", nil, false
+	}
+	return kind, segs, true
 }
 
 // parseStaticLocation builds the export for one static mapping. Returns
@@ -155,22 +275,11 @@ func parseStaticLocation(local, loc string) (export, bool) {
 	if local == "" || loc == "" {
 		return export{}, false
 	}
-	var kind, host string
-	var segs []string
-	switch {
-	case strings.HasPrefix(loc, "smb://"):
-		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, "smb://"), false))
-	case strings.HasPrefix(loc, `\\`):
-		kind, segs = "smb", splitSegs(normPath(strings.TrimPrefix(loc, `\\`), false))
-	case strings.HasPrefix(loc, "nfs://"):
-		kind, segs = "nfs", splitSegs(normPath(strings.TrimPrefix(loc, "nfs://"), false))
-	default:
+	kind, segs, ok := parseLocation(loc)
+	if !ok {
 		return export{}, false
 	}
-	if len(segs) < 2 { // need at least host + share/export root
-		return export{}, false
-	}
-	host = segs[0]
+	host := segs[0]
 	e := export{path: local, kind: kind, host: host}
 	if kind == "smb" {
 		e.name = segs[1]
@@ -190,12 +299,15 @@ func parseStaticLocation(local, loc string) (export, bool) {
 func (r *Resolver) exports() []export {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.loaded && r.now().Sub(r.loadedAt) < r.ttl {
-		return r.cached
+	if !r.loaded || r.now().Sub(r.loadedAt) >= r.ttl {
+		r.enumerated = r.enum()
+		r.loadedAt = r.now()
+		r.loaded = true
 	}
-	enumerated := r.enum()
+	// The MERGE is recomputed per call (a handful of entries, no I/O) so that
+	// installing a new static map does not invalidate the enumeration cache.
 	merged := append([]export{}, r.static...)
-	for _, e := range enumerated {
+	for _, e := range r.enumerated {
 		conflict := false
 		for _, s := range r.static {
 			if normPath(s.path, r.caseFold) == normPath(e.path, r.caseFold) {
@@ -204,13 +316,16 @@ func (r *Resolver) exports() []export {
 			}
 		}
 		if !conflict {
+			if e.source == "" {
+				// Label enumeration here rather than in every per-OS enumerator:
+				// the display layer needs to distinguish "an operator told us
+				// this" from "we found this on the host" (see Resolve).
+				e.source = "discovered " + e.kind + " export"
+			}
 			merged = append(merged, e)
 		}
 	}
-	r.cached = merged
-	r.loadedAt = r.now()
-	r.loaded = true
-	return r.cached
+	return merged
 }
 
 // Hint resolves absPath to a network-open Hint, or nil when no share covers it
@@ -219,8 +334,36 @@ func (r *Resolver) exports() []export {
 // TIE between two distinct equally-specific exports is treated as multi-homed
 // AMBIGUITY and returns nil rather than fabricate a guess.
 func (r *Resolver) Hint(absPath string) *Hint {
+	return r.Resolve(absPath).Hint
+}
+
+// Resolution is Resolve's explained answer for one local path: the hint plus
+// WHERE it came from. A zero Resolution (nil Hint, empty Source) is the honest
+// "no share mapping covers this path" answer — the state the local UI must be
+// able to render explicitly, because an unmapped root produces no share hint at
+// all and nothing else on the agent says so.
+type Resolution struct {
+	// Hint is nil when nothing covers the path, or when coverage is ambiguous.
+	Hint *Hint
+	// Source labels the surface that supplied the covering mapping — a static
+	// map entry's Mapping.Source, or "discovered smb export" for enumeration.
+	// Empty when there is no mapping.
+	Source string
+	// ExportPath is the local path of the covering mapping (which may be a
+	// PARENT of the queried path, since matching is longest-prefix).
+	ExportPath string
+	// Ambiguous marks the multi-homed tie: two equally-specific exports cover
+	// the path, so no hint is fabricated (R1) — but the UI can say why.
+	Ambiguous bool
+}
+
+// Resolve is Hint plus provenance. Selection is identical (longest export path
+// wins on segment boundaries; a tie is ambiguity, not a guess); the extra
+// return fields exist so the local web UI can show, per scan root, which layer
+// supplied the location an operator is looking at.
+func (r *Resolver) Resolve(absPath string) Resolution {
 	if absPath == "" {
-		return nil
+		return Resolution{}
 	}
 	target := normPath(absPath, r.caseFold)
 	exports := r.exports()
@@ -241,15 +384,18 @@ func (r *Resolver) Hint(absPath string) *Hint {
 			tie = true
 		}
 	}
-	if best == nil || tie {
-		return nil // no covering export, or ambiguous multi-homed coverage
+	if best == nil {
+		return Resolution{} // nothing covers this path — the normal case (R1)
+	}
+	if tie {
+		return Resolution{Ambiguous: true} // ambiguous multi-homed coverage
 	}
 	baseSegs := splitSegs(normPath(best.path, r.caseFold))
 	// Recompute the remainder from the ORIGINAL (case-preserving) path so the hint
 	// keeps the real filename case, not the case-folded compare key.
 	origSegs := splitSegs(normPath(absPath, false))
 	rel := origSegs[len(baseSegs):]
-	return r.build(*best, rel)
+	return Resolution{Hint: r.build(*best, rel), Source: best.source, ExportPath: best.path}
 }
 
 // build renders the UNC + URL forms for a covering export and its remainder

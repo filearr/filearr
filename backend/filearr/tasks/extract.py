@@ -377,9 +377,56 @@ def extract_image(path: str) -> dict[str, Any]:
     return meta
 
 
+# Video extensions ffprobe cannot read — the ``unsupported`` gate, mirroring
+# _VECTOR_EXTS above and the model3d/documents convention: a KNOWN-unprobeable
+# extension is a FACT, not an error, so it returns ``{"unsupported": True}`` and
+# ffprobe is never invoked. Without this gate every ``file_category=video`` item
+# probes unconditionally and each failure lands as ``_extract_error`` on the row —
+# on a CCTV library that is tens of thousands of permanently-red items.
+#
+# Evidence, per entry:
+#   * ``bvr`` (Blue Iris) — ffmpeg content-sniffs it as RAW H.264 (probe score 51,
+#     since ``.bvr`` is NOT in ffmpeg's own "h26l,h264,264,avc" extension list) and
+#     then dies demuxing: "too many reference frames 32" / "sps_id 32 out of range",
+#     consistent with Blue Iris injecting non-Annex-B framing. VLC only plays it with
+#     a forced ``--demux h264``. Refs: lossless-cut issue #2160; VideoLAN forum
+#     t=144133.
+#   * ``g64`` / ``g64x`` (Genetec) — encrypted/watermarked proprietary container that
+#     requires Genetec's own player. ffmpeg has zero knowledge of the format, so this
+#     is a guaranteed failure on EVERY file, not an occasional one.
+#   * ``gmp4``, ``rcd``, ``fmp4``, ``fmpi``, ``h3r``, ``n3r``, ``mcg``, ``hm4``,
+#     ``dvr`` — no ffmpeg support information exists either way. They default to
+#     unsupported until someone tests a real sample; spraying ``_extract_error``
+#     across a camera library is the exact outcome this gate exists to avoid.
+#
+# MOVING ONE OUT: this set is deliberately just a frozenset of bare extensions with
+# no other coupling. When a real sample proves ffprobe handles one, delete that
+# string (and note the evidence in the list above) — nothing else changes; the item
+# then takes the normal probe path on its next extract. Adding one is the same edit
+# in reverse.
+#
+# NOT gated (deliberately): ``264`` / ``265`` / ``avc`` / ``h26l``. ffmpeg's raw
+# demuxers register exactly those extensions (libavformat/h264dec.c and hevcdec.c),
+# so they SHOULD probe. Worth watching the ``_extract_error`` rate on them after
+# rollout though — a vendor writing one of those suffixes is not obliged to have
+# written clean Annex-B, and if the rate is bad they belong in the set below.
+_UNPROBEABLE_VIDEO_EXTS = frozenset(
+    {
+        "bvr", "g64", "g64x", "dvr", "gmp4", "rcd", "fmp4", "fmpi", "h3r", "n3r",
+        "mcg", "hm4",
+    }
+)
+
+
 def extract_video(path: str) -> dict[str, Any]:
     """Merge guessit's filename parse (title/year/episode) with ffprobe's
     technical metadata (codec/resolution/duration/tracks/HDR).
+
+    A known-unprobeable extension (:data:`_UNPROBEABLE_VIDEO_EXTS`) short-circuits
+    the probe entirely and is marked ``unsupported`` — the same marker
+    documents.py/model3d.py emit for formats with no safe parser. The guessit parse
+    still runs and is still returned, exactly as it is when ffprobe FAILS: an
+    unreadable CCTV recording should keep whatever its filename yields.
 
     ffprobe failures (corrupt/truncated file, timeout, missing binary) do NOT
     raise here: the guessit parse is still useful, so the probe error is recorded
@@ -406,6 +453,10 @@ def extract_video(path: str) -> dict[str, Any]:
         }.items()
         if v is not None
     }
+
+    if PurePath(path).suffix.lstrip(".").lower() in _UNPROBEABLE_VIDEO_EXTS:
+        meta["unsupported"] = True
+        return meta
 
     settings = get_settings()
     try:

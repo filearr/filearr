@@ -12,6 +12,11 @@
     type AgentCapabilities,
   } from "./agentPolicyDoc";
   import {
+    minimumsByName,
+    toolChip,
+    type HostToolMinimum,
+  } from "./hostTools";
+  import {
     MAX_COLLECTORS,
     addCollectorName,
     collectorEditorFromFetch,
@@ -41,6 +46,7 @@
     revokeEnrollmentToken,
     listConfigGroups,
     listInventoryCollectors,
+    listHostToolMinimums,
     createConfigGroup,
     updateConfigGroup,
     deleteConfigGroup,
@@ -143,6 +149,7 @@
   let summaryTimer: ReturnType<typeof setInterval>;
   onMount(() => {
     refresh();
+    loadToolMinimums();
     // Status header auto-refresh; the sweep set rides the same tick so a
     // finished re-extract clears its badge without a manual reload.
     summaryTimer = setInterval(() => {
@@ -224,9 +231,31 @@
           bits.push(`roots edited ${new Date(lo.roots_edited_at).toLocaleString()}`);
         if (bits.length) lines.push(`local overrides: ${bits.join(", ")}`);
       }
+      // 2026-08-10 share mappings. Same fixed-key-list caveat as above. Central
+      // renders network-open links from the hints these mappings produce, so a
+      // fleet where nothing is mapped, or where an entry was skipped as
+      // malformed, is invisible here without this line — the agent only ever
+      // logs the skip.
+      const sm = h.share_map as Record<string, unknown> | undefined;
+      if (sm && typeof sm.roots === "number") {
+        const mapped = typeof sm.mapped === "number" ? sm.mapped : 0;
+        const rejected = typeof sm.rejected === "number" ? sm.rejected : 0;
+        let line = `share map: ${mapped}/${sm.roots} scan root${sm.roots === 1 ? "" : "s"} resolve to a network location`;
+        if (rejected > 0)
+          line += `, ${rejected} malformed entr${rejected === 1 ? "y" : "ies"} skipped (fix them on the agent)`;
+        lines.push(line);
+      }
       if (a.health_at) lines.push(`health as of ${new Date(a.health_at).toLocaleString()}`);
     }
     return lines.join("\n");
+  }
+
+  // The health snapshot is an opaque blob, so narrow the share-map counts once
+  // here rather than at each use — the badge and the tooltip must agree on what
+  // counts as an error.
+  function shareMapRejects(a: AgentOut): number {
+    const sm = a.health?.share_map as Record<string, unknown> | undefined;
+    return sm && typeof sm.rejected === "number" ? sm.rejected : 0;
   }
 
   function isOnline(a: AgentOut): boolean {
@@ -476,6 +505,33 @@
 
   const capsOf = (a: AgentOut): AgentCapabilities | null =>
     (a.capabilities as AgentCapabilities | null) ?? null;
+
+  // Host-tool MINIMUM versions (2026-08-11). The per-agent judgement already
+  // rides each row as `tool_verdicts` — central computes it, because the same
+  // comparator has to judge central's own tools on the About page and two
+  // implementations would eventually disagree. What this fetch adds is the
+  // PROSE behind a verdict: the number and the one-line consequence that make
+  // an amber chip actionable instead of merely alarming.
+  //
+  // Fetched once on mount (static, fleet-wide, ~7 rows) and deliberately
+  // swallowed on failure: losing it costs a tooltip its numbers, and failing
+  // the whole Agents page over a tooltip would be a far worse trade.
+  let toolMinimums = $state<Record<string, HostToolMinimum>>({});
+  async function loadToolMinimums() {
+    try {
+      toolMinimums = minimumsByName(await listHostToolMinimums());
+    } catch {
+      /* see above — the verdict still colours the chip */
+    }
+  }
+
+  const TOOL_CHIP_CLASS: Record<"ok" | "warn" | "muted", string> = {
+    ok: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+    // Amber is reserved for `outdated`, and matches the "this agent will ignore"
+    // chips below: both mean "working, but not doing what you think".
+    warn: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+    muted: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+  };
 
   async function toggleDetail(a: AgentOut) {
     if (expanded === a.id) {
@@ -1032,23 +1088,21 @@ ${detail}
             </span>
           {/if}
           {#each CAPABILITY_TOOLS as tool (tool)}
-            {@const present = caps.tools?.[tool] === true}
-            {@const version = caps.tool_versions?.[tool]}
+            <!-- The chip carries a VERDICT, not just presence (2026-08-11).
+                 "present" and "present and good enough" are different answers:
+                 a tesseract 4.1.1 and a 5.3.4 used to render as the same green
+                 chip, and the version alone did not help anyone who does not
+                 carry upstream's release history in their head. Central judges
+                 (`tool_verdicts`), ./hostTools turns that into a tone + tooltip,
+                 and `unknown` is styled like neither good nor bad news because
+                 an ffmpeg git build is usually the newest one in the fleet. -->
+            {@const chip = toolChip(tool, caps, a.tool_verdicts, toolMinimums)}
             <span
-              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {present
-                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-                : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}"
-              title={present
-                ? version
-                  ? `${tool} ${version} was found on this agent host's PATH.`
-                  : `${tool} was found on this agent host's PATH, but did not report a version (an older build, or a wrapper script).`
-                : `${tool} is NOT on this agent host's PATH — capabilities that need it are unavailable here. Install it on the machine; no new agent build is required.`}>
-              <!-- The version is shown INLINE rather than only in the tooltip:
-                   "installed" and "installed and current" are different answers,
-                   and an ancient tesseract or ffmpeg is a real cause of bad
-                   output that a checkmark alone would hide. -->
-              {tool}
-              {present ? (version ?? "✓") : "✕"}
+              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {TOOL_CHIP_CLASS[chip.tone]}"
+              title={chip.title}>
+              <!-- The version stays INLINE rather than tooltip-only: it is the
+                   fact an operator compares across rows. -->
+              {chip.label}{chip.verdict === "outdated" ? " ⚠" : ""}
             </span>
           {/each}
           {#if caps.formats?.length}
@@ -1214,6 +1268,10 @@ ${detail}
                 {#if a.health?.local_overrides}
                   <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
                     title={healthTitle(a)}>local settings</span>
+                {/if}
+                {#if shareMapRejects(a) > 0}
+                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title="This agent skipped one or more malformed share-map entries, so those scan roots report no network location. A bad entry is never fatal (share hints are best-effort), which is why it needs saying here. Fix FILEARR_AGENT_SHARE_MAP where the agent is deployed, or the mapping in the agent's own roots editor.">share map errors</span>
                 {/if}
                 {#if a.last_auth_mode === "mtls"}
                   <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"

@@ -103,6 +103,11 @@ asks for OCR on a machine that has none. The check is deliberately conservative:
 an agent that has not yet advertised anything is reported as unknown rather than
 flagged.
 
+Each tool chip also shows the **version** found there and whether it clears the
+minimum Filearr recommends — see
+[Minimum recommended versions](#agent-tool-minimums) for the numbers, the
+reasoning behind each one, and what an amber chip is asking you to do.
+
 #### Host tools: what each one buys {#agent-host-tools}
 
 Every one of these is optional. Install only what the libraries on *that* host
@@ -118,28 +123,127 @@ need — the agent re-detects on start, and the console's matrix confirms it.
 | `tesseract` | OCR of images and scanned pages | No OCR anywhere on that host |
 | `ffmpeg` | Video poster-frame thumbnails (pre-existing capability) | Video items fall back to the placeholder icon |
 
-Typical installs:
+##### Minimum recommended versions {#agent-tool-minimums}
+
+Installed is not the same as good enough. A host running **tesseract 4.1.1** and
+one running 5.3.4 both answer "yes, OCR works here", and only one of them is
+running an engine upstream still maintains. So each agent's chip carries a
+**verdict** as well as a version, and central — not the agent — decides it, which
+is why a revised minimum needs a Filearr release rather than a fleet-wide agent
+rollout.
+
+| Tool | Minimum | Why that number | Below it |
+| --- | --- | --- | --- |
+| `ffprobe` | **4.3** | The first release where the Dolby Vision configuration record is a reportable side-data type (`AV_PKT_DATA_DOVI_CONF`, added 2020-04-22) | DV and some HDR side data are never mentioned, so those videos are indexed as ordinary SDR files with nothing to say anything was missed |
+| `ffmpeg` | **4.3** | Ships with ffprobe and is upgraded with it; also clears AV1 decoding via libdav1d (added in 4.1) | Newer codecs such as AV1 cannot be decoded, so those videos get the placeholder icon instead of a poster frame |
+| `tesseract` | **5.0.0** | 4.1.3 was the **final** 4.x release (2021-11-15); 5.0.0 arrived a fortnight later and every engine fix since has landed only there. 5.0 also moved LSTM inference to 32-bit floats with wider SIMD | OCR runs on an engine line abandoned in 2021 — slower, heavier, and missing four years of recognition and crash fixes. (The neural engine itself arrived in 4.0, so a 4.1 host is not *bad* at OCR; it is frozen) |
+| `exiftool` | **12.24** | Security: **CVE-2021-22204** lets a crafted image execute arbitrary Perl (7.44 → 12.23), fixed in 12.24 | A malicious file anywhere in a scanned library can run code as the user running the extractor |
+| `pdftotext`, `pdftoppm` | **22.09.0** | Security: **CVE-2022-38784**, an integer overflow in libpoppler's JBIG2 decoder (≤ 22.08.0), fixed in 22.09.0 — and both binaries decode untrusted page content | A crafted PDF can crash the extractor or execute code |
+| `pdfinfo` | **22.09.0** | The same poppler package version as the two above. pdfinfo itself only reads the document catalogue, so this is a **package-version proxy**, not a claim that pdfinfo is the exploitable binary | The host's poppler is older than the JBIG2 fix, which means `pdftotext`/`pdftoppm` on that machine are vulnerable |
+
+**What the console shows.** Every tool on the Agents page (and on
+**About → Extraction tools on this server**, which judges *central's* own tools
+by the same rule) carries one of four verdicts:
+
+| Verdict | Looks like | Means |
+| --- | --- | --- |
+| `ok` | green | Installed, and its version meets the minimum above |
+| `outdated` | **amber**, with `⚠` | Installed and demonstrably below the minimum. Hover for the version found, the version wanted, and what it costs |
+| `unknown` | grey | Installed but not judgeable — it reported no version, or its version has no comparable number in it. **Not a problem.** An `ffmpeg` built from git (`N-113579-g1c2d3e4`) lands here, and it is usually *newer* than any release, so Filearr says so instead of guessing |
+| `absent` | grey, with `✕` | Not installed |
+
+Nothing is ever *blocked* by a minimum: an outdated tool keeps working and keeps
+extracting. The verdict exists so that "the OCR on this one host is oddly bad" is
+a thing you can see rather than a thing you have to suspect.
+
+Fixing an amber chip is a **host** package upgrade — no new agent build, no
+re-enrollment. The installers below can do it: they go through the platform
+package manager, so re-running one picks up whatever the host's repositories
+currently offer. Where a distribution's repository is itself pinned to an old
+release (Ubuntu 22.04 still ships tesseract 4.1.1), the upgrade needs a newer
+distribution, a backports/PPA repository, or one of the direct downloads listed
+further down.
+
+##### The installer does this for you {#agent-tools-autoinstall}
+
+**Since 2026-08-10 the install scripts fetch these by default**, so in the normal
+case there is nothing to do:
+
+```bash
+# Linux / macOS — tools installed unless you pass -T
+curl -fsSL https://filearr.example.com/api/v1/agent-dist/install.sh | sh -s -- -t <token>
+curl -fsSL https://filearr.example.com/api/v1/agent-dist/install.sh | sh -s -- -t <token> -T
+```
+
+```powershell
+# Windows — tools installed unless you pass -SkipTools
+.\install-agent.ps1 -Token <token>
+.\install-agent.ps1 -Token <token> -SkipTools
+```
+
+They install through the **platform package manager and nothing else** —
+apt/dnf/zypper/pacman/apk, Homebrew, or winget. That is a deliberate limit: the
+alternative is downloading third-party archives of executables, which would make
+the installer a distributor of arbitrary binaries and put hash and signature
+verification on us for four tools across three platforms. Package managers
+already do that against signed repositories. Where none is available the script
+prints the links below and carries on — **a tool that fails to install never
+fails the agent install**, because extraction is opt-in and an agent with no
+tools is a perfectly good inventory agent.
+
+##### Installing them yourself {#agent-tools-manual}
 
 ```bash
 # Debian/Ubuntu
 sudo apt install ffmpeg poppler-utils libimage-exiftool-perl tesseract-ocr
+# Fedora/RHEL
+sudo dnf install ffmpeg poppler-utils perl-Image-ExifTool tesseract
+# Arch
+sudo pacman -S ffmpeg poppler perl-image-exiftool tesseract tesseract-data-eng
 # Alpine
 apk add ffmpeg poppler-utils exiftool tesseract-ocr tesseract-ocr-data-eng
-# macOS
+# macOS (Homebrew — never run as root)
 brew install ffmpeg poppler exiftool tesseract
 # Windows
-winget install Gyan.FFmpeg && winget install OliverBetz.ExifTool
-# poppler + tesseract on Windows: install the UB-Mannheim tesseract build and a
-# poppler release zip, then either put their bin\ dirs on PATH or point the agent
-# at them directly (FILEARR_AGENT_PDFTOTEXT_PATH, FILEARR_AGENT_TESSERACT_PATH, …).
+winget install Gyan.FFmpeg
+winget install oschwartz10612.Poppler
+winget install OliverBetz.ExifTool
+winget install UB-Mannheim.TesseractOCR
 ```
+
+Direct downloads, when a package manager is not an option:
+
+| Tool | Download | Notes |
+| --- | --- | --- |
+| ffmpeg / ffprobe | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (Windows) · [BtbN releases](https://github.com/BtbN/FFmpeg-Builds/releases) (Windows/Linux) · [johnvansickle.com](https://johnvansickle.com/ffmpeg/) (Linux static) · [osxexperts.net](https://osxexperts.net/) (macOS) | The "essentials" build is enough — Filearr only needs `ffprobe` for metadata and `ffmpeg` for poster frames. **Never use an `--enable-nonfree` build**: ffmpeg.org states those are not redistributable. |
+| poppler | [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) | Windows releases unpack to a **versioned** folder (`poppler-24.02.0\Library\bin`). The agent globs for that, so you do not have to rename it. |
+| exiftool | [exiftool.org](https://exiftool.org/) | The Windows zip ships `exiftool(-k).exe` — **rename it to `exiftool.exe`** or it pauses for a keypress and the extraction pass hangs on it. |
+| tesseract | [UB-Mannheim builds](https://github.com/UB-Mannheim/tesseract/wiki) (Windows) · [tesseract-ocr/tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast) (extra languages) | The installer **does not add itself to `PATH`** — see the note below. Extra languages are ~4 MB each from `tessdata_fast`; the "best" models are ~23 MB each and rarely worth it here. |
+
+!!! tip "Not on PATH? The agent looks anyway"
+    A service does not inherit your shell's `PATH` — a Windows service gets the
+    machine environment, and a launchd job famously lacks Homebrew's
+    `/opt/homebrew/bin`. Combined with installers that never touch `PATH` (the
+    Tesseract one does not), the classic symptom is "it works in my terminal and
+    the console says not installed".
+
+    So when `PATH` misses, the agent also probes the conventional locations:
+    `C:\Program Files\Tesseract-OCR`, `C:\Program Files\ExifTool`,
+    `C:\Program Files\ffmpeg\bin`, versioned `poppler-*\Library\bin`, the
+    winget/Chocolatey/Scoop shim directories, `/opt/homebrew/bin`,
+    `/usr/local/bin`, `/opt/local/bin`, `/snap/bin` and the Nix/Flatpak profile
+    paths. If your install is somewhere else, the `FILEARR_AGENT_*_PATH`
+    overrides below still win over everything.
 
 **Which install gets what.** The **container agent ships all of them** — ffmpeg,
 poppler-utils, exiftool and tesseract with English data — so a containerized host
 has no capability gaps and nothing to install. A **binary or service install**
 (the Windows service, a hand-placed binary) ships **none** of them: the agent is
 a single static executable and every tool above is a *host* program it shells out
-to, so those endpoints need the packages installed (or the path overrides below).
+to. That is why the installers fetch them, and why nothing is bundled into the
+agent download: bundling all four would add roughly 246 MB on Windows, 176 MB on
+Linux and 88–113 MB on macOS to a 35.8 MB binary, and would make each release a
+redistribution of GPL binaries with the licence obligations that carries.
 
 **Verifying what an agent actually found.** The agents table shows each tool as a
 chip with its **detected version** — `tesseract 5.3.4`, `ffmpeg 6.1.1-3ubuntu5` —
@@ -1071,7 +1175,7 @@ policy editor → *Local access*):
 | --- | --- |
 | `local_scan_control` | Pause / resume scanning; **Scan now** |
 | `local_schedule_control` | Edit `scan_cron`, `scan_interval_seconds`, `scan_on_start` |
-| `local_roots_control` | Add / remove scan roots |
+| `local_roots_control` | Add / remove scan roots, and set each root's **share mapping** |
 
 Three rules make this safe to hand out:
 
@@ -1102,6 +1206,44 @@ configuration — but an agent whose **configuration group** derives roots from
 would recompute the edit away. Removing a root only stops **future** scans of it;
 already-indexed items are left alone, because deleting them locally would
 replicate to central as a mass deletion (tombstoning stays the scan's job).
+
+#### Scan roots and share mappings {#local-share-mappings}
+
+The roots table pairs every configured root with its **share mapping** — the
+network location a file under that root reports, so the catalog can offer a
+network-open link (`\\tower\media\Movies\…`). Each row shows:
+
+- the location that resolves **today**, e.g. `smb://tower/media`, and which layer
+  supplied it: the machine's `FILEARR_AGENT_SHARE_MAP`, a mapping saved here, or
+  a share **discovered** on the host;
+- *no share mapping* when nothing covers the root — the useful signal, because an
+  unmapped root is cataloged normally and simply carries no network location,
+  with no other symptom anywhere;
+- *mapping is on the parent path …* when the location comes from a mapping on a
+  directory above the root, so you do not edit the wrong row.
+
+Malformed entries are listed above the table, verbatim, as skipped. A bad pair
+never fails a scan (share hints are best-effort by design), so before this
+listing existed a single typo meant one root quietly had no mapping forever.
+
+Accepted location forms are `smb://host/share[/sub]`, `\\host\share[\sub]` and
+`nfs://host/export[/sub]`; a submitted value is validated with the same parser
+the scanner uses, so anything this page accepts is a value the scanner will
+actually apply.
+
+!!! note "Who wins: the environment, then the local mapping, then discovery"
+    A root mapped by `FILEARR_AGENT_SHARE_MAP` is shown **read-only**, labelled
+    with the variable — that is machine configuration set where the agent is
+    deployed (compose file, Unraid template), and this page cannot rewrite it, so
+    an edit is refused rather than stored and ignored. Mappings saved here fill in
+    the roots the environment does *not* mention. Full rule and reasoning:
+    [Agent settings → Share mappings](reference/agent-settings.md#share-map-precedence).
+
+**Containers and Unraid** are the read-only case end to end: inside a container
+share discovery sees nothing, so the mapping can only come from the environment —
+for example `/mnt/user/media=smb://tower/media` in the Unraid template's *Share
+Map* field. The roots view is then the quickest way to confirm the variable
+parsed and applies to the roots you think it does.
 
 The agent reports what was changed locally in its **health snapshot**, so this is
 visible fleet-wide rather than only on the machine: the agents table shows a

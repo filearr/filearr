@@ -3,6 +3,7 @@ package inventory
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/filearr/filearr/agent/internal/extract"
@@ -58,8 +59,45 @@ func ResolveTool(name, envVar string) string {
 	if err != nil {
 		resolved = ""
 	}
+	// PATH miss, no explicit override: try the places these tools actually get
+	// installed. This is not a convenience — it is a correctness fix for the
+	// SERVICE case, which is how the agent normally runs.
+	//
+	// A Windows service, a launchd job and a systemd unit each start with a
+	// PATH that has nothing to do with the operator's interactive shell. The
+	// Tesseract installer does not add itself to PATH at all (live report,
+	// 2026-08-10: installed at C:\Program Files\Tesseract-OCR on a Windows agent
+	// and reported as absent), and Homebrew's /opt/homebrew/bin is famously
+	// missing from a launchd job's default PATH. In every one of those cases the
+	// operator has genuinely installed the tool, the console says "not
+	// installed", and the only fix was an env var they had no reason to expect
+	// they needed.
+	//
+	// The override still wins and is still the documented escape hatch for a
+	// non-standard location; this only runs when PATH found nothing and the
+	// operator said nothing.
+	if resolved == "" && override == "" {
+		resolved = searchWellKnown(name)
+	}
 	toolCache.Store(key, resolved)
 	return resolved
+}
+
+// searchWellKnown probes the conventional install locations for `name` on this
+// OS, returning the first executable hit or "". Each candidate is verified with
+// LookPath, so a stale directory or a non-executable file is skipped rather than
+// returned as a path that later fails to run.
+func searchWellKnown(name string) string {
+	for _, dir := range wellKnownDirs(name) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name+exeSuffix)
+		if p, err := exec.LookPath(candidate); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // FFmpegPath resolves the host ffmpeg (video poster frames), or "".

@@ -50,7 +50,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import __version__
+from filearr import __version__, toolversions
 from filearr.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -547,12 +547,20 @@ def _configured_tool_paths() -> dict[str, str]:
 
 def host_tools() -> list[dict]:
     """The extraction host tools ON THIS (central) machine: present or absent,
-    and the version where the tool will state one.
+    the version where the tool will state one, and how that version measures up.
 
-    Row shape: ``{name, purpose, present, version, path, url}``. ``present``
-    with ``version: null`` is a real and distinct state — the binary resolved
-    but would not say which build it is — and the UI renders it as "installed,
-    version unknown" rather than a blank.
+    Row shape:
+    ``{name, purpose, present, version, path, url, minimum_version, verdict, impact}``.
+
+    ``present`` with ``version: null`` is a real and distinct state — the binary
+    resolved but would not say which build it is — and the UI renders it as
+    "installed, version unknown" rather than a blank.
+
+    ``verdict`` (``ok``/``outdated``/``unknown``/``absent``) is computed by
+    :func:`filearr.toolversions.tool_verdict`, the SAME function that judges an
+    agent's advertised tools. Sharing it is the point: central's own poppler and
+    a remote agent's poppler must be called old by the same rule, or the two
+    pages contradict each other and neither gets believed.
 
     Not cached as a whole (``shutil.which`` is a cheap path scan and an operator
     who just installed exiftool should see it without a restart); the expensive
@@ -561,14 +569,18 @@ def host_tools() -> list[dict]:
     for name, configured in _configured_tool_paths().items():
         purpose, url = _TOOL_INFO[name]
         resolved = shutil.which(configured)
+        version = _probe_tool_version(name, resolved) if resolved else None
         rows.append(
             {
                 "name": name,
                 "purpose": purpose,
                 "present": resolved is not None,
-                "version": _probe_tool_version(name, resolved) if resolved else None,
+                "version": version,
                 "path": resolved,
                 "url": url,
+                "minimum_version": toolversions.minimum_version(name),
+                "verdict": toolversions.tool_verdict(name, resolved is not None, version),
+                "impact": toolversions.minimum_impact(name),
             }
         )
     return rows

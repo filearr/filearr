@@ -721,7 +721,9 @@ async def about_view(session: AsyncSession = Depends(get_session)) -> dict:
     platform), ``services`` (Meilisearch/PostgreSQL probed live, Procrastinate
     and SQLAlchemy from package metadata), ``python_packages`` (every DIRECT
     dependency with its INSTALLED version and a documentation link),
-    ``host_tools`` (ffprobe/ffmpeg/exiftool/tesseract/poppler on this machine),
+    ``host_tools`` (ffprobe/ffmpeg/exiftool/tesseract/poppler on this machine,
+    each with central's ``verdict`` against the published minimum version —
+    the same judgement the fleet console applies to an agent's tools),
     ``agents`` (fleet ``agent_version`` histogram; null when agents are off) and
     ``embedding`` (the configured HF model, whether it is cached here, and the
     commit sha of the cached revision).

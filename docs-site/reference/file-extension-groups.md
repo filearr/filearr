@@ -80,16 +80,19 @@ The coarse parent layer. Each category rolls up one or more groups and declares 
 ### `raster-photo` — Raster / photo
 
 *Parent `file_category`:* `image`  
-*Extensions (50):* `.avif`, `.avifs`, `.bmp`, `.bpg`, `.cur`, `.dds`, `.dib`, `.exr`, `.fit`, `.fits`, `.flif`, `.hdr`, `.heic`, `.heics`, `.heif`, `.hif`, `.ico`, `.j2k`, `.jfif`, `.jif`, `.jng`, `.jp2`, `.jpe`, `.jpeg`, `.jpf`, `.jpg`, `.jpm`, `.jpx`, `.jxl`, `.pam`, `.pbm`, `.pct`, `.pcx`, `.pgm`, `.pict`, `.png`, `.pnm`, `.ppm`, `.qoi`, `.ras`, `.rgb`, `.sgi`, `.targa`, `.tga`, `.tif`, `.tiff`, `.wbmp`, `.webp`, `.xbm`, `.xpm`
+*Extensions (57):* `.avif`, `.avifs`, `.bmp`, `.bpg`, `.cur`, `.dds`, `.dib`, `.exr`, `.fit`, `.fits`, `.flif`, `.hdr`, `.heic`, `.heics`, `.heif`, `.hif`, `.icns`, `.ico`, `.iff`, `.ilbm`, `.j2k`, `.jfif`, `.jif`, `.jng`, `.jp2`, `.jpc`, `.jpe`, `.jpeg`, `.jpf`, `.jpg`, `.jpm`, `.jpx`, `.jxl`, `.mdi`, `.pam`, `.pbm`, `.pct`, `.pcx`, `.pgm`, `.pict`, `.png`, `.pnm`, `.ppm`, `.qoi`, `.qtif`, `.ras`, `.rgb`, `.sgi`, `.targa`, `.tga`, `.tif`, `.tiff`, `.wbmp`, `.webp`, `.xbm`, `.xpm`, `.xwd`
 
 Pixel (bitmap) images — photographs, screenshots, web graphics and their HDR/high-bit-depth cousins. The everyday image formats.
 
 ### `raw-photo` — Camera RAW
 
 *Parent `file_category`:* `image`  
-*Extensions (39):* `.3fr`, `.ari`, `.arw`, `.bay`, `.cap`, `.cr2`, `.cr3`, `.crw`, `.cs1`, `.dcr`, `.dcs`, `.dng`, `.drf`, `.eip`, `.erf`, `.fff`, `.gpr`, `.iiq`, `.k25`, `.kc2`, `.kdc`, `.mdc`, `.mef`, `.mos`, `.mrw`, `.nef`, `.nksc`, `.nrw`, `.orf`, `.pef`, `.raf`, `.raw`, `.rw2`, `.rwl`, `.rwz`, `.sr2`, `.srf`, `.srw`, `.x3f`
+*Extensions (40):* `.3fr`, `.ari`, `.arw`, `.bay`, `.cap`, `.cr2`, `.cr3`, `.crw`, `.cs1`, `.dcm`, `.dcr`, `.dcs`, `.dng`, `.drf`, `.eip`, `.erf`, `.fff`, `.gpr`, `.iiq`, `.k25`, `.kc2`, `.kdc`, `.mdc`, `.mef`, `.mos`, `.mrw`, `.nef`, `.nksc`, `.nrw`, `.orf`, `.pef`, `.raf`, `.raw`, `.rw2`, `.rwl`, `.rwz`, `.sr2`, `.srf`, `.srw`, `.x3f`
 
 Unprocessed camera sensor data (mostly one proprietary format per manufacturer) plus the open Adobe DNG. Needs a RAW developer, not a plain image viewer.
+
+!!! info "Notes"
+    ``dcm`` (DICOM medical imaging) groups here rather than under ``raster-photo``: like camera RAW it is instrument capture data with an embedded metadata header that a plain image viewer will not open.
 
 ### `vector-image` — Vector image
 
@@ -121,24 +124,24 @@ Short looping animations delivered as an image rather than a video container.
 ### `video` — Video
 
 *Parent `file_category`:* `video`  
-*Extensions (52):* `.3g2`, `.3gp`, `.3gpp`, `.amv`, `.asf`, `.av1`, `.avi`, `.braw`, `.dav`, `.divx`, `.dv`, `.dvr-ms`, `.f4v`, `.flv`, `.gxf`, `.h264`, `.h265`, `.hevc`, `.ifo`, `.m1v`, `.m2t`, `.m2ts`, `.m2v`, `.m4s`, `.m4v`, `.mkv`, `.mod`, `.mov`, `.mp4`, `.mpe`, `.mpeg`, `.mpg`, `.mpv`, `.mts`, `.mxf`, `.nsv`, `.ogm`, `.ogv`, `.qt`, `.r3d`, `.rm`, `.rmvb`, `.roq`, `.swf`, `.tod`, `.ts`, `.tts`, `.vob`, `.webm`, `.wmv`, `.wtv`, `.y4m`
+*Extensions (80):* `.264`, `.265`, `.3g2`, `.3gp`, `.3gpp`, `.amv`, `.asf`, `.av1`, `.avc`, `.avi`, `.braw`, `.bvr`, `.dav`, `.divx`, `.dv`, `.dvr`, `.dvr-ms`, `.f4v`, `.flv`, `.fmp4`, `.fmpi`, `.fxm`, `.g64`, `.g64x`, `.gmp4`, `.gxf`, `.h264`, `.h265`, `.h26l`, `.h3r`, `.hevc`, `.hm4`, `.ifo`, `.m1v`, `.m2t`, `.m2ts`, `.m2v`, `.m4s`, `.m4v`, `.mcg`, `.mkv`, `.mod`, `.moov`, `.mov`, `.movie`, `.mp4`, `.mpe`, `.mpeg`, `.mpg`, `.mpv`, `.mts`, `.mxf`, `.n3r`, `.nsv`, `.ogm`, `.ogv`, `.qt`, `.qtvr`, `.r3d`, `.rcd`, `.rm`, `.rmj`, `.rmm`, `.rms`, `.rmvb`, `.rmx`, `.roq`, `.rv`, `.rvx`, `.swf`, `.tod`, `.ts`, `.tts`, `.viv`, `.vivo`, `.vob`, `.webm`, `.wmv`, `.wtv`, `.y4m`
 
 Moving-image containers and streams (movies, clips, recordings).
 
 !!! info "Notes"
-    ``ts``/``mts`` are MPEG transport streams here, not TypeScript — ``tsx``/``cts`` still classify as source code.
+    ``ts``/``mts`` are MPEG transport streams here, not TypeScript — ``tsx``/``cts`` still classify as source code. CCTV/NVR/dashcam recorder containers (``bvr``, ``g64``/``g64x``, ``dvr``, ``rcd``, …) are video too, but most cannot be probed — see the unsupported gate in ``tasks/extract.py``. Pelco's ``pef`` is deliberately NOT claimed here (Pentax RAW already owns that extension), and the generic ``blk``/``pic``/``sec`` recorder suffixes are left unmapped rather than handed to one CCTV vendor (``pic`` is a long-established raster-image extension).
 
 ### `audio-lossy` — Lossy audio
 
 *Parent `file_category`:* `audio`  
-*Extensions (26):* `.3ga`, `.aac`, `.ac3`, `.amr`, `.awb`, `.dts`, `.eac3`, `.gsm`, `.m4a`, `.m4r`, `.mka`, `.mp1`, `.mp2`, `.mp3`, `.mpa`, `.mpc`, `.oga`, `.ogg`, `.opus`, `.qcp`, `.ra`, `.ram`, `.spx`, `.vqf`, `.weba`, `.wma`
+*Extensions (33):* `.3ga`, `.aa3`, `.aac`, `.ac3`, `.amr`, `.at3`, `.awb`, `.dts`, `.eac3`, `.f4a`, `.gsm`, `.m4a`, `.m4r`, `.mka`, `.mp1`, `.mp2`, `.mp3`, `.mpa`, `.mpc`, `.mpga`, `.oga`, `.ogg`, `.ogx`, `.oma`, `.opus`, `.qcp`, `.ra`, `.ram`, `.rax`, `.spx`, `.vqf`, `.weba`, `.wma`
 
 Perceptually compressed audio (MP3/AAC/Ogg/Opus/…) — smaller files, irreversible quality loss.
 
 ### `audio-lossless` — Lossless / PCM audio
 
 *Parent `file_category`:* `audio`  
-*Extensions (28):* `.aif`, `.aifc`, `.aiff`, `.alac`, `.ape`, `.au`, `.bwf`, `.caf`, `.dff`, `.dsd`, `.dsf`, `.flac`, `.l16`, `.la`, `.mlp`, `.ofr`, `.ofs`, `.pcm`, `.rf64`, `.shn`, `.snd`, `.tak`, `.tta`, `.w64`, `.wav`, `.wave`, `.wv`, `.wvc`
+*Extensions (29):* `.aif`, `.aifc`, `.aiff`, `.alac`, `.ape`, `.au`, `.bwf`, `.caf`, `.dff`, `.dsd`, `.dsf`, `.flac`, `.l16`, `.la`, `.mlp`, `.ofr`, `.ofs`, `.pcm`, `.rf64`, `.shn`, `.snd`, `.tak`, `.tta`, `.voc`, `.w64`, `.wav`, `.wave`, `.wv`, `.wvc`
 
 Losslessly compressed or uncompressed PCM/DSD audio (FLAC/ALAC/WAV/AIFF/APE/…) — bit-exact reconstruction.
 
@@ -148,24 +151,24 @@ Losslessly compressed or uncompressed PCM/DSD audio (FLAC/ALAC/WAV/AIFF/APE/…)
 ### `audiobook` — Audiobook
 
 *Parent `file_category`:* `audio`  
-*Extensions (4):* `.aa`, `.aax`, `.aaxc`, `.m4b`
+*Extensions (5):* `.aa`, `.aax`, `.aaxc`, `.f4b`, `.m4b`
 
 Chapterised spoken-word audiobook containers (M4B and Audible formats).
 
 ### `audio-project` — Audio project, sampler & instrument
 
 *Parent `file_category`:* `audio`  
-*Extensions (54):* `.adg`, `.adv`, `.agr`, `.akp`, `.alp`, `.als`, `.aup`, `.aup3`, `.aupreset`, `.bwproject`, `.cpr`, `.cwb`, `.cwp`, `.dawproject`, `.dls`, `.exs`, `.ffp`, `.flp`, `.fxb`, `.fxp`, `.gig`, `.h2song`, `.kit`, `.logic`, `.logicx`, `.mmp`, `.mmpz`, `.nkc`, `.nki`, `.nkm`, `.nksf`, `.nksn`, `.nkx`, `.npr`, `.pat`, `.ptf`, `.pts`, `.ptx`, `.rcy`, `.reapeaks`, `.rex`, `.rns`, `.rpp`, `.rx2`, `.ses`, `.sesx`, `.sf2`, `.sf3`, `.sfark`, `.sfz`, `.sng`, `.sxt`, `.syx`, `.vstpreset`
+*Extensions (73):* `.669`, `.adg`, `.adv`, `.agr`, `.akp`, `.alp`, `.als`, `.aup`, `.aup3`, `.aupreset`, `.bwproject`, `.cpr`, `.cwb`, `.cwp`, `.dawproject`, `.dls`, `.exs`, `.ffp`, `.flp`, `.fxb`, `.fxp`, `.gig`, `.h2song`, `.it`, `.kar`, `.kit`, `.logic`, `.logicx`, `.m15`, `.med`, `.mid`, `.midi`, `.minipsf`, `.mmp`, `.mmpz`, `.mo3`, `.mtm`, `.nkc`, `.nki`, `.nkm`, `.nksf`, `.nksn`, `.nkx`, `.npr`, `.pat`, `.psflib`, `.ptf`, `.pts`, `.ptx`, `.rcy`, `.reapeaks`, `.rex`, `.rmi`, `.rns`, `.rpp`, `.rx2`, `.s3m`, `.ses`, `.sesx`, `.sf2`, `.sf3`, `.sfark`, `.sfz`, `.sid`, `.sng`, `.stm`, `.sxt`, `.syx`, `.ult`, `.uni`, `.vstpreset`, `.xi`, `.xmf`
 
 Digital-audio-workstation project/session files and sampler / synth instrument, patch, sound-font and loop formats — production assets, not finished audio.
 
 !!! info "Notes"
-    ``ptx`` is a Pro Tools session here (not Pentax RAW).
+    ``ptx`` is a Pro Tools session here (not Pentax RAW). MIDI (``mid``/``midi``/``kar``/``rmi``/``xmf``) and the tracker-module family group here rather than under ``audio-lossy``/``audio-lossless``: both are instrument and sequence DATA a synth must render, not recorded audio. The tracker cluster conspicuously lacks ``mod`` — ``video`` already claims it (JVC camcorder) — and ``amf`` (3D-model) / ``psm`` (CAD) have the same pre-existing collision shape. ``psf`` is left unmapped on purpose: Linux console font vs PlayStation Sound Format is a genuine coin flip, whereas ``minipsf``/``psflib`` are unambiguous and are mapped.
 
 ### `playlist` — Playlist
 
 *Parent `file_category`:* `audio`  
-*Extensions (15):* `.aimppl`, `.asx`, `.b4s`, `.cue`, `.fpl`, `.kpl`, `.m3u`, `.m3u8`, `.pla`, `.pls`, `.wax`, `.wpl`, `.wvx`, `.xspf`, `.zpl`
+*Extensions (17):* `.aimppl`, `.asx`, `.b4s`, `.cue`, `.fpl`, `.kpl`, `.m3u`, `.m3u8`, `.mpls`, `.pla`, `.pls`, `.wax`, `.wmx`, `.wpl`, `.wvx`, `.xspf`, `.zpl`
 
 Ordered references to media tracks/clips (and cue sheets) — the playlist itself carries no audio/video payload.
 
@@ -182,7 +185,7 @@ Timed-text subtitle, caption and synced-lyric sidecar formats.
 ### `document-text` — Plain text document
 
 *Parent `file_category`:* `document`  
-*Extensions (10):* `.1st`, `.ans`, `.diz`, `.etx`, `.me`, `.nfo`, `.readme`, `.text`, `.txt`, `.wtx`
+*Extensions (11):* `.1st`, `.ans`, `.diz`, `.etx`, `.me`, `.nfo`, `.pgn`, `.readme`, `.text`, `.txt`, `.wtx`
 
 Human-readable plain-text documents with no rich formatting model.
 
@@ -196,7 +199,7 @@ Rich word-processor documents (Word/OpenDocument/Pages/WordPerfect/…) with sty
 ### `pdf` — PDF & page description
 
 *Parent `file_category`:* `document`  
-*Extensions (8):* `.fdf`, `.oxps`, `.pdf`, `.prn`, `.ps`, `.xdp`, `.xfdf`, `.xps`
+*Extensions (10):* `.dvi`, `.fdf`, `.oxps`, `.pcl`, `.pdf`, `.prn`, `.ps`, `.xdp`, `.xfdf`, `.xps`
 
 Fixed-layout page-description documents — PDF and the PostScript / XPS print family.
 
@@ -268,7 +271,7 @@ Digital typefaces and font-editor sources (TrueType/OpenType/WOFF/…).
 ### `source-code` — Source code
 
 *Parent `file_category`:* `development`  
-*Extensions (147):* `.ada`, `.adb`, `.ads`, `.asm`, `.au3`, `.bas`, `.c`, `.c++`, `.cairo`, `.cbl`, `.cc`, `.cjs`, `.cl`, `.clj`, `.cljc`, `.cljs`, `.cob`, `.cobol`, `.coffee`, `.comp`, `.cpp`, `.cpy`, `.cr`, `.cs`, `.csx`, `.cts`, `.cu`, `.cuh`, `.cxx`, `.d`, `.dart`, `.dpr`, `.edn`, `.eex`, `.el`, `.elm`, `.erl`, `.ex`, `.f`, `.f03`, `.f08`, `.f90`, `.f95`, `.for`, `.frag`, `.fs`, `.fsi`, `.fsscript`, `.fsx`, `.ftn`, `.gd`, `.gemspec`, `.geom`, `.glsl`, `.go`, `.groovy`, `.gvy`, `.gy`, `.h`, `.h++`, `.heex`, `.hh`, `.hlsl`, `.hpp`, `.hrl`, `.hs`, `.hx`, `.hxml`, `.hxx`, `.i`, `.inc`, `.inl`, `.ino`, `.ipp`, `.jav`, `.java`, `.jl`, `.js`, `.jsx`, `.kt`, `.ktm`, `.kts`, `.leex`, `.lhs`, `.lisp`, `.litcoffee`, `.lsp`, `.lua`, `.m`, `.metal`, `.mjs`, `.ml`, `.mli`, `.mm`, `.move`, `.nasm`, `.nim`, `.nims`, `.pas`, `.php`, `.php3`, `.php4`, `.php5`, `.phps`, `.phtml`, `.pl`, `.pm`, `.pp`, `.purs`, `.pxd`, `.pxi`, `.py`, `.pyi`, `.pyw`, `.pyx`, `.r`, `.rake`, `.rb`, `.rbw`, `.re`, `.rei`, `.rkt`, `.rpy`, `.rs`, `.s`, `.sc`, `.scala`, `.scm`, `.sol`, `.ss`, `.sv`, `.svh`, `.swift`, `.t`, `.tcc`, `.tcl`, `.tpp`, `.tsx`, `.v`, `.vala`, `.vapi`, `.vb`, `.vert`, `.vhdl`, `.wat`, `.wgsl`, `.zig`
+*Extensions (149):* `.ada`, `.adb`, `.ads`, `.asm`, `.au3`, `.bas`, `.c`, `.c++`, `.cairo`, `.cbl`, `.cc`, `.cjs`, `.cl`, `.clj`, `.cljc`, `.cljs`, `.cob`, `.cobol`, `.coffee`, `.comp`, `.cpp`, `.cpy`, `.cr`, `.cs`, `.csx`, `.cts`, `.cu`, `.cuh`, `.cxx`, `.d`, `.dart`, `.diff`, `.dpr`, `.edn`, `.eex`, `.el`, `.elm`, `.erl`, `.ex`, `.f`, `.f03`, `.f08`, `.f90`, `.f95`, `.for`, `.frag`, `.fs`, `.fsi`, `.fsscript`, `.fsx`, `.ftn`, `.gd`, `.gemspec`, `.geom`, `.glsl`, `.go`, `.groovy`, `.gvy`, `.gy`, `.h`, `.h++`, `.heex`, `.hh`, `.hlsl`, `.hpp`, `.hrl`, `.hs`, `.hx`, `.hxml`, `.hxx`, `.i`, `.inc`, `.inl`, `.ino`, `.ipp`, `.jav`, `.java`, `.jl`, `.js`, `.jsx`, `.kt`, `.ktm`, `.kts`, `.leex`, `.lhs`, `.lisp`, `.litcoffee`, `.lsp`, `.lua`, `.m`, `.metal`, `.mjs`, `.ml`, `.mli`, `.mm`, `.move`, `.nasm`, `.nim`, `.nims`, `.pas`, `.patch`, `.php`, `.php3`, `.php4`, `.php5`, `.phps`, `.phtml`, `.pl`, `.pm`, `.pp`, `.purs`, `.pxd`, `.pxi`, `.py`, `.pyi`, `.pyw`, `.pyx`, `.r`, `.rake`, `.rb`, `.rbw`, `.re`, `.rei`, `.rkt`, `.rpy`, `.rs`, `.s`, `.sc`, `.scala`, `.scm`, `.sol`, `.ss`, `.sv`, `.svh`, `.swift`, `.t`, `.tcc`, `.tcl`, `.tpp`, `.tsx`, `.v`, `.vala`, `.vapi`, `.vb`, `.vert`, `.vhdl`, `.wat`, `.wgsl`, `.zig`
 
 Programming-language source files across the common language ecosystems.
 
@@ -302,7 +305,7 @@ Literate computational notebooks (Jupyter, R Markdown, Quarto).
 ### `config-data` — Config & structured data
 
 *Parent `file_category`:* `development`  
-*Extensions (67):* `.avsc`, `.babelrc`, `.bazel`, `.bzl`, `.capnp`, `.cfg`, `.cmake`, `.cnf`, `.conf`, `.config`, `.containerfile`, `.csproj`, `.desktop`, `.dhall`, `.dockerfile`, `.dotenv`, `.editorconfig`, `.env`, `.eslintrc`, `.fbs`, `.geojson`, `.gql`, `.gradle`, `.graphql`, `.hcl`, `.ini`, `.json`, `.json5`, `.jsonc`, `.jsonl`, `.jsonnet`, `.kdl`, `.libsonnet`, `.lock`, `.mak`, `.mk`, `.ndjson`, `.ninja`, `.nix`, `.npmrc`, `.pbxproj`, `.plist`, `.prefs`, `.prettierrc`, `.pri`, `.prop`, `.properties`, `.proto`, `.rc`, `.reg`, `.resx`, `.ron`, `.sbt`, `.service`, `.sln`, `.tf`, `.tfstate`, `.tfvars`, `.thrift`, `.toml`, `.topojson`, `.unit`, `.vcxproj`, `.xcconfig`, `.yaml`, `.yarnrc`, `.yml`
+*Extensions (73):* `.avsc`, `.babelrc`, `.bazel`, `.bzl`, `.capnp`, `.cfg`, `.cmake`, `.cnf`, `.conf`, `.config`, `.containerfile`, `.csproj`, `.desktop`, `.dhall`, `.dockerfile`, `.dotenv`, `.editorconfig`, `.env`, `.eslintrc`, `.fbs`, `.gcrd`, `.geojson`, `.gql`, `.gradle`, `.graphql`, `.hcl`, `.ics`, `.ini`, `.json`, `.json5`, `.jsonc`, `.jsonl`, `.jsonnet`, `.kdl`, `.libsonnet`, `.lock`, `.mak`, `.mk`, `.ndjson`, `.ninja`, `.nix`, `.npmrc`, `.pbxproj`, `.plist`, `.prefs`, `.prettierrc`, `.pri`, `.prop`, `.properties`, `.proto`, `.rc`, `.reg`, `.resx`, `.ron`, `.sbt`, `.service`, `.sln`, `.tf`, `.tfstate`, `.tfvars`, `.thrift`, `.toml`, `.topojson`, `.torrent`, `.unit`, `.vcf`, `.vcs`, `.vct`, `.vcxproj`, `.xcconfig`, `.yaml`, `.yarnrc`, `.yml`
 
 Machine-readable configuration and structured-data / serialization files (JSON/YAML/TOML/INI/env/infrastructure-as-code/…).
 
@@ -364,7 +367,7 @@ X.509 certificates, cryptographic keys, keystores and signatures.
 ### `log` — Log & diagnostic
 
 *Parent `file_category`:* `system`  
-*Extensions (14):* `.dmp`, `.err`, `.etl`, `.evt`, `.evtx`, `.hprof`, `.journal`, `.log`, `.log1`, `.log2`, `.logs`, `.ltsv`, `.mdmp`, `.trace`
+*Extensions (16):* `.dmp`, `.err`, `.etl`, `.evt`, `.evtx`, `.hprof`, `.journal`, `.log`, `.log1`, `.log2`, `.logs`, `.ltsv`, `.mdmp`, `.pcap`, `.pcapng`, `.trace`
 
 Application/system logs and diagnostic event traces.
 
@@ -379,21 +382,21 @@ No matching group — an unrecognised or absent extension. The bucket ``file_gro
 
 | Group | Label | Parent `file_category` | # ext |
 | --- | --- | --- | --: |
-| `raster-photo` | Raster / photo | `image` | 50 |
-| `raw-photo` | Camera RAW | `image` | 39 |
+| `raster-photo` | Raster / photo | `image` | 57 |
+| `raw-photo` | Camera RAW | `image` | 40 |
 | `vector-image` | Vector image | `image` | 24 |
 | `layered-image` | Layered / authoring image | `image` | 20 |
 | `animated-image` | Animated image | `image` | 7 |
-| `video` | Video | `video` | 52 |
-| `audio-lossy` | Lossy audio | `audio` | 26 |
-| `audio-lossless` | Lossless / PCM audio | `audio` | 28 |
-| `audiobook` | Audiobook | `audio` | 4 |
-| `audio-project` | Audio project, sampler & instrument | `audio` | 54 |
-| `playlist` | Playlist | `audio` | 15 |
+| `video` | Video | `video` | 80 |
+| `audio-lossy` | Lossy audio | `audio` | 33 |
+| `audio-lossless` | Lossless / PCM audio | `audio` | 29 |
+| `audiobook` | Audiobook | `audio` | 5 |
+| `audio-project` | Audio project, sampler & instrument | `audio` | 73 |
+| `playlist` | Playlist | `audio` | 17 |
 | `subtitle` | Subtitle / caption | `video` | 21 |
-| `document-text` | Plain text document | `document` | 10 |
+| `document-text` | Plain text document | `document` | 11 |
 | `document-office` | Word-processor / office document | `document` | 30 |
-| `pdf` | PDF & page description | `document` | 8 |
+| `pdf` | PDF & page description | `document` | 10 |
 | `presentation` | Presentation | `document` | 21 |
 | `spreadsheet` | Spreadsheet / tabular | `document` | 34 |
 | `ebook` | E-book | `document` | 29 |
@@ -402,11 +405,11 @@ No matching group — an unrecognised or absent extension. The bucket ``file_gro
 | `3d-model` | 3D model / mesh | `three-d-cad` | 52 |
 | `cad` | CAD & engineering | `three-d-cad` | 58 |
 | `font` | Font | `system` | 31 |
-| `source-code` | Source code | `development` | 147 |
+| `source-code` | Source code | `development` | 149 |
 | `script` | Shell / automation script | `development` | 36 |
 | `web-asset` | Web asset | `development` | 14 |
 | `notebook` | Computational notebook | `development` | 8 |
-| `config-data` | Config & structured data | `development` | 67 |
+| `config-data` | Config & structured data | `development` | 73 |
 | `database` | Database & dataset | `system` | 54 |
 | `archive` | Archive / compressed | `archive` | 74 |
 | `disk-image` | Disk / filesystem image | `archive` | 48 |
@@ -414,7 +417,7 @@ No matching group — an unrecognised or absent extension. The bucket ``file_gro
 | `executable-binary` | Executable / binary | `system` | 37 |
 | `email` | E-mail & mailbox | `system` | 17 |
 | `certificate-key` | Certificate & key | `system` | 33 |
-| `log` | Log & diagnostic | `system` | 14 |
+| `log` | Log & diagnostic | `system` | 16 |
 | `other` | Other / unknown | `other` | 0 |
 
 ## Extension index
@@ -425,6 +428,8 @@ Every mapped extension, alphabetically, with its group.
 | --- | --- |
 | `.123` | `spreadsheet` |
 | `.1st` | `document-text` |
+| `.264` | `video` |
+| `.265` | `video` |
 | `.3dm` | `cad` |
 | `.3ds` | `3d-model` |
 | `.3dxml` | `cad` |
@@ -435,9 +440,11 @@ Every mapped extension, alphabetically, with its group.
 | `.3gpp` | `video` |
 | `.3mf` | `3d-model` |
 | `.602` | `document-office` |
+| `.669` | `audio-project` |
 | `.7z` | `archive` |
 | `.a` | `executable-binary` |
 | `.aa` | `audiobook` |
+| `.aa3` | `audio-lossy` |
 | `.aab` | `package-installer` |
 | `.aac` | `audio-lossy` |
 | `.aar` | `package-installer` |
@@ -507,6 +514,7 @@ Every mapped extension, alphabetically, with its group.
 | `.ass` | `subtitle` |
 | `.astro` | `web-asset` |
 | `.asx` | `playlist` |
+| `.at3` | `audio-lossy` |
 | `.atom` | `markup` |
 | `.au` | `audio-lossless` |
 | `.au3` | `source-code` |
@@ -514,6 +522,7 @@ Every mapped extension, alphabetically, with its group.
 | `.aup3` | `audio-project` |
 | `.aupreset` | `audio-project` |
 | `.av1` | `video` |
+| `.avc` | `video` |
 | `.avi` | `video` |
 | `.avif` | `raster-photo` |
 | `.avifs` | `raster-photo` |
@@ -553,6 +562,7 @@ Every mapped extension, alphabetically, with its group.
 | `.bst` | `markup` |
 | `.btm` | `script` |
 | `.bundle` | `executable-binary` |
+| `.bvr` | `video` |
 | `.bwf` | `audio-lossless` |
 | `.bwproject` | `audio-project` |
 | `.bz2` | `archive` |
@@ -659,6 +669,7 @@ Every mapped extension, alphabetically, with its group.
 | `.db3` | `database` |
 | `.dbf` | `database` |
 | `.dbx` | `email` |
+| `.dcm` | `raw-photo` |
 | `.dcr` | `raw-photo` |
 | `.dcs` | `raw-photo` |
 | `.ddl` | `database` |
@@ -675,6 +686,7 @@ Every mapped extension, alphabetically, with its group.
 | `.dia` | `vector-image` |
 | `.dib` | `raster-photo` |
 | `.dif` | `spreadsheet` |
+| `.diff` | `source-code` |
 | `.dita` | `markup` |
 | `.divx` | `video` |
 | `.diz` | `document-text` |
@@ -711,6 +723,8 @@ Every mapped extension, alphabetically, with its group.
 | `.dtx` | `markup` |
 | `.dump` | `database` |
 | `.dv` | `video` |
+| `.dvi` | `pdf` |
+| `.dvr` | `video` |
 | `.dvr-ms` | `video` |
 | `.dwf` | `cad` |
 | `.dwfx` | `cad` |
@@ -767,6 +781,8 @@ Every mapped extension, alphabetically, with its group.
 | `.f08` | `source-code` |
 | `.f3d` | `cad` |
 | `.f3z` | `cad` |
+| `.f4a` | `audio-lossy` |
+| `.f4b` | `audiobook` |
 | `.f4v` | `video` |
 | `.f90` | `source-code` |
 | `.f95` | `source-code` |
@@ -796,6 +812,8 @@ Every mapped extension, alphabetically, with its group.
 | `.flp` | `audio-project` |
 | `.flv` | `video` |
 | `.fmp12` | `database` |
+| `.fmp4` | `video` |
+| `.fmpi` | `video` |
 | `.fnt` | `font` |
 | `.fodg` | `vector-image` |
 | `.fodp` | `presentation` |
@@ -815,13 +833,17 @@ Every mapped extension, alphabetically, with its group.
 | `.fsx` | `source-code` |
 | `.ftn` | `source-code` |
 | `.fxb` | `audio-project` |
+| `.fxm` | `video` |
 | `.fxp` | `audio-project` |
+| `.g64` | `video` |
+| `.g64x` | `video` |
 | `.gbr` | `cad` |
 | `.gca` | `archive` |
 | `.gcf` | `archive` |
 | `.gcm` | `disk-image` |
 | `.gco` | `3d-model` |
 | `.gcode` | `3d-model` |
+| `.gcrd` | `config-data` |
 | `.gd` | `source-code` |
 | `.gdb` | `database` |
 | `.gdoc` | `document-office` |
@@ -842,6 +864,7 @@ Every mapped extension, alphabetically, with its group.
 | `.gltf2` | `3d-model` |
 | `.glyphs` | `font` |
 | `.glyphspackage` | `font` |
+| `.gmp4` | `video` |
 | `.gnumeric` | `spreadsheet` |
 | `.go` | `source-code` |
 | `.gpg` | `certificate-key` |
@@ -862,7 +885,9 @@ Every mapped extension, alphabetically, with its group.
 | `.h++` | `source-code` |
 | `.h264` | `video` |
 | `.h265` | `video` |
+| `.h26l` | `video` |
 | `.h2song` | `audio-project` |
+| `.h3r` | `video` |
 | `.h5` | `database` |
 | `.haml` | `markup` |
 | `.handlebars` | `markup` |
@@ -879,6 +904,7 @@ Every mapped extension, alphabetically, with its group.
 | `.hh` | `source-code` |
 | `.hif` | `raster-photo` |
 | `.hlsl` | `source-code` |
+| `.hm4` | `video` |
 | `.hpgl` | `vector-image` |
 | `.hpp` | `source-code` |
 | `.hprof` | `log` |
@@ -897,17 +923,21 @@ Every mapped extension, alphabetically, with its group.
 | `.iam` | `cad` |
 | `.ibd` | `database` |
 | `.ibooks` | `ebook` |
+| `.icns` | `raster-photo` |
 | `.ico` | `raster-photo` |
+| `.ics` | `config-data` |
 | `.idml` | `layered-image` |
 | `.idw` | `cad` |
 | `.idx` | `subtitle` |
 | `.ifc` | `cad` |
 | `.ifcxml` | `cad` |
 | `.ifczip` | `cad` |
+| `.iff` | `raster-photo` |
 | `.ifo` | `video` |
 | `.iges` | `cad` |
 | `.igs` | `cad` |
 | `.iiq` | `raw-photo` |
+| `.ilbm` | `raster-photo` |
 | `.img` | `disk-image` |
 | `.importmap` | `web-asset` |
 | `.inc` | `source-code` |
@@ -922,6 +952,7 @@ Every mapped extension, alphabetically, with its group.
 | `.ipynb` | `notebook` |
 | `.iso` | `disk-image` |
 | `.isz` | `disk-image` |
+| `.it` | `audio-project` |
 | `.j2` | `markup` |
 | `.j2k` | `raster-photo` |
 | `.jade` | `markup` |
@@ -939,6 +970,7 @@ Every mapped extension, alphabetically, with its group.
 | `.jng` | `raster-photo` |
 | `.journal` | `log` |
 | `.jp2` | `raster-photo` |
+| `.jpc` | `raster-photo` |
 | `.jpe` | `raster-photo` |
 | `.jpeg` | `raster-photo` |
 | `.jpf` | `raster-photo` |
@@ -959,6 +991,7 @@ Every mapped extension, alphabetically, with its group.
 | `.jwks` | `certificate-key` |
 | `.jxl` | `raster-photo` |
 | `.k25` | `raw-photo` |
+| `.kar` | `audio-project` |
 | `.kbx` | `certificate-key` |
 | `.kc2` | `raw-photo` |
 | `.kdb` | `database` |
@@ -1027,6 +1060,7 @@ Every mapped extension, alphabetically, with its group.
 | `.lzo` | `archive` |
 | `.lzop` | `archive` |
 | `.m` | `source-code` |
+| `.m15` | `audio-project` |
 | `.m1v` | `video` |
 | `.m2t` | `video` |
 | `.m2ts` | `video` |
@@ -1049,26 +1083,32 @@ Every mapped extension, alphabetically, with its group.
 | `.mbx` | `email` |
 | `.mcc` | `subtitle` |
 | `.mcd` | `cad` |
+| `.mcg` | `video` |
 | `.mcw` | `document-office` |
 | `.md` | `markup` |
 | `.mdb` | `database` |
 | `.mdc` | `raw-photo` |
 | `.mde` | `database` |
 | `.mdf` | `database` |
+| `.mdi` | `raster-photo` |
 | `.mdmp` | `log` |
 | `.mdown` | `markup` |
 | `.mds` | `disk-image` |
 | `.mdwn` | `markup` |
 | `.mdx` | `markup` |
 | `.me` | `document-text` |
+| `.med` | `audio-project` |
 | `.mediawiki` | `markup` |
 | `.mef` | `raw-photo` |
 | `.mesh` | `3d-model` |
 | `.metal` | `source-code` |
 | `.mht` | `email` |
 | `.mhtml` | `email` |
+| `.mid` | `audio-project` |
+| `.midi` | `audio-project` |
 | `.mim` | `email` |
 | `.mime` | `email` |
+| `.minipsf` | `audio-project` |
 | `.mjs` | `source-code` |
 | `.mk` | `config-data` |
 | `.mka` | `audio-lossy` |
@@ -1083,12 +1123,15 @@ Every mapped extension, alphabetically, with its group.
 | `.mmp` | `audio-project` |
 | `.mmpz` | `audio-project` |
 | `.mng` | `animated-image` |
+| `.mo3` | `audio-project` |
 | `.mobi` | `ebook` |
 | `.mod` | `video` |
 | `.model` | `cad` |
+| `.moov` | `video` |
 | `.mos` | `raw-photo` |
 | `.mov` | `video` |
 | `.move` | `source-code` |
+| `.movie` | `video` |
 | `.mp1` | `audio-lossy` |
 | `.mp2` | `audio-lossy` |
 | `.mp3` | `audio-lossy` |
@@ -1098,7 +1141,9 @@ Every mapped extension, alphabetically, with its group.
 | `.mpe` | `video` |
 | `.mpeg` | `video` |
 | `.mpg` | `video` |
+| `.mpga` | `audio-lossy` |
 | `.mpkg` | `package-installer` |
+| `.mpls` | `playlist` |
 | `.mpsub` | `subtitle` |
 | `.mpv` | `video` |
 | `.mqo` | `3d-model` |
@@ -1109,11 +1154,13 @@ Every mapped extension, alphabetically, with its group.
 | `.msixbundle` | `package-installer` |
 | `.msp` | `package-installer` |
 | `.mtl` | `3d-model` |
+| `.mtm` | `audio-project` |
 | `.mts` | `video` |
 | `.mustache` | `markup` |
 | `.mxf` | `video` |
 | `.myd` | `database` |
 | `.myi` | `database` |
+| `.n3r` | `video` |
 | `.nasm` | `source-code` |
 | `.nb` | `notebook` |
 | `.nc` | `cad` |
@@ -1171,6 +1218,8 @@ Every mapped extension, alphabetically, with its group.
 | `.ogg` | `audio-lossy` |
 | `.ogm` | `video` |
 | `.ogv` | `video` |
+| `.ogx` | `audio-lossy` |
+| `.oma` | `audio-lossy` |
 | `.opf` | `ebook` |
 | `.opus` | `audio-lossy` |
 | `.ora` | `layered-image` |
@@ -1202,10 +1251,14 @@ Every mapped extension, alphabetically, with its group.
 | `.parquet` | `database` |
 | `.pas` | `source-code` |
 | `.pat` | `audio-project` |
+| `.patch` | `source-code` |
 | `.pbm` | `raster-photo` |
 | `.pbxproj` | `config-data` |
+| `.pcap` | `log` |
+| `.pcapng` | `log` |
 | `.pcd` | `3d-model` |
 | `.pcf` | `font` |
+| `.pcl` | `pdf` |
 | `.pcm` | `audio-lossless` |
 | `.pcss` | `web-asset` |
 | `.pct` | `raster-photo` |
@@ -1223,6 +1276,7 @@ Every mapped extension, alphabetically, with its group.
 | `.pfm` | `font` |
 | `.pfx` | `certificate-key` |
 | `.pgm` | `raster-photo` |
+| `.pgn` | `document-text` |
 | `.pgp` | `certificate-key` |
 | `.php` | `source-code` |
 | `.php3` | `source-code` |
@@ -1285,6 +1339,7 @@ Every mapped extension, alphabetically, with its group.
 | `.psb` | `layered-image` |
 | `.psd` | `layered-image` |
 | `.psd1` | `script` |
+| `.psflib` | `audio-project` |
 | `.psm` | `cad` |
 | `.psm1` | `script` |
 | `.pst` | `email` |
@@ -1313,6 +1368,8 @@ Every mapped extension, alphabetically, with its group.
 | `.qoi` | `raster-photo` |
 | `.qpw` | `spreadsheet` |
 | `.qt` | `video` |
+| `.qtif` | `raster-photo` |
+| `.qtvr` | `video` |
 | `.r` | `source-code` |
 | `.r00` | `archive` |
 | `.r01` | `archive` |
@@ -1324,9 +1381,11 @@ Every mapped extension, alphabetically, with its group.
 | `.rar` | `archive` |
 | `.ras` | `raster-photo` |
 | `.raw` | `raw-photo` |
+| `.rax` | `audio-lossy` |
 | `.rb` | `source-code` |
 | `.rbw` | `source-code` |
 | `.rc` | `config-data` |
+| `.rcd` | `video` |
 | `.rcy` | `audio-project` |
 | `.rdata` | `database` |
 | `.rdoc` | `markup` |
@@ -1349,7 +1408,12 @@ Every mapped extension, alphabetically, with its group.
 | `.rmarkdown` | `notebook` |
 | `.rmd` | `notebook` |
 | `.rmeta` | `executable-binary` |
+| `.rmi` | `audio-project` |
+| `.rmj` | `video` |
+| `.rmm` | `video` |
+| `.rms` | `video` |
 | `.rmvb` | `video` |
+| `.rmx` | `video` |
 | `.rng` | `markup` |
 | `.rns` | `audio-project` |
 | `.rnw` | `notebook` |
@@ -1367,7 +1431,9 @@ Every mapped extension, alphabetically, with its group.
 | `.rte` | `cad` |
 | `.rtf` | `document-office` |
 | `.run` | `package-installer` |
+| `.rv` | `video` |
 | `.rvt` | `cad` |
+| `.rvx` | `video` |
 | `.rw2` | `raw-photo` |
 | `.rwl` | `raw-photo` |
 | `.rwz` | `raw-photo` |
@@ -1375,6 +1441,7 @@ Every mapped extension, alphabetically, with its group.
 | `.rz` | `archive` |
 | `.s` | `source-code` |
 | `.s3db` | `database` |
+| `.s3m` | `audio-project` |
 | `.s7z` | `archive` |
 | `.sab` | `cad` |
 | `.sai` | `layered-image` |
@@ -1419,6 +1486,7 @@ Every mapped extension, alphabetically, with its group.
 | `.shn` | `audio-lossless` |
 | `.shtml` | `markup` |
 | `.shw` | `presentation` |
+| `.sid` | `audio-project` |
 | `.sig` | `certificate-key` |
 | `.sit` | `archive` |
 | `.sitx` | `archive` |
@@ -1462,6 +1530,7 @@ Every mapped extension, alphabetically, with its group.
 | `.step` | `cad` |
 | `.sti` | `presentation` |
 | `.stl` | `3d-model` |
+| `.stm` | `audio-project` |
 | `.stp` | `cad` |
 | `.stpz` | `cad` |
 | `.stw` | `document-office` |
@@ -1529,6 +1598,7 @@ Every mapped extension, alphabetically, with its group.
 | `.toml` | `config-data` |
 | `.tool` | `script` |
 | `.topojson` | `config-data` |
+| `.torrent` | `config-data` |
 | `.tpp` | `source-code` |
 | `.tpz` | `ebook` |
 | `.trace` | `log` |
@@ -1553,6 +1623,8 @@ Every mapped extension, alphabetically, with its group.
 | `.ufo` | `font` |
 | `.uha` | `archive` |
 | `.uif` | `disk-image` |
+| `.ult` | `audio-project` |
+| `.uni` | `audio-project` |
 | `.unit` | `config-data` |
 | `.uof` | `document-office` |
 | `.uop` | `presentation` |
@@ -1569,6 +1641,9 @@ Every mapped extension, alphabetically, with its group.
 | `.vb` | `source-code` |
 | `.vbe` | `script` |
 | `.vbs` | `script` |
+| `.vcf` | `config-data` |
+| `.vcs` | `config-data` |
+| `.vct` | `config-data` |
 | `.vcxproj` | `config-data` |
 | `.vdi` | `disk-image` |
 | `.vert` | `source-code` |
@@ -1577,8 +1652,11 @@ Every mapped extension, alphabetically, with its group.
 | `.vhd` | `disk-image` |
 | `.vhdl` | `source-code` |
 | `.vhdx` | `disk-image` |
+| `.viv` | `video` |
+| `.vivo` | `video` |
 | `.vmdk` | `disk-image` |
 | `.vob` | `video` |
+| `.voc` | `audio-lossless` |
 | `.vox` | `3d-model` |
 | `.vpk` | `archive` |
 | `.vqf` | `audio-lossy` |
@@ -1617,6 +1695,7 @@ Every mapped extension, alphabetically, with its group.
 | `.wma` | `audio-lossy` |
 | `.wmf` | `vector-image` |
 | `.wmv` | `video` |
+| `.wmx` | `playlist` |
 | `.wmz` | `vector-image` |
 | `.woff` | `font` |
 | `.woff2` | `font` |
@@ -1652,6 +1731,7 @@ Every mapped extension, alphabetically, with its group.
 | `.xfdf` | `pdf` |
 | `.xht` | `markup` |
 | `.xhtml` | `markup` |
+| `.xi` | `audio-project` |
 | `.xla` | `spreadsheet` |
 | `.xlam` | `spreadsheet` |
 | `.xls` | `spreadsheet` |
@@ -1662,6 +1742,7 @@ Every mapped extension, alphabetically, with its group.
 | `.xltm` | `spreadsheet` |
 | `.xltx` | `spreadsheet` |
 | `.xlw` | `spreadsheet` |
+| `.xmf` | `audio-project` |
 | `.xml` | `markup` |
 | `.xonsh` | `script` |
 | `.xpi` | `package-installer` |
@@ -1672,6 +1753,7 @@ Every mapped extension, alphabetically, with its group.
 | `.xsl` | `markup` |
 | `.xslt` | `markup` |
 | `.xspf` | `playlist` |
+| `.xwd` | `raster-photo` |
 | `.xyz` | `3d-model` |
 | `.xz` | `archive` |
 | `.y4m` | `video` |
@@ -1695,4 +1777,4 @@ Every mapped extension, alphabetically, with its group.
 | `.ztl` | `3d-model` |
 | `.zz` | `archive` |
 
-_1271 extensions across 37 groups. Generated from `backend/filearr/file_groups.py`._
+_1350 extensions across 37 groups. Generated from `backend/filearr/file_groups.py`._

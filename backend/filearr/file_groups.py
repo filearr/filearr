@@ -65,6 +65,18 @@ reserved documentation domain ``example.com``.
 * Library of Congress, Sustainability of Digital Formats —
   https://www.loc.gov/preservation/digital/formats/
 * FileInfo file-extension database — https://fileinfo.com/
+* VLC's shipped MIME/extension list (``share/vlc.desktop.mimetypes``) and
+  freedesktop.org's shared-mime-info (``freedesktop.org.xml.in``), consulted to find
+  the GAPS in the rows below (the MIDI/tracker family was missing entirely).
+
+  Both were used as RESEARCH INPUTS ONLY — nothing here is a copy of, or a
+  mechanical transformation of, either file. An extension→meaning correspondence is
+  an uncopyrightable fact (*Feist v. Rural Telephone*), but the catalog FILE is a
+  licensed work: in 2021 freedesktop.org issued a DMCA takedown against the Ruby
+  ``mimemagic`` gem for embedding ``freedesktop.org.xml`` wholesale. Every row below
+  is this project's own assignment, written in this module's own grouping scheme
+  (which has no counterpart in either source), and each contested extension was
+  decided here on the collision rules documented above.
 
 Purity: no I/O, no ORM, no network — every function here is a pure function of its
 arguments and unit-testable in isolation.
@@ -113,6 +125,9 @@ _GROUPS: tuple[FileGroup, ...] = (
         "Unprocessed camera sensor data (mostly one proprietary format per "
         "manufacturer) plus the open Adobe DNG. Needs a RAW developer, not a plain "
         "image viewer.",
+        notes="``dcm`` (DICOM medical imaging) groups here rather than under "
+        "``raster-photo``: like camera RAW it is instrument capture data with an "
+        "embedded metadata header that a plain image viewer will not open.",
     ),
     FileGroup(
         "vector-image", "Vector image",
@@ -140,7 +155,13 @@ _GROUPS: tuple[FileGroup, ...] = (
         "video", "Video",
         "Moving-image containers and streams (movies, clips, recordings).",
         notes="``ts``/``mts`` are MPEG transport streams here, not TypeScript — "
-        "``tsx``/``cts`` still classify as source code.",
+        "``tsx``/``cts`` still classify as source code. CCTV/NVR/dashcam recorder "
+        "containers (``bvr``, ``g64``/``g64x``, ``dvr``, ``rcd``, …) are video too, but "
+        "most cannot be probed — see the unsupported gate in ``tasks/extract.py``. "
+        "Pelco's ``pef`` is deliberately NOT claimed here (Pentax RAW already owns that "
+        "extension), and the generic ``blk``/``pic``/``sec`` recorder suffixes are left "
+        "unmapped rather than handed to one CCTV vendor (``pic`` is a long-established "
+        "raster-image extension).",
     ),
     FileGroup(
         "audio-lossy", "Lossy audio",
@@ -164,7 +185,15 @@ _GROUPS: tuple[FileGroup, ...] = (
         "Digital-audio-workstation project/session files and sampler / synth "
         "instrument, patch, sound-font and loop formats — production assets, not "
         "finished audio.",
-        notes="``ptx`` is a Pro Tools session here (not Pentax RAW).",
+        notes="``ptx`` is a Pro Tools session here (not Pentax RAW). MIDI "
+        "(``mid``/``midi``/``kar``/``rmi``/``xmf``) and the tracker-module family group "
+        "here rather than under ``audio-lossy``/``audio-lossless``: both are instrument "
+        "and sequence DATA a synth must render, not recorded audio. The tracker cluster "
+        "conspicuously lacks ``mod`` — ``video`` already claims it (JVC camcorder) — and "
+        "``amf`` (3D-model) / ``psm`` (CAD) have the same pre-existing collision shape. "
+        "``psf`` is left unmapped on purpose: Linux console font vs PlayStation Sound "
+        "Format is a genuine coin flip, whereas ``minipsf``/``psflib`` are unambiguous "
+        "and are mapped.",
     ),
     FileGroup(
         "playlist", "Playlist",
@@ -471,11 +500,19 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "heif", "heics", "hif", "avif", "avifs", "jxl", "ico", "cur", "tga", "targa", "pcx", "ppm",
         "pgm", "pbm", "pnm", "pam", "ras", "sgi", "rgb", "xbm", "xpm", "wbmp", "hdr", "exr", "dds",
         "qoi", "jng", "pict", "pct", "jp2", "j2k", "jpf", "jpx", "jpm", "fits", "fit", "flif", "bpg",
+        # Platform/legacy raster formats: macOS icon set, the Amiga IFF/ILBM pair, the
+        # bare JPEG 2000 codestream (``jpc``, next to the ``jp2`` container above), an
+        # X11 window dump, the QuickTime still image, and Microsoft Office Document
+        # Imaging's TIFF-derived scan format.
+        "icns", "iff", "ilbm", "jpc", "xwd", "qtif", "mdi",
     ),
     "raw-photo": (
         "raw", "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "raf", "orf", "rw2",
         "rwl", "pef", "srw", "x3f", "3fr", "fff", "iiq", "cap", "eip", "dcs", "dcr", "drf", "k25",
         "kdc", "mef", "mos", "erf", "mrw", "mdc", "bay", "gpr", "ari", "nksc", "cs1", "kc2", "rwz",
+        # DICOM: not a camera, but the same shape — instrument capture + metadata
+        # header, unopenable by a plain viewer (see this group's notes).
+        "dcm",
     ),
     "vector-image": (
         "svg", "svgz", "ai", "eps", "epsf", "epsi", "cdr", "cmx", "cgm", "wmf", "emf", "emz", "wmz",
@@ -493,18 +530,46 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "webm", "mpg", "mpeg", "mpe", "m1v", "m2v", "mpv", "vob", "ifo", "flv", "f4v", "swf", "3gp",
         "3g2", "3gpp", "ogv", "ogm", "rm", "rmvb", "divx", "dv", "dav", "gxf", "mxf", "y4m", "nsv",
         "roq", "mod", "tod", "amv", "wtv", "dvr-ms", "m4s", "h264", "h265", "hevc", "av1", "braw", "r3d",
+        # Legacy QuickTime / RealMedia / Vivo siblings of the containers above:
+        # a bare QuickTime movie atom, the spelled-out ``.movie``, VivoActive, the
+        # RealVideo elementary stream + its variants, QuickTime VR panoramas, and the
+        # Flash/RealPlayer wrappers that still turn up in old libraries.
+        "moov", "movie", "viv", "vivo", "rv", "rvx", "qtvr", "fxm", "rmj", "rmm", "rms", "rmx",
+        # Raw elementary video streams (headerless Annex-B / bitstream dumps). ffmpeg's
+        # own raw demuxers register exactly these names ("h26l,h264,264,avc" in
+        # libavformat/h264dec.c; the hevcdec.c equivalent), so unlike the recorder
+        # containers below they DO probe and are deliberately left ungated in
+        # ``tasks/extract.py``.
+        "264", "265", "avc", "h26l",
+        # CCTV / NVR / dashcam recorder containers. Real moving-image recordings, so
+        # they belong in this group — but vendors wrap or mangle the elementary stream
+        # and ffprobe cannot read most of them. These are the seed of
+        # ``tasks/extract.py::_UNPROBEABLE_VIDEO_EXTS``: Blue Iris (``bvr``), Genetec
+        # (``g64``/``g64x``), and a set of generic recorder suffixes (``dvr``, ``gmp4``,
+        # ``rcd``, ``fmp4``, ``fmpi``, ``h3r``, ``n3r``, ``mcg``, ``hm4``). Pelco's
+        # ``pef`` and the generic ``blk``/``pic``/``sec`` are excluded — see notes.
+        "bvr", "g64", "g64x", "dvr", "gmp4", "rcd", "fmp4", "fmpi", "h3r", "n3r", "mcg", "hm4",
     ),
     "audio-lossy": (
         "mp3", "mp2", "mp1", "mpa", "aac", "m4a", "m4r", "ogg", "oga", "opus", "weba", "wma", "ra",
         "ram", "amr", "3ga", "spx", "mpc", "mka", "ac3", "eac3", "dts", "gsm", "awb", "vqf", "qcp",
+        # Flash audio, the spelled-out MPEG audio suffix, RealAudio's lossless-branded
+        # (but still perceptual) ``rax``, Sony's ATRAC/OpenMG family, and the generic
+        # multiplexed Ogg (``ogx`` — audio in practice; the video Ogg is ``ogv``).
+        "f4a", "mpga", "rax", "oma", "aa3", "at3", "ogx",
     ),
     "audio-lossless": (
         "flac", "alac", "wav", "wave", "aif", "aiff", "aifc", "ape", "wv", "wvc", "tta", "tak",
         "mlp", "shn", "la", "ofr", "ofs", "dsf", "dff", "dsd", "l16", "w64", "rf64", "bwf", "caf",
         "au", "snd", "pcm",
+        # Creative Voice File — uncompressed (or ADPCM) PCM, the DOS-era sibling of
+        # ``au``/``snd`` above.
+        "voc",
     ),
     "audiobook": (
         "m4b", "aax", "aaxc", "aa",
+        # Flash's audiobook counterpart to ``f4a`` (same relationship as m4b:m4a).
+        "f4b",
     ),
     "audio-project": (
         "als", "alp", "flp", "logicx", "logic", "ptx", "ptf", "pts", "cpr", "npr", "rpp",
@@ -512,10 +577,27 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "cwb", "reapeaks", "sf2", "sf3", "sfz", "sfark", "exs", "nki", "nkm", "nkc", "nksn", "nksf",
         "nkx", "gig", "dls", "kit", "sxt", "fxp", "fxb", "vstpreset", "aupreset", "adg", "adv",
         "agr", "ffp", "h2song", "rex", "rx2", "rcy", "akp", "syx", "pat",
+        # MIDI. Astonishingly, the single most common sequence format on earth was
+        # unmapped until now (it landed in ``other``); it belongs with the sampler /
+        # instrument assets because a .mid carries no audio, only note events for a
+        # synth to render. ``kar`` is MIDI+karaoke lyrics, ``rmi``/``xmf`` are the
+        # RIFF- and XMF-wrapped variants.
+        "mid", "midi", "kar", "rmi", "xmf",
+        # Tracker modules — the same "instrument samples + a pattern sequence" model.
+        # ``mod`` itself is absent BY DESIGN: ``video`` already claims it (JVC
+        # camcorder). See this group's notes.
+        "669", "it", "m15", "med", "mtm", "s3m", "stm", "ult", "uni", "xi", "mo3",
+        # Chiptune / console rips: a register-level log a hardware emulator plays back.
+        # ``psf`` is excluded (console font vs PlayStation Sound Format); its
+        # unambiguous relatives are not.
+        "sid", "minipsf", "psflib",
     ),
     "playlist": (
         "m3u", "m3u8", "pls", "cue", "xspf", "wpl", "asx", "wax", "wvx", "b4s", "kpl", "zpl", "pla",
         "aimppl", "fpl",
+        # Windows Media's redirector sibling of ``wax``/``wvx``, and the Blu-ray
+        # BDMV playlist that orders a title's .m2ts segments.
+        "wmx", "mpls",
     ),
     "subtitle": (
         "srt", "ass", "ssa", "vtt", "sub", "sbv", "smi", "sami", "ttml", "dfxp", "scc", "mcc",
@@ -523,6 +605,9 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
     ),
     "document-text": (
         "txt", "text", "me", "1st", "diz", "ans", "wtx", "etx", "nfo", "readme",
+        # Portable Game Notation — a chess game transcript; plain text with a small
+        # tag-pair header, readable as-is.
+        "pgn",
     ),
     "document-office": (
         "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "ott", "fodt", "rtf", "wpd", "wps",
@@ -531,6 +616,10 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
     ),
     "pdf": (
         "pdf", "fdf", "xfdf", "xdp", "ps", "prn", "xps", "oxps",
+        # The other two page-description languages that reach disk as files: TeX's
+        # device-independent output and HP PCL printer streams (``prn`` above is the
+        # generic spooled equivalent).
+        "dvi", "pcl",
     ),
     "presentation": (
         "ppt", "pptx", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp", "otp", "fodp",
@@ -590,6 +679,9 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "scm", "ss", "rkt", "vb", "bas", "asm", "s", "nasm", "sol", "move", "cairo", "wat", "gd",
         "rpy", "ino", "au3", "purs", "re", "rei", "vala", "vapi", "hx", "hxml", "wgsl", "glsl",
         "hlsl", "metal", "vert", "frag", "comp", "geom", "cu", "cuh",
+        # Unified-diff patches: source-derived text that belongs beside the code it
+        # edits, not in the ``other`` bucket.
+        "diff", "patch",
     ),
     "script": (
         "sh", "bash", "zsh", "fish", "ksh", "csh", "tcsh", "ash", "dash", "command", "tool", "ps1",
@@ -612,6 +704,10 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "rc", "npmrc", "yarnrc", "babelrc", "eslintrc", "prettierrc", "editorconfig", "cmake", "mk",
         "mak", "ninja", "bazel", "bzl", "sbt", "gradle", "lock", "resx", "pbxproj", "xcconfig",
         "csproj", "vcxproj", "sln", "pri", "prefs", "containerfile", "dockerfile",
+        # BitTorrent metainfo (bencoded structured data describing a transfer, not the
+        # payload) plus the iCalendar / vCard personal-data interchange family
+        # (``vcs`` = legacy vCalendar, ``gcrd``/``vct`` = vCard aliases).
+        "torrent", "ics", "vcs", "vcf", "gcrd", "vct",
     ),
     "database": (
         "db", "db3", "sqlite", "sqlite3", "sqlitedb", "s3db", "sl3", "mdb", "accdb", "accde", "mde",
@@ -657,6 +753,9 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "log": (
         "log", "log1", "log2", "logs", "err", "trace", "journal", "ltsv", "evtx", "evt", "etl",
         "dmp", "mdmp", "hprof",
+        # Packet captures: a network diagnostic trace, the same role as ``etl``/
+        # ``trace`` above rather than a dataset to query.
+        "pcap", "pcapng",
     ),
 }
 

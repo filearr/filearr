@@ -95,6 +95,41 @@ in the same file, it never stops replication, and clearing it cannot lift a
 central [suspend](../agents.md#agent-suspend-maintenance). Full behaviour:
 [Local scan controls](../agents.md#local-scan-controls).
 
+#### Share mappings: the one place the environment wins {#share-map-precedence}
+
+Share mappings — the per-root network locations behind
+[`FILEARR_AGENT_SHARE_MAP`](#scanning) — are the exception to the chain above,
+and deliberately so:
+
+```text
+FILEARR_AGENT_SHARE_MAP  >  mapping saved locally (local-settings.json
+                            share_mappings)  >  share discovered on the host
+```
+
+Why this way round, when the schedule knobs put the local override *above* env:
+
+- Share hints have **no central policy key at all** (they are host-shaped
+  settings — see below), so the top of the chain is the host's own configuration,
+  which is the environment.
+- `FILEARR_AGENT_SHARE_MAP` is what your **deployment manifest** declares (the
+  compose file, the Unraid template). You must be able to read that file and know
+  it describes what the agent reports; a value typed into a web page that
+  silently outranked it would make the manifest a lie, with nothing in the
+  manifest to show for it.
+- Nothing is silently reverted by this order — the failure the central-versus-local
+  rule guards against. A path the environment maps renders **read-only** in the
+  agent's roots editor, labelled with the variable that supplied it, and the edit
+  endpoint refuses it with a `409` instead of storing a value that would never be
+  used. Locally-saved mappings fill in the paths the environment does **not**
+  mention, exactly as local schedule overrides fill in the keys central left unset.
+
+The roots editor shows, per root, the location that resolves today and which of
+those three layers supplied it — or an explicit *no share mapping* when nothing
+covers the root. Malformed entries from either surface are listed verbatim as
+skipped: a bad pair is never fatal, so that listing is the only symptom a typo
+ever produces. See
+[Scan roots and share mappings](../agents.md#local-share-mappings).
+
 **Local wins over policy** for host-shaped settings — there is no policy key at
 all for the data directory, log destination, host tool paths, share hints,
 thumbnail cadence, web-UI bind address or the CA bundle. Central has no business
@@ -288,7 +323,7 @@ sidecar key (if any) for the same setting.
 | `FILEARR_AGENT_SCAN_ON_BOOT` | Boolean: fire one scan roughly 30 s after the daemon starts. | unset (= off) | Central policy `scan_on_start` wins |
 | `FILEARR_AGENT_HASH_TIMEOUT_SECONDS` | Wall-clock ceiling on hashing **one** file. A corrupt or locked file on a FUSE/network mount can block `read(2)` forever and freeze the whole walk; past the bound the agent skips that file's hashes and logs a warning with its path. `0` removes the bound. | `300` | — |
 | `FILEARR_AGENT_SHARE_HOST` | Hostname rendered into share hints (`\\host\share`, `smb://host/…`) so central can offer network-open links. Set it when clients reach this machine by a different name — a DNS alias, a NAS identity. | this machine's `hostname` | — |
-| `FILEARR_AGENT_SHARE_MAP` | Comma-separated `localpath=location` pairs statically mapping scan roots to the network locations they are shared at, where location is `smb://host/share[/sub]`, `\\host\share[\sub]` or `nfs://host/export`. **Required in containers**: inside one, share discovery sees nothing (no `smb.conf`, and the NAS exports paths under *its* name, not the container's). Longest local prefix wins per file; entries override a discovered export of the same path, and a malformed pair is skipped with a warning rather than failing the scan. | unset | — |
+| `FILEARR_AGENT_SHARE_MAP` | Comma-separated `localpath=location` pairs statically mapping scan roots to the network locations they are shared at, where location is `smb://host/share[/sub]`, `\\host\share[\sub]` or `nfs://host/export`. **Required in containers**: inside one, share discovery sees nothing (no `smb.conf`, and the NAS exports paths under *its* name, not the container's). Longest local prefix wins per file; entries override a discovered export of the same path, and a malformed pair is skipped with a warning rather than failing the scan — the agent's roots editor lists the skipped entries verbatim, since that is the only symptom a typo produces. A worked Unraid example: `/mnt/user/media=smb://tower/media,/mnt/user/documents=\\tower\documents`. | unset | The agent's own roots editor, under `local_roots_control`, for paths this variable does **not** map ([precedence](#share-map-precedence)) |
 
 !!! note "All three scheduler knobs absent = the scheduler is off"
     That is the correct state for a container, which runs its own scan loop from
@@ -452,7 +487,9 @@ Container-specific notes:
 - Scanning is driven by the entrypoint loop (`_SCAN_ROOTS` / `_SCAN_INTERVAL` /
   `_SCAN_ON_START`), **not** by the in-daemon scheduler. Do not arm both.
 - Share hints need `FILEARR_AGENT_SHARE_MAP`; discovery finds nothing inside a
-  container.
+  container. The agent's web UI shows the resolved location **next to each scan
+  root** (read-only here — the mapping comes from the container's environment),
+  so you can confirm the variable took effect without shelling in.
 - Exposing the web UI needs `FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` on top of the
   policy gate.
 - `PUID` / `PGID` (default `99`/`100`, the Unraid convention) select the uid/gid

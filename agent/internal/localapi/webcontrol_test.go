@@ -28,6 +28,7 @@ type recordingSeams struct {
 	schedule    []ScheduleEdit
 	addRoot     []string
 	removeRoot  []string
+	rootShare   []string // "path=location" per accepted share-mapping edit
 }
 
 func (rs *recordingSeams) seams() *ControlSeams {
@@ -42,6 +43,10 @@ func (rs *recordingSeams) seams() *ControlSeams {
 		SetSchedule: func(_ context.Context, e ScheduleEdit) error { rs.schedule = append(rs.schedule, e); return nil },
 		AddRoot:     func(_ context.Context, p string) error { rs.addRoot = append(rs.addRoot, p); return nil },
 		RemoveRoot:  func(_ context.Context, p string) error { rs.removeRoot = append(rs.removeRoot, p); return nil },
+		SetRootShare: func(_ context.Context, p, loc string) error {
+			rs.rootShare = append(rs.rootShare, p+"="+loc)
+			return nil
+		},
 	}
 }
 

@@ -46,6 +46,7 @@ import (
 
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/schedule"
+	"github.com/filearr/filearr/agent/internal/shares"
 )
 
 // Control endpoint paths. They are listed once, here, and consumed by both the
@@ -94,6 +95,54 @@ type ControlsState struct {
 	LocalScanOnStart         bool   `json:"local_scan_on_start"`
 
 	Roots []string `json:"roots"`
+
+	// ShareRoots pairs each configured root with the network location a file
+	// under it would report (2026-08-10). One entry per root, same order as
+	// Roots; an entry with an empty Location is the explicit "no share mapping"
+	// answer, which is the one the UI most needs to show — an unmapped root
+	// silently produces no share hint and nothing else says so.
+	ShareRoots []RootShare `json:"share_roots"`
+	// ShareMapRejects are the malformed share-map entries, verbatim, from either
+	// surface. They are skipped, never fatal (hints are best-effort, R1), so
+	// showing them is the only way a typo ever becomes visible.
+	ShareMapRejects []ShareMapReject `json:"share_map_rejects"`
+	// ShareMapEnvPaths are the local paths FILEARR_AGENT_SHARE_MAP maps. The
+	// environment outranks a locally-authored mapping on the same path (see
+	// staticShareMappings in cmd/filearr-agent), so these paths are LOCKED for
+	// local editing and the edit endpoint refuses them.
+	ShareMapEnvPaths []string `json:"share_map_env_paths"`
+}
+
+// RootShare is one scan root's resolved network location plus the provenance an
+// operator needs in order to know which layer they are looking at.
+type RootShare struct {
+	Path string `json:"path"`
+	// Location is the resolved share URL for the root itself ("" = unmapped).
+	Location string `json:"location,omitempty"`
+	UNC      string `json:"unc,omitempty"`
+	// Source names the supplying surface: "FILEARR_AGENT_SHARE_MAP", "local
+	// override", or "discovered smb export"/"discovered nfs export".
+	Source string `json:"source,omitempty"`
+	// InheritedFrom is set when the covering mapping is on a PARENT path rather
+	// than on this root.
+	InheritedFrom string `json:"inherited_from,omitempty"`
+	// EnvValue / LocalValue are the raw configured locations for EXACTLY this
+	// path on each surface, so the UI can show the field's stored value and lock
+	// it when the environment owns the path.
+	EnvValue   string `json:"env_value,omitempty"`
+	LocalValue string `json:"local_value,omitempty"`
+	// Superseded marks a stored local mapping that the environment outranks.
+	Superseded bool `json:"superseded,omitempty"`
+	// Ambiguous marks a multi-homed tie: two equally specific exports cover the
+	// root, so no hint is fabricated (R1).
+	Ambiguous bool `json:"ambiguous,omitempty"`
+}
+
+// ShareMapReject is one malformed share-map entry kept verbatim with the surface
+// that supplied it.
+type ShareMapReject struct {
+	Entry  string `json:"entry"`
+	Source string `json:"source"`
 }
 
 // ScheduleEdit is one local schedule change. A non-nil field SETS the local
@@ -123,6 +172,10 @@ type ControlSeams struct {
 	// AddRoot / RemoveRoot edit the agent's scan roots (scan.json).
 	AddRoot    func(ctx context.Context, path string) error
 	RemoveRoot func(ctx context.Context, path string) error
+	// SetRootShare stores one locally-authored share location for path, or
+	// clears it when location is empty. The location has already been validated
+	// with the resolver's own parser by the time this runs.
+	SetRootShare func(ctx context.Context, path, location string) error
 }
 
 // controlsResponse is what GET /api/control returns: the live state plus the
@@ -190,6 +243,17 @@ func (ws *WebUIServer) handleControls(w http.ResponseWriter, r *http.Request) {
 	}
 	if resp.Roots == nil {
 		resp.Roots = []string{}
+	}
+	// Absent share data must render as "no mapping", not as a broken page: send
+	// empty arrays rather than nulls so the client never has to special-case it.
+	if resp.ShareRoots == nil {
+		resp.ShareRoots = []RootShare{}
+	}
+	if resp.ShareMapRejects == nil {
+		resp.ShareMapRejects = []ShareMapReject{}
+	}
+	if resp.ShareMapEnvPaths == nil {
+		resp.ShareMapEnvPaths = []string{}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -435,13 +499,22 @@ func (ws *WebUIServer) handleControlSchedule(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": sortedKeys(touched)})
 }
 
-// rootsRequest is the POST /api/control/roots body.
+// rootsRequest is the POST /api/control/roots body. Location is a POINTER so
+// "add a root, leave its share mapping alone" is distinguishable from "add a
+// root and clear its mapping" — the same set/absent discipline ScheduleEdit uses.
 type rootsRequest struct {
-	Action string `json:"action"` // "add" | "remove"
-	Path   string `json:"path"`
+	Action   string  `json:"action"` // "add" | "remove" | "set-share"
+	Path     string  `json:"path"`
+	Location *string `json:"location"`
 }
 
-// handleControlRoots adds or removes one scan root.
+// handleControlRoots adds or removes one scan root, and edits the share location
+// recorded for a root.
+//
+// The share location rides the ROOTS endpoint and the roots permission on
+// purpose: it is per-root configuration edited in the same table, and adding a
+// path to allow-list a second endpoint (controlMutationPaths / the method
+// backstop) buys nothing but another way for the two lists to drift.
 func (ws *WebUIServer) handleControlRoots(w http.ResponseWriter, r *http.Request) {
 	pv, ok := ws.controlGate(w, r, "roots")
 	if !ok {
@@ -451,7 +524,12 @@ func (ws *WebUIServer) handleControlRoots(w http.ResponseWriter, r *http.Request
 	if !decodeControlBody(w, r, &req) {
 		return
 	}
-	if pv.RootsManagedByCentral {
+	// The central lock covers the ROOT LIST only. A share location is host
+	// knowledge with no policy key at all (central cannot know how this machine's
+	// paths are exported), so a centrally-derived root may still have its
+	// mapping filled in locally — the same split the settings reference draws
+	// between fleet-shaped and host-shaped settings.
+	if pv.RootsManagedByCentral && req.Action != "set-share" {
 		src := pv.PolicySource
 		if src == "" {
 			src = "central policy"
@@ -468,7 +546,47 @@ func (ws *WebUIServer) handleControlRoots(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, errorBody{Error: "path is required", Code: "bad_request"})
 		return
 	}
+	if req.Action == "remove" && req.Location != nil {
+		// Removing a root drops its mapping anyway; accepting a location here
+		// would make the request read as though it set one.
+		writeError(w, http.StatusBadRequest, errorBody{
+			Error: `"location" is not valid with "remove" — removing a root also drops its share mapping`,
+			Code:  "bad_request",
+		})
+		return
+	}
+	// A submitted location is validated with the resolver's OWN parser and
+	// refused when the environment already owns the path — before anything is
+	// stored. Storing a value the resolver would skip, or one a
+	// higher-precedence layer overrides, is the silent-no-op this whole feature
+	// exists to eliminate.
+	location, ok := ws.shareLocationEdit(w, r, &req)
+	if !ok {
+		return
+	}
 	switch req.Action {
+	case "set-share":
+		if req.Location == nil {
+			writeError(w, http.StatusBadRequest, errorBody{
+				Error: `set-share requires "location" (send "" to clear the mapping)`, Code: "bad_request",
+			})
+			return
+		}
+		if ws.cfg.Controls.SetRootShare == nil {
+			writeError(w, http.StatusServiceUnavailable, errorBody{Error: "share mapping is not available on this agent", Code: "control_unavailable"})
+			return
+		}
+		if err := ws.cfg.Controls.SetRootShare(r.Context(), path, location); err != nil {
+			ws.log.Error("local controls: share mapping edit failed", "path", path, "err", err)
+			writeError(w, http.StatusInternalServerError, errorBody{Error: "could not persist the share mapping", Code: "control_write_error"})
+			return
+		}
+		ws.log.Info("local controls: share mapping edited from the local web UI",
+			"path", path, "location", location)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "action": req.Action, "path": path, "location": location,
+		})
+		return
 	case "add":
 		if ws.cfg.Controls.AddRoot == nil {
 			writeError(w, http.StatusServiceUnavailable, errorBody{Error: "root editing is not available on this agent", Code: "control_unavailable"})
@@ -496,6 +614,23 @@ func (ws *WebUIServer) handleControlRoots(w http.ResponseWriter, r *http.Request
 			return
 		}
 		ws.log.Info("local controls: scan root added from the local web UI", "path", path)
+		// An add may carry the root's share location in the same request, so
+		// "where is this folder on the network?" is answered while the operator
+		// is looking at it — the alternative is a root that reports no location
+		// until someone remembers to come back and fill it in.
+		if req.Location != nil {
+			if ws.cfg.Controls.SetRootShare == nil {
+				writeError(w, http.StatusServiceUnavailable, errorBody{Error: "share mapping is not available on this agent", Code: "control_unavailable"})
+				return
+			}
+			if err := ws.cfg.Controls.SetRootShare(r.Context(), path, location); err != nil {
+				ws.log.Error("local controls: share mapping edit failed", "path", path, "err", err)
+				writeError(w, http.StatusInternalServerError, errorBody{Error: "could not persist the share mapping", Code: "control_write_error"})
+				return
+			}
+			ws.log.Info("local controls: share mapping set from the local web UI",
+				"path", path, "location", location)
+		}
 	case "remove":
 		if ws.cfg.Controls.RemoveRoot == nil {
 			writeError(w, http.StatusServiceUnavailable, errorBody{Error: "root editing is not available on this agent", Code: "control_unavailable"})
@@ -513,11 +648,66 @@ func (ws *WebUIServer) handleControlRoots(w http.ResponseWriter, r *http.Request
 		ws.log.Info("local controls: scan root removed from the local web UI", "path", path)
 	default:
 		writeError(w, http.StatusBadRequest, errorBody{
-			Error: `action must be "add" or "remove"`, Code: "bad_request",
+			Error: `action must be "add", "remove" or "set-share"`, Code: "bad_request",
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": req.Action, "path": path})
+	out := map[string]any{"ok": true, "action": req.Action, "path": path}
+	if req.Location != nil {
+		out["location"] = location
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// shareLocationEdit validates the share location on a roots request and refuses
+// the edit when the environment already maps that path. It returns the trimmed
+// location (empty = clear) and false when it has already written a refusal.
+//
+// Two rules, both "refuse rather than store something inert":
+//
+//  1. The location is parsed by shares.ValidateLocation — the SAME parser the
+//     resolver uses. A location this endpoint accepted but the resolver could
+//     not parse would be skipped at scan time (hints are best-effort, R1) and
+//     the root would silently report nothing, which is precisely the failure the
+//     reject list was added to make visible.
+//  2. FILEARR_AGENT_SHARE_MAP outranks a locally-authored mapping for the same
+//     local path (see staticShareMappings in cmd/filearr-agent for the full
+//     argument). Rather than storing a value the resolver will never reach, the
+//     edit is refused with the variable named — the same shape as the
+//     managed-by-central refusal, with the machine's environment in the owning
+//     role because the web UI cannot rewrite it.
+func (ws *WebUIServer) shareLocationEdit(w http.ResponseWriter, r *http.Request, req *rootsRequest) (string, bool) {
+	if req.Location == nil {
+		return "", true
+	}
+	location := strings.TrimSpace(*req.Location)
+	if location != "" {
+		if err := shares.ValidateLocation(location); err != nil {
+			writeError(w, http.StatusBadRequest, errorBody{
+				Error: err.Error(), Code: "invalid_share_location", Keys: []string{"location"},
+				Reason: `example: \\tower\media or smb://tower/media`,
+			})
+			return "", false
+		}
+	}
+	st, err := ws.controlState(r.Context())
+	if err != nil {
+		ws.log.Error("local controls: state snapshot failed", "err", err)
+		writeError(w, http.StatusInternalServerError, errorBody{Error: "control state unavailable", Code: "control_state_error"})
+		return "", false
+	}
+	for _, envPath := range st.ShareMapEnvPaths {
+		if !shares.SamePath(envPath, strings.TrimSpace(req.Path)) {
+			continue
+		}
+		writeError(w, http.StatusConflict, errorBody{
+			Error: "the share location for this path is set by this machine's environment " +
+				"(" + shares.StaticMapSource + ") — edit it there; a local value would never be used",
+			Code: "managed_by_environment", Keys: []string{"share_map"},
+		})
+		return "", false
+	}
+	return location, true
 }
 
 // controlState fetches the live snapshot, tolerating an unwired seam.

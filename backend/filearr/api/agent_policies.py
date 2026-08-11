@@ -177,7 +177,7 @@ async def get_agent_taxonomy(
     The agent fetches this VERSION-GATED: after a policy poll surfaces a newer
     ``taxonomy_version`` than the agent's cached snapshot, it pulls this payload
     once and persists it. Because it is version-gated, shipping the full
-    ~1271-entry ``ext_to_group`` map each fetch is fine. The payload is exactly
+    ~1350-entry ``ext_to_group`` map each fetch is fine. The payload is exactly
     :meth:`filearr.taxonomy.Taxonomy.agent_payload` — flat lookup maps plus the
     ``primary_categories`` sidecar-parent set (the categories with an extractor).
 

@@ -304,11 +304,17 @@ tbody tr:hover { background: var(--row-hover); }
    the visual cue that the value is owned elsewhere. */
 .ctl-field input:disabled, .ctl-field input.is-managed { opacity: 0.6; border-style: dashed; }
 .ctl-src { color: var(--muted); font-size: 0.78rem; }
-#ctl-root-new {
+#ctl-root-new, #ctl-root-new-share {
   font: inherit; font-size: 0.85rem; padding: 0.25rem 0.45rem;
   border: 1px solid var(--border); border-radius: 0.4rem;
   background: var(--bg); color: var(--fg); min-width: 20rem;
 }
+/* The share-location field sits inside the roots table, so it may not push the
+   row wider than the panel; the provenance line under it wraps freely. */
+#ctl-roots-body .ctl-field { flex-wrap: nowrap; }
+#ctl-roots-body .ctl-field input[type="text"] { min-width: 14rem; width: 100%; max-width: 26rem; }
+#ctl-roots-body .ctl-src { margin-top: 0.25rem; max-width: 34rem; }
+#ctl-roots-body input:disabled { opacity: 0.6; border-style: dashed; }
 
 /* logs table */
 .loglines-wrap { max-height: 32rem; overflow: auto; border: 1px solid var(--border); border-radius: 0.5rem; }

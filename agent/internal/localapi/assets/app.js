@@ -440,6 +440,13 @@
         return t;
       }
       td(r.path, "path-cell");
+      // The resolved network location, with the layer that supplied it. A root
+      // with none is called out explicitly: it is cataloged normally but carries
+      // no network-open link, and nothing else on this page would say so.
+      td(r.share_location
+        ? r.share_location + (r.share_source ? "  (" + r.share_source + ")" : "")
+        : (r.share_ambiguous ? "ambiguous — two shares cover this root" : "no share mapping"),
+        "path-cell");
       td(Number(r.items || 0).toLocaleString(), "num");
       td(fmtSize(r.bytes), "num");
       td(ls.finished_at ? fmtMtime(ls.finished_at) : (ls.status === "running" ? "running…" : "never"));
@@ -501,6 +508,14 @@
         kvRow(dl, "Exclude globs", (sc.exclude_globs || []).join(", "));
         kvRow(dl, "Categories", (sc.enabled_categories || []).join(", "));
         kvRow(dl, "Share map", s.share_map);
+        // Malformed entries are skipped by the resolver and only ever logged;
+        // showing them here is how a typo stops being invisible.
+        var rejects = s.share_map_rejects || [];
+        if (rejects.length) {
+          kvRow(dl, "Share map rejected", rejects.map(function (rj) {
+            return rj.entry + " (" + rj.source + ")";
+          }).join("  ·  ") + " — skipped as malformed, so those paths report no share location");
+        }
         kvRow(dl, "ffmpeg available", s.ffmpeg ? "yes" : "no (video thumbs skipped)");
         kvSection(dl, "Extraction");
         var caps = s.capabilities || {};
@@ -698,21 +713,91 @@
     else if (!perms.roots) rootsReason = "Central policy does not allow root editing from this UI (local_roots_control is off).";
     else if (s.roots_managed_by) rootsReason = "Scan roots are derived centrally (" + s.roots_managed_by + ") — change the selection there.";
     ctlDisable(ctlEl("ctl-root-new"), rootsReason);
+    ctlDisable(ctlEl("ctl-root-new-share"), rootsReason);
     ctlDisable(ctlEl("ctl-root-add"), rootsReason);
     ctlEl("ctl-roots-why").textContent = rootsReason ||
       "Removing a root stops future scans of it; already-indexed items are left alone " +
       "(tombstoning stays the scan's job, so nothing is mass-deleted from central).";
 
+    // Malformed share-map entries, verbatim. They are skipped by the resolver
+    // (hints are best-effort) and would otherwise exist only in a log line.
+    var badBox = ctlEl("ctl-share-bad");
+    var rejects = s.share_map_rejects || [];
+    badBox.textContent = "";
+    badBox.hidden = rejects.length === 0;
+    if (rejects.length) {
+      badBox.textContent = "Skipped " + rejects.length + " malformed share-map " +
+        (rejects.length === 1 ? "entry" : "entries") + ": " +
+        rejects.map(function (rj) { return rj.entry + " (from " + rj.source + ")"; }).join("  ·  ") +
+        " — those paths report no network location. Expected localpath=smb://host/share, " +
+        "localpath=\\\\host\\share or localpath=nfs://host/export.";
+    }
+
     var tbody = ctlEl("ctl-roots-body");
     tbody.textContent = "";
     var roots = s.roots || [];
+    var shareByPath = {};
+    (s.share_roots || []).forEach(function (sr) { shareByPath[sr.path] = sr; });
     ctlEl("ctl-roots-empty").hidden = roots.length > 0;
     ctlEl("ctl-roots-table").hidden = roots.length === 0;
     roots.forEach(function (p) {
+      var sr = shareByPath[p] || {};
       var tr = document.createElement("tr");
       var tdP = document.createElement("td");
       tdP.textContent = p;
       tr.appendChild(tdP);
+
+      // --- share mapping cell ---
+      // The environment owns a path it maps: the field renders read-only with
+      // the variable named, because a value saved here would never be used.
+      // Root editing permission still gates everything (share mappings ride the
+      // same local_roots_control grant).
+      var tdS = document.createElement("td");
+      var field = document.createElement("div");
+      field.className = "ctl-field";
+      var envOwned = !!sr.env_value;
+      var shareReason = "";
+      if (!s.available) shareReason = "This agent build does not expose local controls.";
+      else if (!perms.roots) shareReason = "Central policy does not allow editing this from the local UI (local_roots_control is off).";
+      else if (envOwned) shareReason = "Set by this machine's environment (FILEARR_AGENT_SHARE_MAP) — " +
+        "change it where this agent is deployed; a value saved here would never be used.";
+      var input = document.createElement("input");
+      input.type = "text";
+      input.spellcheck = false;
+      input.placeholder = "no share mapping";
+      input.value = sr.env_value || sr.local_value || "";
+      ctlDisable(input, shareReason);
+      field.appendChild(input);
+      var save = document.createElement("button");
+      save.type = "button";
+      save.className = "btn";
+      save.textContent = "Save";
+      ctlDisable(save, shareReason);
+      save.addEventListener("click", function () {
+        ctlPost("/api/control/roots", {
+          action: "set-share", path: p, location: input.value.trim()
+        });
+      });
+      field.appendChild(save);
+      tdS.appendChild(field);
+
+      // Provenance line: what a file under this root actually reports today,
+      // and which layer said so — or the explicit "no share mapping" state.
+      var src = document.createElement("div");
+      src.className = "ctl-src";
+      if (sr.location) {
+        src.textContent = "resolves to " + sr.location +
+          " (from " + (sr.source || "unknown") + ")" +
+          (sr.inherited_from ? " — mapping is on the parent path " + sr.inherited_from : "") +
+          (sr.superseded ? " · a mapping saved here is superseded by the environment" : "");
+      } else if (sr.ambiguous) {
+        src.textContent = "two shares cover this root equally — no location is reported rather than guess one";
+      } else {
+        src.textContent = "no share mapping — items under this root carry no network location";
+      }
+      tdS.appendChild(src);
+      tr.appendChild(tdS);
+
       var tdB = document.createElement("td");
       var btn = document.createElement("button");
       btn.type = "button";
@@ -777,8 +862,16 @@
       ctlEl("ctl-root-add").addEventListener("click", function () {
         var p = ctlEl("ctl-root-new").value.trim();
         if (!p) return;
-        ctlPost("/api/control/roots", { action: "add", path: p }).then(function (d) {
-          if (d) ctlEl("ctl-root-new").value = "";
+        var body = { action: "add", path: p };
+        // Only send "location" when one was typed: an absent key means "leave
+        // the mapping alone", an empty string means "clear it".
+        var loc = ctlEl("ctl-root-new-share").value.trim();
+        if (loc) body.location = loc;
+        ctlPost("/api/control/roots", body).then(function (d) {
+          if (d) {
+            ctlEl("ctl-root-new").value = "";
+            ctlEl("ctl-root-new-share").value = "";
+          }
         });
       });
     }

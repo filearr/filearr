@@ -46,6 +46,18 @@ export type AboutTool = {
   version: string | null;
   path: string | null;
   url: string;
+  /** The version Filearr recommends at minimum, or null when it publishes no
+   *  opinion about this tool. */
+  minimum_version: string | null;
+  /** Central's verdict, from the SAME function that judges an agent's tools
+   *  (backend/filearr/toolversions.py). `ok` | `outdated` | `unknown` |
+   *  `absent`; see ./hostTools for what each one means. The two surfaces share
+   *  the comparator on purpose — a poppler called old on the Agents page and
+   *  fine here would discredit both pages at once. */
+  verdict: "ok" | "outdated" | "unknown" | "absent";
+  /** One sentence on what degrades below the minimum. Null when there is no
+   *  minimum. */
+  impact: string | null;
 };
 
 export type AboutAgents = {
@@ -122,10 +134,11 @@ export function formatWhen(iso: string | null | undefined): string {
 export type Cell = {
   /** What to show. Never empty. */
   text: string;
-  /** `ok` = a real observed value, `bad` = a probe that failed, `muted` = a
-   *  legitimate "nothing here" (a tool that simply is not installed). Drives
-   *  colour only; the text alone is always sufficient. */
-  tone: "ok" | "bad" | "muted";
+  /** `ok` = a real observed value, `bad` = a probe that failed, `warn` = a real
+   *  value that needs attention (a host tool below its recommended minimum),
+   *  `muted` = a legitimate "nothing here" (a tool that simply is not
+   *  installed). Drives colour only; the text alone is always sufficient. */
+  tone: "ok" | "bad" | "warn" | "muted";
   /** Longer explanation for a title tooltip, when there is one. */
   hint?: string;
 };
@@ -138,9 +151,18 @@ export function serviceCell(s: AboutService): Cell {
   return { text: s.error ?? "unknown", tone: "bad", hint: s.error ?? undefined };
 }
 
-/** How a host-tool row reads. Three distinct states, and the middle one is the
- *  easiest to get wrong: a tool can be present and still refuse to state a
- *  version, which is "installed, version unknown" — not "absent", not blank. */
+/** How a host-tool row reads. Four distinct states, and the ones in the middle
+ *  are the easy ones to get wrong:
+ *
+ *  * a tool can be present and still refuse to state a version, which is
+ *    "installed, version unknown" — not "absent", not blank;
+ *  * a version BELOW the recommended minimum is still a working install, so it
+ *    reads as the version it is, amber, with the reason in the tooltip — not as
+ *    a failure and never as plain green.
+ *
+ *  The verdict itself is central's (`t.verdict`), never recomputed here: the
+ *  Agents page and this page must call the same poppler old or neither is
+ *  trusted. This function only decides how it READS. */
 export function toolCell(t: AboutTool): Cell {
   if (!t.present) return { text: "not installed", tone: "muted" };
   if (!t.version)
@@ -149,7 +171,41 @@ export function toolCell(t: AboutTool): Cell {
       tone: "muted",
       hint: t.path ?? undefined,
     };
-  return { text: t.version, tone: "ok", hint: t.path ?? undefined };
+  if (t.verdict === "outdated")
+    return {
+      text: `${t.version} — below ${t.minimum_version ?? "the recommended minimum"}`,
+      tone: "warn",
+      hint:
+        `Filearr recommends ${t.minimum_version ?? "a newer version"} or newer.` +
+        (t.impact ? ` ${t.impact}` : "") +
+        (t.path ? ` (${t.path})` : ""),
+    };
+  if (t.verdict === "unknown")
+    // Installed, states a version, and we still decline to judge it: either the
+    // string carries no comparable number (a build from git, usually NEWER than
+    // any release) or Filearr publishes no minimum. Neutral on purpose.
+    return {
+      text: t.version,
+      tone: "ok",
+      hint: hint(
+        t.minimum_version
+          ? `This version cannot be compared with the recommended minimum of ${t.minimum_version}, so it is not judged either way.`
+          : "Filearr publishes no minimum version for this tool.",
+        t.path,
+      ),
+    };
+  return {
+    text: t.version,
+    tone: "ok",
+    hint: hint(t.minimum_version ? `Minimum recommended: ${t.minimum_version}.` : null, t.path),
+  };
+}
+
+/** Join a tooltip's sentence and the resolved path, dropping whichever is
+ *  missing. Returns undefined for "no tooltip" so the caller renders none. */
+function hint(sentence: string | null, path: string | null): string | undefined {
+  const parts = [sentence, path].filter(Boolean);
+  return parts.length ? parts.join(" ") : undefined;
 }
 
 /** A dependency's version cell. A declared dependency that is not importable is

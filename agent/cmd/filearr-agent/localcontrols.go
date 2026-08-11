@@ -51,7 +51,16 @@ func webControlSeams(daemonCtx context.Context, cfg *config, ops *opState, log *
 			if err := removeScanRoot(dataDir, path); err != nil {
 				return err
 			}
+			// Drop the root's locally-authored share mapping with it: a mapping
+			// for a path the agent no longer scans is dead configuration that
+			// would silently reappear if the root were ever re-added.
+			if err := setLocalShareMapping(dataDir, path, ""); err != nil {
+				return err
+			}
 			return stampRootsEdited(dataDir)
+		},
+		SetRootShare: func(_ context.Context, path, location string) error {
+			return setLocalShareMapping(dataDir, path, location)
 		},
 	}
 }
@@ -104,10 +113,15 @@ func stampRootsEdited(dataDir string) error {
 // schedule with the surface each value came from, the local overrides as
 // stored, and the configured roots.
 func controlsState(dataDir string, ops *opState) localapi.ControlsState {
+	roots := scanRoots(dataDir)
 	st := localapi.ControlsState{
 		ScanRunning: scanInFlight.Load(),
-		Roots:       scanRoots(dataDir),
+		Roots:       roots,
 	}
+	// Per-root share locations, resolved by the same resolver a scan uses, so
+	// the page cannot show a location the scan would not attach.
+	st.ShareRoots, st.ShareMapRejects = rootShareViews(dataDir, roots, osGetenv)
+	st.ShareMapEnvPaths = envShareMapPaths(osGetenv)
 	if ops != nil {
 		st.LocalPaused = ops.LocalScanPaused()
 		st.CentralSuspended = ops.Suspended()

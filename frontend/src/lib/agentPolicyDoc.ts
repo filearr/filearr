@@ -595,7 +595,12 @@ export interface AgentCapabilities {
   tools?: Record<string, boolean>;
   /** Versions of the tools that are present AND willing to state one. A tool in
    *  `tools` but absent here is installed with an unreportable version, which is
-   *  a different thing from not installed — render them differently. */
+   *  a different thing from not installed — render them differently.
+   *
+   *  Whether a version is old enough to warn about is NOT decided here: central
+   *  publishes the minimums and sends its verdict per tool on the agent row
+   *  (`AgentOut.tool_verdicts`), so that its own host tools and an agent's are
+   *  judged by one comparator. See ./hostTools. */
   tool_versions?: Record<string, string>;
   /** What it can actually extract here, e.g. ["image","audio","document"]. */
   formats?: string[];

@@ -157,6 +157,26 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, 
 				h["local_overrides"] = lo
 			}
 		}
+		// Per-root share mapping summary (2026-08-10). Central renders network-open
+		// links from the hints agents attach, so "this agent's roots produce no
+		// hints" is a fleet-visible condition — and a malformed share-map entry is
+		// skipped rather than fatal (R1), which makes it invisible from the
+		// console otherwise. Counts only: the mappings themselves are host
+		// configuration the console has no key for, and this rides a 60 s poll.
+		if roots := scanRoots(dataDir); len(roots) > 0 {
+			views, rejects := rootShareViews(dataDir, roots, osGetenv)
+			mapped := 0
+			for _, v := range views {
+				if v.Location != "" {
+					mapped++
+				}
+			}
+			sm := map[string]any{"roots": len(views), "mapped": mapped}
+			if len(rejects) > 0 {
+				sm["rejected"] = len(rejects)
+			}
+			h["share_map"] = sm
+		}
 		if n, err := outbox.New(idx.DB()).CountUnsent(ctx); err == nil {
 			h["outbox_pending"] = n
 		}

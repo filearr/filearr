@@ -165,7 +165,7 @@ Sections:
 | **Services** | Probed live. Meilisearch reports its own engine version through the same client every search uses; PostgreSQL reports `SELECT version()`; Procrastinate and SQLAlchemy report the version of the code this process imported. Each probe degrades **independently** — a Meilisearch outage shows as one "unreachable" row, not a broken page. |
 | **Backend dependencies** | Every direct Python dependency with the version actually importable in this process, plus a link to its documentation (taken from the package's own metadata, so it cannot drift). |
 | **Frontend bundle** | Recorded when the bundle was compiled — the image ships only built assets, so these are the resolved versions baked into the JavaScript you are running, along with the Node that built it. |
-| **Extraction tools** | ffprobe, ffmpeg, exiftool, tesseract and the poppler trio **on the central server**: present or absent, and the version each one reports. Agents report their own tools on the Agents page. |
+| **Extraction tools** | ffprobe, ffmpeg, exiftool, tesseract and the poppler trio **on the central server**: present or absent, the version each one reports, and whether that version clears the [minimum Filearr recommends](agents.md#agent-tool-minimums) — a version shown in amber is below it, and the tooltip says what that costs. Judged by the same rule as an agent's tools, so the two pages cannot disagree; agents report their own on the Agents page. |
 | **Agent fleet** | Distinct `agent_version` values with a count each, so a rollout still in flight is visible at a glance. Hidden when `FILEARR_AGENTS_ENABLED` is off. |
 | **Embedding model** | See below. |
 

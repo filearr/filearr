@@ -10,12 +10,15 @@ import type { AgentPolicyDoc } from "./agentPolicyDoc";
 // unknown-name-preservation rules behind the config-group dialog's checkbox
 // list are DOM-free so they can be unit-tested on Node.
 import type { CollectorCatalogueEntry } from "./inventoryCollectors";
+// The host-tool minimum-version catalogue, next to the chip logic that reads it.
+import type { HostToolMinimum } from "./hostTools";
 // The About page's response shape lives in ./about alongside the pure render
 // helpers that consume it; re-exported here so callers keep one types import.
 import type { About } from "./about";
 
 export type { About } from "./about";
 export type { CollectorCatalogueEntry } from "./inventoryCollectors";
+export type { HostToolMinimum } from "./hostTools";
 
 // A single search hit is an untyped Meili document plus, for document results,
 // P3-T5 ``snippet`` (cropped body text with <em>…</em> match markers) and
@@ -2513,6 +2516,13 @@ export interface AgentOut {
   config_group_id: string | null;
   // W6-D3: capability advertisement persisted from the agent's command poll.
   capabilities: Record<string, unknown> | null;
+  /** 2026-08-11: central's verdict on each advertised host tool — `ok` /
+   *  `outdated` / `unknown` / `absent`, keyed by tool name. Derived from
+   *  `capabilities` per response (the minimums are a central opinion, revisable
+   *  without touching a fleet of agents), so the console renders a judgement it
+   *  does not have to make. `{}` for an agent that has never advertised.
+   *  See ./hostTools for how a chip reads it. */
+  tool_verdicts: Record<string, string>;
   /** Self-reported health snapshot from the agent's command poll (uptime,
    *  outbox backlog, index size, scan state) + when it arrived. */
   health: Record<string, unknown> | null;
@@ -3005,6 +3015,15 @@ export const listConfigGroups = () =>
  *  Shapes + merge rules live in ./inventoryCollectors. */
 export const listInventoryCollectors = () =>
   request<CollectorCatalogueEntry[]>("/agents/inventory-collectors");
+
+/** The published minimum version of each extraction host tool, with the
+ *  one-sentence consequence of being below it and the justification for the
+ *  number. Static, fleet-wide data — fetched once per Agents page load and used
+ *  only to write the tooltip behind a chip whose verdict central already
+ *  computed, so a failed fetch degrades the explanation and never the warning.
+ *  Shapes + chip rules live in ./hostTools. */
+export const listHostToolMinimums = () =>
+  request<HostToolMinimum[]>("/agents/host-tool-minimums");
 
 export const createConfigGroup = (body: ConfigGroupIn) =>
   request<ConfigGroupOut>("/agents/config-groups", {

@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agentsync, audit
+from filearr import agentsync, audit, toolversions
 from filearr import policy as policy_mod
 from filearr.agentsync import EnrollmentError
 from filearr.config import get_settings
@@ -179,6 +179,14 @@ class AgentOut(BaseModel):
     # ({inventory_collectors, inventory_version}; NULL until the agent's first
     # post-W6 poll). The console offers only collectors an agent supports.
     capabilities: dict | None = None
+    # 2026-08-11 minimum-version awareness: central's verdict on each host tool
+    # this agent advertises — 'ok' | 'outdated' | 'unknown' | 'absent', keyed by
+    # tool name (filearr.toolversions). Derived from `capabilities`, never stored:
+    # the minimums are a central opinion that can be revised in a central release,
+    # so recomputing them per response is what keeps a fleet of agents out of it.
+    # `{}` for an agent that has never advertised anything — empty is honest,
+    # seven 'absent' verdicts would state as fact something we never observed.
+    tool_verdicts: dict[str, str] = {}
     # 2026-08-08 fleet health: the agent's self-reported snapshot (uptime,
     # outbox backlog, index size, scan state) + when it arrived, and CENTRAL's
     # observation of the transport its last authenticated request used
@@ -313,6 +321,25 @@ class RolloutGroupsOut(BaseModel):
     groups: list[RolloutGroupOut]
 
 
+class HostToolMinimumOut(BaseModel):
+    """One row of the published host-tool minimums (2026-08-11).
+
+    The console pairs this with each agent's ``tool_verdicts`` to explain an
+    amber chip: the version found (from the agent), the version wanted
+    (``minimum_version``) and what is worse without it (``impact``). ``reason``
+    is the justification for the number itself — shipped to the UI on purpose,
+    because a threshold whose rationale lives only in a Python comment is a
+    threshold operators cannot argue with, and one they will therefore work
+    around rather than act on."""
+
+    name: str
+    #: ``None`` = Filearr publishes no minimum for this tool. Renders as
+    #: "not judged", never as "fine".
+    minimum_version: str | None
+    impact: str | None
+    reason: str | None
+
+
 def _ca_bootstrap(settings) -> CaBootstrap:
     """The public CA pinning/bootstrap material handed to an agent (never a
     secret — the root fingerprint is a pin, not a credential)."""
@@ -359,6 +386,7 @@ def _agent_out(a: Agent) -> AgentOut:
         created_at=a.created_at,
         config_group_id=a.config_group_id,
         capabilities=a.capabilities,
+        tool_verdicts=toolversions.capability_verdicts(a.capabilities),
         health=a.health,
         health_at=a.health_at,
         last_auth_mode=a.last_auth_mode,
@@ -786,6 +814,39 @@ async def list_rollout_groups(
             for name in sorted(counts)
         ],
     )
+
+
+@router.get(
+    "/agents/host-tool-minimums",
+    response_model=list[HostToolMinimumOut],
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def list_host_tool_minimums() -> list[HostToolMinimumOut]:
+    """The minimum recommended version of each extraction host tool, with why.
+
+    Static data (:data:`filearr.toolversions.HOST_TOOL_MINIMUMS`) — no database,
+    no agent state. The per-agent judgement already rides every agent row as
+    ``tool_verdicts``; this endpoint carries the PROSE the console needs to
+    explain a verdict: the number, one sentence on what degrades below it, and
+    the justification behind the number.
+
+    Sent separately rather than inline on each agent because it is identical for
+    every row — repeating four paragraphs of reasoning across a 200-agent page
+    would be most of the payload. Declared BEFORE ``/agents/{agent_id}`` so the
+    literal path wins the match (same reason ``/agents/summary`` sits where it
+    does).
+
+    A tool with ``minimum_version: null`` is one Filearr publishes no opinion
+    about; the console must render it as unjudged, not as fine."""
+    return [
+        HostToolMinimumOut(
+            name=e["name"],
+            minimum_version=e["minimum"],
+            impact=e["impact"],
+            reason=e["reason"],
+        )
+        for e in toolversions.HOST_TOOL_MINIMUMS
+    ]
 
 
 @router.patch(

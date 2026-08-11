@@ -131,6 +131,7 @@ TAXONOMY_GROUP_UPDATED = "taxonomy_group_updated"
 TAXONOMY_GROUP_DELETED = "taxonomy_group_deleted"
 TAXONOMY_EXTENSION_ADDED = "taxonomy_extension_added"
 TAXONOMY_EXTENSION_REMOVED = "taxonomy_extension_removed"
+TAXONOMY_SEED_SYNCED = "taxonomy_seed_synced"
 # LLM facade (M1/M3). The key id rides in details["key_id"] — an ApiKey uuid
 # must NEVER go into principal_id (FK to principals; the insert would fail and
 # emit() swallows it). Uppercase values match what llm_keys shipped emitting.

@@ -332,6 +332,42 @@ def test_host_tool_present_but_silent_is_not_absent(monkeypatch):
     assert row["path"] == "/usr/bin/tesseract"
 
 
+def test_host_tools_carry_the_minimum_version_verdict(monkeypatch):
+    """Central's own tools get the SAME verdict treatment as an agent's, from
+    the same function — the About page and the Agents page must not disagree
+    about whether a given poppler is old."""
+
+    class _Old:
+        stdout = "tesseract 4.1.1\n leptonica-1.79.0"
+        stderr = ""
+
+    monkeypatch.setattr(about_mod.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(about_mod.subprocess, "run", lambda argv, **kw: _Old())
+    about_mod._probe_tool_version.cache_clear()
+
+    rows = {r["name"]: r for r in about_mod.host_tools()}
+    tess = rows["tesseract"]
+    assert tess["version"] == "4.1.1"
+    assert tess["verdict"] == "outdated"
+    assert tess["minimum_version"] == "5.0.0"
+    # The tooltip sentence must ship with the verdict; a bare "outdated" tells
+    # an operator nothing about whether to act.
+    assert tess["impact"]
+    # Every row carries the field, including the ones that parsed nothing out of
+    # a tesseract banner (so: present, version unknown -> 'unknown', never 'ok').
+    assert all(r["verdict"] in {"ok", "outdated", "unknown", "absent"} for r in rows.values())
+    assert rows["ffmpeg"]["verdict"] == "unknown"
+    about_mod._probe_tool_version.cache_clear()
+
+
+def test_absent_host_tools_are_absent_not_outdated(monkeypatch):
+    """A tool that is not installed has no version to be old; the verdict must
+    say 'absent' so the UI keeps rendering it as a neutral gap rather than a
+    warning to go and upgrade something that is not there."""
+    monkeypatch.setattr(about_mod.shutil, "which", lambda cmd: None)
+    assert {r["verdict"] for r in about_mod.host_tools()} == {"absent"}
+
+
 def test_host_tool_probe_survives_a_missing_binary(monkeypatch):
     """which() can win a race the exec then loses (a binary deleted between the
     two). The probe must report unknown, never propagate OSError."""
