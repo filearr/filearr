@@ -78,6 +78,11 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		// already-indexed items with a fresh extraction, for the files no scan
 		// will ever report as changed again.
 		RunReextract: reextractRunner(idx, dataDir, ops, log),
+		// 2026-08-12 QH-T6: the operator-triggered migration that re-reads the
+		// 64-128 KiB band and corrects the quick hashes the pre-2026-07-18
+		// hasher got wrong. Distinct from the `rehash_check` command kind (one
+		// item, verify only) — see internal/commands/rehash_sweep.go.
+		RunRehashSweep: rehashSweepRunner(idx, dataDir, ops, log),
 	})
 	done := make(chan struct{})
 	go func() {
@@ -209,6 +214,39 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, 
 				rx["finished"] = st.FinishedAt
 			}
 			h["reextract"] = rx
+		}
+		// QH-T6: the quick_hash migration's state. This rides HEALTH rather than
+		// CAPABILITIES on purpose — health is re-evaluated on every poll while a
+		// capability advertisement is a slower-moving statement about what the
+		// agent CAN do, and this value changes minute by minute during a sweep.
+		//
+		// It is also the ONLY channel through which the migration's state can
+		// reach an operator. Central cannot derive it from the rows: it holds no
+		// hash provenance for agent-owned items (agentsync never writes
+		// policy_version for them), so "has this agent been migrated" is
+		// unanswerable from the catalogue side. Omitted entirely until a sweep has
+		// run, so an un-swept agent reads as "not run" rather than as zeros.
+		if st, err := idx.RehashState(ctx); err == nil && st.StartedAt != "" {
+			rh := map[string]any{
+				"fp":       st.FP,
+				"started":  st.StartedAt,
+				"seen":     st.Seen,
+				"changed":  st.Changed,
+				"verified": st.Verified,
+				"skipped":  st.Skipped,
+				"failed":   st.Failed,
+				"cursor":   st.CursorRowID,
+				"min_size": st.MinSize,
+				"max_size": st.MaxSize,
+				// An empty FinishedAt is the durable "this sweep is partway through"
+				// state the next command resumes from — reported as a flag rather
+				// than left to be inferred from a missing timestamp.
+				"complete": st.FinishedAt != "",
+			}
+			if st.FinishedAt != "" {
+				rh["finished"] = st.FinishedAt
+			}
+			h["rehash"] = rh
 		}
 		if st := readJSON("scan-status.json"); st != nil {
 			h["scan"] = st

@@ -530,10 +530,30 @@ Remaining, non-trivial:
   Two bounded limitations remain, both by design and neither a defect:
   (a) files LARGER than 128 KiB are still head+tail sampled, so a genuinely
   ambiguous pair needs `content_hash` or `mid_hash` to separate — the report's
-  `hash_tier` column says which tier grouped a cluster; (b) agent-owned
-  libraries were excluded from the sweep (central cannot open those files), so
-  a stable agent-side file keeps its pre-fix `quick_hash` until its mtime
-  changes or an operator forces a re-index (brief §9.2).
+  `hash_tier` column says which tier grouped a cluster; (b) **CLOSED 2026-08-12
+  (QH-T6)** — agent-owned libraries were excluded from central's sweep (central
+  cannot open those files, and `agentsync.apply_batch` never writes
+  `policy_version` for agent rows, so no central query can even identify a stale
+  agent hash), leaving stable agent-side files with their pre-fix `quick_hash`
+  indefinitely (brief §9.2). The brief declined to build an agent-side sweep on
+  the assumption that agent libraries were a fraction of the catalogue; they are
+  now effectively all of it (98,628 affected rows across seven libraries), so the
+  ruling was revisited and the sweep built:
+  `agent/internal/rehash` + the agent-scoped `rehash_sweep` command
+  (`POST /agents/{id}/rehash-sweep`, admin scope, TTL 86,400s, 409 single-sweep
+  guard). Operator-triggered, never automatic — an unprompted fleet-wide I/O
+  storm is exactly what an operator needs to schedule. Defaults to the defect
+  band 65537..131072 (overridable per run; the wider <=131072-from-zero QH-T2
+  `content_hash` backfill is a deliberate opt-in, ~10x the reads). Resumable and
+  idempotent on a durable per-agent cursor (`rehash_state`, fingerprinted
+  `h<scan.HashSchemeVersion>-<min>-<max>`), emits ONLY on change (a row already
+  repaired by an ordinary rescan is counted `verified` and costs nothing), and
+  never attaches `extracted` — which is what keeps a ~99k-row hash correction
+  from cascading into a fleet-wide re-extraction and Meili re-index. State is
+  reported in the agent HEALTH block and rendered as the "Hash migration" row on
+  the per-agent About panel; that is the only place it can be seen, since central
+  holds no hash provenance for agent rows. Runbook: `docs/ops/agents.md` §14;
+  user-facing: docs-site `agents.md#agent-rehash`.
   ORIGINAL REPORT (retained for context): quick_hash produced thousands of
   false duplicate detections on small files. The duplicates
   surface (P3-T10 badge + the `duplicate_files` canned report) falls back to

@@ -167,6 +167,15 @@ queue through which central asks an agent to do ONE thing on demand:
 | `stage_upload` | start an agent→central retrieve staging upload | retrieve API (P10-T13) |
 | `inventory` | run the W6-D3 inventory collectors on the agent host | inventory UX (W6-D3) |
 | `self_update` | run one immediate update check-and-apply (§8.6) — **agent-scoped: `item_id` is absent** | console update button (`POST /agents/{id}/self-update`) |
+| `reextract` | sweep the agent's index and re-emit items with a fresh extraction — **agent-scoped** | console re-extract action (`POST /agents/{id}/reextract`) |
+| `rehash_sweep` | migrate stale `quick_hash` values in a size band — **agent-scoped**, §14 | console re-hash action (`POST /agents/{id}/rehash-sweep`) |
+
+!!! warning "`rehash_check` is not `rehash_sweep`"
+    One word apart, opposite jobs. `rehash_check` is **item-scoped**: central
+    asks what one file hashes to right now, the agent answers, nothing is
+    written and nothing is replicated. `rehash_sweep` is **agent-scoped**, runs
+    for hours, rewrites rows in the agent's local index and emits replication
+    events for them. Never reach for one meaning the other.
 
 **Lifecycle.** `pending` → (agent poll delivers) `picked_up` → (agent reports)
 `done` / `failed`. A per-minute maintenance sweep flips a stale unpicked
@@ -1186,3 +1195,181 @@ Semantics and safety:
   own `FILEARR_AGENT_SCAN_INTERVAL` loop and the in-daemon scheduler stays
   off unless policy/env arms it — do not enable both, or you'll double-scan.
   The env names deliberately differ from the container's shell-loop vars.
+
+## 14. Runbook: the quick_hash migration sweep (QH-T6, 2026-08-12)
+
+**One-line summary.** Agents enrolled before 2026-07-18 hold wrong `quick_hash`
+values for every stable file between 65,537 and 131,072 bytes; nothing repairs
+them automatically; `POST /agents/{id}/rehash-sweep` is the repair.
+
+### 14.1 What is broken and why nothing else fixes it
+
+Before the QH-T1 fix (2026-07-18) both hashers — `extract.quick_hash` in Python
+and `scan.QuickHash` in Go, kept byte-identical on purpose — read a fixed 64 KiB
+head and appended a 64 KiB tail only when `size > 131072`. A file in
+**65537..131072** therefore had its middle and tail silently unhashed. Two
+different files sharing their first 64 KiB collided, which for structured
+formats (JPEG/PNG/PDF/office containers) is routine. Symptoms: false duplicate
+groups in the reports, and a mis-keyed tier-1 match in move detection.
+
+Three facts make this need its own machinery rather than an existing sweep:
+
+1. **`scan.diffEntry` will never revisit those files.** It re-hashes only when
+   `size` or `mtime_ns` moved, or when `quick_hash` is empty. A stable file
+   satisfies none of those, forever. That behaviour is deliberate and pinned by
+   `TestScanNewChangedUnchangedMissingSelfHeal` (an unchanged rescan must cause
+   zero `local_seq_no` churn), so the migration is its **own path**, never a
+   flag on the scan path.
+2. **Central's QH-T4 sweep cannot reach agent rows.** `worker.rehash_small_files`
+   selects on `policy_version NOT LIKE 'cfg2:%'`, and `agentsync.apply_batch`
+   **never writes `policy_version`** for agent-owned rows. So central cannot even
+   identify a stale agent hash, let alone recompute one — it does not host the
+   file. Central's own catalogue converged separately (`still_stale = 0`, checked
+   2026-08-11).
+3. **There is no hash-provenance column in the agent's SQLite index** and adding
+   one would mean an `ALTER` on a million-row store on every deployed agent. The
+   sweep's cursor (`rehash_state`, one singleton row) is therefore the only
+   completion signal that exists anywhere.
+
+Live scope when this shipped: **98,628 rows across seven libraries** —
+video_media 37,095 · training 23,052 · audio 18,786 · pictures 14,641 ·
+documents 3,351 · one Windows agent's `d:` 1,685 · tools 18. That is an upper
+bound: anything created or modified since the agent picked up the QH-T1 binary
+already self-corrected through the ordinary changed-file path, and the sweep
+counts those as `verified`.
+
+### 14.2 Enqueue
+
+```bash
+# Defaults: the defect band, unbounded, honour the idempotence short-circuit.
+curl -sS -X POST -H "Authorization: Bearer $ADMIN_KEY" \
+  https://filearr.example.com/api/v1/agents/$AGENT_ID/rehash-sweep
+
+# Bounded first chunk, to time it before committing a night to it.
+curl -sS -X POST -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_items": 5000}' \
+  https://filearr.example.com/api/v1/agents/$AGENT_ID/rehash-sweep
+
+# The SEPARATE, opt-in QH-T2 backfill: give the sub-band files an exact
+# content_hash they never had. ~10x the reads, different benefit. Not the default.
+curl -sS -X POST -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"min_size": 1, "max_size": 131072}' \
+  https://filearr.example.com/api/v1/agents/$AGENT_ID/rehash-sweep
+```
+
+`admin` scope, behind `FILEARR_AGENTS_ENABLED` (404 when off). Body fields are
+all optional: `force` (bool), `max_items` (1..10,000,000), `min_size` /
+`max_size` (1..131,072, inclusive, `min <= max`). A bad value is a **422**, never
+a silent clamp. **409** while a `rehash_sweep` is already `pending`/`picked_up`
+for that agent — two runs would fight over the one cursor and double-emit the
+rows they raced on.
+
+The command carries `REHASH_TTL_SECONDS = 86_400`, not the 1h default, for the
+same reason `reextract` does: `agentsync.sweep_decision` ranks `expires_at`
+above the lease, so a faithfully heartbeating agent's multi-hour sweep would
+otherwise be marked `expired` mid-run — the console's badge would clear and the
+history would record a failure for work that completed. (No output is lost when
+that happens; the events are already replicated and the cursor is durable. The
+report would simply be a lie.)
+
+### 14.3 Watching it
+
+Three places, in increasing detail:
+
+- **Agents table** — a `re-hashing` badge while the command is
+  `pending`/`picked_up` (the page polls the command list every 15s).
+- **row → details → About / versions → Hash migration** — the live counters,
+  from the agent's health block. This is the authoritative view.
+- **Admin → Agents → commands** — the terminal result map.
+
+The health block (re-evaluated on **every** command poll, unlike capabilities,
+which is why it rides health):
+
+```json
+{
+  "rehash": {
+    "fp": "h2-65537-131072",
+    "started": "2026-08-12T09:00:00Z",
+    "finished": "2026-08-12T14:31:07Z",
+    "complete": true,
+    "seen": 40000, "changed": 39100, "verified": 850,
+    "skipped": 50, "failed": 0,
+    "cursor": 812004, "min_size": 65537, "max_size": 131072
+  }
+}
+```
+
+Reading the counters:
+
+- `changed` — rows actually corrected and emitted.
+- `verified` — rows re-read and found already right. **Deliberately separate
+  from `changed`.** High `verified` with low `changed` means an agent that
+  ordinary rescans had already converged; summed into one number that is
+  indistinguishable from a sweep that did nothing.
+- `skipped` — size/mtime drifted, file vanished, or it is no longer a regular
+  file. The ordinary scan owns all three cases.
+- `failed` — the hash could not be computed (unreadable file, or the per-file
+  `FILEARR_AGENT_HASH_TIMEOUT_SECONDS` bound fired on a hung mount). **The stored
+  hash is left intact, never blanked** — writing an empty string would destroy a
+  merely-suspect value and then read as a null-hash row the scan self-heals. The
+  paths are WARNed in the agent log.
+- `fp` — `h<scheme>-<min>-<max>`, from `scan.HashSchemeVersion` and the band.
+  Human-readable so two agents can be compared by eye.
+
+### 14.4 Idempotence, resume, and force
+
+Keyed entirely on `fp`:
+
+| stored state | request | outcome |
+|---|---|---|
+| same `fp`, `finished_at` set | plain | no-op, `reason: "already re-hashed at this scheme and size band"` |
+| same `fp`, `finished_at` empty | plain | resume from `cursor_rowid` |
+| different `fp` (band changed, or `HashSchemeVersion` bumped) | plain | cursor resets to 0, counters zeroed |
+| any | `force: true` | cursor resets to 0 |
+
+`force` is safe to press even on a converged agent: the sweep emits only on
+change, so a forced run over correct rows counts them `verified` and writes
+nothing. Candidate ordering is by SQLite `rowid`, which is assigned on insert and
+never reshuffled — a scan running concurrently appends **above** the cursor, so
+the walk can neither skip nor double-visit.
+
+### 14.5 Blast radius (why this is not a re-index of the fleet)
+
+- The events carry **no `extracted` payload**. `agentsync.apply_batch` merges
+  `metadata_` only when `extracted is not None`, so a hash correction cannot
+  cascade into re-extraction. This is load-bearing: at ~99k rows it is the
+  difference between a hash fix and a fleet-wide re-parse.
+- Emit-only-on-change keeps the *applied batch* count proportional to real
+  corrections, which matters because every applied batch defers a Meilisearch
+  sync job (`api/agent_commands.py`, the `defer_index_sync` at the end of the
+  apply path).
+- Move detection is agent-local, runs during the walk, and never runs on a
+  replicated update — so a corrected hash arriving at central cannot trigger one.
+- Invariant 2 holds: only the two identity hash columns move. `user_metadata` is
+  untouched, and no file content leaves the agent.
+- The sweep stops while the agent is suspended or central is in maintenance
+  (`opState.ReplicationPaused`) — both because its events would only pile up, and
+  because sustained I/O is exactly what "suspended" should stop.
+
+### 14.6 Schema note (do not "fix" this)
+
+`rehash_state` was added to `agent/internal/index/schema.go` **without** bumping
+`schemaVersion`, and that is intentional. `integrity.go:schemaOutdated` treats a
+version bump as *delete the store and rebuild from a fresh walk* — for an
+additive, local-only, empty-on-create cursor table that would cost every deployed
+agent a full re-walk and a re-emission of its entire index (~1.09M items on the
+live agent) to gain twelve columns of bookkeeping. `CREATE TABLE IF NOT EXISTS`
+in the DDL is applied in place by `migrate()` on the next open; `extract_state`
+and `thumb_markers` took the same route for the same reason. Pinned by
+`TestRehashStateIsAddedInPlaceWithoutLosingTheIndex`.
+
+### 14.7 Rollback
+
+`alembic downgrade b2e6d048f317` narrows the `agent_commands.kind` CHECK and
+deletes any `rehash_sweep` rows first (Postgres validates a new CHECK against
+existing rows). Nothing durable is lost: the sweep's progress lives in the
+agent's own `rehash_state` cursor, so a re-upgrade and a re-issued command
+resumes exactly where it stopped. What is lost is the console's history of the
+run, not the run.

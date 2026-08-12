@@ -356,6 +356,31 @@ class AgentAboutExtract(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class AgentAboutRehash(BaseModel):
+    """The agent's quick_hash migration state (QH-T6), from its HEALTH block.
+
+    Every counter is nullable because the whole object is a remote self-report
+    that central type-checks rather than trusts: a field the agent did not send,
+    or sent as the wrong type, is null and renders as "not reported". ``changed``
+    and ``verified`` are separate for a reason the console depends on — see
+    :func:`filearr.agent_about.rehash_section`."""
+
+    #: "h<scheme>-<min>-<max>" — the scheme and band the cursor belongs to.
+    fp: str | None
+    started: str
+    #: Null while the sweep is still partway through; ``complete`` is the flag.
+    finished: str | None
+    complete: bool
+    seen: int | None
+    changed: int | None
+    verified: int | None
+    skipped: int | None
+    failed: int | None
+    cursor: int | None
+    min_size: int | None
+    max_size: int | None
+
+
 class AgentAboutOut(BaseModel):
     """The per-agent About report (2026-08-11).
 
@@ -376,6 +401,11 @@ class AgentAboutOut(BaseModel):
     #: budget)" rather than an empty table.
     modules_omitted: bool
     extract: AgentAboutExtract
+    #: Null when this agent has never run a quick_hash migration sweep. Comes
+    #: from the health block, not capabilities, so it is present even on an agent
+    #: that has never advertised capabilities — and null here means "not run",
+    #: never "converged".
+    rehash: AgentAboutRehash | None
     #: False when this agent has never advertised capabilities at all.
     reported: bool
 

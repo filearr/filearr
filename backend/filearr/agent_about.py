@@ -243,6 +243,72 @@ def extract_section(capabilities: dict | None) -> dict:
     }
 
 
+def _int(value: Any) -> int | None:
+    """A non-negative int, or ``None``. ``bool`` is rejected explicitly because
+    it is an ``int`` subclass in Python and ``True`` rendering as ``1`` in a
+    counter column would be an invented fact. Negatives are rejected for the same
+    reason: every value here is a count or a byte size."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def rehash_section(health: dict | None) -> dict | None:
+    """The agent's quick_hash migration state (QH-T6), or ``None`` when it has
+    never run a sweep.
+
+    **Why this reads HEALTH and not CAPABILITIES**, unlike everything else in
+    this module: capabilities is a slow-moving statement about what an agent CAN
+    do, while this changes minute by minute during a multi-hour sweep, and health
+    is the block the agent re-evaluates on every poll.
+
+    **Why the console needs it at all.** This is the ONLY place the migration's
+    state is visible, and central cannot derive it from the catalogue. There is
+    no hash-provenance column for agent-owned rows — ``agentsync.apply_batch``
+    never writes ``policy_version`` — so no query central can write distinguishes
+    a stale agent quick_hash from a correct one. The agent's own cursor is the
+    entire completion signal, and this is the wire it arrives on.
+
+    ``None`` (rather than a dict of zeros) is what lets the console say "not run"
+    instead of drawing a converged-looking report of a sweep that never happened.
+    Same rule as :func:`build_section`, and the same reason.
+
+    Everything here is third-party JSON from a machine central does not control,
+    so every field is type-checked on the way out; a malformed block degrades to
+    ``None`` rather than raising.
+    """
+    raw = _dict(_dict(health).get("rehash"))
+    started = _text(raw.get("started"))
+    if not started:
+        # The agent omits the whole block until a sweep has run, and stamps
+        # started_at before its first batch — so no start time means no sweep,
+        # whatever else the block happens to contain.
+        return None
+    return {
+        # "h<scheme>-<min>-<max>", deliberately human-readable on the Go side so
+        # an operator can compare two agents' migration state by eye.
+        "fp": _text(raw.get("fp")),
+        "started": started,
+        "finished": _text(raw.get("finished")),
+        # The agent's own flag rather than ``finished is not None``: an empty
+        # finished_at is the durable "partway through" state the next command
+        # resumes from, and it is the agent's to declare.
+        "complete": raw.get("complete") is True,
+        "seen": _int(raw.get("seen")),
+        # changed vs verified stay SEPARATE all the way to the panel. A sweep
+        # reporting 40,000 seen / 0 changed / 40,000 verified is confirming an
+        # already-converged agent; the same numbers with the two added together
+        # are indistinguishable from a sweep that did nothing.
+        "changed": _int(raw.get("changed")),
+        "verified": _int(raw.get("verified")),
+        "skipped": _int(raw.get("skipped")),
+        "failed": _int(raw.get("failed")),
+        "cursor": _int(raw.get("cursor")),
+        "min_size": _int(raw.get("min_size")),
+        "max_size": _int(raw.get("max_size")),
+    }
+
+
 def agent_about(agent: Agent) -> dict[str, Any]:
     """Assemble the whole per-agent About report from one already-loaded row.
 
@@ -292,5 +358,11 @@ def agent_about(agent: Agent) -> dict[str, Any]:
         # that shows a confident empty table.
         "modules_omitted": _dict(caps).get("modules_omitted") is True,
         "extract": extract_section(caps),
+        # QH-T6. Sourced from HEALTH, not capabilities (see rehash_section), and
+        # so it is present even on an agent that has never sent a capability
+        # advertisement — hence its own null rather than a field of `extract`.
+        "rehash": rehash_section(
+            agent.health if isinstance(agent.health, dict) else None
+        ),
         "reported": caps is not None,
     }

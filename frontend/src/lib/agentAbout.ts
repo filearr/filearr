@@ -94,6 +94,40 @@ export type AgentAboutExtract = {
   inventory_version: number | null;
 };
 
+/** The agent's quick_hash migration state (QH-T6), from its HEALTH block rather
+ *  than its capability advertisement — health is re-evaluated on every poll,
+ *  which is what a value that moves minute-by-minute during a multi-hour sweep
+ *  needs.
+ *
+ *  This is the ONLY place the migration's state is visible anywhere. Central
+ *  cannot derive it from the catalogue: it holds no hash provenance for
+ *  agent-owned rows, so no query it can write tells a stale quick_hash from a
+ *  correct one. The agent's own cursor is the whole completion signal.
+ *
+ *  Every counter is nullable because the whole object is a remote self-report
+ *  central type-checks rather than trusts. */
+export type AgentAboutRehash = {
+  /** "h<scheme>-<min>-<max>" — the hash scheme and size band this cursor covers.
+   *  Human-readable on purpose so two agents can be compared by eye. */
+  fp: string | null;
+  started: string;
+  /** Null while the sweep is partway through; `complete` is the flag. */
+  finished: string | null;
+  complete: boolean;
+  seen: number | null;
+  /** Rows this sweep actually CORRECTED. Kept apart from `verified` — see
+   *  `rehashCell`. */
+  changed: number | null;
+  /** Rows re-read and found already right (an ordinary rescan had repaired them
+   *  since the fixed binary landed). */
+  verified: number | null;
+  skipped: number | null;
+  failed: number | null;
+  cursor: number | null;
+  min_size: number | null;
+  max_size: number | null;
+};
+
 export type AgentAbout = {
   agent: AgentAboutIdentity;
   build: AgentAboutBuild | null;
@@ -105,6 +139,9 @@ export type AgentAbout = {
    *  stay inside its payload budget. */
   modules_omitted: boolean;
   extract: AgentAboutExtract;
+  /** Null = this agent has never run a hash-migration sweep. Never a block of
+   *  zeros: "not run" and "converged with nothing to do" are different facts. */
+  rehash: AgentAboutRehash | null;
   /** False = this agent has never advertised capabilities at all. */
   reported: boolean;
 };
@@ -283,6 +320,79 @@ export function modulesSummary(a: AgentAbout): Cell {
   };
 }
 
+/** How the "Hash migration" row reads.
+ *
+ *  Three states, and the difference between the first two is the reason this
+ *  function exists rather than a template string in the component:
+ *
+ *  - **not run** (`null`). Muted, and it says what the sweep IS, because an
+ *    operator who has never heard of QH-T6 is the most likely reader. This is
+ *    NOT an error state: an agent enrolled after 2026-07-18 has nothing to
+ *    migrate and will sit here forever, correctly.
+ *  - **running**. Live counters. `changed` and `verified` are shown SEPARATELY,
+ *    always: a sweep reporting 40,000 seen / 0 changed / 40,000 verified is
+ *    confirming an already-converged agent, and the same numbers added together
+ *    are indistinguishable from a sweep that did nothing. Tone is `warn` — not
+ *    because anything is wrong, but because the agent is under sustained I/O
+ *    load right now and that is worth the operator's eye.
+ *  - **complete**. `ok`, with when and how much.
+ *
+ *  A non-zero `failed` count is surfaced in the hint wherever it appears: those
+ *  are files the agent could not read, they were LEFT ALONE (never blanked), and
+ *  they are the one part of a "complete" sweep that still needs a human. */
+export function rehashCell(a: AgentAbout): Cell {
+  const r = a.rehash;
+  if (!r)
+    return {
+      text: "not run",
+      tone: "muted",
+      hint:
+        "The quick-hash migration re-reads every file in the 64-128 KiB band and " +
+        "corrects hashes computed before the 2026-07-18 fix, which under-read that " +
+        "band and produced false duplicates. Agents enrolled after that date have " +
+        "nothing to migrate. Nothing else can repair these rows: the agent's scan " +
+        "only re-hashes files whose size or modification time changed, and central " +
+        "does not hold the files.",
+    };
+
+  const band =
+    r.min_size !== null && r.max_size !== null
+      ? `${r.min_size.toLocaleString()}–${r.max_size.toLocaleString()} bytes`
+      : "an unreported band";
+  const counts = [
+    r.changed !== null ? `${r.changed.toLocaleString()} corrected` : null,
+    r.verified !== null ? `${r.verified.toLocaleString()} already correct` : null,
+    r.skipped ? `${r.skipped.toLocaleString()} skipped` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const failedNote = r.failed
+    ? ` ${r.failed.toLocaleString()} file(s) could not be read and were left untouched — ` +
+      "their stored hashes are unchanged, not blanked. Check the agent's log for the paths."
+    : "";
+
+  if (!r.complete)
+    return {
+      text: `in progress — ${r.seen?.toLocaleString() ?? "?"} seen${counts ? ` (${counts})` : ""}`,
+      tone: "warn",
+      hint:
+        `Started ${formatWhen(r.started)}, sweeping ${band}. The agent is re-reading ` +
+        "every file in that band right now, so expect sustained disk and network I/O " +
+        "on that machine. It is safe to stop it (suspend the agent) — the cursor is " +
+        "durable and the next run resumes where this one stopped." +
+        failedNote,
+    };
+
+  return {
+    text: `complete ${formatWhen(r.finished)}${counts ? ` — ${counts}` : ""}`,
+    tone: r.failed ? "warn" : "ok",
+    hint:
+      `Swept ${band}${r.fp ? ` under fingerprint ${r.fp}` : ""}. Re-running it at the ` +
+      "same scheme and band does nothing unless forced." +
+      failedNote,
+  };
+}
+
 function mdTable(headers: string[], rows: string[][]): string {
   return [
     `| ${headers.join(" | ")} |`,
@@ -371,6 +481,16 @@ export function agentAboutMarkdown(a: AgentAbout, now = new Date()): string {
         ["Inventory version", md(a.extract.inventory_version)],
       ],
     ),
+  );
+
+  // The migration row belongs in a pasted bug report for the same reason it
+  // belongs on the panel: "is this agent's 64-128 KiB band migrated" is not
+  // answerable from anywhere else, and a duplicate-detection report from an
+  // un-swept agent means something different from one taken after the sweep.
+  parts.push("## Hash migration (quick_hash, 64-128 KiB band)");
+  parts.push(
+    md(rehashCell(a).text) +
+      (a.rehash?.fp ? ` (fingerprint ${md(a.rehash.fp)})` : ""),
   );
 
   parts.push("## Go modules");

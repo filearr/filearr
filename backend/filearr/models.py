@@ -2062,9 +2062,18 @@ class AgentCommand(Base):
 
     __tablename__ = "agent_commands"
     __table_args__ = (
+        # ``rehash_check`` and ``rehash_sweep`` are DIFFERENT commands and the
+        # names are one word apart, so: ``rehash_check`` is item-scoped and
+        # verifies ONE file on demand (P10-T1, central asks "what does this hash
+        # to right now"); ``rehash_sweep`` is agent-scoped, hours long, and
+        # migrates a whole SIZE BAND of the agent's index (QH-T6, 2026-08-12 —
+        # the retroactive repair for the 64-128 KiB quick_hash defect the agent
+        # cannot self-heal, because scan.diffEntry only re-hashes files whose
+        # size or mtime moved).
         CheckConstraint(
             "kind IN ('stat_check','rehash_check','stage_upload','inventory',"
-            "'self_update','suspend','agent_maintenance','reextract')",
+            "'self_update','suspend','agent_maintenance','reextract',"
+            "'rehash_sweep')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(

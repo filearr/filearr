@@ -62,11 +62,22 @@ CommandKind = Literal[
     "suspend",
     "agent_maintenance",
     "reextract",
+    # QH-T6. NOT a variant of ``rehash_check`` above — see the AgentCommand
+    # CHECK-constraint comment in models.py. ``rehash_check`` verifies ONE item
+    # and writes nothing; ``rehash_sweep`` migrates a whole size band of the
+    # agent's index and rewrites the rows in it.
+    "rehash_sweep",
 ]
 
 # Kinds that target the AGENT itself rather than one of its items: item_id is
 # absent for these (nullable since the self_update migration).
-_AGENT_SCOPED_KINDS = {"self_update", "suspend", "agent_maintenance", "reextract"}
+_AGENT_SCOPED_KINDS = {
+    "self_update",
+    "suspend",
+    "agent_maintenance",
+    "reextract",
+    "rehash_sweep",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -665,6 +676,199 @@ async def reextract_agent(
             "kind": "reextract",
             "force": body.force,
             "max_items": body.max_items,
+        },
+    )
+    return CommandOut.of(cmd)
+
+
+# --------------------------------------------------------------------------- #
+# QH-T6 — the agent-side quick_hash migration sweep                            #
+# --------------------------------------------------------------------------- #
+# Same bound and the same reasoning as REEXTRACT_MAX_ITEMS_CEILING: a rejection
+# for nonsense, not a policy. "Sweep everything" is expressed by OMITTING the
+# knob. In practice the default band holds ~99k items fleet-wide, so a single
+# unbounded command covers an entire agent and this only matters for the widened
+# opt-in backfill.
+REHASH_MAX_ITEMS_CEILING = 10_000_000
+
+# The DEFECT BAND, inclusive at both ends, mirroring rehash.DefaultMinSize /
+# DefaultMaxSize in the Go agent. Duplicated rather than shared because there is
+# no shared vocabulary between the two runtimes for this, and pinned here as the
+# API's documented default so an operator reading /api/docs sees the band without
+# reading Go.
+#
+# 65537 and not 1: the pre-QH-T1 code's unconditional read(65536) truncated
+# naturally at EOF, so a file of 65536 bytes or fewer had its ENTIRE content
+# hashed and its stored quick_hash is already correct. 131072 and not higher:
+# above that the tail branch fired then and fires now, so those digests are
+# unchanged by the fix.
+REHASH_DEFAULT_MIN_SIZE = 65_537
+REHASH_DEFAULT_MAX_SIZE = 131_072
+
+# A hard ceiling on the band, not a default. Even the widest legitimate run (the
+# QH-T2 parity backfill, granting content_hash to the ~1.03M files below the
+# band) stops at 131072 — above it nothing about hashing changed. Accepting an
+# arbitrary max_size would let one console click ask an agent to re-read its
+# entire library over SMB, which is not a migration, it is an outage. An
+# operator who genuinely wants that has ``force`` on the scan side.
+REHASH_MAX_SIZE_CEILING = 131_072
+
+# TTL for a queued sweep. Identical reasoning to REEXTRACT_TTL_SECONDS and the
+# same 24h settings clamp (agent_command_ttl_max_seconds): this command's TTL has
+# to cover the RUN, not just the wait for pickup, because ``sweep_decision``
+# ranks TTL above the lease — so even a faithfully heartbeating agent would have
+# a multi-hour sweep marked ``expired`` mid-run under the 1h default, clearing
+# the console's in-flight badge and recording a failure for work that completed.
+REHASH_TTL_SECONDS = 86_400
+
+
+class RehashSweepIn(BaseModel):
+    """Body for ``POST /agents/{agent_id}/rehash-sweep``. Every knob is optional;
+    all four are forwarded in the payload and the agent owns every other decision
+    (which rows qualify, in what order, at what cursor) from its own local index
+    state. Central holds no cursor and must not pretend to."""
+
+    #: Re-sweep at an unchanged scheme and band — the escape hatch for a run
+    #: whose failures are worth retrying. Safe to press: the sweep emits only on
+    #: change, so a forced run over already-corrected rows verifies them and
+    #: writes nothing.
+    force: bool = False
+    #: Validated as a positive bound with a ceiling; anything else is a 422
+    #: rather than a silent clamp, for the same reason ``ReextractIn`` gives —
+    #: enqueue is fire-and-forget and normalising a request the operator did not
+    #: make into a 201 is worse than refusing it.
+    max_items: int | None = Field(default=None, ge=1, le=REHASH_MAX_ITEMS_CEILING)
+    #: Inclusive band edges. ``None`` means the defect band above. Both are
+    #: bounded by REHASH_MAX_SIZE_CEILING and cross-validated below; a widened
+    #: band is a deliberate, separate, opt-in run (the QH-T2 content_hash
+    #: backfill), never the default, because it is ~10x the I/O for a different
+    #: benefit.
+    min_size: int | None = Field(default=None, ge=1, le=REHASH_MAX_SIZE_CEILING)
+    max_size: int | None = Field(default=None, ge=1, le=REHASH_MAX_SIZE_CEILING)
+
+
+@router.post(
+    "/agents/{agent_id}/rehash-sweep",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def rehash_sweep_agent(
+    agent_id: uuid.UUID,
+    # Defaulted so a bare POST works like the sibling ``/maintenance`` action —
+    # "sweep the defect band" is the overwhelmingly common request and should not
+    # require a body. Never mutated, so the shared instance is safe.
+    request: Request,
+    body: RehashSweepIn = RehashSweepIn(),
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue a ``rehash_sweep`` command: the agent re-reads every file in its
+    index inside a size band, recomputes both hashes under the post-QH-T1 rules,
+    and re-emits through the normal replication path the rows whose stored value
+    was wrong (QH-T6).
+
+    **This is not ``rehash_check``.** That kind is item-scoped, verifies ONE
+    file, and writes nothing anywhere. This one is agent-scoped, runs for hours,
+    and rewrites rows in the agent's local index.
+
+    Why the command exists: until 2026-07-18 both hashers read a fixed 64 KiB
+    head and appended the tail only above 131072 bytes, so a file in the
+    65537..131072 band had its middle and its tail silently UNhashed — two
+    different files whose first 64 KiB coincided produced the same
+    ``quick_hash``. QH-T1 fixed the hashers, but a fix to a hasher does not fix
+    stored values: the agent's scan re-hashes a file only when its size or mtime
+    moved (or its ``quick_hash`` is empty), so a stable file in that band keeps
+    its wrong hash forever, because nothing about it will ever change again.
+
+    Central cannot repair those rows on the agent's behalf. It does not host the
+    files, and ``agentsync.apply_batch`` never writes ``policy_version`` for
+    agent-owned rows, so the QH-T4 ``rehash_small_files`` sweep — which converged
+    central's own catalogue — cannot even distinguish a stale agent hash from a
+    correct one. The agent is the sole writer for those rows and this is the only
+    mechanism that reaches them.
+
+    **Operator-triggered, never automatic.** An agent that upgrades does not
+    start re-reading its library on its own: a fleet-wide unprompted I/O storm is
+    exactly the thing an operator needs to schedule. The agent instead REPORTS
+    its migration state in the health block it attaches to every command poll,
+    and the console surfaces it on the per-agent About panel.
+
+    The sweep is RESUMABLE and IDEMPOTENT per (hash scheme, band): the agent
+    keeps a cursor across command invocations — a run interrupted by a restart, a
+    suspend, or ``max_items`` continues where it stopped — and fingerprints the
+    rules it ran under, so a repeat command at an unchanged fingerprint
+    short-circuits. It also emits ONLY ON CHANGE: a row whose recomputed hashes
+    match its stored ones is counted ``verified``, produces no write and no
+    replication event, and costs central nothing. That matters because every
+    applied batch defers a Meilisearch sync job.
+
+    409 while a sweep is already queued or running for this agent — the
+    ``agent_maintenance``/``reextract`` guard, not the ``suspend`` collapse.
+    Collapsing is right for a *desired state*; a sweep is a *job* with per-agent
+    cursor state, and two of them would fight over that cursor and double-emit
+    the rows they raced on. The band knobs do not merge either.
+
+    Invariant 2 holds throughout: the sweep touches only the identity hash
+    fields. It never attaches an ``extracted`` payload, which is precisely what
+    keeps a ~99k-row hash correction from cascading into a fleet-wide
+    re-extraction (``apply_batch`` merges ``metadata_`` only when ``extracted``
+    is present). No file CONTENT leaves the agent.
+    """
+    await _live_agent(session, agent_id)
+
+    min_size = body.min_size if body.min_size is not None else REHASH_DEFAULT_MIN_SIZE
+    max_size = body.max_size if body.max_size is not None else REHASH_DEFAULT_MAX_SIZE
+    if min_size > max_size:
+        # 422 rather than a swap or a clamp: an inverted band selects zero rows,
+        # and the agent would then stamp that fingerprint FINISHED — permanently
+        # short-circuiting the real sweep at that band until someone forces it.
+        # (The agent refuses it independently too; this is the friendly half.)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"invalid size band: min_size ({min_size}) must be <= max_size ({max_size})",
+        )
+
+    in_flight = (
+        await session.execute(
+            select(AgentCommand.id).where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "rehash_sweep",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+        )
+    ).first()
+    if in_flight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "rehash sweep already queued or running"
+        )
+
+    payload: dict[str, Any] = {
+        "force": body.force,
+        "max_items": body.max_items,
+        # Resolved, not passed through as None: the agent defaults a missing knob
+        # to the same numbers, but the FINGERPRINT is built from whatever it ends
+        # up using, so sending the explicit band keeps the command row a faithful
+        # record of what was actually asked for.
+        "min_size": min_size,
+        "max_size": max_size,
+    }
+    cmd = _enqueue_agent_scoped(
+        agent_id, "rehash_sweep", payload, request, ttl_seconds=REHASH_TTL_SECONDS
+    )
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "rehash_sweep",
+            "force": body.force,
+            "max_items": body.max_items,
+            "min_size": min_size,
+            "max_size": max_size,
         },
     )
     return CommandOut.of(cmd)

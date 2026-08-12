@@ -39,6 +39,7 @@
     buildRows,
     modulesSummary,
     orUnknown,
+    rehashCell,
     toolPathCell,
     type AgentAbout,
   } from "./agentAbout";
@@ -69,6 +70,7 @@
     rollbackConfigGroup,
     setAgentConfigGroups,
     reextractAgent,
+    rehashSweepAgent,
     revokeAgent,
     runAgentMaintenance,
     suspendAgent,
@@ -270,6 +272,23 @@
             ? `completed ${new Date(rx.finished).toLocaleString()}`
             : `in progress since ${new Date(rx.started).toLocaleString()}`;
         lines.push(`re-extract: ${when}${enriched}`);
+      }
+      // QH-T6: the quick_hash migration. Same fixed-key-list caveat as the block
+      // above — and this one has nowhere else to be seen at a glance, since
+      // central cannot derive an agent's hash provenance from the catalogue.
+      const rh = h.rehash as Record<string, unknown> | undefined;
+      if (rh && typeof rh.started === "string") {
+        // changed/verified stay apart: "0 corrected, 40,000 already correct" is
+        // a converged agent, and summing them hides exactly that.
+        const counts =
+          typeof rh.changed === "number" && typeof rh.verified === "number"
+            ? ` (${rh.changed.toLocaleString()} corrected, ${rh.verified.toLocaleString()} already correct)`
+            : "";
+        const when =
+          rh.complete && typeof rh.finished === "string"
+            ? `completed ${new Date(rh.finished).toLocaleString()}`
+            : `in progress since ${new Date(rh.started).toLocaleString()}`;
+        lines.push(`hash migration: ${when}${counts}`);
       }
       // 2026-08-10 local scan controls. Same reason as the re-extract block
       // above: this tooltip is a FIXED key list, so an agent-reported key that
@@ -489,15 +508,23 @@
   // per-kind flag for this one, so the page asks the command endpoint directly —
   // TWO requests for the whole table (pending + picked_up), not one per row.
   let sweeping = $state<Set<string>>(new Set());
+  // Agent ids with a queued/in-flight `rehash_sweep` (QH-T6). A SEPARATE set
+  // from `sweeping`, not a merged one: the two sweeps have independent cursors
+  // and independent 409 guards, so an agent can legitimately be running both,
+  // and each button must disable only on its own kind.
+  let rehashing = $state<Set<string>>(new Set());
   async function refreshSweeps() {
     try {
-      const [queued, running] = await Promise.all([
+      const [queued, running, rhQueued, rhRunning] = await Promise.all([
         listAgentCommands(undefined, 200, { kind: "reextract", state: "pending" }),
         listAgentCommands(undefined, 200, { kind: "reextract", state: "picked_up" }),
+        listAgentCommands(undefined, 200, { kind: "rehash_sweep", state: "pending" }),
+        listAgentCommands(undefined, 200, { kind: "rehash_sweep", state: "picked_up" }),
       ]);
       sweeping = new Set([...queued, ...running].map((c) => c.agent_id));
+      rehashing = new Set([...rhQueued, ...rhRunning].map((c) => c.agent_id));
     } catch {
-      /* transient — keep the last-known sweep set (the badge is advisory) */
+      /* transient — keep the last-known sweep sets (the badges are advisory) */
     }
   }
 
@@ -525,6 +552,66 @@
       await refreshSweeps(); // resync the badge — a 409 means one IS in flight
     } finally {
       reextracting[a.id] = false;
+    }
+  }
+
+  // Re-hash (quick_hash migration, QH-T6, 2026-08-12): the agent re-reads every
+  // file in its index between 64 KiB and 128 KiB and corrects the hashes the
+  // pre-2026-07-18 hasher got wrong (it read a fixed 64 KiB head and skipped the
+  // rest of the band, producing false duplicates). Nothing else can fix those
+  // rows: the agent's scan only re-hashes files whose size or mtime moved, and
+  // central neither holds the files nor any hash provenance for agent rows.
+  let rehashingNow: Record<string, boolean> = $state({});
+  // Advanced knobs, per agent so two open rows cannot clobber each other's
+  // draft. Empty string = "use the default", which is the case that must stay
+  // one click away — the defect band is the right answer for ~every operator.
+  let rehashBand: Record<string, { min: string; max: string; items: string }> = $state({});
+  const bandOf = (id: string) => rehashBand[id] ?? { min: "", max: "", items: "" };
+
+  async function rehashSweep(a: AgentOut) {
+    const b = bandOf(a.id);
+    const min = b.min.trim() === "" ? 65537 : Number(b.min);
+    const max = b.max.trim() === "" ? 131072 : Number(b.max);
+    const items = b.items.trim() === "" ? undefined : Number(b.items);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || min > max) {
+      error = `re-hash ${a.name}: the size band must satisfy 0 < min ≤ max`;
+      return;
+    }
+    // The confirm has to state the REAL cost, because this action's cost is
+    // invisible from the console and lands entirely on someone else's machine:
+    // it is a full read of every file in the band, over whatever network mount
+    // that agent uses, for hours.
+    const inBand = a.health?.index_items
+      ? `That index holds about ${a.health.index_items.toLocaleString()} items in total; typically a few percent fall in this band. `
+      : "";
+    if (
+      !confirm(
+        `Re-hash files on agent "${a.name}"?\n\n` +
+          `It re-reads EVERY indexed file between ${min.toLocaleString()} and ${max.toLocaleString()} bytes — ` +
+          `the whole file, not a sample — to recompute its hashes. ${inBand}` +
+          `On the live fleet this was ~99,000 files and ran for hours; over a network mount, longer.\n\n` +
+          `It is safe to stop (suspend the agent) and resume: the cursor is durable. ` +
+          `Only files whose stored hash is actually wrong are re-sent, and file contents never leave the agent.`,
+      )
+    )
+      return;
+    rehashingNow[a.id] = true;
+    try {
+      await rehashSweepAgent(a.id, {
+        min_size: min,
+        max_size: max,
+        ...(items !== undefined ? { max_items: items } : {}),
+      });
+      await refresh();
+    } catch (e) {
+      // 409 = the single-sweep guard (two sweeps would fight over one cursor).
+      error =
+        e instanceof ApiError && e.status === 409
+          ? `re-hash ${a.name}: a hash migration is already running on this agent`
+          : `re-hash ${a.name}: ${errDetail(e)}`;
+      await refreshSweeps(); // resync the badge — a 409 means one IS in flight
+    } finally {
+      rehashingNow[a.id] = false;
     }
   }
 
@@ -1911,6 +1998,58 @@ ${detail}
         </div>
       {/if}
 
+      <!-- Hash-migration knobs (QH-T6). Advanced by placement, not by a fold:
+           three small number boxes that only matter if the operator is doing
+           the opt-in wide backfill, sitting next to the row action they modify.
+           Left blank they are absent from the request and the defect band
+           applies, which is what the overwhelming majority of runs want. -->
+      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+        <div class="flex flex-wrap items-center gap-2">
+          <span
+            class="font-medium text-slate-500"
+            title="Bounds for this agent's 're-hash' action. The default is the defect band — files between 65,537 and 131,072 bytes, the only sizes the pre-2026-07-18 hasher got wrong. A file of 65,536 bytes or less was already hashed in full and is correct; above 131,072 bytes the hash was sampled then and is sampled now, so neither is worth re-reading.">
+            Re-hash band
+          </span>
+          <label class="text-slate-500">
+            min
+            <input
+              type="number" min="1" max="131072" placeholder="65537"
+              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+              bind:value={
+                () => bandOf(a.id).min,
+                (v) => (rehashBand[a.id] = { ...bandOf(a.id), min: String(v ?? "") })
+              } />
+          </label>
+          <label class="text-slate-500">
+            max
+            <input
+              type="number" min="1" max="131072" placeholder="131072"
+              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+              bind:value={
+                () => bandOf(a.id).max,
+                (v) => (rehashBand[a.id] = { ...bandOf(a.id), max: String(v ?? "") })
+              } />
+          </label>
+          <label
+            class="text-slate-500"
+            title="Stop after this many candidate files and leave the cursor there; the next run resumes from it. Leave blank to sweep the whole band in one command.">
+            max files
+            <input
+              type="number" min="1" placeholder="all"
+              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+              bind:value={
+                () => bandOf(a.id).items,
+                (v) => (rehashBand[a.id] = { ...bandOf(a.id), items: String(v ?? "") })
+              } />
+          </label>
+          <span class="text-[11px] text-slate-400">
+            Widening the floor to 1 runs the separate small-file content-hash
+            backfill instead — roughly ten times the reads, for exact identity on
+            files that were never mis-hashed. Not the default for that reason.
+          </span>
+        </div>
+      </div>
+
       <!-- About / versions: what this agent IS, as opposed to what it can do.
            A third opt-in disclosure for the same reason as the one above — it
            is long, and it answers a deliberate investigation ("which exiftool
@@ -1962,6 +2101,26 @@ ${detail}
                   <b class="break-all font-mono text-[11px] text-slate-700 dark:text-slate-200">{row.value}</b>
                 </div>
               {/each}
+            </div>
+
+            <!-- Hash migration (QH-T6). Sits directly under the build stack
+                 rather than in a fold: it is ONE line, it is the only place this
+                 fact exists (central cannot derive an agent's hash provenance
+                 from the catalogue — it holds none for agent-owned rows), and
+                 "has this box been migrated" is a question an operator arrives
+                 with rather than one they discover. -->
+            {@const rehash = rehashCell(rep)}
+            <div class="mt-3 flex flex-wrap items-baseline gap-1.5">
+              <span
+                class="text-slate-500"
+                title="The 2026-07-18 fix corrected a defect where a file between 64 KiB and 128 KiB had only its first 64 KiB hashed, so different files with matching headers looked like duplicates. Stored hashes were NOT corrected by that fix: this agent's scan re-hashes a file only when its size or modification time changes, so a stable file in that band keeps its wrong hash until this migration runs.">
+                Hash migration
+              </span>
+              <b class="{ABOUT_TONE_CLASS[rehash.tone]}" title={rehash.hint}>{rehash.text}</b>
+              {#if rep.rehash?.fp}
+                <span class="font-mono text-[11px] text-slate-400"
+                  title="The scheme and size band this cursor belongs to. A repeat sweep at the same fingerprint short-circuits; changing the band, or a future change to the hashing itself, invalidates it and re-sweeps.">{rep.rehash.fp}</span>
+              {/if}
             </div>
 
             <!-- Host tools: version · location · verdict. The three things the
@@ -2127,6 +2286,10 @@ ${detail}
                   <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
                     title="A re-extract sweep is queued or running: the agent is re-running extraction over its existing index and re-emitting the metadata. It resumes across restarts, so this can stay up for hours on a large library.">re-extracting</span>
                 {/if}
+                {#if rehashing.has(a.id)}
+                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+                    title="A hash migration is queued or running: the agent is re-reading every indexed file in the 64-128 KiB band to correct hashes computed before the 2026-07-18 fix. Expect sustained disk/network I/O on that machine; it resumes across restarts, so this can stay up for hours.">re-hashing</span>
+                {/if}
                 {#if a.health?.central_maintenance}
                   <span class="ml-1 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
                     title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends.">backing off</span>
@@ -2215,6 +2378,17 @@ ${detail}
                     disabled={reextracting[a.id] || sweeping.has(a.id)}
                     title="Re-run extraction across this agent's EXISTING index and re-emit the metadata — the catch-up for items scanned before extraction (or before ffprobe/exiftool/poppler/tesseract) was available on that host. Only extracted metadata is re-sent; file contents never leave the agent. Resumable, and a repeat run at an unchanged extraction configuration does nothing."
                     onclick={() => reextract(a)}>{sweeping.has(a.id) ? "sweeping…" : "re-extract"}</button>
+                  <!-- QH-T6, next to re-extract because they are the same SHAPE
+                       of action (an hours-long resumable sweep of the agent's
+                       existing index) even though they repair different things.
+                       The band/max_items knobs live in the expanded detail row:
+                       the default IS the answer for almost everyone, and putting
+                       three number boxes in a table cell would imply otherwise. -->
+                  <button
+                    class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
+                    disabled={rehashingNow[a.id] || rehashing.has(a.id)}
+                    title="Re-read every indexed file between 64 KiB and 128 KiB on this agent and correct its hashes. Files in that band were under-hashed before 2026-07-18 (only the first 64 KiB was read), which produced false duplicate detections; the agent's ordinary scan will never revisit them, because their size and modification time have not changed. Re-reads whole files for hours — only the rows whose hash is actually wrong are re-sent, and file contents never leave the agent. Open 'details' to change the size band."
+                    onclick={() => rehashSweep(a)}>{rehashing.has(a.id) ? "re-hashing…" : "re-hash"}</button>
                   <button class="ml-3 text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
                 {/if}
                 <button

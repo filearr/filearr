@@ -135,59 +135,71 @@ type Config struct {
 	// posted back to central. Nil => the kind completes ok=false, so an older
 	// agent degrades cleanly against a central that enqueues one.
 	RunReextract func(ctx context.Context, payload map[string]any) (map[string]any, error)
+
+	// RunRehashSweep applies a `rehash_sweep` command (QH-T6): re-read every
+	// indexed file in a size band, recompute its hashes under the post-QH-T1
+	// rules, and re-emit the ones whose stored value was wrong. Distinct from
+	// the `rehash_check` KIND, which verifies ONE item and writes nothing —
+	// see rehash_sweep.go. Takes the command payload verbatim ({"force",
+	// "max_items", "min_size", "max_size"}) and returns the counters posted
+	// back to central. Nil => the kind completes ok=false, so an older agent
+	// degrades cleanly against a central that enqueues one.
+	RunRehashSweep func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // Poller drains central's per-agent command queue and executes each command.
 type Poller struct {
-	baseURL      string
-	agentID      string
-	authFn       func() string
-	http         *http.Client
-	exec         *Executor
-	rateProvider func() int64
-	inv          *inventory.Runner
-	caps         func() map[string]any
-	health       func(ctx context.Context) map[string]any
-	version      string
-	maxCmds      int
-	interval     time.Duration
-	leaseSecs    int
-	log           *slog.Logger
-	clock         func() time.Time
-	rnd           *rand.Rand
-	onAuthError   func()
-	updateTrigger func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
-	onMaintenance func(active bool)
-	setSuspended  func(ctx context.Context, suspended bool) error
-	runMaint      func(ctx context.Context) (map[string]any, error)
-	runReextract  func(ctx context.Context, payload map[string]any) (map[string]any, error)
+	baseURL        string
+	agentID        string
+	authFn         func() string
+	http           *http.Client
+	exec           *Executor
+	rateProvider   func() int64
+	inv            *inventory.Runner
+	caps           func() map[string]any
+	health         func(ctx context.Context) map[string]any
+	version        string
+	maxCmds        int
+	interval       time.Duration
+	leaseSecs      int
+	log            *slog.Logger
+	clock          func() time.Time
+	rnd            *rand.Rand
+	onAuthError    func()
+	updateTrigger  func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
+	onMaintenance  func(active bool)
+	setSuspended   func(ctx context.Context, suspended bool) error
+	runMaint       func(ctx context.Context) (map[string]any, error)
+	runReextract   func(ctx context.Context, payload map[string]any) (map[string]any, error)
+	runRehashSweep func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // NewPoller wires a Poller, applying defaults.
 func NewPoller(cfg Config) *Poller {
 	p := &Poller{
-		baseURL:      strings.TrimRight(cfg.BaseURL, "/"),
-		agentID:      cfg.AgentID,
-		authFn:       cfg.AuthFn,
-		http:         cfg.HTTP,
-		exec:         cfg.Executor,
-		rateProvider: cfg.RateProvider,
-		inv:          cfg.Inventory,
-		caps:         cfg.Capabilities,
-		health:       cfg.Health,
-		version:      cfg.Version,
-		maxCmds:      cfg.MaxCommands,
-		interval:     cfg.Interval,
-		leaseSecs:    cfg.LeaseSeconds,
-		log:          cfg.Logger,
-		clock:        cfg.Clock,
-		rnd:          cfg.Rand,
-		onAuthError:  cfg.OnAuthError,
-		updateTrigger: cfg.TriggerUpdate,
-		onMaintenance: cfg.OnMaintenance,
-		setSuspended:  cfg.SetSuspended,
-		runMaint:      cfg.RunMaintenance,
-		runReextract:  cfg.RunReextract,
+		baseURL:        strings.TrimRight(cfg.BaseURL, "/"),
+		agentID:        cfg.AgentID,
+		authFn:         cfg.AuthFn,
+		http:           cfg.HTTP,
+		exec:           cfg.Executor,
+		rateProvider:   cfg.RateProvider,
+		inv:            cfg.Inventory,
+		caps:           cfg.Capabilities,
+		health:         cfg.Health,
+		version:        cfg.Version,
+		maxCmds:        cfg.MaxCommands,
+		interval:       cfg.Interval,
+		leaseSecs:      cfg.LeaseSeconds,
+		log:            cfg.Logger,
+		clock:          cfg.Clock,
+		rnd:            cfg.Rand,
+		onAuthError:    cfg.OnAuthError,
+		updateTrigger:  cfg.TriggerUpdate,
+		onMaintenance:  cfg.OnMaintenance,
+		setSuspended:   cfg.SetSuspended,
+		runMaint:       cfg.RunMaintenance,
+		runReextract:   cfg.RunReextract,
+		runRehashSweep: cfg.RunRehashSweep,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -291,6 +303,8 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processAgentMaintenance(ctx, cmd)
 	case KindReextract:
 		p.processReextract(ctx, cmd)
+	case KindRehashSweep:
+		p.processRehashSweep(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}

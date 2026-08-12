@@ -11,13 +11,14 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: b2e6d048f317 adds agents.capabilities_at — the arrival stamp
-# for the capability advertisement, which the per-agent About view leads with
-# (every fact it shows is "as of" that instant, and on an offline agent that can
-# be days ago). Its predecessor a7f3c1e9d452 is the P13 config-group unification.
+# HEAD ASSERTION: d4f1a7c93e60 widens the agent_commands kind CHECK for QH-T6's
+# `rehash_sweep` — the agent-scoped quick_hash migration sweep, the only thing
+# that can repair the 64-128 KiB hashes an agent computed before 2026-07-18
+# (central holds no hash provenance for agent-owned rows and does not host the
+# files). Its predecessor b2e6d048f317 adds agents.capabilities_at.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "b2e6d048f317"
+HEAD = "d4f1a7c93e60"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).

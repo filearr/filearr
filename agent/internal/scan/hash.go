@@ -14,6 +14,29 @@ import (
 // backend/filearr/tasks/extract.py:QUICK_CHUNK.
 const quickChunk = 65536
 
+// HashSchemeVersion identifies the BEHAVIOUR of the two hashers below, as
+// opposed to their configuration. It is not used by any hashing code path and
+// must never gate one — its sole consumer is internal/rehash, whose sweep
+// fingerprint embeds it so that a future change to what QuickHash/FullHash
+// COMPUTE automatically invalidates every agent's migration cursor and makes the
+// next sweep real work again.
+//
+// Why the constant starts at 2 rather than 1: scheme 1 is the pre-QH-T1
+// behaviour that shipped until 2026-07-18 — a fixed 64 KiB head, with the tail
+// added only above 131072 bytes, so a 65537..131072-byte file had its middle and
+// tail silently unhashed (the false-duplicate defect), and a 32-hex-char
+// content_hash did not exist because FullHash was still xxh3-64. Scheme 2 is the
+// current behaviour: whole-file quick hash at or below 131072 bytes, head+tail
+// sample above it, and xxh3-128 for FullHash. Numbering the broken scheme rather
+// than pretending the history starts now is what lets "hashed under scheme 2" be
+// a meaningful claim.
+//
+// BUMP THIS whenever QuickHash or FullHash changes what it produces for the same
+// bytes — a window change, an algorithm change, a boundary change. Do NOT bump it
+// for a refactor that provably preserves every digest; hash_test.go's
+// Python-precomputed parity fixtures are the arbiter of "provably".
+const HashSchemeVersion = 2
+
 // HashPolicy controls content-hash computation for a scan. Mirrors central's
 // resolved T7 policy narrowed to the two knobs the agent needs (ruling 6): quick
 // hash is ALWAYS computed; content hash only when ComputeContent AND the file is
@@ -112,6 +135,21 @@ func FullHash(pathStr string) (string, error) {
 	}
 	sum := h.Sum128()
 	return fmt.Sprintf("%016x%016x", sum.Hi, sum.Lo), nil
+}
+
+// HashFile is the exported seam over hashFile, added for internal/rehash
+// (QH-T6, 2026-08-12). The migration sweep has to recompute a file's hashes with
+// EXACTLY the rules a scan would apply — including the QH-T2 branch that grants
+// a small file a content hash regardless of policy — and the only alternative
+// was for that package to re-derive the branch from QuickHash/FullHash, which
+// would make the sweep's output diverge from the scanner's the first time either
+// side changed. No behaviour of its own: one call through.
+//
+// It exists as a wrapper rather than by exporting hashFile itself so the
+// unexported name stays the one the scan package's own hot path uses, and so
+// this doc comment can say who it is for.
+func HashFile(pathStr string, size int64, policy HashPolicy) (quick, content string) {
+	return hashFile(pathStr, size, policy)
 }
 
 // hashFile computes quick (always) and, when required, content hashes for one

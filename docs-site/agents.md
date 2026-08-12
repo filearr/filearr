@@ -1232,6 +1232,11 @@ per-row actions), applied at the agent's next check-in (~1 min):
 - **re-extract** (`reextract`) — sweep the agent's existing index and re-emit
   its items with a fresh extraction result. See below; this is the one that
   fills in metadata for files catalogued before extraction was possible.
+- **re-hash** (`rehash_sweep`) — sweep a size band of the agent's existing index
+  and correct hashes computed by an older, defective hasher. See
+  [Migrating stale quick hashes](#agent-rehash) below. Not to be confused with
+  the internal `rehash_check` command, which verifies a *single* item on demand
+  and writes nothing.
 
 ### Re-extracting already-catalogued items {#agent-reextract}
 
@@ -1282,6 +1287,88 @@ outcome so the console can show it without opening the history.
 Once the metadata lands, the rest follows on its own: RAG chunking and content
 embeddings select on `body_text`, so the backfills pick those items up without
 any further action.
+
+### Migrating stale quick hashes (64-128 KiB band) {#agent-rehash}
+
+**Who needs this: agents enrolled before 2026-07-18.** If your agent was
+installed after that date, its hashes were always computed correctly, this
+action will find nothing to do, and the console will keep saying `not run`
+forever — which is the right answer, not a warning.
+
+**What was wrong.** Filearr computes a fast `quick_hash` for every file and uses
+it, together with the file's size, as the cheap "are these two files the same"
+signal behind duplicate detection and move detection. Until 2026-07-18 that hash
+read the first 64 KiB of a file and — only for files larger than 128 KiB — also
+the last 64 KiB. For a file **between 64 KiB and 128 KiB** that meant the first
+64 KiB and nothing else: the rest of the file was never read. Two genuinely
+different files whose first 64 KiB happened to match therefore got the same
+hash. That is extremely common for structured formats, where the opening bytes
+are container boilerplate — JPEG and PNG headers, PDF preambles, office-document
+scaffolding — so phone photos, artwork and small documents were the worst
+affected. The result was **false duplicate detections**.
+
+The hasher itself was fixed on 2026-07-18: a file of 128 KiB or less is now
+hashed in full. That fix is forward-looking only.
+
+**Why the fix does not repair the files you already have.** An agent re-hashes a
+file when its size or its modification time changes — that is what "this file
+changed" means, and re-hashing everything on every scan would make routine scans
+enormously expensive. A photo sitting untouched in your library has not changed
+and never will, so no future scan will ever look at its bytes again, and its
+wrong hash stays wrong indefinitely. Central cannot repair it either: it does
+not hold the file (the agent does), and it keeps no record of *which* version of
+the hasher produced a given agent-owned value, so it cannot even tell the good
+rows from the bad ones. Only the agent can fix this, and only if you ask it to.
+
+**Running it.** On the Agents page, the agent's row has a **re-hash** action.
+Confirm the prompt — it names the cost — and the sweep starts at that agent's
+next check-in (~1 min). The row shows a `re-hashing` badge while it runs, and the
+row's **details → About / versions** panel carries a **Hash migration** line with
+live progress and, afterwards, the completion time. That panel is the only place
+this state exists, for the reason above: central cannot work it out from the
+catalogue.
+
+**What it costs.** It reads every indexed file in the band, whole, once. On a
+reference deployment that was about 99,000 files and it ran for hours; over a
+network share, expect longer. Budget for it like a scan of that subset — plan it
+for a quiet period, and expect sustained disk and network activity on the agent
+machine while it runs. It is not free, and it is not instant.
+
+**What makes it safe to press:**
+
+- **Stop and resume at any time.** Progress is a durable cursor. Suspend the
+  agent, reboot the machine, or bound the run with **max files** — the next run
+  picks up exactly where the last one stopped, and no file is read twice.
+- **Only genuine corrections are sent.** A file whose recomputed hashes match
+  what is already stored is counted *already correct* and produces no update at
+  all — no write on the agent, nothing sent to central, no re-indexing. Files an
+  ordinary rescan already repaired therefore cost nothing but the read.
+- **Nothing but hashes changes.** It does not re-extract metadata, does not
+  re-classify, does not move or delete anything, and does not touch anything you
+  have edited. File contents never leave the agent.
+- **Files it cannot read are left alone.** An unreadable or locked file is
+  counted as a failure and its stored hash is kept as-is — never blanked. The
+  count appears in the panel and the paths are in the agent's log.
+- **Changed files are left to the scan.** If a file's size or modification time
+  no longer matches what the agent recorded, the sweep skips it: it genuinely
+  changed, and the next ordinary scan will re-hash it correctly anyway.
+- **One at a time per agent.** A second request while one is queued or running
+  is refused, so two sweeps can never fight over the same progress cursor.
+- **Repeating it is nearly free.** Once an agent has finished the band, asking
+  again does nothing unless you change the band or tick force.
+
+**Changing the band.** The defaults — 65,537 to 131,072 bytes — are exactly the
+affected range and are the right choice for essentially everyone. A file of
+65,536 bytes or smaller was always hashed in full and was never wrong; a file
+above 131,072 bytes is sampled at both ends today just as it was before, so
+re-reading it would change nothing. The **details** panel exposes the band and a
+**max files** bound for one deliberate exception: setting the floor to 1 runs a
+different job — giving small files an exact whole-file `content_hash` they never
+had. That is roughly ten times the reading for a different benefit, so it is
+opt-in and never the default.
+
+Counters — seen, corrected, already correct, skipped, failed, whether it
+completed — land in the command history as well as the About panel.
 
 Separately, when **central** enters [maintenance mode](operations.md#maintenance-mode),
 every agent observes it on its next command poll and pauses its replication

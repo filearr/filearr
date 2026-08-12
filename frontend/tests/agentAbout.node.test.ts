@@ -23,8 +23,10 @@ import {
   isUserProfilePath,
   modulesSummary,
   orUnknown,
+  rehashCell,
   toolPathCell,
   type AgentAbout,
+  type AgentAboutRehash,
   type AgentAboutTool,
 } from "../src/lib/agentAbout.ts";
 
@@ -69,6 +71,7 @@ function report(over: Partial<AgentAbout> = {}): AgentAbout {
     modules: [{ path: "golang.org/x/crypto", version: "v0.54.0", url: "https://pkg.go.dev/golang.org/x/crypto" }],
     modules_omitted: false,
     extract: { schema: 1, formats: ["audio", "video"], collectors: ["stat"], inventory_version: 1 },
+    rehash: null,
     reported: true,
     ...over,
   };
@@ -247,4 +250,100 @@ test("a pipe in an agent-supplied string cannot break the table", () => {
     NOW,
   );
   assert.ok(md.includes("5.3\\|4"));
+});
+
+// --------------------------------------------------------------------------- //
+// QH-T6 hash migration                                                         //
+// --------------------------------------------------------------------------- //
+// The panel row is the ONLY place an agent's quick_hash migration state is
+// visible. Central cannot derive it — it holds no hash provenance for
+// agent-owned rows — so the three states below have to be distinguishable at a
+// glance, and two of them are easy to conflate into a wrong conclusion.
+
+const REHASH: AgentAboutRehash = {
+  fp: "h2-65537-131072",
+  started: "2026-08-12T09:00:00Z",
+  finished: null,
+  complete: false,
+  seen: 40000,
+  changed: 39100,
+  verified: 850,
+  skipped: 50,
+  failed: 0,
+  cursor: 812004,
+  min_size: 65537,
+  max_size: 131072,
+};
+
+test("a never-swept agent reads as 'not run', muted, and explains what the sweep is", () => {
+  const cell = rehashCell(report({ rehash: null }));
+  assert.equal(cell.text, "not run");
+  assert.equal(cell.tone, "muted");
+  // Muted, not a warning: an agent enrolled after the fix has nothing to
+  // migrate and will sit here forever, correctly.
+  assert.match(cell.hint ?? "", /64-128 KiB/);
+  assert.match(cell.hint ?? "", /nothing to migrate/);
+});
+
+test("a running sweep shows changed and verified SEPARATELY", () => {
+  const cell = rehashCell(report({ rehash: REHASH }));
+  assert.match(cell.text, /in progress/);
+  assert.match(cell.text, /40,000 seen/);
+  // The load-bearing assertion of this row. 0 corrected / 40,000 already
+  // correct is a converged agent; summed into one number it is indistinguishable
+  // from a sweep that did nothing.
+  assert.match(cell.text, /39,100 corrected/);
+  assert.match(cell.text, /850 already correct/);
+  assert.equal(cell.tone, "warn"); // the machine is under sustained I/O right now
+  assert.match(cell.hint ?? "", /65,537–131,072 bytes/);
+  assert.match(cell.hint ?? "", /resumes/);
+});
+
+test("a completed sweep reports when and how much", () => {
+  const cell = rehashCell(
+    report({ rehash: { ...REHASH, complete: true, finished: "2026-08-12T14:30:00Z" } }),
+  );
+  assert.match(cell.text, /^complete /);
+  assert.equal(cell.tone, "ok");
+  assert.match(cell.hint ?? "", /h2-65537-131072/);
+});
+
+test("unreadable files keep a completed sweep amber and are explained", () => {
+  const cell = rehashCell(
+    report({
+      rehash: { ...REHASH, complete: true, finished: "2026-08-12T14:30:00Z", failed: 12 },
+    }),
+  );
+  // Not green: 12 files were not migrated and someone has to look at them.
+  assert.equal(cell.tone, "warn");
+  // And the reassurance that matters — a failed hash NEVER overwrites a stored
+  // one with an empty value.
+  assert.match(cell.hint ?? "", /left untouched/);
+});
+
+test("a sweep with missing counters still renders sentences, never blanks", () => {
+  const cell = rehashCell(
+    report({
+      rehash: {
+        ...REHASH,
+        seen: null, changed: null, verified: null, skipped: null,
+        min_size: null, max_size: null, fp: null,
+      },
+    }),
+  );
+  assert.ok(cell.text.length > 0);
+  assert.doesNotMatch(cell.text, /null|undefined|NaN/);
+  assert.match(cell.hint ?? "", /an unreported band/);
+});
+
+test("the Markdown dump carries the migration row", () => {
+  const md = agentAboutMarkdown(report({ rehash: REHASH }), new Date("2026-08-12T15:00:00Z"));
+  assert.match(md, /## Hash migration/);
+  assert.match(md, /h2-65537-131072/);
+  // And on an un-swept agent it says so rather than omitting the section — a
+  // pasted duplicate-detection bug report means something different depending
+  // on which side of the migration the agent is.
+  const none = agentAboutMarkdown(report(), new Date("2026-08-12T15:00:00Z"));
+  assert.match(none, /## Hash migration/);
+  assert.match(none, /not run/);
 });

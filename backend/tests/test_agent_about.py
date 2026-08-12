@@ -457,3 +457,112 @@ async def test_accepted_capabilities_stamp_their_arrival(client):
     body = (await c.get(f"/api/v1/agents/{agent.id}/about")).json()
     assert body["agent"]["capabilities_at"] is not None
     assert body["reported"] is True
+
+
+# --------------------------------------------------------------------------- #
+# QH-T6 — the hash-migration row (from HEALTH, not capabilities)               #
+# --------------------------------------------------------------------------- #
+# This block is the only place the quick_hash migration's state is visible.
+# Central cannot derive it: there is no hash provenance for agent-owned rows
+# (agentsync.apply_batch never writes policy_version), so no query distinguishes
+# a stale agent quick_hash from a correct one. The agent's cursor is the entire
+# completion signal and health is the wire it rides — capabilities is
+# re-evaluated far more slowly and would lag a running sweep by design.
+RUNNING_REHASH = {
+    "fp": "h2-65537-131072",
+    "started": "2026-08-12T09:00:00Z",
+    "seen": 40_000,
+    "changed": 39_100,
+    "verified": 850,
+    "skipped": 50,
+    "failed": 0,
+    "cursor": 812_004,
+    "min_size": 65537,
+    "max_size": 131072,
+    "complete": False,
+}
+
+
+def test_rehash_section_reports_a_running_sweep():
+    about = agent_about.agent_about(_agent_row(health={"rehash": RUNNING_REHASH}))
+    rh = about["rehash"]
+    assert rh["fp"] == "h2-65537-131072"
+    assert rh["complete"] is False
+    assert rh["finished"] is None
+    # changed and verified stay APART all the way to the panel: 40,000 seen with
+    # 0 changed and 40,000 verified is a converged agent, and the same numbers
+    # summed are indistinguishable from a sweep that did nothing.
+    assert (rh["changed"], rh["verified"]) == (39_100, 850)
+    assert (rh["min_size"], rh["max_size"]) == (65537, 131072)
+    assert rh["cursor"] == 812_004
+    # It rides health, so it is present even with no capability advertisement.
+    assert about["reported"] is False
+
+
+def test_rehash_section_reports_a_completed_sweep():
+    health = {"rehash": {**RUNNING_REHASH, "complete": True,
+                         "finished": "2026-08-12T14:30:00Z"}}
+    rh = agent_about.agent_about(_agent_row(health=health))["rehash"]
+    assert rh["complete"] is True
+    assert rh["finished"] == "2026-08-12T14:30:00Z"
+
+
+def test_rehash_section_is_none_when_no_sweep_has_run():
+    """None, never a dict of zeros. "Not run" and "converged with nothing to do"
+    are different facts and the console renders them differently; zeros here
+    would state the second while meaning the first."""
+    assert agent_about.agent_about(_agent_row())["rehash"] is None
+    assert agent_about.agent_about(_agent_row(health={}))["rehash"] is None
+    assert agent_about.agent_about(_agent_row(health={"uptime_s": 60}))["rehash"] is None
+    # The agent stamps started_at before its first batch, so a block with no
+    # start time is not a sweep whatever else it contains.
+    assert agent_about.rehash_section({"rehash": {"seen": 10, "complete": True}}) is None
+
+
+def test_rehash_section_degrades_on_a_hostile_health_block():
+    """Same rule as the capability advertisement: this is third-party JSON from a
+    machine central does not control, so a malformed block becomes a missing
+    section and never an exception."""
+    assert agent_about.rehash_section(None) is None
+    assert agent_about.rehash_section({"rehash": "not-a-dict"}) is None
+    assert agent_about.rehash_section({"rehash": ["nope"]}) is None
+
+    rh = agent_about.rehash_section(
+        {
+            "rehash": {
+                "started": "2026-08-12T09:00:00Z",
+                "fp": {"nested": "junk"},
+                "seen": "lots",
+                "changed": -5,
+                # bool is an int subclass in Python; True rendering as 1 in a
+                # counter column would be an invented fact.
+                "verified": True,
+                "cursor": 3.5,
+                "complete": "yes",
+            }
+        }
+    )
+    assert rh["fp"] is None
+    assert rh["seen"] is None and rh["changed"] is None
+    assert rh["verified"] is None and rh["cursor"] is None
+    # `complete` is a strict identity check: a truthy string is not a claim of
+    # completion.
+    assert rh["complete"] is False
+
+
+async def test_endpoint_surfaces_the_hash_migration(client):
+    c, maker, _ = client
+    agent = await _mk_agent(maker, capabilities=FULL_CAPS, health={"rehash": RUNNING_REHASH})
+
+    body = (await c.get(f"/api/v1/agents/{agent.id}/about")).json()
+    assert body["rehash"]["fp"] == "h2-65537-131072"
+    assert body["rehash"]["changed"] == 39_100
+    assert body["rehash"]["verified"] == 850
+    assert body["rehash"]["complete"] is False
+
+
+async def test_endpoint_rehash_is_null_on_an_unswept_agent(client):
+    c, maker, _ = client
+    agent = await _mk_agent(maker, name="unswept", hostname="unswept")
+    body = (await c.get(f"/api/v1/agents/{agent.id}/about")).json()
+    assert body["rehash"] is None

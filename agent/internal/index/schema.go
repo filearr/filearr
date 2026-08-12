@@ -14,6 +14,17 @@ import (
 // an older store fails integrity/version and is rebuilt from a fresh walk
 // (disposable-index philosophy, invariant 1), which re-classifies every item
 // against the live taxonomy.
+//
+// READ THIS BEFORE BUMPING IT. The version is not a schema serial number; it is
+// a DESTRUCTIVE signal. integrity.go:schemaOutdated deletes any store stamped
+// below the constant and Open recreates it empty, so a bump costs every deployed
+// agent a full re-walk and a re-emission of its whole index (~1.09M items on the
+// live agent, plus a Meili sync job per applied batch centrally). Bump it ONLY
+// when an EXISTING column's meaning changes and a stale row would be actively
+// wrong. Purely additive local tables — thumb_markers, extract_state, and
+// rehash_state (QH-T6, 2026-08-12) — ride CREATE TABLE IF NOT EXISTS in
+// schemaSQL, which migrate() applies in place on the next open. That is the
+// upgrade path, and it is why the table added below did NOT take a v6.
 const schemaVersion = 5
 
 // schemaSQL is the full DDL. The items table mirrors a narrow subset of central
@@ -183,6 +194,48 @@ CREATE TABLE IF NOT EXISTS extract_state (
     failed       INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO extract_state(id) VALUES(1);
+
+-- QH-T6 quick_hash migration cursor (2026-08-12). QH-T1 (2026-07-18) fixed a
+-- defect where a file in the 64-128 KiB band had its middle and tail silently
+-- UNhashed: the old code read a fixed 64 KiB head and only added the tail above
+-- 131072 bytes, so two different files whose first 64 KiB coincided produced the
+-- same quick_hash — false duplicates, and a mis-keyed move-detection tier. The
+-- fix is retroactive for nobody: scan.diffEntry re-hashes ONLY on a size/mtime
+-- change or an empty quick_hash, so a stable file in that band keeps its wrong
+-- hash forever. Central cannot repair these rows either — it does not host the
+-- files, and agentsync.apply_batch never writes policy_version, so central's
+-- own cfg1->cfg2 provenance sweep has no jurisdiction over agent-owned rows.
+-- 98,628 rows across seven libraries were affected on the live fleet at the time
+-- this shipped. The rehash_sweep command re-reads those files and emits the
+-- corrected hashes; this singleton row is the ONLY bookkeeping that exists for
+-- it, which is what makes the sweep resumable (cursor_rowid) and idempotent
+-- (fp = hash scheme + band it last ran under).
+--
+-- Deliberately does NOT bump schemaVersion, for exactly the reason extract_state
+-- does not (see above and integrity.go:schemaOutdated): a version bump DELETES
+-- the store and rebuilds it from a fresh walk. For an additive, local-only,
+-- empty-on-create cursor table that would cost every deployed agent a full
+-- re-walk and a re-emission of its entire index — the ~1.09M-item live agent
+-- included — to gain twelve columns of bookkeeping. CREATE TABLE IF NOT EXISTS
+-- here is applied to existing stores by migrate() on the next open, which IS the
+-- in-place upgrade path this needs. min_size/max_size are recorded alongside the
+-- counters because the band is overridable per run: a cursor is meaningless
+-- without the band it was walking.
+CREATE TABLE IF NOT EXISTS rehash_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    fp           TEXT NOT NULL DEFAULT '',
+    cursor_rowid INTEGER NOT NULL DEFAULT 0,
+    started_at   TEXT,
+    finished_at  TEXT,
+    seen         INTEGER NOT NULL DEFAULT 0,
+    changed      INTEGER NOT NULL DEFAULT 0,
+    verified     INTEGER NOT NULL DEFAULT 0,
+    skipped      INTEGER NOT NULL DEFAULT 0,
+    failed       INTEGER NOT NULL DEFAULT 0,
+    min_size     INTEGER NOT NULL DEFAULT 0,
+    max_size     INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO rehash_state(id) VALUES(1);
 `
 
 // migrate applies the schema idempotently and stamps the version.

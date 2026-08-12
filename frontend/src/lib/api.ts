@@ -2670,6 +2670,33 @@ export const reextractAgent = (
     body: JSON.stringify(opts),
   });
 
+/** Queue a `rehash_sweep` command (QH-T6): the agent re-reads every file in its
+ *  index inside a size band, recomputes both hashes under the post-QH-T1 rules,
+ *  and re-emits only the rows whose stored value was wrong.
+ *
+ *  NOT the `rehash_check` command kind, which verifies ONE item and writes
+ *  nothing. This one runs for hours and rewrites rows.
+ *
+ *  Why it exists: until 2026-07-18 the hashers read a fixed 64 KiB head and
+ *  added the tail only above 128 KiB, so a 64-128 KiB file had its middle and
+ *  tail unhashed — false duplicates. The agent's scan only re-hashes files whose
+ *  size or mtime moved, so a stable file in that band keeps its wrong hash
+ *  forever, and central cannot repair it (it does not host the file and holds no
+ *  hash provenance for agent rows).
+ *
+ *  Defaults to the defect band (65537..131072); `min_size`/`max_size` widen it
+ *  for the opt-in small-file `content_hash` backfill. Resumable, and a repeat at
+ *  an unchanged scheme+band short-circuits — `force` re-sweeps anyway.
+ *  409 while a sweep is already queued or running for that agent. */
+export const rehashSweepAgent = (
+  id: string,
+  opts: { force?: boolean; max_items?: number; min_size?: number; max_size?: number } = {},
+) =>
+  request<AgentCommandOut>(`/agents/${id}/rehash-sweep`, {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+
 /** HARD delete an agent row — the cleanup path for failed enrollments and
  *  data-free decommissions. 409 while any library/item references the agent. */
 /** Hard-delete an agent. `deleteLibraries` also removes every library it
@@ -2701,14 +2728,18 @@ export type AgentCommandKind =
   | "self_update"
   | "suspend"
   | "agent_maintenance"
-  | "reextract";
+  | "reextract"
+  // QH-T6. Deliberately NOT a variant of `rehash_check` above: that one is
+  // item-scoped and verifies a single file, this one is agent-scoped and
+  // migrates a whole size band of the agent's index.
+  | "rehash_sweep";
 
 export interface AgentCommandOut {
   id: string;
   agent_id: string;
   kind: AgentCommandKind;
   /** Null for agent-scoped kinds (self_update / suspend / agent_maintenance /
-   *  reextract). */
+   *  reextract / rehash_sweep). */
   item_id: string | null;
   payload: Record<string, unknown>;
   status: AgentCommandStatus;
