@@ -212,6 +212,13 @@ func TestEveryAdvertisedToolHasWellKnownDirs(t *testing.T) {
 // and have the service execute it with full privileges, so a tool installed only
 // into a home directory is reported absent BY DESIGN. No candidate may live
 // under the current user's home.
+//
+// This is the FLOOR, not the whole rule. Windows went further on 2026-08-11 —
+// candidates there must sit under %ProgramFiles%, because C:\ and C:\ProgramData
+// let a non-admin CREATE a not-yet-existing well-known directory even though
+// neither is a home directory (TestWellKnownOnlyProbesProgramFiles). The POSIX
+// lists stay as they are: /usr/local/bin is admin-group-writable on macOS and
+// every Homebrew install lives there.
 func TestWellKnownDirsAreMachineWide(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" || home == string(filepath.Separator) {

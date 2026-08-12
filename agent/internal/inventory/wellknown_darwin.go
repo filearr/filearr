@@ -21,6 +21,15 @@ package inventory
 // user's home is deliberately reported as absent until it is installed
 // machine-wide — the FILEARR_AGENT_*_PATH overrides remain the explicit,
 // operator-chosen escape hatch.
+//
+// Windows narrowed this further on 2026-08-11 (candidates must be under
+// %ProgramFiles%, the only conventional location whose default ACL denies
+// non-admin writes). That was a WINDOWS-ACL-specific decision and is not
+// mirrored here: /usr/local/bin is writable by the admin group on macOS, which
+// is a known and accepted difference — essentially every Homebrew install on an
+// Intel Mac lives there, so dropping it would break almost all macOS agents.
+// POSIX agents also commonly run as root with a curated PATH rather than
+// inheriting an arbitrary one.
 
 import "path/filepath"
 

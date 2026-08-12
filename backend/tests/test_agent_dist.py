@@ -142,6 +142,20 @@ async def test_install_ps1_installs_tools_machine_scope(client):
     assert r"$env:ProgramFiles\WinGet\Links" in ps
     assert r"$env:ProgramFiles\WinGet\Packages\*\*\Library\bin" in ps
     assert r"$env:ProgramFiles\WinGet\Packages\*\*\bin" in ps
+    # ...and nothing outside Program Files (tightened 2026-08-11, mirroring
+    # agent/internal/inventory/wellknown_windows.go). %ProgramData% and C:\ let
+    # Authenticated Users create subdirectories, so a well-known path under
+    # them that does not exist yet is attacker-creatable and then run by
+    # SYSTEM. Chocolatey/Scoop installs are still found via the MACHINE PATH
+    # read asserted above, which is why dropping these costs nothing.
+    for probe in (
+        r"$env:ProgramData\chocolatey\bin",
+        r"$env:ProgramData\scoop\shims",
+        r"C:\ffmpeg\bin",
+        r"C:\exiftool",
+        r"C:\poppler*\Library\bin",
+    ):
+        assert probe not in ps, f"{probe} is not admin-only; SYSTEM must not probe it"
     # Machine scope needs elevation, and a package that refuses it must warn
     # rather than quietly land in a profile.
     assert "Test-Elevated" in ps
@@ -170,3 +184,14 @@ async def test_manage_windows_agent_script_served_templated(client):
     assert "--scope machine" in r.text
     assert '[Environment]::GetEnvironmentVariable("Path", "Machine")' in r.text
     assert r"$env:ProgramFiles\WinGet\Packages\*\*\Library\bin" in r.text
+    # Same Program-Files-only probe list, for the same reason (see the
+    # install.ps1 test above). The two scripts and the agent must agree about
+    # what "visible to the service" means.
+    for probe in (
+        r"$env:ProgramData\chocolatey\bin",
+        r"$env:ProgramData\scoop\shims",
+        r"C:\ffmpeg\bin",
+        r"C:\exiftool",
+        r"C:\poppler*\Library\bin",
+    ):
+        assert probe not in r.text, f"{probe} is not admin-only; SYSTEM must not probe it"

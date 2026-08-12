@@ -21,6 +21,14 @@ package inventory
 // as absent until it is installed machine-wide, and the FILEARR_AGENT_*_PATH
 // override remains the explicit, operator-chosen escape hatch for anything
 // unusual.
+//
+// Windows narrowed this further on 2026-08-11 (candidates must be under
+// %ProgramFiles%, the only conventional Windows location whose default ACL
+// denies non-admin writes). That was a WINDOWS-ACL-specific decision — C:\ and
+// C:\ProgramData let any authenticated user CREATE a missing directory — and it
+// is deliberately not mirrored here. /usr/local/bin is admin-group-writable on
+// macOS and conventionally root-owned here, a known and accepted difference, and
+// POSIX agents commonly run as root with a curated PATH.
 
 // exeSuffix is empty on Unix — tool names are used verbatim.
 const exeSuffix = ""

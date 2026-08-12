@@ -231,7 +231,16 @@ if ($MtlsUrl) {
 # Directories a LocalSystem service can actually read: the MACHINE PATH (not
 # $env:PATH, which is the operator's machine+user merge) plus the same
 # well-known locations agent/internal/inventory/wellknown_windows.go probes.
-# Keep the two lists in step.
+# Keep the two lists in step — if they disagree, this script and the agent
+# disagree about what "installed" means, which is the bug this whole section
+# exists to prevent.
+#
+# The well-known half is Program Files ONLY (tightened 2026-08-11, matching the
+# agent). %ProgramData% and C:\ both let Authenticated Users create
+# subdirectories, so a well-known path under them that does not exist yet can be
+# created and filled by a non-admin and then executed by SYSTEM. Chocolatey and
+# Scoop installs are still found: both put their shim directory on the MACHINE
+# PATH, which is read above.
 function Get-ServiceVisibleDirs {
   $dirs = @()
   $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -241,11 +250,7 @@ function Get-ServiceVisibleDirs {
     "${env:ProgramFiles(x86)}\Tesseract-OCR",
     "$env:ProgramFiles\ExifTool",
     "$env:ProgramFiles\ffmpeg\bin",
-    "C:\ffmpeg\bin",
-    "C:\exiftool",
-    "$env:ProgramFiles\WinGet\Links",
-    "$env:ProgramData\chocolatey\bin",
-    "$env:ProgramData\scoop\shims"
+    "$env:ProgramFiles\WinGet\Links"
   )
   # Versioned payloads: poppler's own layout, and winget PORTABLE packages, which
   # unpack to Packages\<Id>_<hash>\<inner-versioned-dir>\... (both depths, since
@@ -253,7 +258,6 @@ function Get-ServiceVisibleDirs {
   # the matching directories themselves, not their contents.
   $globs = @(
     "$env:ProgramFiles\poppler*\Library\bin",
-    "C:\poppler*\Library\bin",
     "$env:ProgramFiles\WinGet\Packages\*\*\Library\bin",
     "$env:ProgramFiles\WinGet\Packages\*\Library\bin",
     "$env:ProgramFiles\WinGet\Packages\*\*\bin",

@@ -220,12 +220,14 @@ winget install --id UB-Mannheim.TesseractOCR --scope machine
 
 !!! warning "Windows: install machine-wide, or the agent will not use it"
     The Windows agent runs as a service under **LocalSystem**, and it only ever
-    resolves host tools from **machine-wide, admin-writable** locations —
-    `C:\Program Files\...`, `C:\ProgramData\chocolatey\bin`, the machine WinGet
-    link and package directories. A tool installed into a **user profile**
-    (`%LOCALAPPDATA%`) is **ignored on purpose**: executing a binary out of a
-    user-writable directory as SYSTEM would let any local user drop their own
-    `exiftool.exe` there and have it run with full privileges.
+    discovers host tools on the **machine `PATH`** or under **`C:\Program
+    Files`** (including the machine WinGet link and package directories) — the
+    only conventional location non-administrators cannot write. A tool installed
+    into a **user profile** (`%LOCALAPPDATA%`) is **ignored on purpose**:
+    executing a binary out of a user-writable directory as SYSTEM would let any
+    local user drop their own `exiftool.exe` there and have it run with full
+    privileges. The *"Not on PATH? The agent looks anyway"* note below states
+    the full rule and the two escape hatches for a tool installed elsewhere.
 
     This matters because **`winget` defaults to user scope** when you do not say
     otherwise. The symptom is unmistakable: the tool runs fine in your terminal,
@@ -259,19 +261,48 @@ Direct downloads, when a package manager is not an option:
     Tesseract one does not), the classic symptom is "it works in my terminal and
     the console says not installed".
 
-    So when `PATH` misses, the agent also probes the conventional locations:
-    `C:\Program Files\Tesseract-OCR`, `C:\Program Files\ExifTool`,
-    `C:\Program Files\ffmpeg\bin`, versioned `poppler-*\Library\bin`, the machine
-    winget link and package directories, `C:\ProgramData\chocolatey\bin`, the
-    global Scoop shims, `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`,
-    `/snap/bin` and the system-wide Nix/Flatpak paths.
+    So when `PATH` misses, the agent also probes the conventional locations. On
+    **Windows those are under `C:\Program Files` (and `C:\Program Files (x86)`)
+    and nowhere else**: `Tesseract-OCR`, `ExifTool`, `ffmpeg\bin`, versioned
+    `poppler-*\Library\bin`, and the machine winget link and package
+    directories. On macOS and Linux: `/opt/homebrew/bin`, `/usr/local/bin`,
+    `/opt/local/bin`, `/snap/bin` and the system-wide Nix/Flatpak paths.
 
-    Every one of those is **machine-wide**. Nothing under a home directory or
-    `%LOCALAPPDATA%` is probed on any platform — a service running as
-    SYSTEM/root must not execute a binary out of a user-writable directory, so a
-    tool installed only into a profile is reported absent by design. If your
-    install is somewhere else, the `FILEARR_AGENT_*_PATH` overrides below are the
-    explicit, operator-chosen escape hatch and still win over everything.
+    **Why Program Files only.** The Windows agent runs as **LocalSystem**, and
+    Program Files is the only conventional Windows location whose default
+    permissions deny writes to non-administrators. `C:\` and `C:\ProgramData` let
+    any signed-in user *create* a subdirectory, so a well-known path there that
+    does not exist on your machine yet — say `C:\ffmpeg\bin` — could be created
+    and filled by a non-admin and then run with SYSTEM privileges. Directories
+    like `C:\ProgramData\chocolatey\bin`, the Scoop shims, `C:\ffmpeg\bin` and
+    `C:\exiftool` are therefore **not** auto-probed. Nothing under a home
+    directory or `%LOCALAPPDATA%` is probed on any platform either, for the same
+    reason.
+
+    **This almost never costs you anything**, because the **machine `PATH` is
+    searched first** and every package manager that owns a shim directory
+    (Chocolatey, Scoop, winget) puts it on the machine `PATH` when it installs
+    itself. A Chocolatey or Scoop install still resolves normally.
+
+    **If your tool is somewhere else** — a hand-unpacked `C:\ffmpeg\bin`, a
+    Scoop install whose shims are not on the machine `PATH`, anything unusual on
+    any platform — you have two supported options, and both are one-time:
+
+    1. **Add its directory to the machine `PATH`** (System → Environment
+       Variables → *System variables* → `Path`, not the user section), then
+       restart the agent service; or
+    2. **Set that tool's path override**, an environment variable naming the
+       binary or its directory entry:
+       `FILEARR_AGENT_FFMPEG_PATH`, `FILEARR_AGENT_FFPROBE_PATH`,
+       `FILEARR_AGENT_TESSERACT_PATH`, `FILEARR_AGENT_EXIFTOOL_PATH`,
+       `FILEARR_AGENT_PDFINFO_PATH`, `FILEARR_AGENT_PDFTOTEXT_PATH`,
+       `FILEARR_AGENT_PDFTOPPM_PATH`. An override **wins over everything**,
+       including `PATH` — it is the explicit, operator-chosen escape hatch, and
+       it is not subject to the Program Files rule because you chose it
+       deliberately. Set it as a **machine** variable so the service sees it.
+
+    Easiest of all: move or reinstall the tool under `C:\Program Files` (for
+    winget, `winget install --id <Id> --scope machine` from an elevated shell).
 
 **Which install gets what.** The **container agent ships all of them** — ffmpeg,
 poppler-utils, exiftool and tesseract with English data — so a containerized host

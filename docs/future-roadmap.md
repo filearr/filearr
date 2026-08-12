@@ -309,9 +309,13 @@ exclusion (`is_sidecar` filterable; endpoint hides sidecars unless
   has no ecosystem API and the XML schema is proprietary/verbose; treat as a
   future extracted-metadata source once the field mapping is reverse-engineered
   (parse defensively, same untrusted-input posture as NFO).
-- **Subtitle sidecars (`.srt`/`.ass`/`.sub`).** Currently NOT classified as
-  sidecars (they are arguably first-class assets users search for). Decision
-  needed: link-and-hide vs. keep as searchable items with a `subtitle` facet.
+- **Subtitle sidecars (`.srt`/`.ass`/`.sub`) — DECIDED 2026-08-11, already
+  shipped.** User decision: keep them searchable, with a `subtitle` facet.
+  That is the live behaviour and predates the decision — the W8 taxonomy work
+  gave subtitle formats their own `file_group` (`subtitle`, "Subtitle /
+  caption") under `file_category: video`, sidecar detection never touches
+  them, and `file_group` is both filterable and facet-searchable, so
+  `?file_group=subtitle` is the facet. This entry was stale, not open.
 - **Directory-artwork ambiguity.** Directory-level artwork (`poster.jpg`,
   `movie.nfo`) links to the *largest* primary media file in the folder. For
   multi-movie or season folders this may mis-attribute. A stronger model =
@@ -513,8 +517,25 @@ for observability. quick_hash is always computed; only the whole-file
 would need `content_hash` to disambiguate stays ambiguous and is refused
 (counted `move_ambiguous`) — integrity is never traded for a blind transfer.
 Remaining, non-trivial:
-- **RESEARCH PHASE REQUIRED (user-reported 2026-07-16): quick_hash produces
-  thousands of false duplicate detections on SMALL files.** The duplicates
+- **RESOLVED — shipped 2026-07-18 (QH-T1..T5), convergence CONFIRMED 2026-08-11
+  (`still_stale = 0` on the live 1.09M catalogue).** Root cause: a file in the
+  64-128 KiB band had its middle and tail silently unhashed, so head-identical
+  files of equal size collided. Fixed in both languages — anything <=131072
+  bytes is now hashed IN FULL and gets a real `content_hash` regardless of
+  `hash_policy`; `full_hash` moved to xxh3-128; provenance cfg1->cfg2 with
+  `HASH_IMPL_VERSION=2`; a nightly `rehash_small_files` sweep migrated stored
+  rows (now complete); the `duplicate_files` report gained a `hash_tier` column
+  and a hard `size=0` exclusion (the live 3,711-file zero-byte cluster). Full
+  write-up: `docs/research/hash-quickhash-false-duplicates.md`.
+  Two bounded limitations remain, both by design and neither a defect:
+  (a) files LARGER than 128 KiB are still head+tail sampled, so a genuinely
+  ambiguous pair needs `content_hash` or `mid_hash` to separate — the report's
+  `hash_tier` column says which tier grouped a cluster; (b) agent-owned
+  libraries were excluded from the sweep (central cannot open those files), so
+  a stable agent-side file keeps its pre-fix `quick_hash` until its mtime
+  changes or an operator forces a re-index (brief §9.2).
+  ORIGINAL REPORT (retained for context): quick_hash produced thousands of
+  false duplicate detections on small files. The duplicates
   surface (P3-T10 badge + the `duplicate_files` canned report) falls back to
   `(quick_hash, size)` grouping when `content_hash` is absent (`quick_only` /
   network libraries), and live data shows large clusters of small files

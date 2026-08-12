@@ -351,6 +351,13 @@ if (-not (Test-Path filearr-agent.json)) {
 # Directories a LocalSystem service can actually read: the MACHINE PATH (NOT
 # $env:PATH, which is the operator's machine+user merge) plus the same machine
 # locations the agent probes.
+#
+# The well-known half is Program Files ONLY (tightened 2026-08-11, matching
+# agent/internal/inventory/wellknown_windows.go). %ProgramData% and C:\ both
+# let Authenticated Users create subdirectories, so a well-known path under
+# them that does not exist yet can be created and filled by a non-admin and
+# then executed by SYSTEM. Chocolatey and Scoop installs are still found: both
+# put their shim directory on the MACHINE PATH, which is read above.
 function Get-ServiceVisibleDirs {
   $dirs = @()
   $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -360,18 +367,13 @@ function Get-ServiceVisibleDirs {
     "${env:ProgramFiles(x86)}\Tesseract-OCR",
     "$env:ProgramFiles\ExifTool",
     "$env:ProgramFiles\ffmpeg\bin",
-    "C:\ffmpeg\bin",
-    "C:\exiftool",
-    "$env:ProgramFiles\WinGet\Links",
-    "$env:ProgramData\chocolatey\bin",
-    "$env:ProgramData\scoop\shims"
+    "$env:ProgramFiles\WinGet\Links"
   )
   # Versioned payloads: poppler's own layout, and winget PORTABLE packages,
   # which unpack to Packages\<Id>_<hash>\<inner-versioned-dir>\... (both depths,
   # since some packages have no inner directory). Get-Item, not Get-ChildItem:
   # we want the matching directories themselves, not their contents.
   foreach ($g in @("$env:ProgramFiles\poppler*\Library\bin",
-                   "C:\poppler*\Library\bin",
                    "$env:ProgramFiles\WinGet\Packages\*\*\Library\bin",
                    "$env:ProgramFiles\WinGet\Packages\*\Library\bin",
                    "$env:ProgramFiles\WinGet\Packages\*\*\bin",
