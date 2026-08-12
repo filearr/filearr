@@ -21,10 +21,13 @@ const (
 // State is the small non-secret sidecar recording who this agent is and where
 // its trust anchors point. Persisted next to the key/cert so `run` can rebuild
 // the renewal client without re-contacting central.
+// A state.json written by a pre-P13 agent carries a rollout_group key that no
+// longer has a field here; encoding/json ignores unknown keys, so an in-place
+// binary upgrade loads it unchanged (the key is simply dropped on the next
+// write).
 type State struct {
 	AgentID      string `json:"agent_id"`
 	CentralURL   string `json:"central_url"`
-	RolloutGroup string `json:"rollout_group"`
 	CAURL        string `json:"ca_url"`
 	CARootSHA256 string `json:"ca_root_sha256"`
 }

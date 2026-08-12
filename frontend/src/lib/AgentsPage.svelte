@@ -1,16 +1,33 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { copyText } from "./clipboard";
-  import AgentPolicyEditor from "./AgentPolicyEditor.svelte";
   import {
     CAPABILITY_TOOLS,
     POLICY_FIELDS,
-    SOURCE_LABELS,
-    describePolicyGroupChange,
+    POLICY_SECTIONS,
+    RESERVED_POLICY_KEYS,
+    blankPolicyForm,
+    buildPolicyDoc,
+    formFromDoc,
     ignoredPolicySettings,
-    resolvedPolicyScope,
+    passthroughFromDoc,
+    unknownPolicyKeys,
+    unparsedPolicyKeys,
+    validatePolicyForm,
     type AgentCapabilities,
+    type AgentPolicyDoc,
+    type PolicyFieldSpec,
+    type PolicyFormState,
   } from "./agentPolicyDoc";
+  import {
+    MAX_ROLLOUT_TIERS,
+    describeRollout,
+    mergeDocuments,
+    provenanceFor,
+    tierEtaMinutes,
+    validateTiers,
+    type ConfigLayer,
+  } from "./configGroups";
   import {
     minimumsByName,
     toolChip,
@@ -29,14 +46,18 @@
   import {
     ApiError,
     getAgentSummary,
-    getEffectivePolicy,
+    getEffectiveConfig,
     listAgentCommands,
-    listAgentPolicies,
     listAgents,
+    listConfigGroupHistory,
+    listConfigRollouts,
     listEnrollmentTokens,
-    listRolloutGroups,
+    listPresets,
     mintEnrollmentToken,
-    updateAgent,
+    promoteConfigRollout,
+    cancelConfigRollout,
+    rollbackConfigGroup,
+    setAgentConfigGroups,
     reextractAgent,
     revokeAgent,
     runAgentMaintenance,
@@ -50,7 +71,6 @@
     createConfigGroup,
     updateConfigGroup,
     deleteConfigGroup,
-    assignConfigGroup,
     issueInstallerConfig,
     AGENT_LOG_LEVELS,
     SCAN_PRESET_NAMES,
@@ -60,23 +80,36 @@
     type EnrollmentTokenOut,
     type ConfigGroupOut,
     type ConfigGroupIn,
+    type ConfigGroupUpdateIn,
+    type ConfigVersionOut,
+    type EffectiveConfigOut,
     type GroupSettings,
+    type RolloutOut,
+    type RolloutTier,
     type ScanSelection,
     type InventoryConfig,
     type PermissionsConfig,
     type AuditConfig,
     type InstallerConfigOut,
-    type EffectivePolicyOut,
-    type RolloutGroupOut,
   } from "./api";
 
-  // W6-D4 — the agent management page: fleet status header, the agents table
-  // (with inline config-group assignment), enrollment + console-installer card,
-  // and config-group CRUD. Relocated/extended from the old Admin AgentsPanel.
+  // W6-D4 — the agent management page: fleet status header, the agents table,
+  // enrollment + console-installer card, and configuration-group CRUD.
+  //
+  // P13 (2026-08-11) collapsed the console's two competing groupings into ONE.
+  // The page used to show two adjacent, differently-named group controls: one
+  // selected a whole policy document by precedence walk (and doubled as the
+  // release cohort for un-promoted builds), the other an orthogonal settings
+  // bundle that policy resolution never consulted. Operators read the second and
+  // got the first. Now there is a single kind of CONFIGURATION GROUP: an agent
+  // belongs to the permanent Global group plus any number of others, they layer
+  // per key in ascending priority (later wins), and every policy key is edited
+  // inside the group dialog.
   let error = $state("");
   let agents = $state<AgentOut[]>([]);
   let tokens = $state<EnrollmentTokenOut[]>([]);
   let groups = $state<ConfigGroupOut[]>([]);
+  let rollouts = $state<RolloutOut[]>([]);
   let summary = $state<AgentFleetSummary | null>(null);
 
   // Server-side pagination for the registered-agents table: a large fleet can
@@ -125,10 +158,9 @@
         listAgents(AGENTS_PAGE, agentsOffset),
         listEnrollmentTokens(),
         listConfigGroups(),
-        // Policy groups + the CURRENT policy documents. Both feed the per-row
-        // "policy group / resolves" cell, and both degrade to a blank cell
-        // rather than failing the whole page (reloadPolicyContext swallows).
-        reloadPolicyContext(),
+        // Live rollouts feed the rollouts card and the per-group status chip.
+        // Swallowed on failure: a rollout read must not blank the fleet table.
+        reloadRollouts(),
       ]);
       agents = page.items;
       agentsTotal = page.total;
@@ -150,17 +182,35 @@
   onMount(() => {
     refresh();
     loadToolMinimums();
+    loadPresets();
     // Status header auto-refresh; the sweep set rides the same tick so a
-    // finished re-extract clears its badge without a manual reload.
+    // finished re-extract clears its badge without a manual reload. Rollouts
+    // ride it too — the engine promotes on central's own minute tick, so a
+    // static card would show a stale tier for as long as the page is open.
     summaryTimer = setInterval(() => {
       refreshSummary();
       refreshSweeps();
+      reloadRollouts();
     }, 15000);
   });
   onDestroy(() => clearInterval(summaryTimer));
 
   function fmt(iso: string | null): string {
     return iso ? new Date(iso).toLocaleString() : "—";
+  }
+  /** Countdown to a FUTURE timestamp. `relTime` clamps at zero (it only ever
+   *  looks backwards), so reusing it for a scheduled promotion would render
+   *  every pending tier as "0s ago". */
+  function untilTime(iso: string | null): string {
+    if (!iso) return "—";
+    const s = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
+    if (s <= 0) return "due now";
+    if (s < 60) return `in ${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `in ${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `in ${h}h ${m % 60}m`;
+    return `in ${Math.floor(h / 24)}d ${h % 24}h`;
   }
   function relTime(iso: string | null): string {
     if (!iso) return "never";
@@ -273,108 +323,17 @@
     return "text-amber-600";
   }
 
-  // --- agents table: the TWO groupings, side by side -------------------------
-  // The whole reason this pair is rendered together: an operator asked how to
-  // give desktops and filers different extraction rules, assumed the *config*
-  // group (the only one the console used to expose) was what policies keyed on,
-  // and was wrong. Policy resolution reads `rollout_group`; the config group is
-  // an orthogonal dimension it never consults (backend models.py says so
-  // deliberately). Showing one and hiding the other IS the confusion, so both
-  // are editable here, labelled, and each says what it actually controls.
-  // The bundled manual is served at /docs/ by this instance; the Vite dev server
-  // has no such mount, so dev points at the public site (same rule as HelpPage).
-  const DOCS_URL = import.meta.env.DEV ? "https://pwsh.github.io/filearr/" : "/docs/";
-  let rolloutGroups = $state<RolloutGroupOut[]>([]);
-  let canaryGroup = $state("canary");
-  // Scope strings that currently HAVE a policy document (GET /agent-policies
-  // returns one CURRENT row per scope). Enough to mirror the backend resolver
-  // per row without an effective-policy request per agent.
-  let policyScopes = $state<string[]>([]);
+  // --- configuration groups: the ONE grouping --------------------------------
+  // `groups` arrives in MERGE order (the server sorts by priority then name), so
+  // the table and every checkbox list below can render it as-is: top to bottom
+  // reads as "what overrides what". Global is always first.
+  const groupsById = $derived(new Map(groups.map((g) => [g.id, g])));
 
-  async function reloadPolicyContext() {
-    try {
-      const [roster, rows] = await Promise.all([
-        listRolloutGroups(),
-        listAgentPolicies(),
-      ]);
-      rolloutGroups = roster.groups;
-      canaryGroup = roster.canary_group;
-      policyScopes = rows.map((r) => r.scope);
-    } catch {
-      /* keep last-known: a policy-read failure must not blank the fleet table */
-    }
-  }
-
-  /** The policy document THIS agent resolves today, mirroring the backend's
-   *  agent > group > global walk against the loaded rows. */
-  const scopeOf = (a: AgentOut): string => resolvedPolicyScope(policyScopes, a);
-
-  // Free-text on purpose: a rollout group is created by USE (enrollment or this
-  // assignment), there is no group table to pick from — so the control is an
-  // input backed by a datalist of the groups that exist, not a closed select.
-  let policyGroupDraft = $state<Record<string, string>>({});
-  let regrouping = $state<Record<string, boolean>>({});
-
-  const draftFor = (a: AgentOut): string => policyGroupDraft[a.id] ?? a.rollout_group;
-
-  async function applyPolicyGroup(a: AgentOut) {
-    const next = draftFor(a).trim();
-    if (!next || next === a.rollout_group) {
-      policyGroupDraft[a.id] = a.rollout_group; // snap the input back
-      return;
-    }
-    // Consequential in two independent ways (policy document + canary cohort),
-    // so it confirms like suspend/revoke rather than applying on blur.
-    if (
-      !confirm(
-        describePolicyGroupChange({
-          agentName: a.name,
-          from: a.rollout_group,
-          to: next,
-          scopes: policyScopes,
-          canaryGroup,
-          agentId: a.id,
-        }),
-      )
-    ) {
-      policyGroupDraft[a.id] = a.rollout_group;
-      return;
-    }
-    regrouping[a.id] = true;
-    error = "";
-    try {
-      const patched = await updateAgent(a.id, { rollout_group: next });
-      a.rollout_group = patched.rollout_group;
-      policyGroupDraft[a.id] = patched.rollout_group;
-      agents = agents; // trigger reactivity
-      await Promise.all([reloadPolicyContext(), refreshSummary()]);
-    } catch (e) {
-      error = `policy group for ${a.name}: ${errDetail(e)}`;
-      // Drop the draft before resyncing, or the input keeps showing a value the
-      // server rejected as though it had been applied.
-      delete policyGroupDraft[a.id];
-      await refresh(); // resync to server truth
-    } finally {
-      regrouping[a.id] = false;
-    }
-  }
-
-  // --- agents table: inline config-group assignment --------------------------
-  let assigning = $state<Record<string, boolean>>({});
-  async function assignGroup(a: AgentOut, groupId: string) {
-    assigning[a.id] = true;
-    error = "";
-    try {
-      await assignConfigGroup(a.id, groupId || null);
-      a.config_group_id = groupId || null;
-      agents = agents; // trigger reactivity
-      await Promise.all([refreshSummary(), reloadGroups()]);
-    } catch (e) {
-      error = errDetail(e);
-      await refresh(); // resync the dropdown to server truth
-    } finally {
-      assigning[a.id] = false;
-    }
+  /** The EXPLICIT groups an agent is in, in merge order. Global is implicit and
+   *  deliberately not listed here — it is on every row, so printing it on every
+   *  row would be noise; the effective-config viewer names it where it matters. */
+  function groupsOf(a: AgentOut): ConfigGroupOut[] {
+    return groups.filter((g) => !g.is_system && a.config_group_ids.includes(g.id));
   }
 
   async function reloadGroups() {
@@ -382,6 +341,75 @@
       groups = await listConfigGroups();
     } catch {
       /* keep last-known */
+    }
+  }
+
+  async function reloadRollouts() {
+    try {
+      // No status filter = live only (scheduled + running), which is exactly
+      // what the card renders. Finished rollouts are history, not status.
+      rollouts = await listConfigRollouts();
+    } catch {
+      /* keep last-known — an advisory card must not fail the page */
+    }
+  }
+
+  // --- per-agent membership editing (agent detail row) -----------------------
+  // A full REPLACE endpoint, so the editor holds a draft set and PUTs the whole
+  // thing. Editing in place against `a.config_group_ids` would make each
+  // checkbox its own round trip and let a slow response undo a later tick.
+  let memberDraft = $state<Record<string, string[]>>({});
+  let savingMembers = $state<Record<string, boolean>>({});
+
+  const memberIds = (a: AgentOut): string[] => memberDraft[a.id] ?? a.config_group_ids;
+
+  function toggleMembership(a: AgentOut, groupId: string, on: boolean) {
+    const current = memberIds(a);
+    memberDraft[a.id] = on
+      ? [...current, groupId]
+      : current.filter((id) => id !== groupId);
+  }
+
+  const membersDirty = (a: AgentOut): boolean => {
+    const draft = memberDraft[a.id];
+    if (!draft) return false;
+    const before = [...a.config_group_ids].sort().join("|");
+    return [...draft].sort().join("|") !== before;
+  };
+
+  async function saveMembership(a: AgentOut) {
+    const ids = memberIds(a);
+    // Consequential and fleet-visible (it changes the document the machine
+    // receives), so it confirms like the other agent-scoped actions.
+    const names = ids.map((id) => groupsById.get(id)?.name ?? id);
+    if (
+      !confirm(
+        `Set agent "${a.name}" configuration groups to: ${
+          names.length ? names.join(", ") : "(Global only)"
+        }?\n\n` +
+          "Groups layer in priority order and the highest-priority group wins " +
+          "each key it sets. The new document lands on the agent's next poll " +
+          "(~1 min).",
+      )
+    )
+      return;
+    savingMembers[a.id] = true;
+    error = "";
+    try {
+      const res = await setAgentConfigGroups(a.id, ids);
+      a.config_group_ids = res.group_ids;
+      agents = agents; // trigger reactivity
+      delete memberDraft[a.id];
+      // The membership change rewrites the effective document, so the cached
+      // viewer payload is stale the instant this returns.
+      delete effective[a.id];
+      await Promise.all([reloadGroups(), refreshSummary()]);
+    } catch (e) {
+      error = `configuration groups for ${a.name}: ${errDetail(e)}`;
+      delete memberDraft[a.id];
+      await refresh(); // resync the checkboxes to server truth
+    } finally {
+      savingMembers[a.id] = false;
     }
   }
 
@@ -499,9 +527,14 @@
   const EXTRACTION_FIELDS = POLICY_FIELDS.filter((f) => f.section === "extraction");
 
   let expanded = $state<string | null>(null);
-  let effective = $state<Record<string, EffectivePolicyOut>>({});
+  let effective = $state<Record<string, EffectiveConfigOut>>({});
   let effLoading = $state<Record<string, boolean>>({});
   let effError = $state<Record<string, string>>({});
+  /** The FULL effective-configuration report is a second, opt-in disclosure
+   *  inside the already-expanded detail row: ~30 keys with source badges is a
+   *  wall, and the common question ("what will this agent ignore") is answered
+   *  by the extraction summary above it. */
+  let effFull = $state<Record<string, boolean>>({});
 
   const capsOf = (a: AgentOut): AgentCapabilities | null =>
     (a.capabilities as AgentCapabilities | null) ?? null;
@@ -533,28 +566,53 @@
     muted: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
   };
 
+  async function loadEffective(id: string) {
+    if (effective[id] || effLoading[id]) return;
+    effLoading[id] = true;
+    effError[id] = "";
+    try {
+      effective[id] = await getEffectiveConfig(id);
+    } catch (e) {
+      effError[id] = errDetail(e);
+    } finally {
+      effLoading[id] = false;
+    }
+  }
+
   async function toggleDetail(a: AgentOut) {
     if (expanded === a.id) {
       expanded = null;
       return;
     }
     expanded = a.id;
-    if (effective[a.id] || effLoading[a.id]) return;
-    effLoading[a.id] = true;
-    effError[a.id] = "";
-    try {
-      effective[a.id] = await getEffectivePolicy(a.id);
-    } catch (e) {
-      effError[a.id] = errDetail(e);
-    } finally {
-      effLoading[a.id] = false;
-    }
+    await loadEffective(a.id);
   }
 
   function fmtPolicyValue(v: unknown): string {
     if (v === undefined) return "not set";
     if (Array.isArray(v) || (v && typeof v === "object")) return JSON.stringify(v);
     return String(v);
+  }
+
+  /** The merged POLICY half of the delivered document: every top-level key except
+   *  `group`, which is the settings section the composer folds in. Rendering the
+   *  whole blob would show that nested object as one unreadable line. */
+  function policyOf(eff: EffectiveConfigOut): Record<string, unknown> {
+    const { group: _group, ...policy } = eff.document;
+    return policy;
+  }
+
+  const settingsOf = (eff: EffectiveConfigOut): Record<string, unknown> =>
+    (eff.document.group as Record<string, unknown> | undefined) ?? {};
+
+  /** Keys in the merged policy that no POLICY_FIELDS entry renders — forward-compat
+   *  keys from a newer agent build. Listed rather than hidden: they are part of
+   *  what this agent receives, and silence would read as "not set". */
+  function extraPolicyKeys(eff: EffectiveConfigOut): string[] {
+    const known = new Set(POLICY_FIELDS.map((f) => f.key));
+    return Object.keys(policyOf(eff))
+      .filter((k) => !known.has(k))
+      .sort();
   }
 
   async function dropAgent(id: string, name: string) {
@@ -604,19 +662,28 @@ ${detail}
   }
 
   // --- enrollment tokens -----------------------------------------------------
-  let newGroup = $state("default");
+  // The token carries group NAMES, not ids: it is minted before the agent
+  // exists and is frequently pasted into an installer by hand. Every enrolling
+  // agent joins Global regardless, so an empty selection is a valid, complete
+  // answer rather than "no configuration".
+  let newGroupNames = $state<string[]>([]);
   let newTtl = $state<number | undefined>(undefined);
   let minting = $state(false);
   let minted = $state<{ token: string; expires_at: string } | null>(null);
   let mintedCopied = $state(false);
 
+  function toggleMintGroup(name: string, on: boolean) {
+    newGroupNames = on
+      ? [...newGroupNames, name]
+      : newGroupNames.filter((n) => n !== name);
+  }
+
   async function mint() {
-    if (!newGroup.trim()) return;
     minting = true;
     mintedCopied = false;
     error = "";
     try {
-      const r = await mintEnrollmentToken(newGroup.trim(), newTtl || undefined);
+      const r = await mintEnrollmentToken(newGroupNames, newTtl || undefined);
       minted = { token: r.token, expires_at: r.expires_at };
       await refresh();
     } catch (e) {
@@ -640,8 +707,14 @@ ${detail}
 
   // --- console installer -----------------------------------------------------
   let insName = $state("");
-  let insGroupId = $state("");
+  // Ids here (unlike the token mint): the installer request resolves them
+  // server-side and writes the resulting NAMES into the sidecar.
+  let insGroupIds = $state<string[]>([]);
   let insLogLevel = $state("");
+
+  function toggleInsGroup(id: string, on: boolean) {
+    insGroupIds = on ? [...insGroupIds, id] : insGroupIds.filter((g) => g !== id);
+  }
   let issuing = $state(false);
   let installer = $state<InstallerConfigOut | null>(null);
   let sidecarCopied = $state(false);
@@ -657,7 +730,7 @@ ${detail}
     try {
       installer = await issueInstallerConfig({
         agent_name: insName.trim() || null,
-        config_group_id: insGroupId || null,
+        config_group_ids: insGroupIds,
         log_level: insLogLevel || null,
       });
       await refresh(); // the mint created a new token row
@@ -697,8 +770,26 @@ ${detail}
   };
   type GroupForm = {
     id: string | null; // null = create
+    /** Global: name + priority are immutable server-side (409), so the fields
+     *  render disabled rather than letting an operator author a rejected save. */
+    isSystem: boolean;
+    currentVersion: number;
+    memberCount: number;
     name: string;
     description: string;
+    /** Merge rank. LOWER applies first, so a HIGHER number wins a contested key. */
+    priority: number;
+    /** Free-text note stored on the published snapshot — the only place a
+     *  "why" survives into the version history. */
+    note: string;
+    /** The POLICY section of the group document: tri-state per key, plus the
+     *  keys this console does not model, preserved verbatim. See
+     *  ./agentPolicyDoc — dropping a forward-compat key is silent data loss. */
+    policyForm: PolicyFormState;
+    policyPassthrough: Record<string, unknown>;
+    /** What was stored when the dialog opened — drives the unknown/unparsed
+     *  key callouts and the raw-JSON escape hatch. */
+    storedPolicy: AgentPolicyDoc;
     logLevel: string;
     cron: string;
     inventoryEnabled: boolean;
@@ -729,6 +820,245 @@ ${detail}
   let dialog = $state<GroupForm | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
+
+  // --- dialog section accordion ----------------------------------------------
+  // The dialog now holds ~40 fields (settings + every policy key), so everything
+  // except General is COLLAPSED on open. An accordion beats a sidebar here
+  // because the sections are of wildly different heights and an operator
+  // usually came to change exactly one thing.
+  const SETTINGS_SECTIONS: { id: string; label: string; blurb: string }[] = [
+    {
+      id: "delivery",
+      label: "Log level & group scan schedule",
+      blurb: "Agent-wide settings delivered under the document's `group` section.",
+    },
+    {
+      id: "surface",
+      label: "Local access (settings)",
+      blurb:
+        "The per-group form of the three local-surface gates. A value set here " +
+        "is LIFTED over the policy key of the same name in the delivered document.",
+    },
+    { id: "inventory", label: "Inventory", blurb: "Host inventory collection." },
+    {
+      id: "selections",
+      label: "Scan selections",
+      blurb: "Per-OS presets and path specs the agent expands into scan roots.",
+    },
+  ];
+
+  let openSections = $state<Record<string, boolean>>({ general: true });
+  const toggleSection = (id: string) => (openSections[id] = !openSections[id]);
+
+  /** Known preset names for the policy form's preset check. Static and small;
+   *  a failure degrades to server-side validation only. */
+  let presetNames = $state<string[]>([]);
+  async function loadPresets() {
+    try {
+      presetNames = (await listPresets()).presets.map((p) => p.name);
+    } catch {
+      presetNames = [];
+    }
+  }
+
+  const policyErrors = $derived(
+    dialog ? validatePolicyForm(dialog.policyForm, { knownPresets: presetNames }) : {},
+  );
+  const policyDraft = $derived(
+    dialog ? buildPolicyDoc(dialog.policyForm, dialog.policyPassthrough) : {},
+  );
+  const unknownKeys = $derived(dialog ? unknownPolicyKeys(dialog.storedPolicy) : []);
+  const unparsedKeys = $derived(
+    dialog ? unparsedPolicyKeys(dialog.storedPolicy, dialog.policyForm) : [],
+  );
+
+  /** Number of policy keys this group will contribute to the merge. `0` is a
+   *  perfectly good answer (a settings-only group) and reads better than a
+   *  blank. */
+  const policyKeyCount = $derived(Object.keys(policyDraft).length);
+
+  /** Client-side merge PREVIEW: keys this draft sets that a HIGHER-priority
+   *  group also sets, and therefore loses.
+   *
+   *  This is the "why is my value not applying" answer, and it is the one
+   *  question the server cannot pre-answer — the document has not been saved
+   *  yet. It runs the same layering the backend does (./configGroups, which is
+   *  unit-tested against exactly that contract) over the draft plus every other
+   *  group.
+   *
+   *  Deliberately phrased as a conditional: it compares against ALL groups, not
+   *  the ones any particular agent is in, so the honest claim is "for an agent
+   *  in both, that group wins" — never "this value is dead". */
+  const shadowedKeys = $derived.by<{ key: string; by: string }[]>(() => {
+    // Bound to a local so the null-narrowing survives into the callbacks below.
+    const d = dialog;
+    if (!d) return [];
+    const draftId = d.id ?? "__draft__";
+    const layers: ConfigLayer[] = [
+      ...groups
+        .filter((g) => g.id !== d.id)
+        .map((g) => ({
+          id: g.id,
+          name: g.name,
+          priority: g.priority,
+          policy: g.policy,
+        })),
+      {
+        id: draftId,
+        name: d.name || "(this group)",
+        priority: d.priority,
+        policy: policyDraft,
+      },
+    ];
+    const merged = mergeDocuments(layers);
+    return Object.keys(policyDraft)
+      .filter((k) => merged.provenance[`policy.${k}`]?.group_id !== draftId)
+      .sort()
+      .map((key) => ({
+        key,
+        by: merged.provenance[`policy.${key}`]?.group_name ?? "another group",
+      }));
+  });
+
+  // --- policy field editing (tri-state) --------------------------------------
+  // "Inherit (not set)" no longer means "fall back to a broader SCOPE": the key
+  // is simply absent from this group's contribution, so a lower-priority group
+  // — or the agent's built-in default — supplies it.
+  function setBoolMode(key: string, mode: string) {
+    if (!dialog) return;
+    if (mode === "") dialog.policyForm[key] = { set: false, value: dialog.policyForm[key]?.value ?? "" };
+    else dialog.policyForm[key] = { set: true, value: mode };
+  }
+  function setExplicit(key: string, on: boolean) {
+    if (!dialog) return;
+    dialog.policyForm[key] = { set: on, value: dialog.policyForm[key]?.value ?? "" };
+  }
+  function setPolicyValue(key: string, value: string) {
+    if (!dialog) return;
+    dialog.policyForm[key] = { set: true, value };
+  }
+  const boolMode = (key: string): string => {
+    const s = dialog?.policyForm[key];
+    return s?.set ? s.value : "";
+  };
+  const sectionFields = (section: string): PolicyFieldSpec[] =>
+    POLICY_FIELDS.filter((f) => f.section === section);
+
+  /** Hover text for a policy field's label and control: the visible hint plus
+   *  the key and the absent-key behaviour — the two things needed before
+   *  deciding whether this group should set it at all. */
+  const fieldTitle = (f: PolicyFieldSpec): string =>
+    `${f.label} (${f.key}) — ${f.hint} Not set here → a lower-priority group supplies it, or ${f.fallback}.`;
+
+  // --- raw JSON escape hatch (extra="allow" keys) ----------------------------
+  let rawOpen = $state(false);
+  let rawText = $state("");
+  let rawError = $state("");
+
+  function openRaw() {
+    rawOpen = !rawOpen;
+    if (rawOpen) {
+      rawText = JSON.stringify(policyDraft, null, 2);
+      rawError = "";
+    }
+  }
+  function applyRaw() {
+    if (!dialog) return;
+    rawError = "";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      rawError = `Not valid JSON: ${String(e)}`;
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      rawError = "The policy section must be a JSON object.";
+      return;
+    }
+    const doc = parsed as AgentPolicyDoc;
+    dialog.policyForm = formFromDoc(doc);
+    dialog.policyPassthrough = passthroughFromDoc(doc, dialog.policyForm);
+    rawOpen = false;
+  }
+
+  // --- phased rollout (dialog footer) ----------------------------------------
+  // Publishing with tiers leaves `current_version` alone: uncovered agents keep
+  // the old document and each tier widens the hash-bucket share that receives
+  // the new one. Cancelling mid-flight therefore ROLLS BACK the covered agents.
+  let rolloutOpen = $state(false);
+  let tiers = $state<RolloutTier[]>([]);
+  let rolloutStartsAt = $state("");
+  const tierError = $derived(rolloutOpen ? validateTiers(tiers) : null);
+
+  function openRollout() {
+    rolloutOpen = true;
+    if (!tiers.length)
+      // A sane default an operator can accept as-is: a small first wave, a half
+      // fleet an hour later, everyone an hour after that.
+      tiers = [
+        { percent: 10, delay_minutes: 0 },
+        { percent: 50, delay_minutes: 60 },
+        { percent: 100, delay_minutes: 60 },
+      ];
+  }
+  function addTier() {
+    if (tiers.length >= MAX_ROLLOUT_TIERS) return;
+    const last = tiers[tiers.length - 1];
+    tiers = [
+      ...tiers,
+      { percent: Math.min(100, (last?.percent ?? 0) + 25), delay_minutes: 60 },
+    ];
+  }
+
+  // --- version history (in-dialog view) --------------------------------------
+  let historyView = $state(false);
+  let historyRows = $state<ConfigVersionOut[]>([]);
+  let historyLoading = $state(false);
+  let historyError = $state("");
+  let historyOpenSeq = $state<number | null>(null);
+
+  async function openHistory() {
+    if (!dialog?.id) return;
+    historyView = true;
+    historyOpenSeq = null;
+    historyLoading = true;
+    historyError = "";
+    try {
+      historyRows = await listConfigGroupHistory(dialog.id, 20);
+    } catch (e) {
+      historyError = errDetail(e);
+    } finally {
+      historyLoading = false;
+    }
+  }
+
+  async function restoreVersion(v: ConfigVersionOut) {
+    if (!dialog?.id) return;
+    if (
+      !confirm(
+        `Restore version ${v.version} of "${dialog.name}"?\n\n` +
+          "It is copied forward as a NEW version and published IMMEDIATELY — " +
+          "reverting a bad configuration should not wait behind a rollout, so " +
+          "any live rollout for this group is cancelled and the agents it had " +
+          "already covered fall back with everyone else. Unsaved edits in this " +
+          "dialog are discarded.",
+      )
+    )
+      return;
+    dialogBusy = true;
+    dialogError = "";
+    try {
+      const g = await rollbackConfigGroup(dialog.id, v.version);
+      historyView = false;
+      openEdit(g); // re-seed the form from what is now stored
+      await refresh();
+    } catch (e) {
+      dialogError = errDetail(e);
+    } finally {
+      dialogBusy = false;
+    }
+  }
 
   // --- inventory-collector picker (see ./inventoryCollectors) ----------------
   // The vocabulary used to be an operator's guess: a comma-separated box whose
@@ -805,13 +1135,40 @@ ${detail}
     auditWatchPathsText: "",
   };
 
-  function openCreate() {
+  /** Reset every piece of dialog-adjacent state, so reopening never inherits
+   *  the previous group's accordion, tier draft, history page or raw JSON. */
+  function resetDialogChrome() {
     dialogError = "";
+    openSections = { general: true };
+    rolloutOpen = false;
+    tiers = [];
+    rolloutStartsAt = "";
+    historyView = false;
+    historyRows = [];
+    historyOpenSeq = null;
+    historyError = "";
+    rawOpen = false;
+    rawText = "";
+    rawError = "";
+  }
+
+  function openCreate() {
+    resetDialogChrome();
     advancedOpen = false;
     dialog = {
       id: null,
+      isSystem: false,
+      currentVersion: 0,
+      memberCount: 0,
       name: "",
       description: "",
+      // 100 is the server default and the band every hand-made group lands in;
+      // Global sits alone at 0 so it always applies first.
+      priority: 100,
+      note: "",
+      policyForm: blankPolicyForm(),
+      policyPassthrough: {},
+      storedPolicy: {},
       logLevel: "",
       cron: "",
       inventoryEnabled: false,
@@ -826,15 +1183,25 @@ ${detail}
   }
 
   function openEdit(g: ConfigGroupOut) {
-    dialogError = "";
+    resetDialogChrome();
     const s = g.settings ?? {};
     const p = s.inventory?.permissions ?? null;
     const a = p?.audit ?? null;
     advancedOpen = p !== null;
+    const policy = g.policy ?? {};
+    const policyForm = formFromDoc(policy);
     dialog = {
       id: g.id,
+      isSystem: g.is_system,
+      currentVersion: g.current_version,
+      memberCount: g.member_count,
       name: g.name,
       description: g.description ?? "",
+      priority: g.priority,
+      note: "",
+      policyForm,
+      policyPassthrough: passthroughFromDoc(policy, policyForm),
+      storedPolicy: policy,
       logLevel: s.log_level ?? "",
       cron: s.scan_schedule_cron ?? "",
       inventoryEnabled: s.inventory?.enabled ?? false,
@@ -942,11 +1309,29 @@ ${detail}
     return settings;
   }
 
-  async function saveGroup() {
+  /** Publish the dialog. `mode` picks the publication strategy:
+   *   - "now": the new version becomes `current_version` and every member gets
+   *     it on its next poll;
+   *   - "rollout": `current_version` stays put and the new version reaches the
+   *     fleet through the tier schedule (server 422s if nothing actually
+   *     changed — a rollout of an identical document would never finish
+   *     meaning anything). */
+  async function saveGroup(mode: "now" | "rollout" = "now") {
     if (!dialog) return;
     if (!dialog.name.trim()) {
       dialogError = "Name is required.";
       return;
+    }
+    if (Object.keys(policyErrors).length) {
+      dialogError = "Fix the highlighted policy fields first.";
+      return;
+    }
+    if (mode === "rollout") {
+      const err = tierError ?? validateTiers(tiers);
+      if (err) {
+        dialogError = err;
+        return;
+      }
     }
     // Mirror the server bound so a typo doesn't cost a round trip.
     if (
@@ -968,25 +1353,45 @@ ${detail}
     dialogError = "";
     try {
       const settings = buildSettings(dialog, collectors);
+      const policy = buildPolicyDoc(dialog.policyForm, dialog.policyPassthrough);
       if (dialog.id === null) {
         const body: ConfigGroupIn = {
           name: dialog.name.trim(),
           description: dialog.description.trim() || null,
+          priority: dialog.priority,
           settings,
+          policy,
         };
         await createConfigGroup(body);
       } else {
-        await updateConfigGroup(dialog.id, {
-          name: dialog.name.trim(),
+        const patch: ConfigGroupUpdateIn = {
           description: dialog.description.trim() || null,
           settings,
-        });
+          policy,
+        };
+        // Global's name and priority are fixed (409 if sent at all), so they
+        // are omitted rather than sent unchanged — an unchanged value is still
+        // "a change to name/priority" as far as the endpoint is concerned.
+        if (!dialog.isSystem) {
+          patch.name = dialog.name.trim();
+          patch.priority = dialog.priority;
+        }
+        if (dialog.note.trim()) patch.note = dialog.note.trim();
+        if (mode === "rollout")
+          patch.rollout = {
+            tiers,
+            starts_at: rolloutStartsAt
+              ? new Date(rolloutStartsAt).toISOString()
+              : null,
+          };
+        await updateConfigGroup(dialog.id, patch);
       }
       dialog = null;
       await refresh();
     } catch (e) {
-      // Surface the backend's 422 detail inline (unknown key / bad regex / bad
-      // cron / bad preset / oversize) or a 409 duplicate-name message.
+      // Surface the backend's detail inline: 422 (unknown key / bad regex / bad
+      // cron / bad preset / bad tiers / a rollout with no document change), 409
+      // (duplicate name, Global's fixed fields, a second live rollout) or 413.
       dialogError = errDetail(e);
     } finally {
       dialogBusy = false;
@@ -996,8 +1401,12 @@ ${detail}
   async function removeGroup(g: ConfigGroupOut) {
     const n = g.member_count;
     if (!confirm(
-      `Delete config group "${g.name}"?` +
-        (n > 0 ? ` ${n} member agent(s) will reset to built-in defaults.` : "")
+      `Delete configuration group "${g.name}"?` +
+        (n > 0
+          ? ` ${n} member agent(s) stop receiving its keys — each of those keys ` +
+            "falls back to the next-highest group that sets it, or to the " +
+            "agent's built-in default."
+          : "")
     )) return;
     try {
       await deleteConfigGroup(g.id);
@@ -1006,7 +1415,119 @@ ${detail}
       error = errDetail(e);
     }
   }
+
+  // --- priority reordering (groups table) ------------------------------------
+  // Two numeric PATCHes rather than a drag handle: no DnD dependency, and the
+  // resulting priorities stay legible numbers an operator can also type into the
+  // dialog. Deliberately NOT confirm()-guarded — it is a one-click-reversible
+  // move whose result is visible in the row order immediately, and a prompt per
+  // arrow press would make reordering unusable.
+  let reordering = $state(false);
+  /** Global is pinned at priority 0 and is never part of the movable run. */
+  const reorderable = $derived(groups.filter((g) => !g.is_system));
+
+  async function reorderGroup(g: ConfigGroupOut, dir: -1 | 1) {
+    // Global is pinned at priority 0 and always applies first, so it is never
+    // part of the reorderable run.
+    const list = groups.filter((x) => !x.is_system);
+    const i = list.findIndex((x) => x.id === g.id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    const other = list[j];
+
+    let mine = other.priority;
+    let theirs = g.priority;
+    if (g.priority === other.priority) {
+      // Equal priorities are legal (the server tie-breaks by name), so swapping
+      // the numbers would be a no-op. Step one of them past the other instead,
+      // keeping clear of Global's 0.
+      if (dir < 0 && other.priority > 1) {
+        mine = other.priority - 1;
+        theirs = other.priority;
+      } else if (dir < 0) {
+        mine = other.priority;
+        theirs = other.priority + 1; // push the other one later instead
+      } else {
+        mine = other.priority + 1;
+        theirs = other.priority;
+      }
+    }
+
+    reordering = true;
+    error = "";
+    try {
+      if (mine !== g.priority) await updateConfigGroup(g.id, { priority: mine });
+      if (theirs !== other.priority)
+        await updateConfigGroup(other.id, { priority: theirs });
+      await reloadGroups();
+    } catch (e) {
+      error = `reorder ${g.name}: ${errDetail(e)}`;
+      await reloadGroups(); // a half-applied swap must not linger on screen
+    } finally {
+      reordering = false;
+    }
+  }
+
+  // --- live rollouts card ----------------------------------------------------
+  let rolloutBusy = $state<Record<string, boolean>>({});
+
+  async function promoteRollout(r: RolloutOut) {
+    if (
+      !confirm(
+        `Promote "${r.group_name}" to the next tier now?\n\n` +
+          `Version ${r.target_version} immediately reaches the next tier's share ` +
+          "of the fleet instead of waiting out the configured delay. This cannot " +
+          "be un-promoted — a tier only ever widens.",
+      )
+    )
+      return;
+    rolloutBusy[r.id] = true;
+    error = "";
+    try {
+      await promoteConfigRollout(r.id);
+      await Promise.all([reloadRollouts(), reloadGroups()]);
+    } catch (e) {
+      error = `promote ${r.group_name}: ${errDetail(e)}`;
+      await reloadRollouts();
+    } finally {
+      rolloutBusy[r.id] = false;
+    }
+  }
+
+  async function cancelRollout(r: RolloutOut) {
+    if (
+      !confirm(
+        `Cancel the rollout of version ${r.target_version} for "${r.group_name}"?\n\n` +
+          `The group stays on its current version, so the ${r.covered_percent}% of ` +
+          "agents already covered ROLL BACK to it on their next poll. The version " +
+          "itself is kept — start a new rollout, or publish it immediately, to " +
+          "deliver it later.",
+      )
+    )
+      return;
+    rolloutBusy[r.id] = true;
+    error = "";
+    try {
+      await cancelConfigRollout(r.id);
+      await Promise.all([reloadRollouts(), reloadGroups()]);
+    } catch (e) {
+      error = `cancel ${r.group_name}: ${errDetail(e)}`;
+      await reloadRollouts();
+    } finally {
+      rolloutBusy[r.id] = false;
+    }
+  }
 </script>
+
+<!-- Honesty chip: the setting is validated, stored and delivered over the config
+     channel, but no shipped agent build acts on it yet. Better to say so here
+     than to let an operator conclude the fleet is misbehaving. Declared first
+     because both the agent-detail panel and the group dialog render it. -->
+{#snippet notEnforced(why: string)}
+  <span
+    class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+    title={why}>not enforced yet</span>
+{/snippet}
 
 <div class="mt-4">
   <div class="flex items-center gap-3">
@@ -1114,23 +1635,70 @@ ${detail}
         {/if}
       </div>
 
+      <!-- Configuration-group membership. A FULL-REPLACE editor: tick the
+           groups this agent should be in and save once. Global is shown ticked
+           and disabled because membership in it is implicit — there are no join
+           rows for it and the endpoint 400s if its id is submitted. -->
+      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="font-medium text-slate-500">Configuration groups</span>
+          <span class="text-slate-400">
+            applied in priority order, lowest first — the last group to set a key wins it
+          </span>
+        </div>
+        <div class="mt-1.5 flex flex-wrap gap-2">
+          {#each groups as g (g.id)}
+            <label
+              class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
+              title={g.is_system
+                ? "The permanent Global group. Every agent is a member and it always applies first, so it is the fleet-wide baseline every other group overrides. It cannot be left."
+                : `Priority ${g.priority} — a higher priority applies later and wins any key it sets. ${g.member_count} member agent(s).`}>
+              <input
+                type="checkbox"
+                checked={g.is_system || memberIds(a).includes(g.id)}
+                disabled={g.is_system || savingMembers[a.id] || a.status === "revoked"}
+                onchange={(e) => toggleMembership(a, g.id, e.currentTarget.checked)} />
+              <span>{g.name}</span>
+              <span class="tabular-nums text-slate-400">p{g.priority}</span>
+              {#if g.is_system}
+                <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">always</span>
+              {/if}
+            </label>
+          {/each}
+        </div>
+        {#if membersDirty(a)}
+          <div class="mt-1.5 flex items-center gap-2">
+            <button
+              class="rounded-lg bg-[var(--accent)] px-2 py-1 text-[11px] text-white disabled:opacity-50"
+              disabled={savingMembers[a.id]}
+              onclick={() => saveMembership(a)}>
+              {savingMembers[a.id] ? "Saving…" : "Save membership"}
+            </button>
+            <button
+              class="text-[11px] text-slate-500"
+              onclick={() => delete memberDraft[a.id]}>discard</button>
+          </div>
+        {/if}
+      </div>
+
       <!-- Effective extraction policy + the ignored-settings verdict -->
       <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
-        <span class="font-medium text-slate-500">Effective content-extraction policy</span>
+        <span class="font-medium text-slate-500">Effective content-extraction settings</span>
         {#if effLoading[a.id]}
           <p class="mt-1 text-slate-400">Loading…</p>
         {:else if effError[a.id]}
-          <p class="mt-1 text-red-600">Could not load the effective policy: {effError[a.id]}</p>
+          <p class="mt-1 text-red-600">Could not load the effective configuration: {effError[a.id]}</p>
         {:else if effective[a.id]}
           {@const eff = effective[a.id]}
-          {@const ignored = ignoredPolicySettings(eff.policy, caps)}
+          {@const merged = policyOf(eff)}
+          {@const ignored = ignoredPolicySettings(merged, caps)}
           <div class="mt-1 flex flex-wrap gap-x-5 gap-y-1">
             {#each EXTRACTION_FIELDS as f (f.key)}
               <span class="text-slate-500">
                 <code class="font-mono text-[11px]">{f.key}</code>
-                <b class="text-slate-700 dark:text-slate-200">{fmtPolicyValue(eff.policy[f.key])}</b>
+                <b class="text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[f.key])}</b>
                 <span class="text-slate-400">
-                  ({SOURCE_LABELS[eff.source_keys[f.key]] ?? "agent default"})
+                  ({provenanceFor(eff.provenance, eff.groups, "policy", f.key)})
                 </span>
               </span>
             {/each}
@@ -1141,22 +1709,134 @@ ${detail}
               {#each ignored as ig (ig.key)}
                 <span
                   class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                  title={`${ig.key} is set in this agent's effective policy, but ${ig.reason}. The agent logs the ignored setting once and carries on.`}>
+                  title={`${ig.key} is set in this agent's effective configuration, but ${ig.reason}. The agent logs the ignored setting once and carries on.`}>
                   {ig.key} — {ig.reason}
                 </span>
               {/each}
             </div>
           {:else if caps !== null}
             <p class="mt-2 text-emerald-600 dark:text-emerald-400">
-              Nothing in this agent's effective policy is beyond what it advertises.
+              Nothing in this agent's effective configuration is beyond what it advertises.
             </p>
           {/if}
-          <p class="mt-2 text-slate-400">
-            Winning document: <b>{eff.scope}</b>{eff.version ? ` (version ${eff.version})` : ""}.
-            Edit it in the Agent policy card above.
-          </p>
         {/if}
       </div>
+
+      <!-- The FULL effective configuration: every merged key with the group and
+           version that supplied it. Opt-in inside an already-expanded row —
+           ~40 keys with badges is a wall, and the extraction summary above
+           answers the common question on its own. -->
+      {#if effective[a.id]}
+        {@const eff = effective[a.id]}
+        <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              class="font-medium text-[var(--accent)]"
+              title="Every key of the document this agent receives on its next poll, after all of its groups have been merged — with the group and version each value came from."
+              onclick={() => (effFull[a.id] = !effFull[a.id])}>
+              {effFull[a.id] ? "▾" : "▸"} Effective configuration
+            </button>
+            <span class="text-slate-400" title="The delivered generation: max(version seq) across the group snapshots that composed this document. The agent echoes it back on its next poll.">
+              generation <b class="tabular-nums text-slate-600 dark:text-slate-300">{eff.generation}</b>
+            </span>
+            {#if eff.confirmed_generation !== eff.generation}
+              <span
+                class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                title={`This agent last confirmed generation ${eff.confirmed_generation ?? "none"}. A poll (~1 min) or an offline agent explains a brief lag; a persistent one means it is not reaching central.`}>
+                agent has not confirmed latest (at {eff.confirmed_generation ?? "none"})
+              </span>
+            {:else}
+              <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                title="The agent has echoed back this exact generation, so what is shown below is what it is running.">confirmed</span>
+            {/if}
+            <span class="font-mono text-slate-400" title="First 12 hex of the sha256 over the canonical document — the same hash that rides the delivery ETag.">{eff.hash}</span>
+          </div>
+
+          {#if effFull[a.id]}
+            <!-- Computed ONCE for the whole report: the verdict walks the tool
+                 matrix, and re-deriving it per field would run it ~30 times. -->
+            {@const merged = policyOf(eff)}
+            {@const ignoredKeys = new Set(
+              ignoredPolicySettings(merged, caps).map((ig) => ig.key),
+            )}
+            <!-- Contributing layers, in merge order. Naming them (and their
+                 versions) is what makes a surprising value traceable. -->
+            <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span class="text-slate-500">Layers:</span>
+              {#each eff.groups as g, i (g.id)}
+                {#if i > 0}<span class="text-slate-400">→</span>{/if}
+                <span
+                  class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                  title={`Priority ${g.priority}, version ${g.version_used}${g.via_rollout ? " — delivered by a phased rollout this agent's bucket is covered by, so other members of the same group may still be on the previous version" : ""}.`}>
+                  {g.name} v{g.version_used}{g.via_rollout ? " · rollout" : ""}
+                </span>
+              {/each}
+            </div>
+
+            {#each POLICY_SECTIONS as section (section.id)}
+              {@const fields = POLICY_FIELDS.filter((f) => f.section === section.id)}
+              <div class="mt-2">
+                <span class="font-medium text-slate-500">{section.label}</span>
+                <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
+                  {#each fields as f (f.key)}
+                    <div class="flex flex-wrap items-baseline gap-1.5">
+                      <code class="font-mono text-[11px] text-slate-500">{f.key}</code>
+                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[f.key])}</b>
+                      <span
+                        class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                        title="The group version that supplied this value. 'built-in default' means no group sets the key, so the agent's own default applies.">
+                        {provenanceFor(eff.provenance, eff.groups, "policy", f.key)}
+                      </span>
+                      {#if ignoredKeys.has(f.key)}
+                        {@render notEnforced(`This agent cannot honour ${f.key} — see the ignored-settings chips above.`)}
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/each}
+
+            {#if extraPolicyKeys(eff).length}
+              <div class="mt-2">
+                <span class="font-medium text-slate-500">Other delivered keys</span>
+                <span class="text-slate-400"> — set by a group but not modelled by this console</span>
+                <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
+                  {#each extraPolicyKeys(eff) as key (key)}
+                    <div class="flex flex-wrap items-baseline gap-1.5">
+                      <code class="font-mono text-[11px] text-slate-500">{key}</code>
+                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[key])}</b>
+                      <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {provenanceFor(eff.provenance, eff.groups, "policy", key)}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            <!-- The settings half, delivered under the document's `group` key. -->
+            <div class="mt-2">
+              <span class="font-medium text-slate-500">Group settings</span>
+              <span class="text-slate-400"> — delivered under <code class="font-mono">group</code></span>
+              {#if Object.keys(settingsOf(eff)).length === 0}
+                <p class="mt-1 text-slate-400">No group supplies any settings — the agent uses its own configuration.</p>
+              {:else}
+                <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
+                  {#each Object.entries(settingsOf(eff)) as [key, value] (key)}
+                    <div class="flex flex-wrap items-baseline gap-1.5">
+                      <code class="font-mono text-[11px] text-slate-500">{key}</code>
+                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(value)}</b>
+                      <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {provenanceFor(eff.provenance, eff.groups, "settings", key)}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
   {/snippet}
 
@@ -1166,41 +1846,17 @@ ${detail}
        in one response. Defined as a snippet here, rendered at the end. -->
   {#snippet registeredAgents()}
     <h3 class="mt-8 font-medium">Registered agents</h3>
-    <!-- The legend exists because the two group columns are the single most
-         misread thing on this page: "how do I let filers read GPS EXIF but not
-         desktops" is a POLICY-group question, and the config group — the only
-         grouping the console used to expose — cannot answer it. -->
     <p class="mt-1 text-xs text-slate-500">
-      Each agent carries <b>two independent groupings</b>.
-      <b>Policy group</b> picks the <code class="font-mono">group:&lt;name&gt;</code>
-      policy document it resolves — extraction, EXIF, OCR, watch mode, scheduling,
-      local access — and doubles as the release-canary selector.
-      <b>Config group</b> carries log level, scan selections/paths, inventory
-      collectors and the group scan cron. Changing one never changes the other.
-      Both apply at the agent's next policy poll.
-      <a class="underline" href="{DOCS_URL}agents/#two-groupings" target="_blank" rel="noreferrer">Which one do I want?</a>
+      Every agent is in the permanent <b>Global</b> group plus any configuration
+      groups you add it to. They layer in priority order — the lowest priority
+      applies first and the last group to set a key wins it — so a value shown in
+      one group is not necessarily the value an agent receives. Open a row's
+      <b>details</b> to change its membership and to read its merged, per-key
+      effective configuration. Changes land on the agent's next poll.
     </p>
-    {#if rolloutGroups.length && !rolloutGroups.some((g) => g.canary && g.agent_count > 0)}
-      <p class="mt-1 text-xs text-amber-600 dark:text-amber-400"
-        title="Canary coverage is selected by the POLICY group, so renaming your groups (desktops/filers/…) without keeping one called by the configured canary name leaves un-promoted releases reaching nobody. Either keep an agent in it, or set FILEARR_AGENT_CANARY_GROUP to one of your real groups.">
-        No agent is in the release-canary policy group
-        <code class="font-mono">{canaryGroup}</code> — canary releases currently
-        reach nobody.
-      </p>
-    {/if}
     {#if agentsTotal === 0}
       <p class="py-2 text-slate-400">No agents registered.</p>
     {:else}
-      <!-- Suggestions for the free-text policy-group input. Rollout groups have
-           no table of their own — they exist because agents are in them — so the
-           roster comes from the server-side GROUP BY (a client-side tally over
-           the loaded page would miss every group whose members are elsewhere in
-           a paged fleet). -->
-      <datalist id="filearr-policy-groups-roster">
-        {#each rolloutGroups as g (g.name)}
-          <option value={g.name}></option>
-        {/each}
-      </datalist>
       <div class="mt-1 overflow-x-auto">
         <table class="w-full min-w-[64rem] text-sm">
           <thead class="text-left text-slate-500">
@@ -1210,20 +1866,10 @@ ${detail}
               <th class="py-2 pr-3 font-medium">Platform</th>
               <th class="py-2 pr-3 font-medium">Status</th>
               <th class="py-2 pr-3 font-medium">Online</th>
-              <!-- Two groupings, deliberately adjacent and deliberately named
-                   differently. They are orthogonal: one selects a POLICY
-                   document (and the canary cohort), the other a settings
-                   bundle. Showing only the second is what made operators think
-                   policies keyed off it. -->
               <th
                 class="py-2 pr-3 font-medium"
-                title="POLICY group (agents.rollout_group). Selects which group:<name> policy document this agent resolves — extraction, EXIF, OCR, watch mode, scan schedule, local-access gates — under the precedence agent > group > global, where the winning document REPLACES the others whole (no key merging). It is ALSO the release-canary selector: only agents in the canary group are offered un-promoted builds. Free text; assigning a name that has no document yet is allowed.">
-                Policy group
-              </th>
-              <th
-                class="py-2 pr-3 font-medium"
-                title="CONFIGURATION group (agents.config_group_id) — a different, orthogonal dimension that policy resolution never consults. Carries log level, scan selections/paths, inventory collectors and the group scan cron. Changing it does NOT change which policy document applies.">
-                Config group
+                title="The configuration groups this agent belongs to, in merge order (lowest priority first). Global is implicit on every agent and is not listed. Edit membership in the row's details panel — an agent can be in any number of groups and they layer per key.">
+                Config groups
               </th>
               <th class="py-2 pr-3 font-medium">Version</th>
               <th class="py-2 text-right font-medium">Actions</th>
@@ -1281,57 +1927,21 @@ ${detail}
                     title="This agent's last authenticated request used the interim bearer (fingerprint) path — it has not been switched to the mTLS endpoint yet. See the mode-flip runbook (docs: TLS).">bearer</span>
                 {/if}
               </td>
+              <!-- NAMES, not a picker: an agent can be in many groups, so the
+                   cell reports and the details panel edits. Global is left out
+                   deliberately — it is on every row, so printing it on every row
+                   is noise; the effective-config viewer names it where the
+                   provenance actually matters. -->
               <td class="py-2 pr-3">
-                <input
-                  class="w-32 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
-                  list="filearr-policy-groups-roster"
-                  title="POLICY group. Decides which group:<name> policy document this agent resolves (agent > group > global; the winner replaces the whole document, keys it omits fall back to the agent's built-in default) AND whether it receives canary releases. Free text — a group exists because agents are in it. Applies at the agent's next policy poll; confirmed first because both consequences land together."
-                  disabled={regrouping[a.id] || a.status === "revoked"}
-                  value={draftFor(a)}
-                  oninput={(e) =>
-                    (policyGroupDraft[a.id] = (e.currentTarget as HTMLInputElement).value)}
-                  onblur={() => applyPolicyGroup(a)}
-                  onkeydown={(e) => {
-                    if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
-                    if (e.key === "Escape") policyGroupDraft[a.id] = a.rollout_group;
-                  }} />
-                <!-- The document it ACTUALLY resolves today. Mirrors the backend
-                     walk against the loaded policy rows, so an operator reads
-                     "group:filers" instead of inferring it from the group name
-                     (which is wrong whenever that group has no document, or the
-                     agent has its own agent: override). -->
-                {#if policyScopes.length}
-                  {@const sc = scopeOf(a)}
-                  <div
-                    class="mt-0.5 truncate text-[10px] text-slate-400"
-                    title={sc === "none"
-                      ? "No policy document exists at any scope — this agent runs entirely on its built-in defaults."
-                      : sc.startsWith("agent:")
-                        ? "This agent has its OWN agent: policy document, which outranks any group policy. Changing the policy group will not change its effective policy until that document is removed."
-                        : sc === "global"
-                          ? "No policy document exists for this agent's policy group, so it falls back to the global document."
-                          : `This agent resolves the ${sc} policy document. Edit it in the Agent policy card above.`}>
-                    resolves <span class="font-mono">{sc}</span>
-                  </div>
-                {/if}
-                {#if a.rollout_group === canaryGroup}
+                {#each groupsOf(a) as g (g.id)}
                   <span
-                    class="mt-0.5 inline-block rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                    title="This is the configured release-canary group (FILEARR_AGENT_CANARY_GROUP), so this agent is offered un-promoted canary agent builds before the rest of the fleet.">canary</span>
-                {/if}
-              </td>
-              <td class="py-2 pr-3">
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800"
-                  title="CONFIGURATION group — orthogonal to the policy group on the left, and NOT what policy documents key off. Which configuration group's settings this agent receives over the policy channel. Applies immediately — the change invalidates the agent's policy cache, so it lands on the agent's next poll with no restart. Default (built-in) means no group settings at all, not an empty group."
-                  disabled={assigning[a.id] || a.status === "revoked"}
-                  value={a.config_group_id ?? ""}
-                  onchange={(e) => assignGroup(a, (e.currentTarget as HTMLSelectElement).value)}>
-                  <option value="">Default (built-in)</option>
-                  {#each groups as g (g.id)}
-                    <option value={g.id}>{g.name}</option>
-                  {/each}
-                </select>
+                    class="mr-1 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                    title={`Priority ${g.priority} — a higher priority applies later and wins the keys it sets. Current version ${g.current_version}.`}>
+                    {g.name}
+                  </span>
+                {:else}
+                  <span class="text-[11px] text-slate-400" title="This agent is only in the implicit Global group, so it receives the fleet-wide baseline and nothing else.">Global only</span>
+                {/each}
               </td>
               <td class="py-2 pr-3 text-slate-500">
                 <span class="font-mono text-xs">{a.agent_version ?? "—"}</span>
@@ -1391,7 +2001,7 @@ ${detail}
             </tr>
             {#if expanded === a.id}
               <tr class="bg-slate-50/60 dark:bg-slate-900/40">
-                <td colspan="9" class="px-1 py-2">{@render agentDetail(a)}</td>
+                <td colspan="8" class="px-1 py-2">{@render agentDetail(a)}</td>
               </tr>
             {/if}
           {/each}
@@ -1431,13 +2041,23 @@ ${detail}
 
     <!-- Simple token mint -->
     <div class="mt-3 flex flex-wrap items-end gap-2">
-      <label class="text-xs text-slate-500"
-        title="The rollout group the enrolling agent lands in. Rollout groups are the middle POLICY scope (agent beats group beats global) — not the same thing as a configuration group, which is assigned in the table above. Free text: a new name creates the group on first enrollment.">
-        rollout group
-        <input class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-          title="The rollout group the enrolling agent lands in. Rollout groups are the middle POLICY scope (agent beats group beats global) — not the same thing as a configuration group. Free text: a new name creates the group on first enrollment."
-          bind:value={newGroup} />
-      </label>
+      <div class="text-xs text-slate-500"
+        title="The configuration groups the enrolling agent joins, by NAME (a token is minted before the agent exists, so there is nothing to assign ids to yet). Global is joined automatically — selecting nothing is a complete answer, not an unconfigured one. A name that no longer exists at enrollment time is skipped rather than failing the enrollment.">
+        configuration groups (joined at enrollment)
+        <div class="mt-1 flex flex-wrap gap-2">
+          {#each groups.filter((g) => !g.is_system) as g (g.id)}
+            <label class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
+              title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}>
+              <input type="checkbox"
+                checked={newGroupNames.includes(g.name)}
+                onchange={(e) => toggleMintGroup(g.name, e.currentTarget.checked)} />
+              {g.name}
+            </label>
+          {:else}
+            <span class="text-slate-400">No groups beyond Global — the agent enrolls into the fleet-wide baseline.</span>
+          {/each}
+        </div>
+      </div>
       <label class="text-xs text-slate-500"
         title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes).">
         TTL (min, blank = default)
@@ -1473,18 +2093,23 @@ ${detail}
             title="Writes agent_name into the sidecar — the friendly name this agent shows under in the fleet table. Left blank, the agent uses the device's own hostname."
             placeholder="(auto from hostname)" bind:value={insName} />
         </label>
-        <label class="text-xs text-slate-500"
-          title="Writes config_group into the sidecar, so the agent joins that configuration group at enrollment instead of needing an assignment afterwards. Default (built-in) writes no group — the agent gets no group settings at all.">
-          config group
-          <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
-            title="Writes config_group into the sidecar, so the agent joins that configuration group at enrollment instead of needing an assignment afterwards. Default (built-in) writes no group — the agent gets no group settings at all."
-            bind:value={insGroupId}>
-            <option value="">Default (built-in)</option>
-            {#each groups as g (g.id)}
-              <option value={g.id}>{g.name}</option>
+        <div class="text-xs text-slate-500"
+          title="Writes config_group_names into the sidecar, so the agent joins these configuration groups at enrollment instead of needing an assignment afterwards. Global is implicit. The sidecar also keeps the legacy single-group config_group key (the first name) so an older agent binary still reads one of them.">
+          configuration groups
+          <div class="mt-1 flex flex-wrap gap-2">
+            {#each groups.filter((g) => !g.is_system) as g (g.id)}
+              <label class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
+                title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}>
+                <input type="checkbox"
+                  checked={insGroupIds.includes(g.id)}
+                  onchange={(e) => toggleInsGroup(g.id, e.currentTarget.checked)} />
+                {g.name}
+              </label>
+            {:else}
+              <span class="text-slate-400">Global only</span>
             {/each}
-          </select>
-        </label>
+          </div>
+        </div>
         <label class="text-xs text-slate-500"
           title="Writes log_level into the sidecar. This is the ONE log-level setting a shipped agent actually reads (the per-group Log level below is stored but not yet enforced). The host can still override it with FILEARR_AGENT_LOG_LEVEL or -log-level; the sidecar is the lowest-precedence source. Takes effect at agent start. (default) leaves the key out, so the agent uses info.">
           log level
@@ -1549,13 +2174,15 @@ ${detail}
       <div class="overflow-x-auto">
         <table class="mt-1 w-full text-sm">
           <thead class="text-left text-slate-500">
-            <tr><th class="py-1 pr-3">hash</th><th class="pr-3">group</th><th class="pr-3">status</th><th class="pr-3">expires</th><th></th></tr>
+            <tr><th class="py-1 pr-3">hash</th><th class="pr-3">config groups</th><th class="pr-3">status</th><th class="pr-3">expires</th><th></th></tr>
           </thead>
           <tbody>
             {#each tokens as t (t.token_hash)}
               <tr class="border-t border-slate-200 dark:border-slate-800">
                 <td class="py-1 pr-3 font-mono text-xs">{t.token_hash.slice(0, 12)}…</td>
-                <td class="pr-3">{t.rollout_group}</td>
+                <td class="pr-3" title="Groups the enrolling agent joins on top of Global.">
+                  {t.config_group_names.length ? t.config_group_names.join(", ") : "Global only"}
+                </td>
                 <td class="pr-3 {tokenStatusClass(t.status)}">{t.status}</td>
                 <td class="pr-3 text-slate-500">{fmt(t.expires_at)}</td>
                 <td class="text-right">
@@ -1573,39 +2200,156 @@ ${detail}
     {/if}
   </div>
 
-  <!-- Config groups -->
+  <!-- Live rollouts. Only rendered when something is in flight: an empty card
+       would be permanent furniture for a feature most fleets use rarely, and
+       "no rollouts" is already the visible state of the groups table. -->
+  {#if rollouts.length}
+    <div class="mt-8 rounded-xl border border-sky-300 p-4 dark:border-sky-800">
+      <div class="flex items-center gap-3">
+        <h3 class="font-medium">Rollouts in flight</h3>
+        <span class="text-xs text-slate-500">
+          promotion is evaluated on central's minute tick; coverage is by stable agent-id bucket
+        </span>
+      </div>
+      <div class="mt-2 overflow-x-auto">
+        <table class="w-full min-w-[48rem] text-sm">
+          <thead class="text-left text-slate-500">
+            <tr class="border-b border-slate-200 dark:border-slate-800">
+              <th class="py-2 pr-3 font-medium">Group</th>
+              <th class="py-2 pr-3 font-medium">Target</th>
+              <th class="py-2 pr-3 font-medium">Progress</th>
+              <th class="py-2 pr-3 font-medium">Covered</th>
+              <th class="py-2 pr-3 font-medium">Next promotion</th>
+              <th class="py-2 text-right font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+            {#each rollouts as r (r.id)}
+              <tr>
+                <td class="py-2 pr-3 font-medium">{r.group_name}</td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500"
+                  title="The group version this rollout is delivering. The group's current_version is unchanged until the last tier completes, so uncovered agents keep receiving the old one.">
+                  v{r.target_version}
+                </td>
+                <td class="py-2 pr-3 text-slate-500">{describeRollout(r)}</td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500"
+                  title="Share of the fleet whose agent-id hash bucket is inside the active tier. Membership in the bucket is stable, so an agent never flaps in and out between polls.">
+                  {r.covered_percent}%
+                </td>
+                <td class="py-2 pr-3 text-slate-500"
+                  title={r.next_promotion_at
+                    ? "When the engine widens to the next tier on its own. Promote now to skip the remaining wait."
+                    : "No further tier is scheduled — this rollout finishes at its current tier."}>
+                  {#if r.next_promotion_at}
+                    {untilTime(r.next_promotion_at)} · {fmt(r.next_promotion_at)}
+                  {:else if r.status === "scheduled"}
+                    starts {fmt(r.starts_at)}
+                  {:else}
+                    —
+                  {/if}
+                </td>
+                <td class="py-2 text-right whitespace-nowrap">
+                  {#if r.status === "running"}
+                    <button class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
+                      disabled={rolloutBusy[r.id]}
+                      title="Advance to the next tier immediately instead of waiting out its delay."
+                      onclick={() => promoteRollout(r)}>promote now</button>
+                  {/if}
+                  <button class="ml-3 text-red-600 disabled:opacity-50"
+                    disabled={rolloutBusy[r.id]}
+                    title="Stop the rollout. The group stays on its current version, so agents already covered roll BACK to it on their next poll."
+                    onclick={() => cancelRollout(r)}>cancel</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Configuration groups -->
   <div class="mt-8">
     <div class="flex items-center gap-3">
-      <h3 class="font-medium">Config groups</h3>
-      <span class="text-xs text-slate-500">reusable remote-configuration bundles</span>
+      <h3 class="font-medium">Configuration groups</h3>
+      <span class="text-xs text-slate-500">layered per key, lowest priority first</span>
       <div class="grow"></div>
       <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={openCreate}>New group</button>
     </div>
+    <p class="mt-1 text-xs text-slate-500">
+      Rows are listed in <b>merge order</b>: each group applies over the ones
+      above it and wins only the keys it actually sets. <b>Global</b> is
+      permanent, contains every agent and always applies first, so it is the
+      fleet-wide baseline. Use the arrows to change a group's priority, and
+      <b>edit</b> to change its settings, its policy keys, or to publish a change
+      as a phased rollout.
+    </p>
 
     {#if groups.length === 0}
-      <p class="py-2 text-slate-400">No config groups. Agents without a group use built-in defaults.</p>
+      <p class="py-2 text-slate-400">No configuration groups yet.</p>
     {:else}
       <div class="mt-2 overflow-x-auto">
-        <table class="w-full min-w-[40rem] text-sm">
+        <table class="w-full min-w-[48rem] text-sm">
           <thead class="text-left text-slate-500">
             <tr class="border-b border-slate-200 dark:border-slate-800">
               <th class="py-2 pr-3 font-medium">Name</th>
-              <th class="py-2 pr-3 font-medium">Description</th>
+              <th class="py-2 pr-3 font-medium"
+                title="Merge rank. Lower applies FIRST, so a higher number wins any key both groups set. Ties are legal and break deterministically by name.">Priority</th>
               <th class="py-2 pr-3 font-medium">Members</th>
-              <th class="py-2 pr-3 font-medium">Updated</th>
+              <th class="py-2 pr-3 font-medium"
+                title="The version uncovered agents receive. A phased rollout delivers a NEWER version to part of the fleet without changing this number until it completes.">Version</th>
+              <th class="py-2 pr-3 font-medium">Rollout</th>
+              <th class="py-2 pr-3 font-medium">Description</th>
               <th class="py-2 text-right font-medium">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
             {#each groups as g (g.id)}
               <tr>
-                <td class="py-2 pr-3 font-medium">{g.name}</td>
-                <td class="max-w-[20rem] truncate py-2 pr-3 text-slate-500" title={g.description ?? ""}>{g.description ?? "—"}</td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500">{g.member_count}</td>
-                <td class="py-2 pr-3 text-slate-500">{relTime(g.updated_at)}</td>
+                <td class="py-2 pr-3 font-medium whitespace-nowrap">
+                  {g.name}
+                  {#if g.is_system}
+                    <span class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                      title="The permanent Global group: every agent is a member, its name and priority are fixed, and it cannot be deleted. Its document is the fleet-wide baseline.">system</span>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3 whitespace-nowrap tabular-nums text-slate-500">
+                  {g.priority}
+                  {#if !g.is_system}
+                    <!-- Two-PATCH swap rather than a drag handle: no DnD
+                         dependency, and the priorities stay numbers an operator
+                         can also type into the dialog. -->
+                    <button class="ml-2 disabled:opacity-30"
+                      disabled={reordering || reorderable[0]?.id === g.id}
+                      title="Apply this group EARLIER (lower priority), so groups below it can override it."
+                      onclick={() => reorderGroup(g, -1)}>↑</button>
+                    <button class="ml-1 disabled:opacity-30"
+                      disabled={reordering || reorderable[reorderable.length - 1]?.id === g.id}
+                      title="Apply this group LATER (higher priority), so it overrides the groups above it."
+                      onclick={() => reorderGroup(g, 1)}>↓</button>
+                  {/if}
+                </td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500"
+                  title={g.is_system ? "Every enrolled agent — membership in Global is implicit." : "Agents explicitly added to this group."}>
+                  {g.member_count}
+                </td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500">v{g.current_version}</td>
+                <td class="py-2 pr-3">
+                  {#if g.active_rollout}
+                    <span class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                      title={`Version ${g.active_rollout.target_version} is being delivered in ${g.active_rollout.tiers.length} tier(s). Manage it in the rollouts card above.`}>
+                      → v{g.active_rollout.target_version} · {describeRollout(g.active_rollout)}
+                    </span>
+                  {:else}
+                    <span class="text-slate-400">—</span>
+                  {/if}
+                </td>
+                <td class="max-w-[18rem] truncate py-2 pr-3 text-slate-500" title={g.description ?? ""}>{g.description ?? "—"}</td>
                 <td class="py-2 text-right whitespace-nowrap">
                   <button class="text-[var(--accent)]" onclick={() => openEdit(g)}>edit</button>
-                  <button class="ml-3 text-red-600" onclick={() => removeGroup(g)}>delete</button>
+                  {#if !g.is_system}
+                    <button class="ml-3 text-red-600" onclick={() => removeGroup(g)}>delete</button>
+                  {/if}
                 </td>
               </tr>
             {/each}
@@ -1615,32 +2359,43 @@ ${detail}
     {/if}
   </div>
 
-  <!-- Full policy editor (P7-T4 policy channel, every scope + every key). The
-       three local-access toggles that used to live in their own card are the
-       "Local access" section of this editor. -->
-  <!-- The roster + canary name are passed down so the editor can tell you how
-       many agents a `group:` document you are about to write actually reaches.
-       It cannot compute that itself: `agents` is one page of a paged fleet. -->
-  <AgentPolicyEditor {agents} {rolloutGroups} {canaryGroup} />
-
   {@render registeredAgents()}
 </div>
 
-<!-- Honesty chip: the setting is validated, stored and delivered over the policy
-     channel, but no shipped agent build acts on it yet. Better to say so here
-     than to let an operator conclude the fleet is misbehaving. -->
-{#snippet notEnforced(why: string)}
-  <span
-    class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-    title={why}>not enforced yet</span>
+<!-- A collapsible dialog section. Everything except General starts closed: the
+     dialog now carries the whole group document (~40 fields across settings and
+     policy) and an operator almost always came to change exactly one thing. -->
+{#snippet sectionHead(id: string, label: string, blurb: string)}
+  <button
+    class="flex w-full items-baseline gap-2 rounded-lg border border-slate-200 px-3 py-2 text-left dark:border-slate-800"
+    onclick={() => toggleSection(id)}>
+    <span class="text-slate-400">{openSections[id] ? "▾" : "▸"}</span>
+    <span class="text-sm font-medium">{label}</span>
+    <span class="text-xs text-slate-500">{blurb}</span>
+  </button>
 {/snippet}
 
 <!-- Config-group create/edit dialog -->
 {#if dialog}
   <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-    <div class="my-8 w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-      <div class="flex items-center gap-3">
-        <h3 class="text-lg font-semibold">{dialog.id === null ? "New config group" : "Edit config group"}</h3>
+    <div class="my-8 w-full max-w-3xl rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+      <div class="flex flex-wrap items-center gap-3">
+        <h3 class="text-lg font-semibold">
+          {dialog.id === null
+            ? "New configuration group"
+            : dialog.isSystem
+              ? "Edit the Global group"
+              : `Edit “${dialog.name}”`}
+        </h3>
+        {#if dialog.id !== null}
+          <span class="text-xs text-slate-500"
+            title="The version uncovered members receive today. Every publish writes a NEW version — nothing is ever rewritten in place.">
+            v{dialog.currentVersion} · {dialog.memberCount} member{dialog.memberCount === 1 ? "" : "s"}
+          </span>
+          <button class="text-xs text-[var(--accent)]"
+            title="Past versions of this group's document, newest first — with a one-click restore that republishes an old snapshot as a new version."
+            onclick={openHistory}>history</button>
+        {/if}
         <div class="grow"></div>
         <button class="text-slate-500" onclick={() => (dialog = null)}>✕</button>
       </div>
@@ -1649,11 +2404,92 @@ ${detail}
         <p class="mt-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{dialogError}</p>
       {/if}
 
+      {#if historyView}
+        <!-- In-dialog history view. Deliberately a VIEW rather than a second
+             modal: restoring re-seeds the form behind it, so stacking two
+             dialogs would hide the thing that just changed. -->
+        <div class="mt-3">
+          <button class="text-xs text-[var(--accent)]" onclick={() => (historyView = false)}>← back to editing</button>
+          {#if historyLoading}
+            <p class="mt-2 text-sm text-slate-400">Loading version history…</p>
+          {:else if historyError}
+            <p class="mt-2 text-sm text-red-600">Could not load the history: {historyError}</p>
+          {:else if historyRows.length === 0}
+            <p class="mt-2 text-sm text-slate-400">No versions recorded for this group.</p>
+          {:else}
+            <table class="mt-2 w-full text-xs">
+              <thead class="text-left text-slate-500">
+                <tr>
+                  <th class="py-1 pr-3 font-medium">Version</th>
+                  <th class="py-1 pr-3 font-medium"
+                    title="The fleet-wide generation counter this snapshot advanced. It is the number an agent echoes back as its applied generation.">Generation</th>
+                  <th class="py-1 pr-3 font-medium">Actor</th>
+                  <th class="py-1 pr-3 font-medium">Note</th>
+                  <th class="py-1 pr-3 font-medium">Written</th>
+                  <th class="py-1 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each historyRows as h (h.seq)}
+                  <tr class="border-t border-slate-100 dark:border-slate-800/60">
+                    <td class="py-1 pr-3 tabular-nums">
+                      v{h.version}
+                      {#if h.version === dialog.currentVersion}
+                        <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">current</span>
+                      {/if}
+                    </td>
+                    <td class="py-1 pr-3 tabular-nums text-slate-500">{h.seq}</td>
+                    <td class="py-1 pr-3 text-slate-500">{h.actor ?? "—"}</td>
+                    <td class="max-w-[14rem] truncate py-1 pr-3 text-slate-500" title={h.note ?? ""}>{h.note ?? "—"}</td>
+                    <td class="py-1 pr-3 text-slate-500">{fmt(h.created_at)}</td>
+                    <td class="py-1 text-right whitespace-nowrap">
+                      <button class="text-[var(--accent)]"
+                        onclick={() => (historyOpenSeq = historyOpenSeq === h.seq ? null : h.seq)}>
+                        {historyOpenSeq === h.seq ? "hide" : "view JSON"}
+                      </button>
+                      {#if h.version !== dialog.currentVersion}
+                        <button class="ml-3 text-amber-600 disabled:opacity-50 dark:text-amber-400"
+                          disabled={dialogBusy}
+                          title="Copy this snapshot forward as a new version and publish it immediately."
+                          onclick={() => restoreVersion(h)}>restore this version</button>
+                      {/if}
+                    </td>
+                  </tr>
+                  {#if historyOpenSeq === h.seq}
+                    <tr>
+                      <td colspan="6" class="pb-2">
+                        <pre class="max-h-72 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[11px] text-slate-100">{JSON.stringify(
+                            { settings: h.settings, policy: h.policy },
+                            null,
+                            2,
+                          )}</pre>
+                      </td>
+                    </tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      {:else}
       <div class="mt-3 flex flex-col gap-3">
+        <!-- General: the only section open on entry. -->
+        {@render sectionHead("general", "General", "Name, description and merge priority.")}
+        {#if openSections.general}
+        <div class="flex flex-col gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+        {#if dialog.isSystem}
+          <p class="rounded-lg border border-slate-300 bg-slate-50 p-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+            This is the permanent <b>Global</b> group. Every agent is a member, it
+            always applies first, and its name and priority are fixed — every
+            other group layers on top of what you set here. Its document is the
+            only sensible place for a fleet-wide default.
+          </p>
+        {/if}
         <label class="text-xs text-slate-500"
-          title="How this group is identified in the assignment dropdown. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned.">Name
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-            title="How this group is identified in the assignment dropdown. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned."
+          title="How this group is identified everywhere in this console and in enrollment tokens. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned.">Name
+          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-700"
+            title="How this group is identified everywhere in this console and in enrollment tokens. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned."
+            disabled={dialog.isSystem}
             bind:value={dialog.name} />
         </label>
         <label class="text-xs text-slate-500"
@@ -1662,8 +2498,27 @@ ${detail}
             title="Free-text note for other operators, up to 1024 characters. Never sent to the agent."
             bind:value={dialog.description} />
         </label>
+        <label class="text-xs text-slate-500"
+          title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0.">Priority
+          <input type="number" min="0" max="1000000"
+            class="mt-1 block w-40 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-700"
+            title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0."
+            disabled={dialog.isSystem}
+            bind:value={dialog.priority} />
+          <span class="mt-0.5 block text-[11px] text-slate-400">
+            Lower applies first; a higher number wins the keys it sets.
+          </span>
+        </label>
+        </div>
+        {/if}
 
-        <div class="flex flex-wrap gap-4">
+        {@render sectionHead(
+          "delivery",
+          SETTINGS_SECTIONS[0].label,
+          SETTINGS_SECTIONS[0].blurb,
+        )}
+        {#if openSections.delivery}
+        <div class="flex flex-wrap gap-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <label class="text-xs text-slate-500">
             <span class="inline-flex items-center gap-1.5">Log level
               {@render notEnforced("Delivered under the policy document's `group` section, but the agent's log level comes only from its sidecar config, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag today. Set it in the installer sidecar to actually change an agent's logging.")}</span>
@@ -1684,14 +2539,21 @@ ${detail}
             <span class="mt-0.5 block text-[11px] text-slate-400">5-field cron in the agent's local time.</span>
           </label>
         </div>
+        {/if}
 
-        <!-- Local access (per-group overrides of the fleet-wide policy card) -->
+        {@render sectionHead(
+          "surface",
+          SETTINGS_SECTIONS[1].label,
+          SETTINGS_SECTIONS[1].blurb,
+        )}
+        {#if openSections.surface}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <span class="text-xs font-medium text-slate-500">Local access (per-group)</span>
-          <p class="mt-0.5 text-xs text-slate-400">
-            Inherit = the fleet-wide Local access policy applies. These override
-            the global policy for this group's members; an explicit per-agent /
-            rollout-group policy row (API) still outranks them.
+          <p class="text-xs text-slate-400">
+            Inherit = this group says nothing, so a lower-priority group or the
+            agent's built-in default supplies the value. These three exist in
+            BOTH halves of the document: a non-null value here is lifted over the
+            policy key of the same name in the Local access policy section below,
+            for this group's layer only.
           </p>
           <div class="mt-2 flex flex-wrap gap-4">
             <label class="text-xs text-slate-500"
@@ -1729,8 +2591,14 @@ ${detail}
             </label>
           </div>
         </div>
+        {/if}
 
-        <!-- Inventory -->
+        {@render sectionHead(
+          "inventory",
+          SETTINGS_SECTIONS[2].label,
+          SETTINGS_SECTIONS[2].blurb,
+        )}
+        {#if openSections.inventory}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex flex-wrap items-center gap-2">
             <label class="inline-flex items-center gap-2 text-sm"
@@ -1955,7 +2823,14 @@ ${detail}
           {/if}
         </div>
 
-        <!-- Scan selections -->
+        {/if}
+
+        {@render sectionHead(
+          "selections",
+          SETTINGS_SECTIONS[3].label,
+          SETTINGS_SECTIONS[3].blurb,
+        )}
+        {#if openSections.selections}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">Scan selections</span>
@@ -2011,14 +2886,307 @@ ${detail}
             </div>
           {/each}
         </div>
+        {/if}
+
+        <!-- The POLICY half of the group document. Same catalogue the old
+             standalone policy editor rendered (./agentPolicyDoc), now scoped to
+             ONE group: every field is tri-state, and "Inherit (not set)" means
+             this group contributes nothing for that key, so a lower-priority
+             group — or the agent's built-in default — supplies it. -->
+        {#each POLICY_SECTIONS as section (section.id)}
+          {@render sectionHead(`policy:${section.id}`, section.label, section.blurb)}
+          {#if openSections[`policy:${section.id}`]}
+            <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+              {#each sectionFields(section.id) as f (f.key)}
+                <div class="mt-3 grid gap-2 border-t border-slate-100 pt-3 first:mt-0 first:border-t-0 first:pt-0 md:grid-cols-[18rem_1fr] dark:border-slate-800/60">
+                  <div>
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span class="text-sm" title={fieldTitle(f)}>{f.label}</span>
+                      {#if f.enforcedBy === "central"}
+                        <span
+                          class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+                          title="Enforced by CENTRAL, not the agent: central applies this when the agent asks, so it takes effect for every agent build — including old ones.">
+                          central-enforced
+                        </span>
+                      {/if}
+                    </div>
+                    <code class="text-[11px] text-slate-400" title={fieldTitle(f)}>{f.key}</code>
+                    <p class="mt-0.5 text-xs text-slate-500" title={fieldTitle(f)}>{f.hint}</p>
+                  </div>
+
+                  <div>
+                    {#if f.kind === "bool"}
+                      <select
+                        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                        title={fieldTitle(f)}
+                        value={boolMode(f.key)}
+                        onchange={(e) => setBoolMode(f.key, e.currentTarget.value)}>
+                        <option value="">Inherit (not set)</option>
+                        <option value="true">On</option>
+                        <option value="false">Off</option>
+                      </select>
+                    {:else}
+                      <label
+                        class="inline-flex items-center gap-2 text-xs text-slate-500"
+                        title="Write this key into THIS group's policy section. Unticked leaves it absent, which is not the same as off — the key is then supplied by a lower-priority group, or falls back to {f.fallback}.">
+                        <input
+                          type="checkbox"
+                          checked={dialog.policyForm[f.key]?.set ?? false}
+                          onchange={(e) => setExplicit(f.key, e.currentTarget.checked)} />
+                        set in this group
+                      </label>
+                      {#if dialog.policyForm[f.key]?.set}
+                        {#if f.kind === "int"}
+                          <input
+                            type="number" min={f.min} max={f.max}
+                            title={fieldTitle(f)}
+                            class="mt-1 block w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                            value={dialog.policyForm[f.key].value}
+                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                        {:else if f.kind === "cron"}
+                          <input
+                            class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+                            title={fieldTitle(f)}
+                            placeholder="0 3 * * *"
+                            value={dialog.policyForm[f.key].value}
+                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                        {:else if f.kind === "presets"}
+                          <div class="mt-1 flex flex-wrap gap-1">
+                            {#each presetNames as p (p)}
+                              {@const chosen = dialog.policyForm[f.key].value
+                                .split(/[\n,]/)
+                                .map((x) => x.trim())
+                                .includes(p)}
+                              <button type="button"
+                                class="rounded-full border px-2 py-0.5 text-[11px] {chosen
+                                  ? 'border-transparent bg-[var(--accent)] text-white'
+                                  : 'border-slate-300 dark:border-slate-700'}"
+                                onclick={() => {
+                                  const cur = dialog!.policyForm[f.key].value
+                                    .split(/[\n,]/)
+                                    .map((x) => x.trim())
+                                    .filter(Boolean);
+                                  setPolicyValue(
+                                    f.key,
+                                    (chosen ? cur.filter((x) => x !== p) : [...cur, p]).join(", "),
+                                  );
+                                }}>{p}</button>
+                            {/each}
+                          </div>
+                          <input
+                            class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                            title={fieldTitle(f)}
+                            placeholder="comma-separated preset names"
+                            value={dialog.policyForm[f.key].value}
+                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                        {:else}
+                          <textarea rows="3"
+                            class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                            title={fieldTitle(f)}
+                            placeholder="one per line"
+                            value={dialog.policyForm[f.key].value}
+                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)}></textarea>
+                        {/if}
+                      {/if}
+                    {/if}
+                    {#if policyErrors[f.key]}
+                      <p class="mt-1 text-xs text-red-600">{policyErrors[f.key]}</p>
+                    {/if}
+                    {#if !dialog.policyForm[f.key]?.set}
+                      <p class="mt-1 text-[11px] text-slate-400">
+                        Not set here → a lower-priority group supplies it, or {f.fallback}.
+                      </p>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        {/each}
+
+        <!-- Advanced: the keys the form does not render. Both halves matter —
+             the fixed keys explain why they have no field, and the raw view is
+             the only way to author a forward-compat key an unshipped agent
+             build reads. -->
+        {@render sectionHead(
+          "advanced",
+          "Advanced: fixed and forward-compat policy keys",
+          "Raw JSON for keys this console does not model.",
+        )}
+        {#if openSections.advanced}
+          <div class="rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-800">
+            <span class="text-sm font-medium">Fixed keys</span>
+            <ul class="mt-1 space-y-1 text-slate-500">
+              {#each Object.entries(RESERVED_POLICY_KEYS) as [key, why] (key)}
+                <li>
+                  <code class="font-mono text-slate-600 dark:text-slate-300">{key}</code> — {why}
+                  {#if key in dialog.storedPolicy}
+                    <span class="text-slate-400">(present in this group; preserved as-is)</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+
+            {#if unknownKeys.length || unparsedKeys.length}
+              <div class="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900/40">
+                {#if unknownKeys.length}
+                  <p>
+                    <b>{unknownKeys.length} key(s) this console does not model</b>
+                    are in this group and are preserved untouched on save (the
+                    policy schema allows forward-compat keys so a newer agent can
+                    read them): <code class="font-mono">{unknownKeys.join(", ")}</code>.
+                  </p>
+                {/if}
+                {#if unparsedKeys.length}
+                  <p class="mt-1 text-amber-700 dark:text-amber-400">
+                    <b>Unexpected value shape</b> for
+                    <code class="font-mono">{unparsedKeys.join(", ")}</code> — the
+                    fields above show these as “Inherit” but the stored value is
+                    kept as-is. Fix them in the raw JSON below.
+                  </p>
+                {/if}
+              </div>
+            {/if}
+
+            <button class="mt-3 rounded-lg border border-slate-300 px-3 py-1 dark:border-slate-700"
+              onclick={openRaw}>{rawOpen ? "Hide" : "Show"} raw policy JSON</button>
+            {#if rawOpen}
+              <p class="mt-2 text-slate-500">
+                The exact <code class="font-mono">policy</code> section that will be
+                sent. Apply loads it back into the fields above; nothing is stored
+                until you publish. The <code class="font-mono">settings</code>
+                section is authored by the fields above only — it is typed and
+                rejects unknown keys.
+              </p>
+              <textarea rows="10"
+                class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+                title="This group's whole policy section, including keys this console does not render (those round-trip untouched). Editing here is how you set a key the form has no field for."
+                bind:value={rawText}></textarea>
+              {#if rawError}<p class="mt-1 text-red-600">{rawError}</p>{/if}
+              <button class="mt-1 rounded-lg border border-slate-300 px-3 py-1 dark:border-slate-700"
+                onclick={applyRaw}>Apply JSON to the fields</button>
+            {/if}
+          </div>
+        {/if}
       </div>
 
-      <div class="mt-4 flex justify-end gap-2">
-        <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700" onclick={() => (dialog = null)}>Cancel</button>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50" disabled={dialogBusy} onclick={saveGroup}>
-          {dialogBusy ? "Saving…" : dialog.id === null ? "Create" : "Save"}
-        </button>
+      <!-- Publish. Two buttons because they are two different acts, not one act
+           with a checkbox: "apply now" makes the new version current for every
+           member on its next poll; a phased rollout leaves current_version alone
+           and widens coverage by tier, so cancelling it ROLLS BACK the agents
+           already covered. -->
+      <div class="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+        {#if shadowedKeys.length}
+          <!-- Layering preview, computed client-side because the draft is not
+               saved yet. Amber rather than red: being overridden is a normal,
+               intended state — it is only a surprise when nobody said so. -->
+          <p class="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+            title="These keys are set by a group with a HIGHER priority, which applies after this one. For any agent that is in both groups, that group's value wins. Agents in this group but not that one still get the value you set here.">
+            <b>Overridden for agents that are also in a higher-priority group:</b>
+            {#each shadowedKeys as s, i (s.key)}{i > 0 ? ", " : " "}<code class="font-mono">{s.key}</code> (by {s.by}){/each}
+          </p>
+        {/if}
+        {#if dialog.id !== null}
+          <label class="text-xs text-slate-500"
+            title="Stored on the published snapshot and shown in the version history. The only place the reason for a change survives.">
+            Change note (optional)
+            <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+              placeholder="why this change"
+              bind:value={dialog.note} />
+          </label>
+        {/if}
+
+        {#if rolloutOpen}
+          <div class="mt-3 rounded-lg border border-sky-300 p-3 dark:border-sky-800">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium">Phased rollout</span>
+              <span class="text-xs text-slate-500">
+                up to {MAX_ROLLOUT_TIERS} tiers · percent of the fleet, and how long
+                to wait after the previous tier
+              </span>
+              <div class="grow"></div>
+              <button class="text-xs text-slate-500" onclick={() => (rolloutOpen = false)}>cancel rollout</button>
+            </div>
+            <p class="mt-1 text-xs text-slate-400">
+              Coverage is picked by a stable hash of each agent's id, so an agent
+              never flaps in and out between polls. Members outside the active
+              tier keep receiving version {dialog.currentVersion} until the last
+              tier completes.
+            </p>
+            {#each tiers as t, i (i)}
+              <div class="mt-2 flex flex-wrap items-end gap-2">
+                <span class="text-xs text-slate-500">Tier {i + 1}</span>
+                <label class="text-xs text-slate-500">
+                  percent
+                  <input type="number" min="1" max="100"
+                    class="mt-1 block w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                    title="Share of the fleet receiving the new version once this tier activates. Strictly ascending across tiers; the last tier must be 100."
+                    bind:value={t.percent} />
+                </label>
+                <label class="text-xs text-slate-500">
+                  delay (minutes)
+                  <input type="number" min="0"
+                    class="mt-1 block w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                    title="How long to wait after the PREVIOUS tier activated before this one does. For tier 1 the wait counts from the rollout's start."
+                    bind:value={t.delay_minutes} />
+                </label>
+                <button class="text-xs text-red-600"
+                  onclick={() => (tiers = tiers.filter((_, j) => j !== i))}>remove</button>
+                <!-- The running sum, because each row's number is a delay after
+                     the PREVIOUS tier and operators reliably read it as "minutes
+                     from the start". -->
+                <span class="text-[11px] text-slate-400"
+                  title="Cumulative wait from the rollout's start until this tier activates — the sum of every delay up to and including this row.">
+                  ≈ {tierEtaMinutes(tiers, i)} min after start
+                </span>
+              </div>
+            {/each}
+            <div class="mt-2 flex flex-wrap items-end gap-3">
+              <button class="rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-40 dark:border-slate-700"
+                disabled={tiers.length >= MAX_ROLLOUT_TIERS}
+                onclick={addTier}>+ add tier</button>
+              <label class="text-xs text-slate-500"
+                title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC.">
+                start at (optional)
+                <input type="datetime-local"
+                  class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                  bind:value={rolloutStartsAt} />
+              </label>
+            </div>
+            {#if tierError}
+              <p class="mt-2 text-xs text-red-600">{tierError}</p>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
+          <span class="mr-auto text-xs text-slate-400">
+            {policyKeyCount} policy key(s) will be written for this group.
+          </span>
+          <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
+            onclick={() => (dialog = null)}>Cancel</button>
+          {#if dialog.id !== null && !rolloutOpen}
+            <button class="rounded-lg border border-sky-400 px-3 py-1.5 text-sm text-sky-700 dark:border-sky-700 dark:text-sky-300"
+              title="Publish the new version behind a tiered schedule instead of delivering it to every member at once."
+              onclick={openRollout}>Save &amp; phased rollout…</button>
+          {/if}
+          {#if rolloutOpen}
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50"
+              disabled={dialogBusy || tierError !== null}
+              onclick={() => saveGroup("rollout")}>
+              {dialogBusy ? "Publishing…" : "Publish with rollout"}
+            </button>
+          {:else}
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50"
+              disabled={dialogBusy}
+              title="Publish a new version immediately — every member receives it on its next poll (~1 min)."
+              onclick={() => saveGroup("now")}>
+              {dialogBusy ? "Saving…" : dialog.id === null ? "Create" : "Save & apply now"}
+            </button>
+          {/if}
+        </div>
       </div>
+      {/if}
     </div>
   </div>
 {/if}

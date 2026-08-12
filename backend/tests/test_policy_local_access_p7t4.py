@@ -36,6 +36,7 @@ from filearr.policy import (
     flatten_path_grants,
     validate_policy,
 )
+from tests.agentcfg_helpers import reset_config_groups, set_global
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -166,7 +167,7 @@ async def db_maker(pg_uri):
     command.upgrade(cfg, "head")
     engine = create_async_engine(_psycopg3(pg_uri))
     async with engine.begin() as conn:
-        await conn.execute(text("DELETE FROM policy_versions"))
+        await reset_config_groups(conn)
         await conn.execute(text("DELETE FROM security_events"))
         await conn.execute(text("DELETE FROM agents"))
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -201,7 +202,6 @@ async def _seed_agent(maker) -> tuple[uuid.UUID, str]:
             name="nas",
             hostname="nas",
             platform="linux",
-            rollout_group="default",
             cert_fingerprint=fp,
         )
         s.add(agent)
@@ -209,16 +209,12 @@ async def _seed_agent(maker) -> tuple[uuid.UUID, str]:
         return agent.id, fp
 
 
-async def test_put_rejects_read_only_false(client):
+async def test_publish_rejects_read_only_false(client):
     c, _, _ = client
-    r = await c.put(
-        "/api/v1/agent-policies/global", json={"policy": {"read_only": False}}
-    )
+    r = await set_global(c, policy={"read_only": False})
     assert r.status_code == 422
     # read_only:true is accepted
-    ok = await c.put(
-        "/api/v1/agent-policies/global", json={"policy": {"read_only": True}}
-    )
+    ok = await set_global(c, policy={"read_only": True})
     assert ok.status_code == 200
 
 
@@ -232,7 +228,7 @@ async def test_effective_policy_serves_local_keys_verbatim(client):
         "path_scope": ["Movies/**"],
         "offline_grace_seconds": 3600,
     }
-    await c.put("/api/v1/agent-policies/global", json={"policy": payload})
+    await set_global(c, policy=payload)
     async with maker() as s:
         tv = int(
             (
@@ -243,6 +239,7 @@ async def test_effective_policy_serves_local_keys_verbatim(client):
         f"/api/v1/agents/{agent_id}/policy", headers={"Authorization": f"Bearer {fp}"}
     )
     assert r.status_code == 200
-    # served verbatim through resolution, plus the W8-E computed taxonomy_version
-    # (central always injects it; read live since the migrated DB is session-shared).
-    assert r.json()["policy"] == {**payload, "taxonomy_version": tv}
+    # served verbatim through resolution, plus the (empty) merged settings section
+    # and the W8-E computed taxonomy_version (central always injects it; read
+    # live since the migrated DB is session-shared).
+    assert r.json()["policy"] == {**payload, "group": {}, "taxonomy_version": tv}

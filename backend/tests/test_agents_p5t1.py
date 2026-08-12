@@ -80,7 +80,7 @@ async def test_migration_round_trip(db_maker):
         tok_raw, tok_hash = agentsync.generate_enrollment_token()
         tok = EnrollmentToken(
             token_hash=tok_hash,
-            rollout_group="canary",
+            config_group_names=["filers"],
             expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         s.add(tok)
@@ -90,9 +90,11 @@ async def test_migration_round_trip(db_maker):
 
         # tables + columns exist; the raw token is NOT stored anywhere.
         got = (
-            await s.execute(text("SELECT rollout_group FROM enrollment_tokens LIMIT 1"))
+            await s.execute(
+                text("SELECT config_group_names FROM enrollment_tokens LIMIT 1")
+            )
         ).scalar_one()
-        assert got == "canary"
+        assert got == ["filers"]
         cnt = (
             await s.execute(
                 text("SELECT count(*) FROM enrollment_tokens WHERE token_hash = :h"),
@@ -121,7 +123,9 @@ async def test_migration_round_trip(db_maker):
 # --------------------------------------------------------------------------- #
 async def test_mint_token_shows_once_and_hashes_at_rest(client):
     c, maker, _ = client
-    r = await c.post("/api/v1/agents/enrollment-tokens", json={"rollout_group": "canary"})
+    r = await c.post(
+        "/api/v1/agents/enrollment-tokens", json={"config_group_names": ["filers"]}
+    )
     assert r.status_code == 201, r.text
     body = r.json()
     raw = body["token"]
@@ -132,7 +136,7 @@ async def test_mint_token_shows_once_and_hashes_at_rest(client):
     async with maker() as s:
         row = await s.get(EnrollmentToken, body["token_hash"])
         assert row is not None
-        assert row.rollout_group == "canary"
+        assert row.config_group_names == ["filers"]
         assert row.consumed_at is None
 
     # list never re-exposes the raw token.

@@ -403,7 +403,7 @@ future CA-rotation signal). Facts verified against a real in-process step-ca
   protection is the data dir's inherited ACL (hardening item, tracked in
   `certstore.go`).
 
-## 8. Agent self-update: signed manifest + staged rollout (P5-T7)
+## 8. Agent self-update: signed manifest + `auto_update` gating (P5-T7)
 
 Agents self-update from an operator-signed manifest. The signing **private key
 lives only on your signing machine** (never on central, never in the repo — see
@@ -432,36 +432,39 @@ another update.
 # Where uploaded artifact BINARIES live (manifests go in the agent_releases table).
 # Default: {config_dir}/agent-releases  (i.e. /config/agent-releases in the LXC).
 FILEARR_AGENT_RELEASES_DIR=/config/agent-releases
-# The rollout_group whose agents receive a canary release before you promote it.
-FILEARR_AGENT_CANARY_GROUP=canary          # default
 # Hard ceiling on one uploaded artifact (bytes).
 FILEARR_AGENT_UPDATE_MAX_ARTIFACT_BYTES=536870912   # 512 MiB default
 ```
 
-Assign a machine to the canary wave by setting its `agents.rollout_group` to the
-canary group (R5 — this text column migrates to phase-6 machine groups later;
-never two parallel grouping authorities). Everyone else stays `default`.
+There is **no release-staging setting**. P13 (2026-08-11) removed binary-release
+staging along with `agents.rollout_group`: every uploaded release is generally
+visible once all its artifacts are present, and who takes it is decided by the
+`auto_update` key in a config group (§8.5) plus the per-agent `self_update`
+command. Attaching releases to the config tier engine (§9.3) is a roadmap item.
 
 ### 8.2 Operator flow
 
 1. **Build + sign** three platforms and produce `manifest.json` (see
    `agent/README.md` — `filearr-release keygen` once, then build with the pinned
    public key, then `filearr-release sign`).
-2. **Register** the signed manifest (admin scope) — lands as `stage=canary`:
+2. **Register** the signed manifest (admin scope):
    `POST /api/v1/agent-releases` (body = `manifest.json`).
 3. **Upload** each artifact binary (admin scope), verified against the manifest
    sha256/size: `PUT /api/v1/agent-releases/{version}/artifacts/{filename}` with
-   the raw file as the body. A release is only offered / promotable once **every**
-   manifest artifact is present.
-4. **Watch the canary group confirm.** `GET /api/v1/agent-releases` returns each
-   release's `confirmed_count` and a per-agent `agent_version` rollup — the §6.3
-   "which version has each agent confirmed" query. An agent reports its running
-   version on every manifest poll; that report IS the confirmed-version signal
-   (a polling agent has, by definition, booted + passed its 60s health window).
-5. **Promote** canary→general once the canary wave is healthy (the R5 / §6.3
-   operator-confirmation gate): `POST /api/v1/agent-releases/{version}/promote`.
-   The whole fleet then sees it on its next poll (default 6h;
-   `FILEARR_AGENT_UPDATE_POLL_INTERVAL`).
+   the raw file as the body. A release is only offered once **every** manifest
+   artifact is present.
+4. **Decide who takes it, before you upload.** With `auto_update` left on
+   everywhere, the whole fleet sees the release on its next poll (default 6h;
+   `FILEARR_AGENT_UPDATE_POLL_INTERVAL`). To stage it: set `auto_update: false`
+   in the **Global** config group and `true` in a small higher-priority group
+   holding the machines you want on it first (§8.5).
+5. **Watch confirmations.** `GET /api/v1/agent-releases` returns each release's
+   `confirmed_count` and a per-agent `agent_version` rollup — the §6.3 "which
+   version has each agent confirmed" query. An agent reports its running version
+   on every manifest poll; that report IS the confirmed-version signal (a polling
+   agent has, by definition, booted + passed its 60s health window).
+6. **Widen** by moving machines into the enabled group, or by flipping the
+   Global `auto_update` back on once the first wave is healthy.
 
 ### 8.3 Rollback semantics
 
@@ -528,18 +531,30 @@ release public key), so it updates ONLY via signed §8.2 releases — cutting a
 new signed release with a version above the fleet's is what actually moves
 those agents; central image redeploys never will.
 
-### 8.5 Gating + staged rollout: the `auto_update` policy
+### 8.5 Gating + staged rollout: the `auto_update` key
 
-The update-manifest poll is gated **server-side** by the effective agent policy
-key `auto_update` (absent = **true**, preserving historic behavior). When
-false, the poll answers 204 — the agent still reports its version (the console
-still sees drift), it just isn't offered anything. Staged rollout recipes:
+The update-manifest poll is gated **server-side** by the effective `auto_update`
+key (absent = **true**, preserving historic behavior). When false, the poll
+answers 204 — the agent still reports its version (the console still sees
+drift), it just isn't offered anything. It gates both channels identically
+(signed releases §8.2 and the dist channel §8.4).
 
-- signed releases: the existing canary→general stages (§8.2);
-- dist channel: set the GLOBAL policy `{"auto_update": false, ...}` and enable
-  it per rollout-group or per-agent scope. Remember policy resolution is
-  most-specific-wins with **no key merging** — a narrower doc must carry every
-  key it needs, not just `auto_update`.
+Staged rollout recipe, same for either channel:
+
+```bash
+# 1. hold the fleet
+PATCH /api/v1/agents/config-groups/<global-id>   {"policy": {"auto_update": false}}
+# 2. a small, high-priority group that lets its members through
+POST  /api/v1/agents/config-groups
+      {"name": "update-first", "priority": 900, "policy": {"auto_update": true}}
+# 3. put the pilot machines in it
+PUT   /api/v1/agents/<agent-id>/config-groups    {"group_ids": ["<update-first-id>"]}
+```
+
+Config resolution is a per-key layered merge (§9.1), so `update-first` needs to
+state **only** `auto_update` — everything else those machines run still comes
+from Global and their other groups. Widen by adding members, or by setting
+Global back to `true` once the pilot wave is healthy.
 
 ### 8.6 Console: update badge + per-agent trigger
 
@@ -616,23 +631,30 @@ both; OS-level trust (Windows Authenticode via Azure Trusted Signing, macOS
 notarization) is the third, deferred layer for when binaries target users
 outside the operator's own trust domain.
 
-## 9. Configuration groups + remote configuration (W6-D2)
+## 9. Configuration groups: the single configuration mechanism (W6-D2, P13)
 
-A **config group** is a named, reusable bundle of remote-configuration settings
-you author once and assign to many agents. It is a NEW grouping dimension,
-ORTHOGONAL to `rollout_group` (§8 — that is the release-canary group only; the
-two are never conflated). `agents.config_group_id` is `NULL` by default, meaning
-"built-in agent defaults" — there is no special-cased "default" group row.
+A **config group** is a named row holding two document sections — `settings`
+(typed, unknown keys rejected) and `policy` (permissive, unknown keys preserved)
+— an integer `priority`, and its own version history. Since P13 (2026-08-11)
+this is the ONLY configuration mechanism: the old policy scopes
+(`global` / `group:<name>` / `agent:<uuid>`, whole-document replacement),
+`agents.rollout_group`, and the `/agent-policies/*` admin surface are gone.
+
+A permanent **Global** group (`is_system=true`, `priority=0`, name and priority
+immutable, undeletable) applies to every agent implicitly — no membership rows.
+Agents can be members of any number of other groups
+(`agent_config_group_members`).
 
 Admin surface (all `admin` scope, all audited, all 404 when
 `FILEARR_AGENTS_ENABLED=false`):
 
 ```bash
-# Create a group (settings validated; see the schema below)
+# Create a group (both sections validated; see the schema below)
 curl -s -X POST http://<ct-ip>:8484/api/v1/agents/config-groups \
   -H 'content-type: application/json' -d '{
     "name": "office-workstations",
     "description": "Windows desktops, documents + downloads",
+    "priority": 100,
     "settings": {
       "log_level": "info",
       "scan_selections": [
@@ -644,28 +666,112 @@ curl -s -X POST http://<ct-ip>:8484/api/v1/agents/config-groups \
       ],
       "inventory": {"enabled": true, "collectors": ["stat", "owner"]},
       "scan_schedule_cron": "0 3 * * *"
-    }
+    },
+    "policy": {"extract_enabled": true, "extract_exif": false}
   }'
 
-curl -s http://<ct-ip>:8484/api/v1/agents/config-groups            # list (+member_count)
-curl -s http://<ct-ip>:8484/api/v1/agents/config-groups/<id>       # get
-curl -s -X PATCH .../config-groups/<id> -d '{"settings": {...}}'   # partial update
-curl -s -X DELETE .../config-groups/<id>                            # members -> NULL
+curl -s .../api/v1/agents/config-groups          # list, in MERGE ORDER (+member_count,
+                                                 #   current_version, active_rollout)
+curl -s .../api/v1/agents/config-groups/<id>     # get + latest 20 versions
+curl -s -X PATCH  .../config-groups/<id> -d '{"policy": {...}, "note": "why"}'
+curl -s -X DELETE .../config-groups/<id>         # 409 if is_system
+curl -s .../config-groups/<id>/history           # newest first, ?before=<version>, cap 100
+curl -s -X POST .../config-groups/<id>/rollback -d '{"version": 4}'
 
-# Assign / clear a group on an agent
-curl -s -X PUT .../agents/<agent-id>/config-group -d '{"config_group_id": "<id>"}'
-curl -s -X PUT .../agents/<agent-id>/config-group -d '{"config_group_id": null}'
+# Membership: PUT replaces the agent's ENTIRE explicit group set
+curl -s -X PUT .../agents/<agent-id>/config-groups -d '{"group_ids": ["<id>", "<id2>"]}'
+curl -s -X PUT .../agents/<agent-id>/config-groups -d '{"group_ids": []}'
+
+# What does this machine actually get, and from where?
+curl -s .../agents/<agent-id>/effective-config
 ```
 
-Deleting a group with members is **allowed** — the `ON DELETE SET NULL` FK falls
-every member back to `NULL` (built-in defaults), and the delete audit event
-records how many agents were reset (`members_reset`).
+Passing Global's id to the membership PUT is a **400** — it is implicit, so
+accepting it would imply it could also be omitted. Deleting Global is a **409**;
+so is renaming or re-prioritising it. Deleting any other group cascades its
+membership rows and cancels any live rollout on it.
+
+`PATCH` is the only publish path: any `settings`/`policy` change snapshots a new
+version. Each section **replaces wholesale** when supplied — authoring is
+replace, layering is what happens across groups (deep-merging on write too would
+leave an operator unable to unset a key).
+
+### 9.1 Resolution: per-key layered merge
+
+`agent_config.resolve_effective_config()`:
+
+1. Load Global + the agent's member groups ordered by `(priority, name, id)`.
+2. Per group, pick the version THIS agent gets — a running rollout whose active
+   tier covers the agent's bucket hands over `target_version`, otherwise
+   `current_version`.
+3. Merge each section key by key in that order. A later group overrides only the
+   keys it sets. The merge is **shallow** at each section's top level: a nested
+   object (`inventory`, `scan_selections`) replaces wholesale.
+4. Compose the frozen wire document, the generation and the content hash.
+
+Equal priorities are legal (tie-break by name, then id) so inserting a group
+between two others is never a renumbering exercise.
+
+### 9.2 Versions and generations
+
+`agent_config_group_versions` carries a per-group `version` (from 1) and a
+fleet-wide `seq` identity column. The **generation** delivered to an agent is
+`max(seq)` over the snapshots that composed its document — monotonic, so it only
+moves forward, and `agents.config_generation_applied` stores what the agent
+echoed back via `?applied=`.
+
+Versioning is forward-only: rollback copies an old snapshot into a NEW version
+and publishes it immediately (no rollout option — reverting a breaking config
+should not wait), cancelling any live rollout on that group.
+
+### 9.3 Phased rollouts
+
+`PATCH`ing a group with a `rollout` block phases the new version in instead of
+switching every member at once:
+
+```bash
+curl -s -X PATCH .../api/v1/agents/config-groups/<id> -d '{
+  "policy": {"extract_ocr": true},
+  "note": "OCR on the filers",
+  "rollout": {
+    "tiers": [{"percent": 10, "delay_minutes": 0},
+              {"percent": 50, "delay_minutes": 120},
+              {"percent": 100, "delay_minutes": 240}],
+    "starts_at": "2026-08-12T02:00:00Z"
+  }
+}'
+
+curl -s .../api/v1/agents/config-rollouts                       # live ones (?status= for the rest)
+curl -s -X POST .../agents/config-rollouts/<id>/promote         # advance now (409 if not running)
+curl -s -X POST .../agents/config-rollouts/<id>/cancel          # stop shipping it
+```
+
+- Tiers: 1..5 entries of `{percent 1..100, delay_minutes >= 0}`, percents
+  **strictly ascending**, last must be **100** (422 otherwise). A rollout with no
+  document change is also a 422.
+- Bucketing: `sha256(agent.id.bytes)[:4] % 100`, so tier *P* covers buckets
+  `< P`. Derived, not stored — a fleet that grows mid-rollout keeps a uniform
+  slice with no backfill.
+- `delay_minutes` of tier N is the wait after tier N-1 activated; tier 0's counts
+  from the rollout start. `starts_at` NULL = the next minute tick.
+- The engine is `_advance_config_rollouts()` inside the existing every-minute
+  worker tick: `scheduled` → `running` at tier 0 → one tier per tick as delays
+  elapse → `completed` at the last tier, which finally moves
+  `group.current_version` to `target_version`. It is skipped entirely while
+  central is in maintenance mode and catches up (one tier per tick) afterwards.
+- **Cancel means fall back**: `current_version` is untouched, so covered agents
+  return to it on their next poll (~60 s). To keep the new version, promote to
+  completion instead.
+- Partial UNIQUE on `group_id WHERE status IN ('scheduled','running')` — a second
+  live rollout on the same group is a 409.
+
+Binary releases do NOT ride this engine yet (§8.1); that is a roadmap item.
 
 ### Settings schema (typed, versioned)
 
 The `settings` object is Pydantic-validated at the API. **Unknown top-level keys
-are rejected with 422** so a typo never silently no-ops (contrast the per-agent
-*policy* body in §6, which preserves unknown keys for forward-compat). Whole doc
+are rejected with 422** so a typo never silently no-ops (contrast the same
+group's `policy` section, which preserves unknown keys for forward-compat). Whole doc
 is capped at 64 KiB (422 beyond). All keys optional:
 
 | Key | Type | Notes |
@@ -697,25 +803,41 @@ Example specs that PASS validation: `%USERPROFILE%/Documents`, `$HOME/documents`
 `~/Documents`, `/home/*/documents`, `/data/{a,b}/[abc]*`. A spec like
 `/home/[user` (unbalanced bracket) is a 422.
 
-### Delivery + precedence (rides the policy channel)
+### Delivery (the wire shape is FROZEN)
 
-A group's settings are merged into the agent's effective policy doc
-(`GET /agents/{id}/policy`, §6) under a **new top-level `group` section**. The
-group's `updated_at` is folded into the policy `ETag`
-(`"<scope>/<version>/g:<tag>"`), so **any group edit invalidates the agent's
-cached policy** on its next `If-None-Match` poll.
+The merged document rides `GET /agents/{id}/policy` (§6) exactly as before:
+merged `policy` keys at the top level, merged `settings` under a top-level
+`group` section, the three lifted local-surface keys
+(`web_ui_enabled`, `local_access_enabled`, `auth_required` — **the `settings`
+value wins**, `null` = inherit), and the server-injected `taxonomy_version`.
+Deployed Go binaries needed zero changes for P13.
 
-Precedence (most-specific wins):
+What the fields MEAN changed:
 
 ```text
-per-agent explicit policy keys  >  config-group settings  >  agent defaults
+{"scope": "groups", "version": <generation>, "policy": {…}}
+ETag: "groups/<generation>/h:<sha256[:12] of canonical doc>/t:<taxonomy_version>"
 ```
 
-Concretely: a `NULL` config group adds **no** `group` section (and the ETag stays
-the pre-W6 `"<scope>/<version>"` form — current binaries are unaffected). An
-operator-authored top-level `group` key in a per-agent `agent-policies` row
-**wins** over the config group (never clobbered). New `group` keys are purely
-additive — an agent that ignores them behaves exactly as before.
+`scope` is now the literal constant `"groups"` (one resolution scheme, so the
+field carries no information and exists only so old binaries keep parsing), and
+`version` is the generation (§9.2) rather than a per-scope policy version.
+
+Three independent things invalidate the cache and all three ride the ETag: any
+contributing group publishing (generation), the merged content changing (hash —
+which is what catches a **membership or priority edit**, neither of which moves a
+version number), and a taxonomy edit. `?applied=<generation>` stamps
+`agents.config_generation_applied` + `last_seen_at`.
+
+An agent never 404s here: with no explicit groups it still resolves Global, and
+with no Global row (only reachable mid-migration) it gets an empty document
+rather than an error.
+
+Admin-side, `GET /api/v1/agents/{id}/effective-config` returns the same document
+minus `taxonomy_version`, plus the ordered contributor list
+(`version_used`, `via_rollout`), per-key `provenance`
+(`"<section>.<key>" -> {group_id, group_name, version}`), and
+`confirmed_generation` for the published-vs-enforced comparison.
 
 ## 10. Console installer distribution (W6-D2)
 
@@ -728,7 +850,7 @@ install hints:
 curl -s -X POST http://<ct-ip>:8484/api/v1/agents/installer-config \
   -H 'content-type: application/json' -d '{
     "agent_name": "lab-01",
-    "config_group_id": "<group-id>",
+    "config_group_ids": ["<group-id>", "<group-id-2>"],
     "log_level": "info",
     "central_url_override": "https://filearr.example.com",
     "ttl_seconds": 3600
@@ -743,7 +865,8 @@ Response (FROZEN contract for the UI, W6-D4):
     "central_url": "https://filearr.example.com",
     "enrollment_token": "fae_…",        // raw, show-once
     "agent_name": "lab-01",
-    "config_group": "office-workstations",  // by NAME
+    "config_group_names": ["office-workstations", "low-power"],  // by NAME
+    "config_group": "office-workstations",  // first name, for shipped binaries
     "log_level": "info"
   },
   "token_hash": "…",                     // for show/revoke in the UI
@@ -759,11 +882,20 @@ Response (FROZEN contract for the UI, W6-D4):
 Notes:
 
 - `central_url` is the request base URL unless `central_url_override` is set.
-- `config_group_id` (if given) must exist (422 otherwise) and is emitted in the
-  sidecar **by name** — the agent presents that name to `/agents/register`, which
-  resolves it back to `config_group_id`. An **unknown name at register is
-  fail-safe**: the agent enrolls with a `NULL` group and the register response
-  carries a `config_group_warning` — enrollment is never blocked.
+- `config_group_ids` (if given) must all exist (422 otherwise) and are emitted in
+  the sidecar **by name** in `config_group_names`. The membership is ALSO recorded
+  on the minted enrollment token (`enrollment_tokens.config_group_names`), which
+  is the authoritative half — central applies it at register whatever the agent
+  sends. `config_group` repeats the first name because shipped agent binaries
+  parse exactly that key and pass it to `/agents/register`; dropping it would
+  silently strip the group from every install done with a current binary.
+- Global is implicit and never listed. An **unknown name at register is
+  fail-safe**: the agent enrolls into whichever named groups do exist (Global
+  always), and the register response carries a `config_group_warning` naming the
+  ones it could not resolve — enrollment is never blocked.
+- `POST /api/v1/agents/enrollment-tokens` takes the same list directly as
+  `config_group_names` (see `scripts/manage-windows-agent.ps1 -ConfigGroup`,
+  repeatable).
 - The install hints reference the **first-install distribution surface**
   `/api/v1/agent-dist`: cross-compiled binaries baked into the central Docker
   image (`/app/agent-dist`; override `FILEARR_AGENT_DIST_DIR`) plus generated
@@ -944,9 +1076,9 @@ category gates) overlay `scan.json` per §9 exactly as on a host install.
   binds loopback-only by default — unreachable through a Docker port
   mapping — so the template sets `FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` and
   maps 8686. Serving is still centrally gated: enable **Local web UI** under
-  the Agents page's *Local access policy* card (the P7-T4 policy channel —
-  NOT a config-group setting; per-agent/per-rollout-group overrides go via
-  `PUT /api/v1/agent-policies/<scope>` and win wholesale). Management stays
+  *Local surface* in a config group the container's agent belongs to (§9 — the
+  **Global** group for the whole fleet, a higher-priority group for just these
+  hosts; the key layers per key like everything else). Management stays
   in the central console; the local UI is READ-ONLY. Five tabs (2026-07-27):
   **Search** (category chips, sort, CSV/JSON export of results, full-path
   copy), **Filters** (condition-row builder compiling to the shared query
@@ -990,8 +1122,8 @@ The image is built **without** a release-signing key pin, so the §8
 self-update machinery is fail-closed (refuses every manifest) — intentional
 for an immutable container. Updating = pulling the new image (Unraid's
 built-in update flow); the identity and index in `/config` carry over
-unchanged. Do not add the container to §8 rollout groups expecting binary
-swaps; if you truly want in-container self-update, build with
+unchanged. Do not expect a container agent to take a signed §8 release, whatever
+`auto_update` says; if you truly want in-container self-update, build with
 `--build-arg UPDATE_PUBLIC_KEY=...` and ensure the restart policy relaunches
 on exit code 20 (the service-managed swap handshake).
 
@@ -1016,24 +1148,29 @@ agent's external scheduled-scan task did not survive a re-enroll — the daemon
 heartbeated for nine days while its catalog silently froze at the old data.
 
 The scheduler is **off until configured**. Knobs, per-key precedence
-*policy > config-group > env*:
+*merged `policy` section > merged `settings` section > env*:
 
 | Source | Key | Meaning |
 |---|---|---|
-| per-agent/global policy (§6) | `scan_cron` | 5-field cron, agent-local time |
-| policy | `scan_interval_seconds` | fixed cadence (≥300); `scan_cron` wins when both set |
-| policy | `scan_on_start` | one scan ~30 s after daemon start |
-| config-group settings (§9) | `scan_schedule_cron` | same as `scan_cron`; a top-level policy key overrides it |
-| env | `FILEARR_AGENT_SCAN_CRON` / `FILEARR_AGENT_SCAN_EVERY` / `FILEARR_AGENT_SCAN_ON_BOOT` | local fallbacks for installs that don't author policy (`_EVERY` is a Go duration, e.g. `6h`) |
+| group `policy` (§9) | `scan_cron` | 5-field cron, agent-local time |
+| group `policy` | `scan_interval_seconds` | fixed cadence (≥300); `scan_cron` wins when both set |
+| group `policy` | `scan_on_start` | one scan ~30 s after daemon start |
+| group `settings` (§9) | `scan_schedule_cron` | same as `scan_cron`; a `policy` `scan_cron` overrides it |
+| env | `FILEARR_AGENT_SCAN_CRON` / `FILEARR_AGENT_SCAN_EVERY` / `FILEARR_AGENT_SCAN_ON_BOOT` | local fallbacks for installs that don't author central config (`_EVERY` is a Go duration, e.g. `6h`) |
 
 Example — schedule every enrolled agent nightly at 03:00 plus a catch-up scan
-whenever the service (re)starts:
+whenever the service (re)starts. Put it in **Global**, since it should apply to
+machines no other group covers:
 
 ```bash
-curl -s -X PUT http://<ct-ip>:8484/api/v1/agents/policies/global \
+curl -s -X PATCH http://<ct-ip>:8484/api/v1/agents/config-groups/<global-id> \
   -H 'content-type: application/json' \
-  -d '{"policy": {"scan_cron": "0 3 * * *", "scan_on_start": true}}'
+  -d '{"policy": {"scan_cron": "0 3 * * *", "scan_on_start": true},
+       "note": "nightly fleet scan"}'
 ```
+
+Remember `policy` REPLACES the section wholesale on write: send the whole
+document you want Global to hold, not just the changed keys.
 
 Semantics and safety:
 

@@ -1490,6 +1490,140 @@ async def reconcile_report_exports(timestamp: int) -> int:
         return await exports.reconcile_stale_exports(session, get_settings())
 
 
+# --- P13: phased config-group rollouts --------------------------------------
+# Rides the SAME static minute-tick contract as scan scheduling: Procrastinate
+# cannot register periodic tasks dynamically, so a rollout's tier schedule is
+# evaluated in code on one static tick rather than by registering a task per
+# rollout. FIX-8/FIX-9 discipline throughout: NO retry (a transient DB fault
+# re-evaluates next minute), the queueing_lock collapses overlapping ticks, and
+# state is stamped BEFORE anything observable happens — the `_defer_due_scans`
+# rule. Here "observable" is the agents' next poll, so each transition COMMITS
+# before the loop moves on; a worker that dies mid-sweep leaves every already-
+# advanced rollout advanced exactly once, and re-evaluates the rest next minute.
+async def _advance_config_rollouts(tick: datetime) -> list[str]:
+    """Advance every due config-group rollout; return their ids as strings.
+
+    Three transitions, evaluated against ``tick`` (the cron reference minute, not
+    ``datetime.now()`` — so a late tick promotes on the schedule it was FOR, and
+    a test can drive the whole lifecycle without sleeping):
+
+      * ``scheduled`` whose ``starts_at`` is due (or NULL = immediately) →
+        ``running`` at tier 0, stamping ``started_at``/``tier_started_at``.
+      * ``running`` with a next tier whose ``delay_minutes`` has elapsed since
+        ``tier_started_at`` → advance one tier (ONE tier per tick, even when
+        several delays have lapsed: each tier exists so somebody can look at the
+        fleet between them, and collapsing them would silently skip that).
+      * the LAST tier (always 100%) → ``completed``, ``finished_at`` stamped and
+        the group's ``current_version`` finally moved to ``target_version``, at
+        which point coverage stops depending on the rollout at all.
+
+    A cancelled rollout is simply not selected here; its covered agents fall back
+    to ``current_version`` on their next poll (documented on the cancel endpoint).
+    """
+    from sqlalchemy import select
+
+    from filearr import audit, maintmode
+    from filearr.db import SessionLocal
+    from filearr.models import AgentConfigGroup, AgentConfigRollout
+
+    # Maintenance mode: skip WITHOUT consuming anything — a rollout is a
+    # wall-clock schedule, so it simply resumes (and catches up one tier per
+    # tick) once the mode lifts.
+    if await maintmode.is_active_standalone():
+        return []
+
+    async def _finish(session, rollout) -> None:
+        """Publish the target version to everyone (the last tier is always 100%)
+        and record it. Runs AFTER the rollout row is committed `completed`, so a
+        crash between the two re-runs only this idempotent half."""
+        group = await session.get(AgentConfigGroup, rollout.group_id)
+        if group is not None:
+            group.current_version = rollout.target_version
+            await session.commit()
+        await audit.emit(
+            audit.AGENT_CONFIG_ROLLOUT_COMPLETED,
+            details={
+                "rollout_id": str(rollout.id),
+                "group_id": str(rollout.group_id),
+                "target_version": rollout.target_version,
+            },
+        )
+
+    advanced: list[str] = []
+    async with SessionLocal() as session:
+        rollouts = list(
+            (
+                await session.execute(
+                    select(AgentConfigRollout)
+                    .where(AgentConfigRollout.status.in_(("scheduled", "running")))
+                    .order_by(AgentConfigRollout.created_at)
+                )
+            ).scalars()
+        )
+        for rollout in rollouts:
+            tiers = rollout.tiers or []
+            if not tiers:
+                continue
+            if rollout.status == "scheduled":
+                if rollout.starts_at is not None and rollout.starts_at > tick:
+                    continue
+                # Tier 0's own delay counts from the start instant, so a rollout
+                # authored as "wait 30 minutes, then 10%" goes running-at-tier-0
+                # only once that delay has passed. started_at records WHEN the
+                # window opened, which is what the delay is measured from.
+                rollout.status = "running"
+                rollout.started_at = tick
+                first_delay = int(tiers[0].get("delay_minutes", 0) or 0)
+                if first_delay > 0:
+                    # Hold at tier -1 (covering nobody) until the delay elapses;
+                    # tier_started_at anchors that wait.
+                    rollout.tier_started_at = tick
+                else:
+                    rollout.current_tier = 0
+                    rollout.tier_started_at = tick
+                    if len(tiers) == 1:
+                        rollout.status = "completed"
+                        rollout.finished_at = tick
+                await session.commit()
+                if rollout.status == "completed":
+                    await _finish(session, rollout)
+                advanced.append(str(rollout.id))
+                continue
+
+            nxt = rollout.current_tier + 1
+            if nxt >= len(tiers):
+                continue  # already at the last tier; completion happens below
+            anchor = rollout.tier_started_at or rollout.started_at or tick
+            delay = int(tiers[nxt].get("delay_minutes", 0) or 0)
+            if tick < anchor + timedelta(minutes=delay):
+                continue
+            rollout.current_tier = nxt
+            rollout.tier_started_at = tick
+            if nxt == len(tiers) - 1:
+                rollout.status = "completed"
+                rollout.finished_at = tick
+            await session.commit()
+            if rollout.status == "completed":
+                await _finish(session, rollout)
+            advanced.append(str(rollout.id))
+    return advanced
+
+
+@proc_app.periodic(cron="* * * * *")
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.advance_config_rollouts",
+    queueing_lock="advance-config-rollouts",  # FIX-8: no retry (minutely re-runs)
+)
+async def advance_config_rollouts(timestamp: int) -> int:
+    """Promote every config-group rollout due this minute. Returns how many
+    advanced (a cheap no-op on an empty table, so it is not gated on
+    ``agents_enabled`` — a fleet disabled mid-rollout must still not leave a
+    rollout wedged half-way when it is re-enabled)."""
+    tick = datetime.fromtimestamp(timestamp, tz=UTC)
+    return len(await _advance_config_rollouts(tick))
+
+
 @proc_app.periodic(cron="* * * * *")
 @proc_app.task(queue="maintenance", name="filearr.worker.schedule_scans")
 async def schedule_scans(timestamp: int) -> int:

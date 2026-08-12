@@ -15,7 +15,7 @@ What is pinned here:
   dropped when the source text changes, so ``embed_missing`` / ``chunk_missing``
   re-select the item (and are NOT dropped when it doesn't);
 * an OLDER agent (no ``extracted`` field at all) is byte-for-byte unaffected;
-* the four new policy keys round-trip through ``PUT /agent-policies/{scope}`` and
+* the four new policy keys round-trip through a config group's ``policy`` section and
   show up in the admin effective-policy view.
 
 Harness mirrors ``test_replication_p5t4`` / ``test_agent_policy_effective``
@@ -51,6 +51,7 @@ from filearr.db import get_session
 from filearr.embed import EMBEDDING_KEY, FINGERPRINT_KEY
 from filearr.main import create_app
 from filearr.models import Agent, Item, ItemStatus
+from tests.agentcfg_helpers import effective, reset_config_groups, set_global
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -65,7 +66,7 @@ async def db_maker(pg_uri):
     command.upgrade(cfg, "head")
     engine = create_async_engine(_psycopg3(pg_uri))
     async with engine.begin() as conn:
-        await conn.execute(text("DELETE FROM policy_versions"))
+        await reset_config_groups(conn)
         await conn.execute(text("DELETE FROM agent_replication_log"))
         await conn.execute(text("DELETE FROM items"))
         await conn.execute(text("DELETE FROM libraries"))
@@ -451,19 +452,19 @@ async def test_extraction_policy_keys_round_trip(client):
         await s.commit()
         agent_id = agent.id
 
-    r = await c.put("/api/v1/agent-policies/global", json={"policy": EXTRACT_POLICY})
+    r = await set_global(c, policy=EXTRACT_POLICY)
     assert r.status_code == 200, r.text
     assert r.json()["policy"] == EXTRACT_POLICY
 
-    body = (await c.get(f"/api/v1/agent-policies/effective/{agent_id}")).json()
-    assert body["policy"] == EXTRACT_POLICY
-    for key in EXTRACT_POLICY:
-        assert body["source_keys"][key] == "global"
+    body = await effective(c, agent_id)
+    for key, value in EXTRACT_POLICY.items():
+        assert body["document"][key] == value
+        assert body["provenance"][f"policy.{key}"]["group_name"] == "Global"
 
 
 async def test_extraction_policy_keys_are_known_defaults_when_absent(client):
-    """They must be MODELLED keys (reported as ``default``), not forward-compat
-    unknowns — the console renders a field per known key."""
+    """No group sets them, so they carry no provenance entry at all — the console
+    renders the agent-side default for a key nothing claims."""
     c, maker, _ = client
     async with maker() as s:
         agent = Agent(
@@ -476,16 +477,15 @@ async def test_extraction_policy_keys_are_known_defaults_when_absent(client):
         await s.commit()
         agent_id = agent.id
 
-    body = (await c.get(f"/api/v1/agent-policies/effective/{agent_id}")).json()
+    body = await effective(c, agent_id)
     for key in EXTRACT_POLICY:
-        assert body["source_keys"][key] == "default"
+        assert key not in body["document"]
+        assert f"policy.{key}" not in body["provenance"]
 
 
 async def test_extract_max_bytes_rejects_a_negative_bound(client):
     c, _, _ = client
-    r = await c.put(
-        "/api/v1/agent-policies/global", json={"policy": {"extract_max_bytes": -1}}
-    )
+    r = await set_global(c, policy={"extract_max_bytes": -1})
     assert r.status_code == 422
     assert "extract_max_bytes" in r.json()["detail"]
 

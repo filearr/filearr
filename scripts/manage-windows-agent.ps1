@@ -74,7 +74,7 @@ param(
   [string]$Name = $env:COMPUTERNAME,
   [string[]]$ScanRoot,
   [string]$MtlsUrl,
-  [string]$RolloutGroup = "default",
+  [string[]]$ConfigGroup = @(),
   [ValidateRange(1, 1440)] [int]$TokenTtlMinutes = 60,
   [switch]$Force,
   [switch]$SkipTools,
@@ -128,7 +128,10 @@ $offered = $null
 if (-not $installed) {
   # ==== PROVISION ============================================================
   Write-Host "no installed agent found - provisioning"
-  $mintBody = @{ rollout_group = $RolloutGroup; ttl_minutes = $TokenTtlMinutes } | ConvertTo-Json
+  # config_group_names must serialise as a JSON ARRAY even for one entry, and
+  # ConvertTo-Json unwraps a single-element array unless it is forced.
+  $mintBody = @{ config_group_names = @($ConfigGroup); ttl_minutes = $TokenTtlMinutes } |
+    ConvertTo-Json -Depth 4
   try {
     $mint = Invoke-RestMethod -Method Post -Uri "$base/api/v1/agents/enrollment-tokens" `
       -Headers $headers -ContentType "application/json" -Body $mintBody
@@ -139,7 +142,8 @@ if (-not $installed) {
     }
     throw
   }
-  Write-Host "minted enrollment token (rollout group '$($mint.rollout_group)', expires $($mint.expires_at))"
+  $groupNote = if ($mint.config_group_names) { "config groups: $($mint.config_group_names -join ', ')" } else { "Global only" }
+  Write-Host "minted enrollment token ($groupNote, expires $($mint.expires_at))"
 
   $staged = Join-Path $env:TEMP "filearr-agent-provision.exe"
   $null = Save-VerifiedBinary $staged

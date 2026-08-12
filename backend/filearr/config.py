@@ -1047,11 +1047,11 @@ class Settings(BaseSettings):
     # sweep frees its staging without a dedicated periodic task.
     agent_reconcile_page_max: int = 5000
     agent_reconcile_session_ttl_seconds: int = 3600
-    # P5-T6 config/policy push: hard cap (bytes of compact JSON) on ONE policy
-    # payload PUT to /agent-policies/{scope}. A body above this is rejected (413)
-    # so a hostile/buggy operator cannot bloat a policy_versions row. The policy
-    # is small (preset names + a handful of glob lists + scalar tunables); 64 KiB
-    # is generous headroom for the forward-compat unknown-key passthrough.
+    # Hard cap (bytes of compact JSON) on ONE config group's `policy` section. A
+    # body above this is rejected (413) so a hostile/buggy operator cannot bloat
+    # a group row (and, through it, every version snapshot of it). The policy is
+    # small (preset names + a handful of glob lists + scalar tunables); 64 KiB is
+    # generous headroom for the forward-compat unknown-key passthrough.
     agent_policy_max_bytes: int = 65536
     # --- W6-D3 extensible inventory framework --------------------------------
     # Hard cap (bytes of compact JSON) on the additive ``capabilities`` object an
@@ -1114,10 +1114,9 @@ class Settings(BaseSettings):
     # scripts — a machine that isn't enrolled yet can't use the agent-authed
     # release path above. None => /app/agent-dist (the image's bake location).
     agent_dist_dir: str | None = None
-    # The rollout_group whose agents receive stage='canary' releases before the
-    # operator promotes them to 'general' (R5). Everyone sees 'general'; only this
-    # group sees an un-promoted 'canary'. Rename per deployment if desired.
-    agent_canary_group: str = "canary"
+    # (P13 removed FILEARR_AGENT_CANARY_GROUP along with release staging: every
+    # release is fleet-visible on upload, `auto_update` in a config group is the
+    # brake, and phased delivery lives in agent_config_rollouts.)
     # Hard ceiling (bytes) on a single uploaded release artifact — bounds a
     # hostile/buggy admin upload and the agent's own download read.
     agent_update_max_artifact_bytes: int = 536_870_912  # 512 MiB

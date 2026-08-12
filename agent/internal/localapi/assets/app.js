@@ -499,7 +499,6 @@
         kvRow(dl, "Agent id", s.agent_id);
         kvRow(dl, "Agent version", s.agent_version);
         kvRow(dl, "Central", s.central_url);
-        kvRow(dl, "Rollout group", s.rollout_group);
         kvRow(dl, "Data dir", s.data_dir);
         kvSection(dl, "Scanning");
         var sc = s.scan || {};

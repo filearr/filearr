@@ -74,11 +74,13 @@ you enable it, and what an agent can actually do depends on which tools exist on
       report `unsupported`, exactly as central's own extractor does for them.
       The agent advertises the `formats` it can actually handle.
 
-    **How to turn it on:** set `extract_enabled: true` in the policy scope you
-    want (Agents page → *Agent policy* → *Content extraction*), plus
+    **How to turn it on:** set `extract_enabled: true` in the
+    [configuration group](#two-groupings) you want it in (Agents page → the
+    group's **edit** dialog → *Extraction & privacy*), plus
     `extract_body_text` for document text, `extract_exif` for camera/GPS
-    metadata, and `extract_ocr` where the hosts have tesseract. Remember that a narrower scope **replaces** a broader one, so an
-    `agent:` document must repeat every key it needs. Then install the host
+    metadata, and `extract_ocr` where the hosts have tesseract. Groups layer
+    **per key**, so a group only needs to state what differs from the layers
+    below it. Then install the host
     tools on the machines that need them. Existing items pick the new metadata
     up on their next change event or the next full reconcile; RAG chunking and
     content embeddings follow automatically once `body_text` lands, because the
@@ -282,10 +284,17 @@ a plain, user-editable JSON file the agent picks up during install:
   "central_url": "https://filearr.example.com",
   "enrollment_token": "fae_…",
   "agent_name": "",
-  "config_group": "default",
+  "config_group_names": ["office-workstations"],
+  "config_group": "office-workstations",
   "log_level": "info"
 }
 ```
+
+`config_group_names` is the full list of [configuration
+groups](#two-groupings) the machine joins at enrollment (Global is implicit and
+never listed). `config_group` repeats the first name because shipped agent
+binaries parse exactly that key — leave both in place unless you are certain
+every machine runs a build that reads the list.
 
 **One-command install (recommended):** your central serves the agent binaries
 for every platform itself (`/api/v1/agent-dist` — baked into the Docker image,
@@ -357,8 +366,9 @@ service's `scan.json` (presets/globs you added survive) and `-MtlsUrl`
 rewrites the sidecar's `central_url` to the mTLS site — enrollment always
 runs against the main URL (the mTLS site refuses clients without a
 certificate yet), and the enrolled agent presents its client certificate
-automatically after the switch. `-Name`, `-RolloutGroup`, and
-`-TokenTtlMinutes` cover the rest of the mint surface.
+automatically after the switch. `-Name`, `-ConfigGroup` (repeatable — the
+[configuration groups](#two-groupings) the machine joins; Global is implicit)
+and `-TokenTtlMinutes` cover the rest of the mint surface.
 
 !!! warning "mTLS switch needs an agent build from 2026-08-08 or later"
     Older daemons pinned the enrollment-time URL inside `state.json` and
@@ -475,9 +485,10 @@ locations work too; the longest matching prefix wins per file.
 **Local web UI**: the template maps port 8686 and sets
 `FILEARR_AGENT_WEBUI_ALLOW_REMOTE=true` (a loopback-only listener would be
 unreachable through a Docker port mapping). It stays read-only search and is
-**central-policy-gated** — enable *Local web UI* under **Local access
-policy** on the central Agents page (fleet-wide; per-agent/per-group
-overrides via `PUT /api/v1/agent-policies/<scope>`) or it serves nothing. Self-update is off inside the
+**centrally gated** — enable *Local web UI* under **Local surface** in a
+[configuration group](#two-groupings) the container's agent belongs to (the
+**Global** group for the whole fleet, a higher-priority group for just these
+hosts) or it serves nothing. Self-update is off inside the
 container (`FILEARR_AGENT_SELF_UPDATE=false` in the image): updating means
 pulling a new image, and the agent no longer logs the unpinned-key warning.
 
@@ -531,167 +542,258 @@ binary; the data directory is pinned to `/config`.
     unhashed and a WARN in the agent log names the path so you can repair or
     exclude it.
 
-## Two groupings: policy group vs configuration group {#two-groupings}
+## Configuration groups and layering {#two-groupings}
 
-Every agent carries **two independent group assignments**. They are not
-alternatives and neither is a superset of the other — they drive different
-channels, and the single most common mistake is assuming the one you can see in
-a dropdown is the one your policies key off.
+Everything central configures on an agent arrives through **configuration
+groups**. A group is a row you create: a name, an integer **priority**, and two
+document sections (`settings` and `policy`). Every agent belongs to the
+permanent **Global** group plus as many other groups as you put it in, and
+central resolves that set into one document, key by key, on every poll.
 
-| | **Policy group** (rollout group) | **Configuration group** |
+Three rules cover the whole model.
+
+1. **Global applies to everyone.** It is a system group — priority `0`, name and
+   priority immutable, undeletable — and membership is implicit: no agent is
+   ever added to it or removed from it. It is the fleet-wide baseline every
+   other group layers on top of.
+2. **Groups apply in ascending `(priority, name)` order, and a later group wins
+   *per key*.** Not per document. A group whose `policy` is
+   `{"extract_ocr": false}` changes exactly that one key; every other key keeps
+   whatever the layers below supplied. Equal priorities are legal and break the
+   tie by name, so you never have to renumber a fleet to insert a group.
+3. **An agent can be in many groups.** Membership is a plain set (Agents table →
+   the agent's detail row, or `PUT /api/v1/agents/{id}/config-groups`), so
+   "Windows desktops" and "low-powered machines" are two groups you *compose*
+   rather than one `windows-desktops-lowpower` group you maintain by hand.
+
+### The two sections of a group
+
+| Section | Unknown keys | What lives there |
 | --- | --- | --- |
-| Column in the DB | `agents.rollout_group` (free text) | `agents.config_group_id` (FK to a group row) |
-| What it selects | The `group:<name>` **policy document** — extraction, `extract_exif`, `extract_ocr`, `extract_body_text`, watch mode, `scan_cron`, path scope, the local-access gates, `auto_update`. See [Every policy key](#every-policy-key). | A **settings bundle**: log level, scan selections/paths, inventory collectors + permissions, `scan_schedule_cron`. See [Group settings schema](#group-settings-schema). |
-| Also controls | **Release-canary membership** — only agents in `FILEARR_AGENT_CANARY_GROUP` (default `canary`) are offered un-promoted builds. | Nothing else. |
-| Where it is set | Enrollment token (`rollout_group` when minting), then editable per agent: Agents page → **Policy group** column, or `PATCH /api/v1/agents/{id}`. | Installer sidecar (`config_group` by name), then editable per agent: Agents page → **Config group** column, or `PUT /api/v1/agents/{id}/config-group`. |
-| Where the document lives | Agents page → **Agent policy** card, scope *Rollout group*. Created by writing it — a group needs no row. | Agents page → **Configuration groups** card. A real row you create, name, and delete. |
-| Unknown keys | Preserved verbatim (`extra="allow"`). | **Rejected with 422.** |
-| Changing it | Replaces the agent's whole effective policy (below) **and** flips canary membership. | Swaps the settings bundle only; the policy document is untouched. |
-| Takes effect | Next policy poll (~1 min). No restart. | Next policy poll (~1 min). No restart. |
+| `settings` | **rejected with 422** | Log level, scan selections, inventory collectors and their permissions block, `scan_schedule_cron`, and the three local-surface gates. [Group settings schema](#group-settings-schema) |
+| `policy` | **preserved verbatim** | Extraction, watch mode, scan schedule, path scope, poll cadence, the local self-administration permissions, `auto_update`. [Every policy key](#every-policy-key) |
 
-Both ride the same delivery channel (`GET /agents/{id}/policy`) — the config
-group's settings arrive folded in under a top-level `group` section — but only
-`rollout_group` participates in [scope resolution](#policy-scopes).
+The split is about which validator runs, not about what the setting means. The
+console's group dialog presents both by topic — *General*, *Scanning*,
+*Inventory*, *Extraction & privacy*, *Local surface*, *Advanced* — so you rarely
+have to know which half a field lands in. It matters in exactly two places:
 
-The Agents table shows both columns side by side, each with a tooltip naming
-what it controls, plus the scope the agent **actually resolves today**
-(`resolves group:filers`). The policy editor shows the reverse view: how many
-agents are in the group whose document you are editing.
+- a typo in `settings` is a 422, while a typo in `policy` is stored and shipped.
+  That permissiveness is deliberate — it is what lets a newer agent build read a
+  key this central release has never heard of;
+- three keys exist in both — `web_ui_enabled`, `local_access_enabled`,
+  `auth_required`. **The `settings` value wins** when a group sets both, because
+  `settings` is the typed, checkbox-rendered half and `policy` is the raw-JSON
+  escape hatch. A `null` in `settings` means "inherit" and overrides nothing.
 
-!!! note "This used to be impossible after enrollment"
-    Before 2026-08-10 `agents.rollout_group` was written exactly once, at
-    registration, from the consumed enrollment token — no endpoint could change
-    it. An agent's policy group was frozen for life, and the documented
-    workaround was to **re-enroll the machine** into a new group. That is no
-    longer necessary: re-assign it in place from the Agents table.
+!!! note "Merging is shallow, per section"
+    Each section merges at its **top level**. A nested object — the `inventory`
+    block, the `scan_selections` list — is replaced wholesale by the
+    higher-priority group that sets it, never deep-merged. A group that wants to
+    add one collector therefore states the whole `inventory` object it wants,
+    not just the changed field. Half-merged lists are unexplainable in a console;
+    replacement is the rule an operator can hold in their head.
+
+!!! note "Editing a section replaces it; layering happens *across* groups"
+    `PATCH`ing a group's `settings` or `policy` swaps that whole section for the
+    body you send. Deep-merging on write as well would leave you unable to
+    *unset* a key. Authoring is replace, resolution is layer.
+
+!!! info "One mechanism, since 2026-08-11"
+    Earlier releases had two independent groupings. A free-text
+    `agents.rollout_group` selected a whole-document policy written at one of
+    three scopes (`global`, `group:<name>`, `agent:<uuid>`) and doubled as the
+    binary-release canary cohort; a separate configuration group carried a
+    settings bundle. Scopes **replaced** rather than merged, so a narrower
+    document had to repeat every key it needed, and the two groupings were
+    routinely confused for each other. Both are gone. Existing documents were
+    migrated into groups on upgrade — each `group:<name>` scope became a group,
+    each `agent:<uuid>` document became a single-member `host-<hostname>` group,
+    and the old `global` document seeded Global — with version counters
+    restarting at 1, because whole-document history does not translate into
+    layered semantics.
 
 ### Worked example: desktops inventory, filers extract {#policy-group-example}
 
 The question this answers: *"On user desktops I want to inventory files but not
-capture GPS EXIF, and not run OCR/text extraction on low-powered machines. On the
-filer I want all of it."*
+capture GPS EXIF, and not run OCR/text extraction on low-powered machines. On
+the filer I want all of it."*
 
-That is a **policy group** job. Three steps.
+Four groups, three of which say almost nothing.
 
-**1 — Put each agent in the right policy group.** On the Agents page, edit the
-**Policy group** cell (free text; the input suggests groups that already exist).
-Give the desktops `desktops` and the file servers `filers`. Confirm the prompt —
-it names the document the agent will start resolving and whether the move changes
-canary membership. Or by API:
+**1 — Global (priority 0)** is the baseline. Everything you want to be true
+*unless* something overrides it goes here, once — `PATCH` it onto the Global
+group (`PATCH /api/v1/agents/config-groups/{global-id}`):
+
+```json
+{
+  "policy": {
+    "extract_enabled": true,
+    "extract_body_text": false,
+    "extract_ocr": false,
+    "extract_exif": false,
+    "extract_max_bytes": 33554432,
+    "content_hash_max_bytes": 1073741824,
+    "watch_mode": false,
+    "scan_cron": "30 2 * * *",
+    "poll_interval_seconds": 300,
+    "local_access_enabled": true,
+    "web_ui_enabled": false
+  }
+}
+```
+
+**2 — `desktops` (priority 100)** now needs *nothing*: Global already describes
+a desktop. Create it anyway if you want somewhere to put desktop-only inventory
+settings, or skip it entirely — an agent in no group but Global is fully
+configured.
+
+**3 — `filers` (priority 100)** states only the differences:
 
 ```bash
-curl -X PATCH http://central:8000/api/v1/agents/$AGENT_ID \
+curl -X POST http://central:8000/api/v1/agents/config-groups \
   -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
-  -d '{"rollout_group":"filers"}'
-# -> {..., "rollout_group":"filers",
-#     "policy_scope":"group:filers", "policy_version":3,
-#     "canary_releases":false}
+  -d '{
+        "name": "filers",
+        "description": "File servers: full extraction",
+        "priority": 100,
+        "policy": {
+          "extract_body_text": true,
+          "extract_ocr": true,
+          "extract_exif": true,
+          "extract_max_bytes": 268435456,
+          "content_hash_max_bytes": 0,
+          "watch_mode": true,
+          "scan_cron": "0 3 * * *",
+          "poll_interval_seconds": 60,
+          "web_ui_enabled": true
+        }
+      }'
 ```
 
-`policy_scope` is the recomputed answer to "which document does it get now" —
-`group:filers` if that document exists, otherwise `global`, otherwise `none`.
+**4 — `low-power` (priority 500)** is one key, and it is the reason layering
+earns its keep:
 
-**2 — Author `group:desktops`.** Agents page → **Agent policy** → scope
-*Rollout group* → `desktops`. Inventory everything, extract the cheap stuff, and
-explicitly refuse the expensive/sensitive passes:
+```json
+{ "name": "low-power", "priority": 500, "policy": { "extract_ocr": false } }
+```
+
+Put the two elderly filers in **both** `filers` and `low-power`. They get the
+filers' body-text extraction, EXIF, watch mode and cadence, and OCR off —
+without a fifth group that duplicates the filer document:
+
+```bash
+curl -X PUT http://central:8000/api/v1/agents/$AGENT_ID/config-groups \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"group_ids": ["<filers-id>", "<low-power-id>"]}'
+```
+
+Resolution for that machine, in merge order:
+
+| Key | Global (0) | `filers` (100) | `low-power` (500) | Effective |
+| --- | --- | --- | --- | --- |
+| `extract_enabled` | `true` | — | — | `true` (Global) |
+| `extract_exif` | `false` | `true` | — | `true` (`filers`) |
+| `extract_ocr` | `false` | `true` | `false` | `false` (`low-power`) |
+| `poll_interval_seconds` | `300` | `60` | — | `60` (`filers`) |
+| `local_access_enabled` | `true` | — | — | `true` (Global) |
+
+`extract_exif: true` on the filers means `exiftool` runs there and GPS
+coordinates reach central (where they stay hidden unless the library sets
+`expose_gps`); the desktops never start that subprocess at all, because nothing
+above Global turns it on for them.
+
+!!! tip "State only what differs"
+    The old scope model forced a narrower document to repeat every key it
+    needed. Layering inverts that: a group should contain the keys that are
+    *true about that group and not about the fleet*. A group that repeats
+    Global's values still works, but it silently pins them — a later edit to
+    Global will not reach its members, and nothing on screen says why.
+
+!!! warning "Priority ties resolve by name, so keep overrides above their base"
+    Two groups at the same priority that both set a key resolve alphabetically,
+    which is deterministic but not meaningful. Give a group that exists to
+    *override* another a strictly higher priority — that is what `low-power`'s
+    `500` is for.
+
+### Checking one agent's effective configuration {#effective-config}
+
+`GET /api/v1/agents/{agent_id}/effective-config` (admin scope) answers "what
+does this machine actually have, and who said so". It is byte-identical to what
+the agent's next poll would deliver, minus the server-injected
+`taxonomy_version`, and it is strictly read-only — it stamps no `last_seen_at`
+and emits no ETag, so inspecting an agent never perturbs its liveness signals.
 
 ```json
 {
-  "extract_enabled": true,
-  "extract_body_text": false,
-  "extract_ocr": false,
-  "extract_exif": false,
-  "extract_max_bytes": 33554432,
-  "content_hash_max_bytes": 1073741824,
-  "watch_mode": false,
-  "scan_cron": "30 2 * * *",
-  "poll_interval_seconds": 300,
-  "local_access_enabled": true,
-  "web_ui_enabled": false
+  "agent_id": "0198f0a1-…",
+  "document": {
+    "extract_enabled": true,
+    "extract_exif": true,
+    "extract_ocr": false,
+    "poll_interval_seconds": 60,
+    "group": { "log_level": "info", "scan_schedule_cron": "0 3 * * *" }
+  },
+  "generation": 412,
+  "hash": "9f2c1ab4de07",
+  "groups": [
+    {"name": "Global",    "priority": 0,   "is_system": true,  "version_used": 7, "via_rollout": false},
+    {"name": "filers",    "priority": 100, "is_system": false, "version_used": 3, "via_rollout": false},
+    {"name": "low-power", "priority": 500, "is_system": false, "version_used": 2, "via_rollout": true}
+  ],
+  "provenance": {
+    "policy.extract_enabled": {"group_name": "Global",    "version": 7},
+    "policy.extract_exif":    {"group_name": "filers",    "version": 3},
+    "policy.extract_ocr":     {"group_name": "low-power", "version": 2},
+    "settings.log_level":     {"group_name": "Global",    "version": 7}
+  },
+  "confirmed_generation": 409,
+  "last_seen_at": "2026-08-11T09:14:22Z"
 }
 ```
 
-With `extract_enabled: true` the desktop still catalogs identity plus the
-metadata that costs nothing extra (image dimensions, container format), but
-`extract_exif: false` means **`exiftool` is never run**, so no GPS coordinates
-leave the machine, and `extract_ocr` / `extract_body_text` are off so no
-`tesseract` or `pdftotext` subprocess ever starts inside the scan.
+Read it as four answers:
 
-**3 — Author `group:filers`.** Same editor, scope `filers`:
+- **`groups`** is the merge order, lowest priority first, with the version of
+  each group this agent is on. `via_rollout: true` means this agent's bucket is
+  inside an active [phased rollout](#phased-rollouts) tier, so it is running a
+  version the rest of that group has not received yet.
+- **`provenance`** names the winning layer for every single key, as
+  `"<section>.<key>"`. This is the answer to "I set that to `false`, why is it
+  `true`" — the key names the group that outranked you.
+- **`generation`** is the delivered version identity: the highest snapshot
+  sequence across the contributing groups (see
+  [Versions, history and rollback](#config-versions)). It is monotonic across
+  the whole fleet, so it only ever moves forward.
+- **`confirmed_generation`** is what the agent last echoed back after applying a
+  document. Lower than `generation` means *published, not yet confirmed* — the
+  agent is offline, or simply between polls.
 
-```json
-{
-  "extract_enabled": true,
-  "extract_body_text": true,
-  "extract_ocr": true,
-  "extract_exif": true,
-  "extract_max_bytes": 268435456,
-  "content_hash_max_bytes": 0,
-  "watch_mode": true,
-  "scan_cron": "0 3 * * *",
-  "poll_interval_seconds": 60,
-  "local_access_enabled": true,
-  "web_ui_enabled": true
-}
-```
+The console renders exactly this in the agent's detail row: the merged document
+grouped by section, a source badge (`filers v3`, with a marker when it arrived
+via a rollout) on every key, the amber *not enforced yet* chips for fields no
+shipped agent build reads, and the delivered-versus-confirmed generation pair.
 
-!!! danger "Repeat every key — a group document does not inherit"
-    Resolution is [most-specific-wins with **no key merging**](#policy-scopes).
-    The winning document *is* the policy: keys it omits fall back to the agent's
-    **built-in default**, not to whatever `global` was providing. So the two
-    documents above deliberately repeat `content_hash_max_bytes`, `watch_mode`,
-    `scan_cron`, `poll_interval_seconds` and the local-access gates even though
-    only the `extract_*` keys differ between them. Writing
-    `{"extract_exif": false}` alone into `group:desktops` would silently drop
-    every other setting your `global` document was applying to those machines.
-    The console's editor lists the exact keys a save would stop applying, and the
-    agents table's **details** row shows the resolved value of each key with the
-    document it came from.
+## What a group configures {#configuration-groups}
 
-Verify with `GET /api/v1/agent-policies/effective/{agent_id}` (admin scope), or
-the **details** expander on the agent's row — it shows each effective extraction
-key next to its source (`rollout-group policy`, `global policy`, `agent default`)
-and flags settings that agent will ignore because the host lacks the tool.
-
-!!! warning "Renaming your groups can orphan canary releases"
-    `rollout_group` has a second job: it selects the release-canary cohort.
-    Central offers a `stage='canary'` release only to agents whose policy group
-    equals `FILEARR_AGENT_CANARY_GROUP` (default `canary`). If every agent is in
-    `desktops` or `filers`, **no agent is in `canary`** and un-promoted releases
-    reach nobody — canary testing silently stops working. Either keep one machine
-    in a `canary` group (it then also resolves `group:canary` for policy, so
-    author that document too), or point
-    `FILEARR_AGENT_CANARY_GROUP` at one of your real groups (e.g. `desktops`).
-    The Agents page warns when the configured canary group has no members, and
-    the roster endpoint always returns it with `agent_count: 0` so the warning is
-    possible.
-
-    The two jobs are not being split: one field, two consumers, documented. If
-    you need canary membership independent of policy, make the canary group one
-    of your policy groups rather than a fourth grouping concept.
-
-**Machine-level exceptions.** One laptop that must never extract at all? Write an
-`agent:<uuid>` document for it rather than inventing a group — it outranks the
-group document (and, again, must carry every key that machine needs). The
-console's confirmation says so explicitly when you move an agent that already has
-its own document: its effective policy will not change until that document goes.
-
-## Configuration groups (remote configuration)
-
-Agents can be assigned to **configuration groups** managed on the Agents
-page. A group carries typed settings delivered over the signed policy
-channel (an edit invalidates agent caches immediately): log level, scan
-selections, inventory settings, and an optional scan schedule. Scan
-selections accept **predefined per-OS presets** (`user-documents`,
-`user-media`, `user-profiles-full`, `downloads`, `server-data`) or explicit
-path specs with environment-token expansion (`%USERPROFILE%`, `$HOME`, `~`),
-multi-user globs (`/home/*/documents`), and regex include/exclude filters —
-all expanded **on the agent**, never centrally. Presets resolve real
-locations (Windows known folders — OneDrive-redirect aware; Linux XDG
-`user-dirs.dirs`, locale-proof; macOS user folders) and exclude system
-files, thumbnails, caches, and other junk by default. Cloud-placeholder
+A group's `settings` section carries the typed half of remote configuration,
+delivered over the same policy channel as everything else (an edit invalidates
+agent caches immediately): log level, scan selections, inventory settings, and
+an optional scan schedule. Scan selections accept **predefined per-OS presets**
+(`user-documents`, `user-media`, `user-profiles-full`, `downloads`,
+`server-data`) or explicit path specs with environment-token expansion
+(`%USERPROFILE%`, `$HOME`, `~`), multi-user globs (`/home/*/documents`), and
+regex include/exclude filters — all expanded **on the agent**, never centrally.
+Presets resolve real locations (Windows known folders — OneDrive-redirect
+aware; Linux XDG `user-dirs.dirs`, locale-proof; macOS user folders) and exclude
+system files, thumbnails, caches, and other junk by default. Cloud-placeholder
 files (e.g. OneDrive online-only) are detected from attributes and **never
 opened**, so an inventory can't accidentally hydrate a user's cloud drive.
+
+The `policy` section of the same group carries the extraction, scheduling and
+local-surface keys — [Every policy key](#every-policy-key) — and both sections
+layer across groups by the rules in
+[Configuration groups and layering](#two-groupings).
 
 ### Group settings schema
 
@@ -786,7 +888,161 @@ until an agent advertises it; name it with **+ add another**.)
     forward-looking; it changes nothing on the fleet today. `scan_schedule_cron`
     and the three local-access gates **are** live.
 
-## Inventory commands (extensible, no redeploy)
+
+### Versions, history and rollback {#config-versions}
+
+Every group carries its own version history, and **publishing is forward-only**.
+Any change to a group's `settings` or `policy` — through `POST` (v1), `PATCH`, or
+a rollback — inserts a new immutable snapshot of *both* sections. Nothing is ever
+edited in place, so the document an agent ran last Tuesday is still readable.
+
+Two counters, and they answer different questions:
+
+| Counter | Scope | Where you see it |
+| --- | --- | --- |
+| `version` | per group, from 1 | The console's history list; the number you target with a rollback |
+| generation | fleet-wide, monotonic | What agents receive as `version` on the wire, and what `confirmed_generation` compares against |
+
+The **generation** is the highest snapshot sequence among the groups that
+composed a given agent's document. Because the sequence is global, any group
+publishing moves it forward, it never repeats, and comparing two generations
+across two agents is meaningless — it is a change token, not a fleet version.
+
+```bash
+# newest first, keyset-paged with ?before=<version>, cap 100
+curl -s http://central:8000/api/v1/agents/config-groups/$GROUP_ID/history \
+  -H "Authorization: Bearer $ADMIN_KEY"
+
+# republish version 4 as a new version, live immediately
+curl -X POST http://central:8000/api/v1/agents/config-groups/$GROUP_ID/rollback \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"version": 4, "note": "OCR was pinning the NAS CPU"}'
+```
+
+A rollback **copies** the old snapshot forward as a new version rather than
+rewinding the counter, and it publishes immediately — there is deliberately no
+phased option, because reverting a configuration that is actively breaking
+machines is the wrong moment to schedule anything. For the same reason it
+**cancels any live rollout on that group**: leaving one running would keep
+handing the bad version to the covered slice while everyone else recovered.
+
+The console shows the history inside the group's edit dialog, with a *restore*
+action per version. Every publish, rollback, membership change and rollout
+transition is audited — group ids, names and version numbers only; document
+bodies are never written to the audit log.
+
+!!! note "What invalidates an agent's cached document"
+    The delivered ETag is `"groups/<generation>/h:<hash>/t:<taxonomy_version>"`,
+    and each of the three parts catches something the others miss: a contributing
+    group publishing (generation), the merged content changing (the hash — which
+    is also what catches a **membership or priority edit**, neither of which moves
+    a version number), and a taxonomy edit. An agent re-applies on any ETag
+    change; an unchanged document is a `304`.
+
+!!! info "Nothing changed on the wire for agents"
+    `GET /agents/{agent_id}/policy` still answers
+    `{"scope": …, "version": …, "policy": {…}}` with the merged keys at the top
+    level and merged settings under `group`. `scope` is now the constant
+    `"groups"` (there is one resolution scheme, so the field carries no
+    information and exists only so old binaries keep parsing) and `version` is
+    the generation. Deployed agent binaries need no update.
+
+## Phased rollouts {#phased-rollouts}
+
+A configuration change can be handed to the fleet in up to **five tiers**, each
+a coverage percentage plus a delay, instead of reaching every member on the next
+poll. Attach a `rollout` block to the same `PATCH` that publishes the change:
+
+```bash
+curl -X PATCH http://central:8000/api/v1/agents/config-groups/$GROUP_ID \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{
+        "policy": {"extract_ocr": true, "extract_body_text": true},
+        "note": "turn OCR on for the filers",
+        "rollout": {
+          "tiers": [
+            {"percent": 10,  "delay_minutes": 0},
+            {"percent": 50,  "delay_minutes": 120},
+            {"percent": 100, "delay_minutes": 240}
+          ],
+          "starts_at": "2026-08-12T02:00:00Z"
+        }
+      }'
+```
+
+How it behaves:
+
+- **The new version is published either way.** With a rollout, the group's
+  `current_version` stays where it was and the new snapshot is handed only to
+  the agents inside the active tier; without one, `current_version` moves and
+  every member picks the change up on its next poll.
+- **Agents are bucketed 0–99 by a stable hash of their id.** Tier *P* covers
+  every bucket below *P*, so `10` means "the same ten percent of the fleet,
+  every time". Nothing records which agents a tier covered: the bucket is
+  derived, so a fleet that grows mid-rollout keeps a uniform slice with no
+  backfill, and re-running a rollout hits the same machines first.
+- **`delay_minutes` on tier *N* is the wait after tier *N−1* activated**; tier
+  0's delay counts from the rollout's start. `0` means "go live at the next
+  tick".
+- **A worker tick advances one tier per minute-tick**, even when several delays
+  have lapsed. Each tier exists so somebody can look at the fleet between them;
+  collapsing them would skip exactly that.
+- **Reaching the last tier completes the rollout** — status `completed`, and
+  `current_version` finally moves to the target. From then on coverage does not
+  depend on the rollout at all.
+- **`starts_at` in the future covers nobody** until the tick that promotes it.
+  Expect up to 60 seconds of lag between the scheduled minute and tier 0 going
+  live; the API and the worker deliberately share the tick's clock rather than
+  each deciding what "now" means.
+
+Tier lists are validated on write: 1–5 entries, `percent` 1–100 **strictly
+ascending**, `delay_minutes` a non-negative integer, and the **last tier must be
+100** (422 otherwise). A rollout that stopped at 60% would leave the group
+permanently split between two documents with nothing recording that it was
+intentional — "configure a subset and stop" is an edit to a narrower group, not
+a rollout. Requesting a rollout without a document change is also a 422: there
+would be nothing to roll out.
+
+### Watching, promoting and cancelling
+
+```bash
+# live rollouts only (the default); ?status=completed|cancelled for history
+curl -s http://central:8000/api/v1/agents/config-rollouts \
+  -H "Authorization: Bearer $ADMIN_KEY"
+
+curl -X POST .../api/v1/agents/config-rollouts/$ROLLOUT_ID/promote   # advance now
+curl -X POST .../api/v1/agents/config-rollouts/$ROLLOUT_ID/cancel    # stop shipping it
+```
+
+Each row carries `status`, `current_tier`, `covered_percent`,
+`next_promotion_at`, and the group it belongs to — which is what the console's
+**live rollouts** panel renders, with promote-now and cancel buttons per row.
+**Promote** skips the remaining delay for a running rollout (409 when it is not
+running — a scheduled rollout has no tier to advance from); promoting the last
+tier completes it, exactly as the tick would.
+
+!!! warning "Cancel means fall back, not freeze"
+    Cancelling leaves `current_version` untouched, so agents already covered by
+    an active tier **return to the previous version on their next poll** (within
+    one poll interval, ~60 s). That is what makes cancel a safe panic button —
+    but it is not "keep what has shipped so far". To keep the new version, keep
+    promoting until the rollout completes.
+
+!!! note "One live rollout per group"
+    Starting a second while one is `scheduled` or `running` is a `409`; two
+    overlapping rollouts would each define a different active version for the
+    same agent. Cancel or complete the first. A
+    [rollback](#config-versions) also cancels whatever is live.
+
+    Promotion is skipped entirely while central is in
+    [maintenance mode](operations.md#maintenance-mode) — a rollout is a
+    wall-clock schedule, so it simply resumes (one tier per tick) once the mode
+    lifts.
+
+Phased rollouts cover **configuration**, not binaries. Signed agent releases
+ship to the whole fleet on upload and are gated by the `auto_update` policy key
+instead — see [Self-update with signed releases](#self-update-with-signed-releases).
+
 
 Beyond media scanning, agents accept generic **inventory commands**: a
 composition of *collectors* over a preset or path selection. Built-in
@@ -994,46 +1250,48 @@ replication, analogous to the central Postgres↔Meilisearch reconcile sweep.
 
 ## Policy keys
 
-Central pushes a per-scope **policy** the agent polls (with ETag) and applies
-within one poll interval. The policy controls which libraries/paths the agent
-scans, preset exclude bundles, and the local-access flags below. mTLS is the only
-integrity layer on this channel; there is no separate payload signing (a single
-operator is the sole policy author). Policy is **advisory-by-asymmetry**: central
-can *disable* a local capability and the agent honors it on next poll, but
-central cannot reach into the agent to read local-only data.
+Central pushes the resolved **configuration document** the agent polls (with
+ETag) and applies within one poll interval. The keys below are the `policy`
+section of a [configuration group](#two-groupings): they control which
+libraries/paths the agent scans, preset exclude bundles, extraction, and the
+local-access flags. mTLS is the only integrity layer on this channel; there is
+no separate payload signing (a single operator is the sole author). The channel
+is **advisory-by-asymmetry**: central can *disable* a local capability and the
+agent honors it on next poll, but central cannot reach into the agent to read
+local-only data.
 
 For how these keys interact with the host's environment variables and sidecar
 file — which surface wins per setting — see
 [Agent settings → Precedence](reference/agent-settings.md#precedence).
 
-### Scopes, and why they replace rather than merge {#policy-scopes}
+### How a key gets its value {#policy-scopes}
 
-A policy document is written at one of three scopes:
+There is one resolution rule, and it runs per key:
 
-| Scope string | Applies to |
-| --- | --- |
-| `global` | every agent |
-| `group:<rollout_group>` | agents in that **policy (rollout) group** — set at enrollment and re-assignable per agent from the Agents table; [not the same thing as a *configuration group*](#two-groupings) |
-| `agent:<uuid>` | one agent |
+1. Take the agent's groups — **Global**, plus every group it is a member of — in
+   ascending `(priority, name)` order.
+2. Walk them in that order. Each group that *sets* the key overwrites the
+   running value; a group that says nothing about it changes nothing.
+3. Whatever survives is delivered. A key no group sets at all is simply absent
+   from the document, and the agent applies its **built-in default**.
 
-Resolution is **most-specific-wins**: `agent:` beats `group:` beats `global`.
+So "absent" in a group document means *let a lower-priority group or the
+built-in default supply this* — which is emphatically not the same as `false`.
+The full model, including the shallow-merge rule for nested objects and the
+`settings`-wins tie-break on the three lifted keys, is in
+[Configuration groups and layering](#two-groupings); the per-agent answer with
+per-key attribution is in
+[the effective-configuration report](#effective-config).
 
-!!! danger "The winning scope supplies the WHOLE document"
-    There is **no key merging**. If an agent has an `agent:` document, that
-    document *is* its policy — every key the `global` document was providing
-    simply stops applying, and the agent falls back to its **built-in default**
-    for those keys, not to the broader scope. A narrower document must therefore
-    carry every key it needs. This is the single most surprising property of the
-    channel; the console shows exactly which keys a save would stop applying
-    before you confirm it.
-
-Writes are **append-only versions** — a `PUT` inserts a new row at
-`version = prior max + 1` and never mutates history.
+Publishing is **forward-only**: every change to a group snapshots a new version
+and history is never rewritten. See
+[Versions, history and rollback](#config-versions).
 
 ### Every policy key
 
-All keys are optional; **absent means "inherit-or-default"**, which is not the
-same as `false`. "Enforced by" says who actually acts on the value.
+All keys are optional; **absent means "a lower-priority group or the built-in
+default supplies it"**, which is not the same as `false`. "Enforced by" says who
+actually acts on the value.
 
 | Key | Type | Absent = | Enforced by | What it controls |
 | --- | --- | --- | --- | --- |
@@ -1068,63 +1326,73 @@ Two more keys appear in a delivered document but are **not operator-settable**:
 
 - `taxonomy_version` — injected by central per response so a taxonomy edit
   invalidates the agent's cache. Writing it has no effect.
-- `group` — where the assigned *configuration group*'s settings ride. An
-  operator-authored top-level `group` key **suppresses the config-group fold
-  entirely** (it is never clobbered), so don't author one unless you mean it.
+- `group` — where the merged `settings` section rides. Authoring a top-level
+  `group` key in a group's raw `policy` JSON accomplishes nothing: `group` *is*
+  the settings section, and the real one overwrites the shadow.
 
-Unknown keys are **preserved verbatim**: the schema is `extra="allow"` and the
-row stores the submitted body as-is, so an older central can never strip a newer
-agent's key. The console re-emits keys it does not model rather than dropping
-them, and lists them for you.
+Unknown keys in the `policy` section are **preserved verbatim**, so an older
+central can never strip a newer agent's key. The console re-emits keys it does
+not model rather than dropping them, and lists them for you. (The `settings`
+section is the strict half — an unknown key there is a 422.)
 
-### Editing policy in the console
+### Editing configuration in the console {#editing-config-console}
 
-The Agents page carries a full **Agent policy** editor:
+The Agents page carries a compact **configuration groups** table in merge order
+— name, priority, member count, current version, rollout status — so it reads
+top-to-bottom as "what overrides what", with up/down buttons to reorder a group
+and an **edit** action per row.
 
-- a **scope selector** (Global / Rollout group / Specific agent) that loads that
-  scope's stored document, or tells you it has none and what it inherits today —
-  and, for a group scope, **how many agents are in that group** across the whole
-  fleet (`0` meaning the document you are writing is not delivered to anything
-  yet);
-- a grouped, **tri-state** form for every key above — *Inherit (not set)* versus
-  an explicit value — so you never accidentally write `false` where you meant
-  "say nothing";
-- a **replacement warning** on any non-global scope, naming the exact keys a save
-  would stop applying;
-- an **"effective now"** column when a specific agent is selected, showing the
-  value that agent actually has and which document supplied it (agent policy /
-  rollout-group policy / global policy / config group / agent default), from
-  `GET /api/v1/agent-policies/effective/{agent_id}` (admin scope). That endpoint
-  mirrors the agent-plane resolution exactly, minus the injected
-  `taxonomy_version`, and never stamps the agent's `last_seen_at`;
-- a **raw JSON** escape hatch that round-trips forward-compat keys;
-- a read-only **recent versions** list per scope.
+Edit opens a **dialog** holding every option a group can set, settings and
+policy alike, grouped by topic rather than by validator: *General* (name,
+description, priority), *Scanning*, *Inventory*, *Extraction & privacy*, *Local
+surface*, and *Advanced* (raw JSON for forward-compat keys). Sections are
+collapsed except *General* — there are roughly thirty fields behind that button
+and it is rarely-visited surface.
 
-The other direction is on the agents table itself: each row's **Policy group**
-cell is editable (free text, suggesting the groups that exist) and shows the
-scope that agent resolves *today* — `resolves group:filers`, or `global` when the
-group has no document, or `agent:<uuid>` when a per-agent document outranks the
-group. Changing it asks for confirmation first, because the same field also
-decides [canary-release membership](#two-groupings).
+Inside the dialog:
+
+- every boolean is **tri-state** — *Inherit (not set)* versus an explicit value —
+  so you never accidentally write `false` where you meant "say nothing".
+  *Inherit* now has a concrete meaning: a lower-priority group, or the agent's
+  built-in default, supplies this key;
+- the footer publishes two ways: **Save & apply now** (members pick the change up
+  on their next poll) or **Save & phased rollout…**, which opens a tier editor of
+  up to five percent/delay rows, validated client-side against the same rules the
+  API enforces;
+- **version history** with a *restore* action per entry sits in the dialog, next
+  to the document it belongs to.
+
+The other direction is the agents table itself. Each row's detail panel carries
+**group membership** as a checkbox list (Global shown checked and disabled — it
+is implicit) and the **effective configuration** viewer described in
+[Checking one agent's effective configuration](#effective-config): the merged
+document with a source badge on every key, a via-rollout marker where one
+applies, the amber *not enforced yet* chips, and the delivered-versus-confirmed
+generation.
+
+A separate **live rollouts** panel lists any rollout in flight — group, tier
+*n*/*m*, covered percent, next promotion ETA — with promote-now and cancel
+buttons.
 
 Setting a key is only half the story for anything host-dependent. Expand an
 agent's **details** row in the agents table to see its
 [capability advertisement](#agent-capabilities) — extraction support and
 schema, the `ffmpeg` / `ffprobe` / `tesseract` / `exiftool` / poppler matrix, the supported
-`formats` — next to its effective content-extraction policy, plus an explicit
+`formats` — next to its effective content-extraction settings, plus an explicit
 list of the settings **that agent will ignore** and why. That is the answer to
 "I turned OCR on fleet-wide; why is nothing happening on this box".
 
-### Scan scheduling from policy (service installs)
+### Scan scheduling from configuration (service installs)
 
 A service-managed `filearr-agent run` schedules its own scans — no external
-Task Scheduler or cron entry to lose across reinstalls. Set `scan_cron`
-(5-field cron, agent-local time), `scan_interval_seconds` (≥300; cron wins if
-both are set), and/or `scan_on_start` (one scan ~30 s after start) in the
-agent's policy, or `scan_schedule_cron` in a config group. All absent =
-scheduler off. Scans run as a child process of the daemon (identical to a
-hand-run `filearr-agent scan`, crash-isolated), never overlap, and a policy
-edit takes effect on the next poll without a restart. Container deployments
+Task Scheduler or cron entry to lose across reinstalls. In any group the agent
+belongs to, set `scan_cron` (5-field cron, agent-local time),
+`scan_interval_seconds` (≥300; cron wins if both are set), and/or
+`scan_on_start` (one scan ~30 s after start) in its `policy` section, or
+`scan_schedule_cron` in its `settings` section. All absent = scheduler off.
+Scans run as a child process of the daemon (identical to a hand-run
+`filearr-agent scan`, crash-isolated), never overlap, and an edit takes effect
+on the next poll without a restart. Container deployments
 keep using the entrypoint's `FILEARR_AGENT_SCAN_INTERVAL` loop instead —
 don't enable both.
 
@@ -1168,8 +1436,8 @@ mounted a new share.
     Nothing here can create, edit, move or delete a catalogued item, on the agent
     or centrally.
 
-Everything is **off by default** and enabled per scope from the console (Agents →
-policy editor → *Local access*):
+Everything is **off by default** and enabled per configuration group from the
+console (Agents → the group's **edit** dialog → *Local surface*):
 
 | Policy key | What the local UI may then do |
 | --- | --- |
@@ -1180,9 +1448,9 @@ policy editor → *Local access*):
 Three rules make this safe to hand out:
 
 - **A key you set centrally is locked locally.** Local editing may only fill in
-  keys your policy leaves *unset*. The agent renders a centrally-set value
-  read-only, labelled *managed by central* with the scope and version that set it
-  (e.g. `central policy group:nas v7`), and refuses the edit with a `409`. The
+  keys your groups leave *unset*. The agent renders a centrally-set value
+  read-only, labelled *managed by central* with the group and version that set it
+  (e.g. `central config nas v7`), and refuses the edit with a `409`. The
   reason is not politeness: central re-applies its document on every poll, so a
   local edit to a key you own would silently revert a minute later — worse than
   being told no. The resulting chain is
@@ -1269,9 +1537,15 @@ re-sign a manifest, so a compromised central cannot push a wrongly-signed binary
 - Each release is Ed25519-signed over a canonical manifest; the agent re-derives
   the canonical bytes and verifies before swapping.
 
-**Rollout is staged:** a signed manifest lands as `canary` and is offered only to
-agents in the canary rollout group; once the canary wave confirms healthy, an
-operator **promotes** it to the whole fleet.
+**Every uploaded release is generally visible** once all its artifacts are
+present — there is no separate staging step to promote through. What controls
+who actually takes it is the `auto_update` key in a
+[configuration group](#two-groupings): leave it on where you want the fleet to
+follow releases, set it `false` in a group whose members should hold, and use
+the per-agent **update** action (which bypasses the gate — the click is the
+authorization) to bring machines forward one at a time. Phased tiers currently
+cover configuration, not binaries; attaching releases to the same tier engine is
+a roadmap item.
 
 **Rollback is automatic:** a newly swapped binary is on trial — it writes a boot
 counter and runs a 60-second health window on each launch. On pass it clears the
@@ -1298,11 +1572,11 @@ for the fleet to follow it**:
   used), and they accept this channel (with a logged warning). A key-pinned
   build refuses unsigned bits and tells central so; it updates only through
   the signed-release flow above.
-- **`auto_update` policy (staged rollout):** the offer is gated server-side by
-  the agent-policy key `auto_update` (absent = on). Set it `false` globally
-  and enable it per rollout-group or per-agent to stage a rollout — or leave
-  it on and stage with canary releases. Remember policy scopes replace, they
-  don't merge.
+- **`auto_update` gating (staged rollout):** the offer is gated server-side by
+  the `auto_update` key (absent = on). Set it `false` in the **Global** group
+  and `true` in a higher-priority group holding the machines you want to move
+  first. Layering is per key, so that single key is all either group needs to
+  state — nothing else about their configuration changes.
 - **Console badge + button:** the Agents page shows **"update available"**
   next to any agent whose version differs from what central would offer, with
   an **update** action that queues the update for the agent's next check-in

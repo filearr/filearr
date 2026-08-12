@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 import pytest
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
@@ -29,7 +29,8 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Agent, PolicyVersion
+from filearr.models import Agent, AgentConfigGroup, AgentConfigGroupVersion
+from tests.agentcfg_helpers import reset_config_groups
 
 pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -49,7 +50,7 @@ async def db_maker(pg_uri):
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM agent_commands"))
         await conn.execute(text("DELETE FROM agent_releases"))
-        await conn.execute(text("DELETE FROM policy_versions"))
+        await reset_config_groups(conn)
         await conn.execute(text("DELETE FROM security_events"))
         await conn.execute(text("DELETE FROM agents"))
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -65,7 +66,6 @@ async def client(db_maker, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "auth_enabled", False)
     monkeypatch.setattr(settings, "agents_enabled", True)
     monkeypatch.setattr(settings, "agent_releases_dir", str(tmp_path / "releases"))
-    monkeypatch.setattr(settings, "agent_canary_group", "canary")
 
     # An agent-dist bake with one linux binary.
     dist = tmp_path / "dist"
@@ -87,14 +87,13 @@ async def client(db_maker, monkeypatch, tmp_path):
     app.dependency_overrides.clear()
 
 
-async def _seed_agent(maker, rollout_group="default", version=None):
+async def _seed_agent(maker, version=None):
     fp = "FP:" + uuid.uuid4().hex
     async with maker() as s:
         agent = Agent(
             name="a",
             hostname="a",
             platform="linux",
-            rollout_group=rollout_group,
             cert_fingerprint=fp,
             agent_version=version,
         )
@@ -104,9 +103,20 @@ async def _seed_agent(maker, rollout_group="default", version=None):
 
 
 async def _set_global_policy(maker, policy: dict):
+    """Publish ``policy`` into the permanent Global group (P13: the auto_update
+    gate now reads the layered configuration, not a policy scope)."""
     async with maker() as s:
+        group = (
+            await s.execute(
+                select(AgentConfigGroup).where(AgentConfigGroup.is_system.is_(True))
+            )
+        ).scalars().one()
+        group.policy = policy
+        group.current_version = 2
         s.add(
-            PolicyVersion(scope_type="global", scope_id=None, version=1, policy=policy)
+            AgentConfigGroupVersion(
+                group_id=group.id, version=2, settings={}, policy=policy
+            )
         )
         await s.commit()
 
@@ -257,8 +267,7 @@ async def test_signed_release_beats_dist_fallback(client):
         "/api/v1/agent-releases/9.9.9/artifacts/filearr-agent-linux-amd64", content=art
     )
     assert r.status_code == 200, r.text
-    r = await c.post("/api/v1/agent-releases/9.9.9/promote")
-    assert r.status_code == 200, r.text
+    # P13: no promote step — a fully-uploaded release is fleet-visible at once.
 
     r = await _poll(c, aid, fp, "1.0.0")
     assert r.status_code == 200

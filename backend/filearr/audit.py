@@ -67,23 +67,34 @@ AGENT_DELETED = "agent_deleted"
 # P5-T5 full-manifest reconciliation sweep (records agent_id + the anti-join
 # counters on a mismatch finish, or the in-sync status on a start-match).
 AGENT_RECONCILED = "agent_reconciled"
-# P5-T6 config/policy push: an operator writes a new policy version (records the
-# scope + new version only, NEVER the policy body).
-AGENT_POLICY_UPDATED = "agent_policy_updated"
-# W6-D2 agent configuration groups (remote configuration). Create/update/delete
-# record the group id + name (delete also records the member count that fell back
-# to NULL); assign records the agent + old/new group. The settings body is NEVER
-# recorded. installer_config_issued records an installer-sidecar mint (token hash
-# + config group only — never the raw enrollment token).
+# W6-D2 agent configuration groups (remote configuration), unified in P13.
+# Create/update/delete record the group id + name (delete also records the member
+# count that lost the group); assign records the agent + old/new membership. The
+# settings/policy bodies are NEVER recorded. installer_config_issued records an
+# installer-sidecar mint (token hash + config groups only — never the raw
+# enrollment token).
 AGENT_CONFIG_GROUP_CREATED = "agent_config_group_created"
 AGENT_CONFIG_GROUP_UPDATED = "agent_config_group_updated"
 AGENT_CONFIG_GROUP_DELETED = "agent_config_group_deleted"
+# P13: an agent's group MEMBERSHIP was replaced (records the agent + the old/new
+# group id sets). Keeps its historic event name — the trail is continuous with
+# the pre-P13 single-group assignment it generalises.
 AGENT_CONFIG_GROUP_ASSIGNED = "agent_config_group_assigned"
-# 2026-08-10: an operator re-assigned an enrolled agent's POLICY (rollout) group
-# or renamed it via PATCH /agents/{id}. Distinct from the config-group assignment
-# above because the consequences are different and both are worth reconstructing
-# from the trail: a rollout-group change moves which `group:` policy document the
-# agent resolves AND whether it is in the release-canary cohort.
+# P13 versioned configuration history: a new immutable snapshot was published for
+# one group (records group + per-group version + generation + whether it went
+# live immediately or behind a rollout; NEVER the document body).
+AGENT_CONFIG_VERSION_PUBLISHED = "agent_config_version_published"
+# P13 phased rollouts, replacing the release canary. Created/promoted/cancelled
+# are operator actions; completed is stamped by the worker tick when the last
+# (100%) tier lands. All record group + rollout id + tier only.
+AGENT_CONFIG_ROLLOUT_CREATED = "agent_config_rollout_created"
+AGENT_CONFIG_ROLLOUT_PROMOTED = "agent_config_rollout_promoted"
+AGENT_CONFIG_ROLLOUT_CANCELLED = "agent_config_rollout_cancelled"
+AGENT_CONFIG_ROLLOUT_COMPLETED = "agent_config_rollout_completed"
+# 2026-08-10: an operator renamed an enrolled agent via PATCH /agents/{id}.
+# (Until P13 this endpoint also moved an agent between rollout groups; that
+# column is gone — membership is edited via PUT /agents/{id}/config-groups,
+# audited as agent_config_group_assigned.)
 AGENT_UPDATED = "agent_updated"
 AGENT_INSTALLER_CONFIG_ISSUED = "agent_installer_config_issued"
 # P10-T1 on-demand agent command primitive (admin enqueue/cancel; NOT per-poll)
@@ -107,10 +118,11 @@ AGENT_TRANSFER_CANCELLED = "agent_transfer_cancelled"
 AGENT_SHARE_MAP_CREATED = "agent_share_map_created"
 AGENT_SHARE_MAP_UPDATED = "agent_share_map_updated"
 AGENT_SHARE_MAP_DELETED = "agent_share_map_deleted"
-# P5-T7 signed update manifest: an operator uploads a (canary) release or
-# promotes canary->general (records version + stage only, never the artifacts).
+# P5-T7 signed update manifest: an operator uploads a release (records the
+# version + artifact count only, never the artifacts). P13 removed the
+# canary->general promote action along with release staging, and with it the
+# former agent_release_promoted event.
 AGENT_RELEASE_UPLOADED = "agent_release_uploaded"
-AGENT_RELEASE_PROMOTED = "agent_release_promoted"
 # 2026-08-05: an operator queues a self_update command for one agent from the
 # console (records agent_id + target/current versions only).
 AGENT_UPDATE_TRIGGERED = "agent_update_triggered"

@@ -1,11 +1,12 @@
-"""P5-T7 — signed agent update manifest + staged rollout (central-side).
+"""P5-T7 — signed agent update manifest distribution (central-side).
 
 Central STORES/serves the signed manifest but never verifies the signature (the
 agent does that against its pinned key — Go-side test). These endpoint tests
 cover: the FILEARR_AGENTS_ENABLED gate, two-phase upload (register manifest +
-stream artifacts with sha256 verification), canary→general coverage + the
-promote gate, the up-to-date 204 path, artifact download with no traversal, and
-the confirmed-version rollup.
+stream artifacts with sha256 verification), the "fully-uploaded means
+fleet-visible" rule that replaced the canary/promote staging gate in P13, the
+up-to-date 204 path, artifact download with no traversal, and the
+confirmed-version rollup.
 
 Runs against the migrated pgserver Postgres (mirrors test_agent_commands' harness).
 """
@@ -59,7 +60,6 @@ async def client(db_maker, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "auth_enabled", False)
     monkeypatch.setattr(settings, "agents_enabled", True)
     monkeypatch.setattr(settings, "agent_releases_dir", str(tmp_path / "releases"))
-    monkeypatch.setattr(settings, "agent_canary_group", "canary")
     app = create_app()
 
     async def _test_session():
@@ -73,14 +73,13 @@ async def client(db_maker, monkeypatch, tmp_path):
     app.dependency_overrides.clear()
 
 
-async def _seed_agent(maker, rollout_group="default", version=None) -> tuple[uuid.UUID, str]:
+async def _seed_agent(maker, version=None) -> tuple[uuid.UUID, str]:
     fp = "FP:" + uuid.uuid4().hex
     async with maker() as s:
         agent = Agent(
             name="a",
             hostname="a",
             platform="linux",
-            rollout_group=rollout_group,
             cert_fingerprint=fp,
             agent_version=version,
         )
@@ -150,7 +149,9 @@ async def test_upload_and_sha256_verification(client):
     r = await c.post("/api/v1/agent-releases", json=m)
     assert r.status_code == 201
     body = r.json()
-    assert body["stage"] == "canary" and body["ready"] is False
+    # Registered but not yet uploaded -> not ready, therefore never offered.
+    assert body["ready"] is False
+    assert "stage" not in body  # P13: release staging is gone
 
     # Corrupted bytes -> 400 (central-side upload integrity), file not stored.
     r = await c.put("/api/v1/agent-releases/1.5.0/artifacts/agent-linux-amd64", content=b"CORRUPT")
@@ -183,51 +184,46 @@ async def test_unsigned_or_bad_manifest_rejected(client):
 
 
 # --------------------------------------------------------------------------- #
-# Staged rollout: canary coverage + promote                                    #
+# Visibility: fully-uploaded == fleet-visible (P13 removed canary staging)      #
 # --------------------------------------------------------------------------- #
-async def test_canary_coverage_then_promote(client):
+async def test_release_is_offered_once_artifacts_land(client):
+    """A registered-but-incomplete release is never offered (its download would
+    404); the moment its last artifact lands EVERY agent is offered it. There is
+    no promote step any more — ``auto_update`` in a config group is the brake."""
     c, maker, _settings = client
     art = b"BIN"
-    await _upload_release(c, "1.5.0", [("linux", "amd64", art, "agent-linux-amd64")])
+    m = _manifest("1.5.0", [("linux", "amd64", art, "agent-linux-amd64")])
+    assert (await c.post("/api/v1/agent-releases", json=m)).status_code == 201
 
-    canary_id, canary_fp = await _seed_agent(maker, rollout_group="canary", version="1.4.0")
-    default_id, default_fp = await _seed_agent(maker, rollout_group="default", version="1.4.0")
+    a_id, a_fp = await _seed_agent(maker, version="1.4.0")
+    b_id, b_fp = await _seed_agent(maker, version="1.4.0")
 
-    # Canary agent SEES the canary release.
-    r = await _poll(c, canary_id, canary_fp, "1.4.0")
+    # Artifacts missing -> nothing offered to anyone.
+    assert (await _poll(c, a_id, a_fp, "1.4.0")).status_code == 204
+
+    r = await c.put(
+        "/api/v1/agent-releases/1.5.0/artifacts/agent-linux-amd64", content=art
+    )
     assert r.status_code == 200
-    assert r.json()["version"] == "1.5.0"
 
-    # Default-group agent does NOT (204) until promotion.
-    r = await _poll(c, default_id, default_fp, "1.4.0")
-    assert r.status_code == 204
-
-    # Promote canary -> general.
-    r = await c.post("/api/v1/agent-releases/1.5.0/promote")
-    assert r.status_code == 200 and r.json()["stage"] == "general"
-
-    # Now EVERYONE sees it.
-    r = await _poll(c, default_id, default_fp, "1.4.0")
-    assert r.status_code == 200 and r.json()["version"] == "1.5.0"
+    for aid, fp in ((a_id, a_fp), (b_id, b_fp)):
+        r = await _poll(c, aid, fp, "1.4.0")
+        assert r.status_code == 200
+        assert r.json()["version"] == "1.5.0"
 
 
-async def test_promote_incomplete_conflict(client):
+async def test_promote_endpoint_is_gone(client):
+    """The canary->general promote action was removed with release staging; the
+    path must 404 rather than silently succeeding as something else."""
     c, _maker, _settings = client
-    # Register but do NOT upload the artifact -> not ready -> promote 409.
-    m = _manifest("1.5.0", [("linux", "amd64", b"x", "a")])
-    await c.post("/api/v1/agent-releases", json=m)
-    r = await c.post("/api/v1/agent-releases/1.5.0/promote")
-    assert r.status_code == 409
-    # Already-general is also a 409.
-    await c.put("/api/v1/agent-releases/1.5.0/artifacts/a", content=b"x")
-    assert (await c.post("/api/v1/agent-releases/1.5.0/promote")).status_code == 200
-    assert (await c.post("/api/v1/agent-releases/1.5.0/promote")).status_code == 409
+    await _upload_release(c, "1.5.0", [("linux", "amd64", b"BIN", "agent-linux-amd64")])
+    assert (await c.post("/api/v1/agent-releases/1.5.0/promote")).status_code == 404
+
 
 
 async def test_up_to_date_204(client):
     c, maker, _settings = client
     await _upload_release(c, "1.5.0", [("linux", "amd64", b"BIN", "agent-linux-amd64")])
-    await c.post("/api/v1/agent-releases/1.5.0/promote")
     aid, fp = await _seed_agent(maker, version="1.5.0")
     # Running the same version -> nothing newer.
     r = await c.get(f"/api/v1/agents/{aid}/update-manifest?current=1.5.0", headers=_auth(fp))
@@ -244,7 +240,6 @@ async def test_no_artifact_for_platform_still_served(client):
     # is coverage + freshness, not platform matching.
     c, maker, _settings = client
     await _upload_release(c, "1.5.0", [("windows", "amd64", b"WIN", "agent-win.exe")])
-    await c.post("/api/v1/agent-releases/1.5.0/promote")
     aid, fp = await _seed_agent(maker, version="1.4.0")
     r = await c.get(f"/api/v1/agents/{aid}/update-manifest?current=1.4.0", headers=_auth(fp))
     assert r.status_code == 200
@@ -283,7 +278,6 @@ async def test_download_artifact_and_traversal_guard(client):
 async def test_confirmed_version_rollup(client):
     c, maker, _settings = client
     await _upload_release(c, "1.5.0", [("linux", "amd64", b"BIN", "agent-linux-amd64")])
-    await c.post("/api/v1/agent-releases/1.5.0/promote")
     aid, fp = await _seed_agent(maker, version="1.4.0")
 
     # A manifest poll reporting the running version records it (confirmed signal).

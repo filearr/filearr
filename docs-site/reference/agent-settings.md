@@ -7,7 +7,7 @@ beats what*.
 
 | Surface | Lives where | Edited by | Applies when |
 | --- | --- | --- | --- |
-| **Central policy** | Postgres on central, delivered over the mTLS policy channel | An admin, in the console (Agents → policy editor) | Within one poll interval, no restart |
+| **Central policy** | [Configuration groups](../agents.md#two-groupings) in Postgres on central, delivered over the mTLS policy channel | An admin, in the console (Agents → a group's **edit** dialog) | Within one poll interval, no restart |
 | **Local override** | `local-settings.json` in the agent's data dir | Whoever is at the machine, in the agent's own web UI — **only** where central granted a `local_*_control` permission | On the next scheduler tick, no restart |
 | **Environment variables** | The host: service unit, container `environment:`, shell | Whoever owns the host | At process start (restart required) |
 | **Sidecar config file** | `filearr-agent.json` next to the binary or in the OS config dir | Whoever owns the host | At process start (restart required) |
@@ -53,7 +53,7 @@ There is no single rule; it is per setting, and the split is deliberate.
 
 | Setting | Policy key | Local fallback | Rule |
 | --- | --- | --- | --- |
-| Scan cron | `scan_cron` | local override, then `FILEARR_AGENT_SCAN_CRON` | Top-level policy key > config-group `scan_schedule_cron` > local override > env |
+| Scan cron | `scan_cron` | local override, then `FILEARR_AGENT_SCAN_CRON` | The merged `policy` key > the merged `settings` key `scan_schedule_cron` > local override > env |
 | Scan interval | `scan_interval_seconds` | local override, then `FILEARR_AGENT_SCAN_EVERY` | Policy wins whenever the key is present |
 | Scan on start | `scan_on_start` | local override, then `FILEARR_AGENT_SCAN_ON_BOOT` | Policy wins whenever the key is present |
 | Reconcile cadence | `reconcile_interval_seconds` | `FILEARR_AGENT_RECONCILE_INTERVAL` | Env seeds the interval at daemon start; a policy value **live-overrides** it on the next poll, without a restart |
@@ -180,53 +180,59 @@ with "data dir … was adopted into the service install at …". Re-run with the
 
 ---
 
-## Central policy keys
+## Central configuration keys
 
-A **policy** is a versioned JSON document stored at one of three scopes —
-`global`, `group:<rollout_group>`, or `agent:<uuid>` — and resolution is
-most-specific-wins.
+Central configuration lives in **[configuration groups](../agents.md#two-groupings)**.
+A group is a named row with an integer `priority` and two document sections —
+`settings` (typed; unknown keys are a 422) and `policy` (permissive; unknown
+keys are preserved for forward compatibility). Every agent is implicitly in the
+permanent **Global** group and can be a member of any number of others.
 
-Two properties account for nearly all confusion, and both are covered in depth in
-[Distributed agents → Policy keys](../agents.md#policy-keys):
+Two properties account for nearly all confusion, and both are covered in depth
+in [Distributed agents → Policy keys](../agents.md#policy-keys):
 
-- **The winning document supplies the whole policy.** There is
-  [no key merging](../agents.md#policy-scopes). If an agent has an `agent:`
-  document, that document *is* its policy; keys the `global` document was
-  providing fall back to the agent's **built-in default**, not to the broader
-  scope. A narrower document must carry every key it needs.
-- **Absent is not `false`.** An absent key means "inherit-or-default", which for
-  several keys (`watch_mode`, every `extract_*` key) happens to be off — but for
-  others it means "keep the agent's local value", which is a different thing
-  entirely.
+- **Resolution is a per-key layered merge.** The agent's groups are applied in
+  ascending `(priority, name)` order and a later group overrides only the keys
+  it actually sets — [how a key gets its value](../agents.md#policy-scopes). A
+  group therefore states what is *different* about its members; it does not need
+  to repeat the fleet-wide baseline. Merging is shallow per section: a nested
+  object such as `inventory` is replaced wholesale, not deep-merged.
+- **Absent is not `false`.** An absent key means "a lower-priority group or the
+  built-in default supplies this", which for several keys (`watch_mode`, every
+  `extract_*` key) happens to be off — but for others it means "keep the agent's
+  local value", which is a different thing entirely.
 
-The full per-key table — 22 keys, their types, what absent means, and whether the
-**agent** or **central** enforces each one — is in
-[Every policy key](../agents.md#every-policy-key). The console's policy editor
-renders the same text as a hint under each field and as a hover tooltip, and
-shows which document currently supplies each effective value.
+The full per-key table — types, what absent means, and whether the **agent** or
+**central** enforces each one — is in
+[Every policy key](../agents.md#every-policy-key). The console's group dialog
+renders the same text as a hint under each field and as a hover tooltip.
 
-Configuration groups carry a separate, stricter settings object (unknown keys are
-rejected with a 422 rather than stored): see
-[Group settings schema](../agents.md#group-settings-schema). One exception to the
-strictness: `inventory.collectors` is free-form. The four shipped collectors
-(`stat`, `owner`, `perms`, `placeholder`) are a **catalogue the console renders as
-a checkbox list**, not a whitelist — a newer agent build's collector still works,
-and a stored name central cannot describe is preserved rather than dropped. Table
-and rationale: [Group settings schema](../agents.md#group-settings-schema).
+The `settings` section is the stricter half (unknown keys rejected with a 422
+rather than stored): see
+[Group settings schema](../agents.md#group-settings-schema). One exception to
+the strictness: `inventory.collectors` is free-form. The four shipped collectors
+(`stat`, `owner`, `perms`, `placeholder`) are a **catalogue the console renders
+as a checkbox list**, not a whitelist — a newer agent build's collector still
+works, and a stored name central cannot describe is preserved rather than
+dropped.
 
-!!! important "`group:<rollout_group>` is not the configuration group"
-    An agent has **two independent group assignments** and only one of them takes
-    part in policy resolution. The **policy group** (`agents.rollout_group`) is
-    what `group:<name>` scopes match — and it doubles as the release-canary
-    selector. The **configuration group** (`agents.config_group_id`) carries log
-    level, scan selections, inventory collectors and `scan_schedule_cron`, and
-    policy resolution never consults it. Both are editable per agent from the
-    Agents table; changing one does not change the other.
+Three keys exist in both sections — `web_ui_enabled`, `local_access_enabled`,
+`auth_required`. When a group sets both, **the `settings` value wins**; a `null`
+there means "inherit" and overrides nothing.
 
-    Full contrast table, plus the worked "desktops inventory but don't capture
-    GPS EXIF / filers do everything" example:
-    [Two groupings](../agents.md#two-groupings) and
-    [Worked example](../agents.md#policy-group-example).
+!!! tip "Which group supplied this value?"
+    `GET /api/v1/agents/{agent_id}/effective-config` (admin scope) returns the
+    merged document plus per-key provenance — the group name and version behind
+    every single key — and the console renders it as source badges in the
+    agent's detail row. Full shape:
+    [Checking one agent's effective configuration](../agents.md#effective-config).
+
+!!! note "Changes can be phased"
+    A group edit can be published to the whole group at once or handed out in up
+    to five percentage tiers with delays between them, and either can be rolled
+    back by republishing an older version. Neither changes what an agent parses —
+    it still polls one document. See
+    [Phased rollouts](../agents.md#phased-rollouts).
 
 ---
 
@@ -263,7 +269,8 @@ state):
 | `enrollment_token` | Single-use enrollment token | **Erased after a successful enroll** and replaced by `enrollment_token_consumed_at`, so the secret is never left at rest and a re-run cannot attempt a (rejected) replay |
 | `enrollment_token_consumed_at` | RFC3339 stamp | Written by the agent, not by you |
 | `agent_name` | Friendly name in the console | Defaults to the device hostname |
-| `config_group` | Configuration group to join | Read at enrollment |
+| `config_group_names` | List of [configuration groups](../agents.md#two-groupings) to join. Global is implicit and never listed | Read at enrollment. The minted token also records the list, so central applies it whatever the agent sends |
+| `config_group` | The first group name, repeated | Read at enrollment by shipped agent builds, which parse this key and not the list. The console's generated sidecar writes both |
 | `data_dir` | Where key/cert/state/index live | |
 | `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | |
 | `log_dir` | Directory for the rotating log | |

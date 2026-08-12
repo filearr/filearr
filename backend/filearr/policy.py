@@ -1,34 +1,32 @@
-"""Agent config/policy resolution + validation (Phase 5, P5-T6).
+"""Agent policy-document validation (Phase 5, P5-T6; trimmed by P13).
 
-The pure-ish core behind the config-push channel (research §6):
+The pure core behind the ``policy`` half of a configuration group's document:
 
-* :func:`parse_scope` / :func:`scope_string` — the frozen scope-string grammar
-  ``global`` | ``group:<name>`` | ``agent:<uuid>`` ↔ ``(scope_type, scope_id)``.
 * :class:`PolicyModel` / :func:`validate_policy` — additive v1 validation of the
   known policy keys (unknown keys are PRESERVED verbatim — an older central must
   never strip a newer agent's keys; §6.3).
-* :func:`resolve_effective_policy` — the most-specific-wins resolution across the
-  precedence ``agent`` > ``group`` > ``global`` (NO merging in v1: the winning
-  row IS the policy; merging is a documented future option).
+* :func:`flatten_path_grants` — RBAC grants → the flattened ``path_scope``
+  predicate list the agent applies locally.
 
-The HTTP surface (agent poll + admin write) lives in
-:mod:`filearr.api.agent_policies`; this module holds the logic so it is unit-
-testable without a request.
+HISTORY (P13, 2026-08-11): this module also owned the scope grammar
+(``global`` | ``group:<name>`` | ``agent:<uuid>``) and ``resolve_effective_policy``,
+a most-specific-wins resolution where the winning row supplied the WHOLE
+document. Both are gone. There is exactly one grouping concept now — the
+configuration group — and resolution is a per-key layered merge across an
+agent's groups in priority order (:func:`filearr.agent_config.resolve_effective_config`).
+What survives here is validation, which the group's ``policy`` section still
+runs unchanged.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import uuid
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import rbac
-from filearr.models import PolicyVersion
 from filearr.presets import validate_preset_names
 
 #: Offline-grace default for the local query surface (P7-T4 / research §5.2, R4).
@@ -43,45 +41,6 @@ DEFAULT_OFFLINE_GRACE_SECONDS = 86400
 #: Upper bound on the number of flattened path-scope predicates a policy may carry
 #: (payload-size guard; the whole policy is additionally 64KiB-capped at the API).
 MAX_PATH_SCOPE_PREDICATES = 1000
-
-
-# --------------------------------------------------------------------------- #
-# Scope grammar                                                                #
-# --------------------------------------------------------------------------- #
-class ScopeError(ValueError):
-    """Malformed scope string (maps onto a 422 at the API)."""
-
-
-def parse_scope(scope: str) -> tuple[str, str | None]:
-    """``global`` | ``group:<name>`` | ``agent:<uuid>`` → ``(scope_type, scope_id)``.
-
-    Raises :class:`ScopeError` on anything malformed (empty group name, a
-    non-UUID agent id, an unknown prefix). ``global`` → ``("global", None)``;
-    ``group:x`` → ``("group", "x")``; ``agent:<uuid>`` → ``("agent", "<uuid>")``
-    (the UUID is normalised to its canonical lowercase text form)."""
-    if scope == "global":
-        return "global", None
-    prefix, sep, rest = scope.partition(":")
-    if not sep:
-        raise ScopeError(f"malformed scope: {scope!r}")
-    if prefix == "group":
-        if not rest:
-            raise ScopeError("group scope requires a non-empty name")
-        return "group", rest
-    if prefix == "agent":
-        try:
-            aid = uuid.UUID(rest)
-        except (ValueError, AttributeError) as err:
-            raise ScopeError(f"agent scope requires a UUID: {rest!r}") from err
-        return "agent", str(aid)
-    raise ScopeError(f"unknown scope kind: {prefix!r}")
-
-
-def scope_string(scope_type: str, scope_id: str | None) -> str:
-    """Inverse of :func:`parse_scope`."""
-    if scope_type == "global":
-        return "global"
-    return f"{scope_type}:{scope_id}"
 
 
 # --------------------------------------------------------------------------- #
@@ -164,11 +123,11 @@ class PolicyModel(BaseModel):
     # ``auto_update`` — whether central OFFERS updates on this agent's periodic
     # update-manifest poll. Enforced SERVER-side (the poll answers 204 when
     # disabled), so it gates every agent build uniformly. Absent = TRUE
-    # (preserves the historic always-offer behaviour). Staged rollout: set the
-    # global policy false and enable per rollout-group/agent scope — remember
-    # policy resolution is most-specific-wins with NO key merging, so a
-    # narrower doc must carry every key it needs. An operator-triggered
-    # self_update command bypasses this gate (the click IS the authorization).
+    # (preserves the historic always-offer behaviour). Staged binary rollout:
+    # set it false in Global and true in a higher-priority group — the P13
+    # layered merge overrides per KEY, so that narrower group carries this one
+    # key and nothing else. An operator-triggered self_update command bypasses
+    # the gate entirely (the click IS the authorization).
     auto_update: bool | None = None
 
     # --- agent-side content extraction (2026-08-09 parity pass) -------------
@@ -305,54 +264,6 @@ def policy_json_len(policy: Any) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Effective-policy resolution (most-specific-wins; agent > group > global)      #
-# --------------------------------------------------------------------------- #
-async def _max_version_row(
-    session: AsyncSession, scope_type: str, scope_id: str | None
-) -> PolicyVersion | None:
-    """The highest-version row for one scope, or None (the CURRENT policy there)."""
-    q = (
-        select(PolicyVersion)
-        .where(
-            PolicyVersion.scope_type == scope_type,
-            PolicyVersion.scope_id.is_(scope_id)
-            if scope_id is None
-            else PolicyVersion.scope_id == scope_id,
-        )
-        .order_by(PolicyVersion.version.desc())
-        .limit(1)
-    )
-    return (await session.execute(q)).scalars().first()
-
-
-async def next_version(
-    session: AsyncSession, scope_type: str, scope_id: str | None
-) -> int:
-    """The version a NEW row for this scope takes: prior scope max + 1 (1 if none)."""
-    row = await _max_version_row(session, scope_type, scope_id)
-    return (row.version + 1) if row is not None else 1
-
-
-async def resolve_effective_policy(
-    session: AsyncSession, agent: Any
-) -> tuple[str, int, dict]:
-    """Resolve the effective policy for ``agent`` — most-specific-wins across the
-    precedence ``agent:<id>`` > ``group:<rollout_group>`` > ``global`` (NO
-    merging: the winning row's policy IS the answer). Returns
-    ``(scope_string, version, policy)``; with no policy rows at all,
-    ``("none", 0, {})`` (an agent must never 404 the policy endpoint)."""
-    for scope_type, scope_id in (
-        ("agent", str(agent.id)),
-        ("group", agent.rollout_group),
-        ("global", None),
-    ):
-        row = await _max_version_row(session, scope_type, scope_id)
-        if row is not None:
-            return scope_string(scope_type, scope_id), row.version, row.policy
-    return "none", 0, {}
-
-
-# --------------------------------------------------------------------------- #
 # RBAC grant → flattened path-scope predicate list (R2, best-effort)           #
 # --------------------------------------------------------------------------- #
 class PathScopeFlattenError(ValueError):
@@ -394,7 +305,7 @@ def flatten_path_grants(
       (``strip_library_prefix``): the agent index is per-machine with its own roots
       and no central library_id, so multi-library grants collapse onto one
       rel_path space. A per-machine agent typically maps to one library's roots;
-      push the right scope to the right rollout group.
+      push the right scope from the right config group.
     * **Hashed (over-long) ltree labels** are one-way (:data:`rbac.HASHED_LABEL`)
       and cannot be turned back into a glob. Raises :class:`PathScopeFlattenError`.
     * **GLOB metacharacters in a literal directory name** (a real dir literally

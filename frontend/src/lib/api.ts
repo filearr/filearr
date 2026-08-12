@@ -2486,7 +2486,10 @@ export type AgentStatus = "pending" | "active" | "revoked";
 
 export interface EnrollmentTokenOut {
   token_hash: string;
-  rollout_group: string;
+  /** P13: the configuration groups (by NAME) the enrolling agent joins. A name
+   *  list rather than ids because a token is minted before the agent exists and
+   *  is often pasted into an installer by hand. `[]` = Global membership only. */
+  config_group_names: string[];
   expires_at: string;
   consumed_at: string | null;
   consumed_by: string | null;
@@ -2503,17 +2506,23 @@ export interface AgentOut {
   name: string;
   hostname: string;
   platform: string;
-  rollout_group: string;
   status: AgentStatus;
   cert_fingerprint: string | null;
   last_contiguous_seq_no: number;
   last_seen_at: string | null;
   agent_version: string | null;
-  policy_version_applied: number | null;
+  /** P13: the config GENERATION (max version seq over the groups that composed
+   *  this agent's document) the agent last echoed back via `?applied=`. Compare
+   *  against `EffectiveConfigOut.generation` to see whether it has caught up.
+   *  Replaces the old whole-document applied-version number, which counted on a
+   *  different scale entirely. */
+  config_generation_applied: number | null;
   revoked_at: string | null;
   created_at: string;
-  // W6-D4: current config-group assignment (null = built-in defaults).
-  config_group_id: string | null;
+  /** P13: EXPLICIT configuration-group memberships. Global is implicit and is
+   *  never listed here. Populated only by `GET /agents` — a PATCH/DELETE
+   *  response always carries `[]`, so never write it back from one. */
+  config_group_ids: string[];
   // W6-D3: capability advertisement persisted from the agent's command poll.
   capabilities: Record<string, unknown> | null;
   /** 2026-08-11: central's verdict on each advertised host tool — `ok` /
@@ -2552,129 +2561,42 @@ export const listAgents = (limit = 50, offset = 0) =>
 
 /** PATCH /agents/{id} — the operator-mutable fields of an ENROLLED agent.
  *
- *  `rollout_group` is the POLICY group (the middle scope: agent > group >
- *  global) AND the release-canary selector. Before this endpoint it was written
- *  once at enrollment and never again, so an agent's policy group was frozen for
- *  life. It is deliberately NOT the same thing as the *config* group
- *  (`assignConfigGroup`), which policy resolution never consults. */
+ *  Exactly one field since P13: group membership moved to its own full-replace
+ *  endpoint (`setAgentConfigGroups`) because an agent is now in MANY groups, and
+ *  the old single group-name field went with the whole policy-scope scheme. */
 export interface AgentPatchIn {
-  rollout_group?: string;
   name?: string;
 }
 
-/** The patched agent plus the CONSEQUENCE of the patch: the policy scope it now
- *  resolves (recomputed server-side after the write) and whether it is now in
- *  the release-canary cohort. Both change together when the group moves. */
-export interface AgentPatchOut extends AgentOut {
-  /** `agent:<uuid>` | `group:<name>` | `global` | `none`. */
-  policy_scope: string;
-  policy_version: number;
-  canary_releases: boolean;
-}
-
 export const updateAgent = (id: string, body: AgentPatchIn) =>
-  request<AgentPatchOut>(`/agents/${id}`, {
+  request<AgentOut>(`/agents/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
 
-/** One distinct POLICY (rollout) group across enrolled agents, with its member
- *  count. Server-side aggregate on purpose: the agents list pages (≤200 rows),
- *  so counting the loaded window would under-report any larger fleet. */
-export interface RolloutGroupOut {
-  name: string;
-  agent_count: number;
-  /** True for the configured release-canary group (FILEARR_AGENT_CANARY_GROUP). */
-  canary: boolean;
-}
-
-/** The roster plus the canary group's NAME — the name is served explicitly
- *  because a canary group with zero members carries no row-level flag, and that
- *  zero ("canary releases reach nobody") is exactly what needs surfacing. */
-export interface RolloutGroupsOut {
-  canary_group: string;
-  groups: RolloutGroupOut[];
-}
-
-export const listRolloutGroups = () =>
-  request<RolloutGroupsOut>("/agents/rollout-groups");
-
-/** One CURRENT agent-policy row (P5-T6/P7-T4 policy channel). Scopes:
- *  `global` | `group:<rollout_group>` | `agent:<uuid>`; resolution is
- *  most-specific-wins with NO key merging — the winning scope's whole
- *  document applies. Writes are append-only versions. */
-export interface AgentPolicyRow {
-  id: string;
-  scope: string;
-  scope_type: string;
-  scope_id: string | null;
-  version: number;
-  policy: AgentPolicyDoc;
-  actor: string | null;
-  created_at: string;
-}
-
 export type { AgentPolicyDoc };
-
-export const listAgentPolicies = () =>
-  request<AgentPolicyRow[]>("/agent-policies");
-
-export const putAgentPolicy = (scope: string, policy: Record<string, unknown>) =>
-  request<AgentPolicyRow>(`/agent-policies/${encodeURIComponent(scope)}`, {
-    method: "PUT",
-    body: JSON.stringify({ policy }),
-  });
-
-/** Version history for one scope, newest-first (keyset by version desc; `before`
- *  = the last version of the previous page). Read-only; the console shows the
- *  most recent handful. */
-export const listAgentPolicyHistory = (scope: string, limit = 10, before?: number) =>
-  request<AgentPolicyRow[]>(
-    `/agent-policies/${encodeURIComponent(scope)}/history?limit=${limit}` +
-      (before !== undefined ? `&before=${before}` : ""),
-  );
-
-/** Where one key of an agent's effective policy came from. `agent`/`group`/
- *  `global` name the winning policy DOCUMENT's scope (the winner supplies the
- *  whole document — there is no key merging); `group-settings` is the assigned
- *  config group's lift; `default` means no document sets it. */
-export type PolicySourceKind =
-  | "agent"
-  | "group"
-  | "global"
-  | "group-settings"
-  | "default";
-
-/** GET /agent-policies/effective/{agent_id} (admin) — what this agent actually
- *  receives on its next poll, with per-key provenance. Mirrors the agent-plane
- *  resolution exactly; the server-injected `taxonomy_version` is deliberately
- *  omitted (it is never operator-set). */
-export interface EffectivePolicyOut {
-  agent_id: string;
-  scope: string;
-  version: number;
-  policy: Record<string, unknown>;
-  group: { id: string; name: string } | null;
-  source_keys: Record<string, PolicySourceKind>;
-}
-
-export const getEffectivePolicy = (agentId: string) =>
-  request<EffectivePolicyOut>(
-    `/agent-policies/effective/${encodeURIComponent(agentId)}`,
-  );
 
 export const listEnrollmentTokens = () =>
   request<EnrollmentTokenOut[]>("/agents/enrollment-tokens");
 
-export const mintEnrollmentToken = (rollout_group: string, ttl_minutes?: number) =>
+/** Mint a single-use enrollment token. `config_group_names` are joined at
+ *  register time; an unknown name is fail-safe (the agent enrolls into Global
+ *  only), so a typo never blocks an enrollment. */
+export const mintEnrollmentToken = (
+  config_group_names: string[],
+  ttl_minutes?: number,
+) =>
   request<{
     token: string;
     token_hash: string;
-    rollout_group: string;
+    config_group_names: string[];
     expires_at: string;
   }>("/agents/enrollment-tokens", {
     method: "POST",
-    body: JSON.stringify({ rollout_group, ...(ttl_minutes ? { ttl_minutes } : {}) }),
+    body: JSON.stringify({
+      config_group_names,
+      ...(ttl_minutes ? { ttl_minutes } : {}),
+    }),
   });
 
 /** Delete an enrollment token. Unconsumed tokens delete freely; a consumed
@@ -2973,12 +2895,46 @@ export interface GroupSettings {
   scan_selections?: ScanSelection[] | null;
   inventory?: InventoryConfig | null;
   scan_schedule_cron?: string | null;
-  /** Per-group local-surface gates. Absent/null = inherit (global policy,
-   *  else agent default). Delivery lifts these over the GLOBAL policy —
-   *  an explicit per-agent/rollout-group policy row still wins. */
+  /** Per-group local-surface gates. Absent/null = inherit (a lower-priority
+   *  group's value, else the agent default). Delivery LIFTS these to the top
+   *  level of the document, where a non-null settings value beats the merged
+   *  policy key of the same name. */
   web_ui_enabled?: boolean | null;
   local_access_enabled?: boolean | null;
   auth_required?: boolean | null;
+}
+
+// --------------------------------------------------------------------------- //
+// P13 — configuration groups: ONE grouping, layered by priority                 //
+//                                                                               //
+// A group carries two sections: `settings` (typed GroupSettings, extra=forbid)  //
+// and `policy` (the agent policy document, extra=allow). An agent is in the     //
+// permanent Global group plus any number of explicit groups; the effective      //
+// document is a per-KEY merge in ascending `priority` (later wins), tie-broken  //
+// by (name, id). This replaced whole-document policy scopes, the second        //
+// per-agent grouping and the staged-release cohort — none of those concepts     //
+// exist any more, on either end.                                                //
+// --------------------------------------------------------------------------- //
+
+/** One phase of a rollout: `percent` of the fleet (by stable agent-id hash
+ *  bucket) covered once this tier activates, `delay_minutes` after the PREVIOUS
+ *  tier activated (tier 0 counts from the rollout's start). */
+export interface RolloutTier {
+  percent: number;
+  delay_minutes: number;
+}
+
+/** The live rollout embedded in a group row — enough to render a status chip
+ *  without a second request. `current_tier` is -1 until the first tier fires. */
+export interface ActiveRolloutOut {
+  id: string;
+  status: "scheduled" | "running";
+  current_tier: number;
+  tiers: RolloutTier[];
+  target_version: number;
+  starts_at: string | null;
+  started_at: string | null;
+  tier_started_at: string | null;
 }
 
 export interface ConfigGroupOut {
@@ -2986,25 +2942,186 @@ export interface ConfigGroupOut {
   name: string;
   description: string | null;
   settings: GroupSettings;
+  /** The policy half of the group document (extra="allow" — unmodelled keys
+   *  round-trip verbatim; see ./agentPolicyDoc). */
+  policy: AgentPolicyDoc;
+  /** Merge rank: LOWER applies first, so a HIGHER number wins a contested key.
+   *  Global is pinned at 0 and immutable. */
+  priority: number;
+  /** True only for the permanent Global group: undeletable, un-renamable,
+   *  priority-locked, and implicitly containing every agent. */
+  is_system: boolean;
+  current_version: number;
+  /** Explicit members — except for Global, where it is the WHOLE fleet count. */
   member_count: number;
+  active_rollout: ActiveRolloutOut | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One published snapshot of a group document. `seq` is the fleet-wide
+ *  generation counter (what an agent echoes back); `version` is the per-group
+ *  number an operator reads and rolls back to. */
+export interface ConfigVersionOut {
+  seq: number;
+  version: number;
+  settings: GroupSettings;
+  policy: AgentPolicyDoc;
+  actor: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface ConfigGroupDetailOut extends ConfigGroupOut {
+  /** Newest-first, capped at 20 by the server — page the rest via history(). */
+  versions: ConfigVersionOut[];
 }
 
 export interface ConfigGroupIn {
   name: string;
   description?: string | null;
   settings?: GroupSettings;
+  policy?: AgentPolicyDoc;
+  priority?: number;
 }
 
+/** PATCH body. `settings` and `policy` REPLACE their section wholesale —
+ *  authoring is replacement, layering happens ACROSS groups. Passing `rollout`
+ *  publishes the new version behind a phased rollout instead of immediately:
+ *  `current_version` stays put and uncovered agents keep receiving it. */
 export interface ConfigGroupUpdateIn {
   name?: string;
   description?: string | null;
+  priority?: number;
   settings?: GroupSettings;
+  policy?: AgentPolicyDoc;
+  note?: string;
+  rollout?: { tiers: RolloutTier[]; starts_at?: string | null };
 }
 
+/** Ordered by (priority, name) — i.e. in MERGE order, so the table reads
+ *  top-to-bottom as "what overrides what". Global is always first. */
 export const listConfigGroups = () =>
   request<ConfigGroupOut[]>("/agents/config-groups");
+
+export const getConfigGroup = (id: string) =>
+  request<ConfigGroupDetailOut>(`/agents/config-groups/${id}`);
+
+/** Version history, newest-first. `before` is the last `version` of the
+ *  previous page (keyset, strict <). */
+export const listConfigGroupHistory = (id: string, limit = 20, before?: number) =>
+  request<ConfigVersionOut[]>(
+    `/agents/config-groups/${id}/history?limit=${limit}` +
+      (before !== undefined ? `&before=${before}` : ""),
+  );
+
+/** Copy an old snapshot forward as a NEW version and publish it IMMEDIATELY —
+ *  a rollback also cancels any live rollout. Versioning stays forward-only, so
+ *  nothing is ever rewritten in place. */
+export const rollbackConfigGroup = (id: string, version: number, note?: string) =>
+  request<ConfigGroupOut>(`/agents/config-groups/${id}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ version, ...(note ? { note } : {}) }),
+  });
+
+/** A phased rollout of one group version. `covered_percent` is the fleet share
+ *  already receiving `target_version`; `next_promotion_at` is null unless it is
+ *  running with a tier still to come. */
+export interface RolloutOut {
+  id: string;
+  group_id: string;
+  group_name: string;
+  target_version: number;
+  tiers: RolloutTier[];
+  status: "scheduled" | "running" | "completed" | "cancelled";
+  current_tier: number;
+  covered_percent: number;
+  next_promotion_at: string | null;
+  starts_at: string | null;
+  started_at: string | null;
+  tier_started_at: string | null;
+  finished_at: string | null;
+  actor: string | null;
+  created_at: string;
+}
+
+/** Omitting `status` returns only the LIVE ones (scheduled + running) — which
+ *  is all the console's rollouts card ever wants. */
+export const listConfigRollouts = (status?: string, limit = 50) =>
+  request<RolloutOut[]>(
+    `/agents/config-rollouts?limit=${limit}` +
+      (status ? `&status=${encodeURIComponent(status)}` : ""),
+  );
+
+/** Cancel: the rollout stops and `current_version` is left alone, so agents
+ *  already covered by a tier FALL BACK to it on their next poll. */
+export const cancelConfigRollout = (id: string) =>
+  request<RolloutOut>(`/agents/config-rollouts/${id}/cancel`, { method: "POST" });
+
+/** Advance to the next tier now, ignoring the remaining delay. 409 unless the
+ *  rollout is actually running. */
+export const promoteConfigRollout = (id: string) =>
+  request<RolloutOut>(`/agents/config-rollouts/${id}/promote`, { method: "POST" });
+
+export interface MembershipOut {
+  agent_id: string;
+  group_ids: string[];
+  groups: { id: string; name: string; priority: number }[];
+}
+
+/** FULL REPLACE of an agent's explicit memberships (`[]` removes them all).
+ *  Global is implicit — including its id is a 400, not a no-op. */
+export const setAgentConfigGroups = (agentId: string, group_ids: string[]) =>
+  request<MembershipOut>(`/agents/${agentId}/config-groups`, {
+    method: "PUT",
+    body: JSON.stringify({ group_ids }),
+  });
+
+/** One contributing layer of an agent's effective document, in merge order.
+ *  `via_rollout` marks a group whose version came from a rollout tier this
+ *  agent's hash bucket is covered by, rather than from `current_version`. */
+export interface EffectiveGroupRef {
+  id: string;
+  name: string;
+  priority: number;
+  is_system: boolean;
+  version_used: number;
+  via_rollout: boolean;
+}
+
+/** Which group version supplied one merged key. Keys of `provenance` are
+ *  `"policy.<key>"` / `"settings.<key>"`. */
+export interface ProvenanceEntry {
+  group_id: string;
+  group_name: string;
+  version: number;
+}
+
+/** GET /agents/{id}/effective-config (admin) — the merged document this agent
+ *  receives on its next poll, with per-key provenance.
+ *
+ *  `document` is the wire shape: merged POLICY keys at the top level, the merged
+ *  SETTINGS section under `group`, and the three lifted local-surface keys.
+ *  `taxonomy_version` is deliberately absent — central injects it per agent-plane
+ *  response and it is never operator-set. */
+export interface EffectiveConfigOut {
+  agent_id: string;
+  document: Record<string, unknown>;
+  /** max(seq) over the contributing snapshots — the number an agent echoes. */
+  generation: number;
+  /** First 12 hex of sha256 over the canonical document. */
+  hash: string;
+  groups: EffectiveGroupRef[];
+  provenance: Record<string, ProvenanceEntry>;
+  /** What the agent last confirmed. Behind `generation` = not applied yet. */
+  confirmed_generation: number | null;
+  last_seen_at: string | null;
+}
+
+export const getEffectiveConfig = (agentId: string) =>
+  request<EffectiveConfigOut>(
+    `/agents/${encodeURIComponent(agentId)}/effective-config`,
+  );
 
 /** The inventory-collector vocabulary for the config-group dialog's checkbox
  *  list: the UNION of the shipped catalogue and every collector name the
@@ -3046,19 +3163,13 @@ export async function deleteConfigGroup(id: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
 }
 
-/** PUT /agents/{id}/config-group — assign (or clear with null). Returns the
- *  newly-assigned group, or null when cleared. */
-export const assignConfigGroup = (agentId: string, groupId: string | null) =>
-  request<ConfigGroupOut | null>(`/agents/${agentId}/config-group`, {
-    method: "PUT",
-    body: JSON.stringify({ config_group_id: groupId }),
-  });
-
 // ---- console installer distribution (POST /agents/installer-config) ----------
 export interface InstallerConfigIn {
   central_url_override?: string | null;
   agent_name?: string | null;
-  config_group_id?: string | null;
+  /** Groups to join at enrollment, by id. Global is implicit and is silently
+   *  skipped if passed. */
+  config_group_ids?: string[];
   log_level?: string | null;
   ttl_seconds?: number | null;
 }
@@ -3067,7 +3178,11 @@ export interface InstallerSidecar {
   central_url: string;
   enrollment_token: string; // raw, show-once
   agent_name: string | null;
-  config_group: string | null; // group NAME
+  /** P13: every group the agent joins, by NAME. */
+  config_group_names: string[];
+  /** LEGACY single-group key (= config_group_names[0]), still emitted so a
+   *  shipped agent binary that only reads this one keeps working. */
+  config_group: string | null;
   log_level: string | null;
 }
 

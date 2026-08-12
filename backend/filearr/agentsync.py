@@ -46,8 +46,11 @@ Architect rulings baked in (see the tasks doc for the full list):
   :func:`bind_agent_certificate` implement this (P5-T1). ``apply_batch``
   (P5-T4) and the ``reconcile_*`` sweep (P5-T5) are now implemented too.
 - **R4** — no policy-payload signing beyond mTLS in v3 (single-operator trust).
-- **R5** — ``agents.rollout_group`` is a text column now; migrates to phase-6
-  machine groups later (alias/supersede, never two parallel authorities).
+- **R5** — machine grouping. Settled by P13 (2026-08-11): the interim
+  ``agents.rollout_group`` text column is GONE and there is exactly one
+  authority, ``agent_config_group_members`` (many groups per agent, merged in
+  priority order) — the "alias/supersede, never two parallel authorities"
+  outcome R5 asked for.
 
 The central-side DDL these models mirror (``agents``,
 ``agent_replication_log``, ``enrollment_tokens``) is *intended, not created* by
@@ -581,14 +584,21 @@ def generate_enroll_secret() -> tuple[str, str]:
 async def mint_enrollment_token(
     session: Any,
     *,
-    rollout_group: str = "default",
+    config_group_names: list[str] | None = None,
     ttl_seconds: int = 3600,
 ) -> tuple[str, Any]:
     """P5-T1: mint + persist a single-use, short-TTL enrollment token (brief
     §7.1, R3). Returns ``(raw_token, EnrollmentToken row)``; the caller shows the
     raw token to the operator once and never again. The row stores only the hash.
     The agent presents the raw token at ``/agents/register`` *before* any cert
-    exists (R3)."""
+    exists (R3).
+
+    P13: ``config_group_names`` are the configuration groups the registering
+    agent joins. They live on the TOKEN rather than only in the installer sidecar
+    so central applies the membership itself at register — a binary that only
+    knows how to echo one group name back cannot lose the rest, and a hand-edited
+    sidecar cannot silently join a group the operator never granted. Empty/None
+    = Global only, which is already a complete configuration."""
     from datetime import UTC, datetime, timedelta
 
     from filearr.models import EnrollmentToken
@@ -596,7 +606,7 @@ async def mint_enrollment_token(
     raw, token_hash = generate_enrollment_token()
     row = EnrollmentToken(
         token_hash=token_hash,
-        rollout_group=rollout_group or "default",
+        config_group_names=list(config_group_names or []) or None,
         expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
     )
     session.add(row)
@@ -626,16 +636,25 @@ async def register_agent(
     in the SAME transaction that creates the agent, so a replay finds the token
     already consumed.
 
-    W6-D2: ``config_group`` (an installer-sidecar string) is resolved by NAME to
-    ``agents.config_group_id`` at registration. FAIL-SAFE: an UNKNOWN name never
-    blocks enrollment — the agent registers with a NULL group and the returned
-    ``config_group_warning`` explains it (surfaced to the operator in the register
-    response). ``None``/absent → no group, no warning."""
+    P13 config-group membership: the groups to join are the union of the TOKEN's
+    ``config_group_names`` (recorded when an operator minted the installer config
+    — the authoritative half) and the single ``config_group`` name the enrolling
+    binary echoes from its sidecar (kept because shipped agents send exactly that
+    key). Membership rows are created for each name that resolves; **Global** is
+    implicit and needs none. FAIL-SAFE: an UNKNOWN name never blocks enrollment —
+    the agent registers without it and the returned ``config_group_warning``
+    names what was dropped (surfaced to the operator in the register response).
+    No names at all → Global only, no warning."""
     from datetime import UTC, datetime
 
     from sqlalchemy import select
 
-    from filearr.models import Agent, AgentConfigGroup, EnrollmentToken
+    from filearr.models import (
+        Agent,
+        AgentConfigGroup,
+        AgentConfigGroupMember,
+        EnrollmentToken,
+    )
 
     if platform not in PLATFORMS:
         raise EnrollmentError("bad_platform", f"platform must be one of {sorted(PLATFORMS)}")
@@ -650,32 +669,43 @@ async def register_agent(
     if verdict is not None:
         raise EnrollmentError(verdict, f"enrollment token {verdict}")
 
-    # Resolve the config group by name (fail-safe: unknown name -> NULL + warning).
-    config_group_id = None
-    warning: str | None = None
-    if config_group:
+    wanted: list[str] = [
+        n for n in (row.config_group_names or []) if isinstance(n, str) and n
+    ]
+    if config_group and config_group not in wanted:
+        wanted.append(config_group)
+
+    resolved: list[Any] = []
+    unknown: list[str] = []
+    for want in wanted:
         grp = (
             await session.execute(
-                select(AgentConfigGroup).where(AgentConfigGroup.name == config_group)
+                select(AgentConfigGroup).where(AgentConfigGroup.name == want)
             )
         ).scalar_one_or_none()
-        if grp is not None:
-            config_group_id = grp.id
-        else:
-            warning = f"unknown config group {config_group!r}; assigned built-in defaults"
+        if grp is None:
+            unknown.append(want)
+        elif not grp.is_system:  # Global membership is implicit — never a row
+            resolved.append(grp)
+    warning = (
+        f"unknown config group(s) {', '.join(repr(u) for u in unknown)}; "
+        "the agent enrolled without them"
+        if unknown
+        else None
+    )
 
     raw_secret, secret_hash = generate_enroll_secret()
     agent = Agent(
         name=(name or hostname),
         hostname=hostname,
         platform=platform,
-        rollout_group=row.rollout_group,
         agent_version=agent_version,
         enroll_secret_hash=secret_hash,
-        config_group_id=config_group_id,
     )
     session.add(agent)
     await session.flush()  # assigns agent.id (server-side, R3)
+    for grp in resolved:
+        session.add(AgentConfigGroupMember(agent_id=agent.id, group_id=grp.id))
 
     row.consumed_at = datetime.now(UTC)
     row.consumed_by = agent.id

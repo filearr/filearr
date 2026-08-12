@@ -278,7 +278,12 @@ per-library flag.
 | `FILEARR_AGENT_ASSOCIATE_DEBOUNCE_SECONDS` | `120` | Debounce for the post-replication sidecar-association pass on agent-backed libraries. |
 | `FILEARR_AGENT_EXTRACTED_MAX_BYTES` | `262144` | Cap on the `extracted` object one replication event may carry ([agent-side extraction](../agents.md#agent-extraction)). Oversize is dropped with a warning and the event still applies. |
 | `FILEARR_AGENT_RELEASES_DIR` | `{config_dir}/agent-releases` | Uploaded signed-release artifact binaries (manifests live in Postgres). |
-| `FILEARR_AGENT_CANARY_GROUP` | `canary` | Rollout group that receives `canary`-stage releases before promotion. |
+
+!!! note "There is no release-staging variable"
+    Every uploaded release is generally visible once its artifacts are present.
+    Who actually takes one is decided by the `auto_update` key in a
+    [configuration group](../agents.md#two-groupings), plus the per-agent update
+    action — not by an environment variable.
 
 ## Alerting
 

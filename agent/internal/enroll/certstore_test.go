@@ -28,7 +28,7 @@ func TestCertStoreRoundTrip(t *testing.T) {
 		Leaf:  leaf,
 		Chain: []*x509.Certificate{root},
 		Roots: []*x509.Certificate{root},
-		State: State{AgentID: "agent-1", CentralURL: "https://central", RolloutGroup: "canary", CAURL: "https://ca", CARootSHA256: "deadbeef"},
+		State: State{AgentID: "agent-1", CentralURL: "https://central", CAURL: "https://ca", CARootSHA256: "deadbeef"},
 	}
 	if err := store.SaveIdentity(id); err != nil {
 		t.Fatalf("save: %v", err)

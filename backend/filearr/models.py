@@ -1594,16 +1594,12 @@ class Agent(Base):
         CheckConstraint(
             "platform IN ('windows','macos','linux')", name="agent_platform_valid"
         ),
-        Index("ix_agents_rollout_group", "rollout_group"),
         Index(
             "ix_agents_cert_fingerprint",
             "cert_fingerprint",
             unique=True,
             postgresql_where=text("cert_fingerprint IS NOT NULL"),
         ),
-        # Mirrors migration f5c8a2b4d6e0 (W6-D2 group-membership lookups) so the
-        # CI drift check sees models == migrations.
-        Index("ix_agents_config_group_id", "config_group_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1612,9 +1608,11 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(Text)
     hostname: Mapped[str] = mapped_column(Text)
     platform: Mapped[str] = mapped_column(Text)  # windows|macos|linux
-    # R5: text column now; migrates to phase-6 machine groups (alias/supersede,
-    # never two parallel grouping authorities).
-    rollout_group: Mapped[str] = mapped_column(Text, server_default=text("'default'"))
+    # HISTORY (P13, 2026-08-11): ``rollout_group`` lived here from P5-T1 and did
+    # two unrelated jobs at once — the middle policy scope AND the release-canary
+    # selector. Both concepts are gone: grouping is now membership rows in
+    # ``agent_config_group_members`` (many groups per agent, priority-ordered
+    # per-key merge) and release staging was removed with the canary.
     cert_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     enroll_secret_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_contiguous_seq_no: Mapped[int] = mapped_column(
@@ -1634,17 +1632,15 @@ class Agent(Base):
         DateTime(timezone=True), nullable=True
     )
     agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # FK-adjacent to phase-2 policy_versions (shape coordinated, not yet a FK).
-    policy_version_applied: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # W6-D2: the agent's assigned configuration group (remote configuration). NULL
-    # = built-in agent defaults (a "default" group is NOT special-cased — NULL IS
-    # the default). ON DELETE SET NULL: deleting a group falls its members back to
-    # defaults. Distinct from ``rollout_group`` (the P5-T7 release-canary group);
-    # this is the config-push grouping dimension only.
-    config_group_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("agent_config_groups.id", ondelete="SET NULL"),
-        nullable=True,
+    # P13: the config GENERATION the agent last echoed back via ``?applied=`` on
+    # its policy poll — i.e. max(agent_config_group_versions.seq) over the group
+    # snapshots that composed the document it is actually running. BigInteger
+    # because the generation is the global identity sequence, not a per-group
+    # counter. (Was ``policy_version_applied``, a per-scope policy version; the
+    # migration nulls the old numbers — they are on a different scale and
+    # comparing them would report a permanently "behind" fleet.)
+    config_generation_applied: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
     )
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1672,27 +1668,37 @@ class Agent(Base):
 
 
 class AgentConfigGroup(Base):
-    """A named, reusable remote-configuration bundle assigned to fleet agents
-    (W6-D2). An operator authors the ``settings`` once and assigns the group to
-    many agents; the settings ride the EXISTING policy channel
-    (``GET /agents/{id}/policy``) under a new top-level ``group`` section.
+    """A named, priority-ordered configuration group — the ONE surviving agent
+    grouping concept (P13, ``archive/docs/design-config-group-unification.md``).
 
-    ``settings`` is a typed, versioned JSON object (see
-    :mod:`filearr.agent_config`): ``log_level``, ``scan_selections`` (per-OS path
-    selections — preset name + path specs with env/glob tokens + include/exclude
-    regexes), ``inventory`` (collector toggles), ``scan_schedule_cron``. It is
-    Pydantic-validated at the API (unknown top-level keys → 422) and stored
-    VERBATIM here.
+    A group carries TWO documents, each keeping its own validator:
 
-    This grouping is ORTHOGONAL to ``agents.rollout_group`` — that is the P5-T7
-    release-canary group and is deliberately NOT reused. ``agents.config_group_id``
-    references this table ON DELETE SET NULL: a deleted group falls its members
-    back to built-in defaults (NULL). NULL config_group_id means "built-in
-    defaults"; there is no special-cased "default" group row."""
+    * ``settings`` — :class:`filearr.agent_config.GroupSettings`
+      (``extra='forbid'``: an operator typo is a 422, never a silent no-op).
+    * ``policy`` — :class:`filearr.policy.PolicyModel` (``extra='allow'``:
+      unknown forward-compat keys are PRESERVED so an older central never strips
+      a newer agent's keys).
+
+    Resolution is a **per-key layered merge**, not whole-document precedence: an
+    agent's groups apply in ascending ``priority`` and a later group overrides
+    only the keys it sets (ties broken deterministically by ``(name, id)``).
+    Whole-document replacement plus multi-group membership would have made every
+    group but the last meaningless.
+
+    ``is_system`` marks the permanent **Global** group (``priority`` 0), whose
+    membership is IMPLICIT — every agent gets it, with no join rows. It cannot be
+    deleted, renamed or re-prioritised; its documents are freely editable, which
+    is what makes it the fleet-wide baseline.
+
+    ``current_version`` is the per-group version uncovered agents receive. A
+    phased rollout (:class:`AgentConfigRollout`) leaves it alone and hands the
+    NEWER ``target_version`` to bucket-covered agents until the last tier
+    completes, at which point the engine advances it."""
 
     __tablename__ = "agent_config_groups"
     __table_args__ = (
         UniqueConstraint("name", name="uq_agent_config_groups_name"),
+        Index("ix_agent_config_groups_priority", "priority"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1701,6 +1707,19 @@ class AgentConfigGroup(Base):
     name: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     settings: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    #: The policy half of the group document (see the class docstring). Separate
+    #: JSONB column rather than a nested key so each half keeps its own validator
+    #: and the two merge independently, section by section.
+    policy: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    #: Merge order. Ascending; LAST wins per key. Global is 0. Deliberately NOT
+    #: unique — ties are legal and broken by (name, id) in code, because forcing
+    #: uniqueness would make "insert a group between these two" a renumbering
+    #: migration instead of a text-field edit.
+    priority: Mapped[int] = mapped_column(Integer, server_default=text("100"))
+    #: True only for the seeded Global row (undeletable, un-renamable).
+    is_system: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    #: The version uncovered agents receive right now.
+    current_version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
@@ -1711,19 +1730,166 @@ class AgentConfigGroup(Base):
     )
 
 
+class AgentConfigGroupMember(Base):
+    """Explicit membership of one agent in one config group (P13).
+
+    A pure join row — an agent may be in MANY groups, which is the whole point of
+    the layered merge. The **Global** group is deliberately absent from this
+    table: its membership is implicit, so enrolling an agent needs no write here
+    and deleting every membership row still leaves an agent fully configured.
+
+    Both FKs cascade: deleting an agent or a group removes its memberships (no
+    orphan rows, and no "group deleted but agents still claim it" state)."""
+
+    __tablename__ = "agent_config_group_members"
+    __table_args__ = (Index("ix_agent_config_group_members_group", "group_id"),)
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_config_groups.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class AgentConfigGroupVersion(Base):
+    """One immutable snapshot of a config group's two documents (P13).
+
+    Versioning is FORWARD-ONLY, exactly as the old policy history was: every
+    publish inserts a row; "rollback" copies an old snapshot forward as a NEW
+    version. Nothing ever mutates a stored snapshot, so the audit trail and the
+    "which agent is running which document" view stay reconstructible.
+
+    ``seq`` is the GLOBAL generation counter (a BIGINT identity) and is the
+    version identity delivered on the wire: an agent's ``version`` is
+    ``max(seq)`` across the snapshots that composed its document. A single
+    monotonic number across all groups is what makes the delivered value
+    comparable at all — per-group ``version`` counters restart at 1 per group and
+    could not be compared between two agents in different groups.
+
+    ``version`` is the human-facing per-group counter (1, 2, 3 … per group), the
+    number the console shows and ``rollback`` targets."""
+
+    __tablename__ = "agent_config_group_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id", "version", name="uq_agent_config_group_versions_group_version"
+        ),
+        Index(
+            "ix_agent_config_group_versions_group_version",
+            "group_id",
+            text("version DESC"),
+        ),
+    )
+
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_config_groups.id", ondelete="CASCADE"),
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    settings: Mapped[dict] = mapped_column(JSONB)
+    policy: Mapped[dict] = mapped_column(JSONB)
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class AgentConfigRollout(Base):
+    """A phased rollout of ONE group version to a growing slice of its members
+    (P13) — the replacement for the P5-T7 binary-release canary.
+
+    ``tiers`` is a 1..5 entry list of ``{"percent": 1..100, "delay_minutes": >=0}``
+    with strictly ascending percents whose LAST entry is 100 (a rollout always
+    finishes fleet-wide; a "stop at 50%" is an edit, not a rollout). Tier N's
+    ``delay_minutes`` is the wait after tier N-1 ACTIVATED — tier 0's delay counts
+    from the rollout's start.
+
+    Coverage is by stable agent-id hash bucket
+    (:func:`filearr.agent_config.agent_bucket`): an agent whose bucket is below
+    the active tier's percent receives ``target_version`` on its next poll;
+    everyone else keeps the group's ``current_version``. No per-agent state is
+    stored — the hash is deterministic, so the same agents stay in the same tier
+    across restarts, and a fleet that grows mid-rollout keeps a uniform slice.
+
+    The partial unique index allows exactly ONE live (scheduled/running) rollout
+    per group: two overlapping rollouts of the same group would each define a
+    different "active version" for the same agent."""
+
+    __tablename__ = "agent_config_rollouts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('scheduled','running','completed','cancelled')",
+            name="agent_config_rollouts_status_valid",
+        ),
+        Index(
+            "uq_agent_config_rollouts_live",
+            "group_id",
+            unique=True,
+            postgresql_where=text("status IN ('scheduled','running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_config_groups.id", ondelete="CASCADE"),
+    )
+    target_version: Mapped[int] = mapped_column(Integer)
+    tiers: Mapped[list] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'scheduled'"))
+    #: -1 = no tier active yet (scheduled, or waiting on tier 0's delay).
+    current_tier: Mapped[int] = mapped_column(Integer, server_default=text("-1"))
+    #: NULL = start immediately (at the next minute tick).
+    starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    tier_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class EnrollmentToken(Base):
     """A single-use, short-TTL enrollment token (P5-T1, research §7.1, R3). The
     raw token is shown to the operator ONCE and NEVER persisted — only its
     sha256 (``token_hash``, the PK) is stored, mirroring the API-key / session
     pattern. Single-use is enforced by ``consumed_at``/``consumed_by`` (set
     atomically at register); TTL by ``expires_at`` (minutes-to-hours, research
-    §7.1 — the one human-copy-paste weak link, so kept short)."""
+    §7.1 — the one human-copy-paste weak link, so kept short).
+
+    P13: ``config_group_names`` replaces the old ``rollout_group`` text column —
+    a LIST of config-group names the freshly-registered agent joins. NULL/absent
+    means "Global only", which is a complete configuration on its own, so an
+    operator who does not care about grouping mints a token with no extra
+    thought. Names (not ids) because the installer sidecar already speaks names
+    and a name survives a group being recreated."""
 
     __tablename__ = "enrollment_tokens"
     __table_args__ = (Index("ix_enrollment_tokens_expires", "expires_at"),)
 
     token_hash: Mapped[str] = mapped_column(Text, primary_key=True)  # sha256 hex
-    rollout_group: Mapped[str] = mapped_column(Text, server_default=text("'default'"))
+    config_group_names: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1736,67 +1902,13 @@ class EnrollmentToken(Base):
     )
 
 
-class PolicyVersion(Base):
-    """Append-only, audit-trailed agent policy version (P5-T6, research §6.3).
-
-    The single source of policy an agent polls at ``GET /agents/{id}/policy``.
-    One row PER (scope, version); a policy edit NEVER mutates an existing row —
-    it inserts a new one at ``version = prior scope max + 1``, so the full history
-    is preserved (the console's "which agent is on which version" view, §6.3).
-
-    Scope precedence (most-specific-wins, NO merging in v1 — the winning row IS
-    the effective policy): ``agent`` > ``group`` > ``global``. ``scope_id`` is
-    NULL for ``global``, the ``rollout_group`` name for ``group``, and the agent
-    UUID-as-text for ``agent`` (text, not a UUID FK: a group name is never a
-    UUID, and keeping one column type across the three scopes is simpler than a
-    polymorphic id). Merging across scopes is a documented future option.
-
-    ``policy`` is stored VERBATIM (unknown forward-compat keys preserved so an
-    older central never strips a newer agent's keys); the API validates the known
-    v1 keys but passes unknown ones through untouched.
-
-    A future **phase-2 Stage B** policy-versioning feature REUSES this exact table
-    (it was designed here first because P5-T6 shipped before P2 Stage B); do not
-    invent a second policy-versioning scheme.
-
-    NOTE on the unique constraint: because ``scope_id`` is NULL for ``global`` and
-    Postgres treats NULLs as distinct in a UNIQUE constraint, uniqueness for the
-    global scope is enforced by the application's ``max(version)+1`` append (the
-    single-operator write path), not by the constraint alone — the constraint is a
-    backstop for the group/agent scopes where ``scope_id`` is non-null."""
-
-    __tablename__ = "policy_versions"
-    __table_args__ = (
-        CheckConstraint(
-            "scope_type IN ('global','group','agent')",
-            name="policy_versions_scope_type_valid",
-        ),
-        UniqueConstraint(
-            "scope_type",
-            "scope_id",
-            "version",
-            name="uq_policy_versions_scope_version",
-            postgresql_nulls_not_distinct=True,
-        ),
-        Index(
-            "ix_policy_versions_scope_version",
-            "scope_type",
-            "scope_id",
-            text("version DESC"),
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
-    )
-    scope_type: Mapped[str] = mapped_column(Text)  # global|group|agent
-    scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    version: Mapped[int] = mapped_column(Integer)
-    policy: Mapped[dict] = mapped_column(JSONB)
-    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
-    )
+# HISTORY (P13, 2026-08-11): ``policy_versions`` lived here from P5-T6 —
+# append-only rows keyed by a ``global`` | ``group:<name>`` | ``agent:<uuid>``
+# scope string, resolved most-specific-wins with NO key merging. Its docstring
+# earmarked itself for reuse "so nobody invents a second policy-versioning
+# scheme"; the config-group unification is that single scheme, so the table was
+# dropped rather than left as a second one. Snapshots now live in
+# ``agent_config_group_versions`` (see :class:`AgentConfigGroupVersion`).
 
 
 class AgentReplicationLog(Base):
@@ -2015,38 +2127,28 @@ class AgentRelease(Base):
     pinned public key, so a compromised central cannot push a wrongly-signed
     binary (research §8 threat model: central is untrusted for update integrity).
 
-    ``stage`` gates the staged rollout (R5): a fresh upload is ``'canary'`` (seen
-    only by agents whose ``rollout_group`` is the canary group); the operator
-    ``promote`` action flips it to ``'general'`` (seen by the whole fleet) — the
-    §6.3 operator-confirmation gate, taken after checking canary health via the
-    per-agent confirmed-version rollup. Artifact BINARIES live under
-    ``FILEARR_AGENT_RELEASES_DIR`` (not this table); only manifest metadata is in
-    Postgres."""
+    HISTORY (P13, 2026-08-11): this table used to carry a ``stage``
+    (``'canary'`` | ``'general'``) + ``promoted_at`` staging pair, where a fresh
+    upload was visible only to agents in the configured canary rollout group
+    until an operator promoted it. Both columns are gone with ``rollout_group``:
+    every release is fleet-visible on upload, the per-group ``auto_update``
+    policy key is the brake, and a per-agent ``self_update`` command is the
+    targeting tool. (Roadmap: attach releases to the config-rollout tier engine
+    so binaries get the same phased treatment as configuration.)
+
+    Artifact BINARIES live under ``FILEARR_AGENT_RELEASES_DIR`` (not this table);
+    only manifest metadata is in Postgres."""
 
     __tablename__ = "agent_releases"
-    __table_args__ = (
-        CheckConstraint(
-            "stage IN ('canary','general')", name="agent_releases_stage_valid"
-        ),
-        UniqueConstraint("version", name="uq_agent_releases_version"),
-        Index(
-            "ix_agent_releases_stage_created",
-            "stage",
-            text("created_at DESC"),
-        ),
-    )
+    __table_args__ = (UniqueConstraint("version", name="uq_agent_releases_version"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
     )
     version: Mapped[str] = mapped_column(Text)
-    stage: Mapped[str] = mapped_column(Text, server_default=text("'canary'"))
     manifest: Mapped[dict] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
-    )
-    promoted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
     )
 
 

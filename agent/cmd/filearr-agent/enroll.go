@@ -71,7 +71,7 @@ func runEnroll(args []string) error {
 		}
 	}
 
-	fmt.Printf("enrolled: agent_id=%s rollout_group=%s status=active\n", res.AgentID, res.RolloutGroup)
+	fmt.Printf("enrolled: agent_id=%s status=active\n", res.AgentID)
 	fmt.Printf("cert_fingerprint=%s\n", res.CertFingerprint)
 	fmt.Printf("data_dir=%s\n", cfg.DataDir)
 	return nil

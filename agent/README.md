@@ -197,27 +197,34 @@ size, url`; compact JSON, HTML-escaping disabled, UTF-8, no trailing newline.
 The agent re-derives these bytes from the parsed manifest, so central storing
 the manifest as JSONB (re-serializing it) is harmless.
 
-### Upload → canary → promote
+### Upload a release
 
 Upload is two-phase (admin scope; see `docs/ops/agents.md §8`):
 
 ```bash
-# 1. register the signed manifest (lands as stage=canary)
+# 1. register the signed manifest (immediately visible to the whole fleet)
 curl -H "Authorization: Bearer <admin-key>" -H 'Content-Type: application/json' \
      --data @manifest.json https://filearr.example.com/api/v1/agent-releases
 # 2. stream each artifact (sha256 verified against the manifest)
 curl -H "Authorization: Bearer <admin-key>" --upload-file dist/filearr-agent-linux-amd64 \
      https://filearr.example.com/api/v1/agent-releases/1.4.0/artifacts/filearr-agent-linux-amd64
 # ... (windows + darwin) ...
-# 3. after canary agents confirm healthy, promote to the whole fleet
-curl -X POST -H "Authorization: Bearer <admin-key>" \
-     https://filearr.example.com/api/v1/agent-releases/1.4.0/promote
 ```
 
-Only agents whose `rollout_group` is the canary group (`FILEARR_AGENT_CANARY_GROUP`,
-default `canary`) see a `canary` release; **promote** flips it to `general` for
-everyone. Confirm canary health via `GET /api/v1/agent-releases` (the per-agent
-`agent_version` rollup — "which version has each agent confirmed").
+A release is offered to an agent as soon as all its artifacts are uploaded —
+there is no canary/promote staging any more (P13 removed it along with
+`agents.rollout_group`). Two levers control the spread instead:
+
+- **`auto_update`** in the agent's configuration groups. Set it `false` in
+  **Global** and `true` in a small higher-priority group to pilot a build; the
+  layered merge overrides per key, so that group carries this one key and
+  nothing else. Enforcement is server-side (the manifest poll answers 204), so
+  it holds for every agent build.
+- **per-agent self-update** (`POST /agents/{id}/self-update`), which bypasses
+  `auto_update` entirely — the operator's click is the authorization.
+
+Track adoption via `GET /api/v1/agent-releases` (the per-agent `agent_version`
+rollup — "which version has each agent confirmed").
 
 ### A/B swap + crash-loop rollback (research §5.2/§5.3)
 

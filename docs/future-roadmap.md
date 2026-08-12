@@ -9,15 +9,24 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 ## 1. Distributed agent architecture
 
 > **SHIPPED** (Phase 5 + P10 + W6 waves, July 2026; auto-update extensions
-> 2026-08-05). Everything below is live: step-ca enrollment + short-lived mTLS
-> certs (+ fingerprint rebind self-heal, expired-leaf recovery OTT), versioned
-> policy push (global/group/agent scopes, ETag poll), local SQLite+FTS5 index,
+> 2026-08-05; config-group unification P13 2026-08-11). Everything below is
+> live: step-ca enrollment + short-lived mTLS certs (+ fingerprint rebind
+> self-heal, expired-leaf recovery OTT), versioned **configuration-group** push
+> (a permanent Global group plus prioritised member groups, merged per key,
+> ETag poll) with per-group history, rollback and **phased rollouts** (≤5
+> percent/delay tiers over a stable agent-id bucket), local SQLite+FTS5 index,
 > outbox replication with per-agent seq + full-manifest reconcile sweep,
-> tombstones, and signed staged-rollout updates — now extended with
-> central-version tracking (unsigned dist channel for unpinned builds),
-> a server-side `auto_update` policy gate, and a console per-agent update
-> trigger. First-install distribution is served by central itself
-> (`/api/v1/agent-dist` + install scripts). Runbook: `docs/ops/agents.md`.
+> tombstones, and signed updates — extended with central-version tracking
+> (unsigned dist channel for unpinned builds), a server-side `auto_update`
+> gate, and a console per-agent update trigger. First-install distribution is
+> served by central itself (`/api/v1/agent-dist` + install scripts). Runbook:
+> `docs/ops/agents.md`.
+>
+> P13 retired the parallel grouping: policy scopes
+> (`global`/`group:<name>`/`agent:<uuid>`, whole-document replacement),
+> `agents.rollout_group`, and binary-release staging are gone. Releases are now
+> generally visible on upload, with `auto_update` as the brake — see §23 for
+> the deferred half.
 
 **Native clients (agents)** installable on Windows/Linux/macOS, centrally
 configured:
@@ -27,9 +36,10 @@ configured:
   (Syncthing's cert-hash-as-device-ID is the proven precedent). All
   agent↔server traffic is **mutual TLS** — authorization and integrity in one
   mechanism.
-- **Config push:** central server holds per-agent/per-group index policy (what
-  paths to index, type/exclusion rules, watch schedules); agents poll or hold a
-  long-poll channel; policy is versioned and auditable.
+- **Config push:** central server holds prioritised **configuration groups**
+  (what paths to index, type/exclusion rules, watch schedules) that merge per
+  key into one document per agent; agents poll or hold a long-poll channel;
+  every group is versioned and auditable.
 - **Local-first indexing:** agents scan to a **local SQLite index** (FTS5),
   fully functional offline.
 - **Replication:** transactional **outbox + per-agent monotonic sequence
@@ -38,8 +48,9 @@ configured:
   (research conclusion — cr-sqlite/Litestream do NOT solve many-SQLite→one-
   Postgres). Tombstones replicate deletes; periodic full-reconciliation sweep
   as safety net.
-- **Agent updates:** signed packages, central version pinning, staged rollout
-  groups (Fleet/Wazuh precedent).
+- **Agent updates:** signed packages, central version pinning, and a staged
+  rollout (Fleet/Wazuh precedent). Signing + pinning + `auto_update` gating are
+  live; percentage-tiered *binary* staging is deferred — §23.
 
 ## 2. Local query access
 
@@ -83,8 +94,8 @@ configured:
 ## 4. Indexing controls
 
 > **SHIPPED** (July 2026; content-sniffing 2026-08-06): include/exclude globs
-> + one-click preset bundles, per-agent policy scopes, taxonomy extension
-> groups (W8), config-group default scan selections, hot-folder scheduling,
+> + one-click preset bundles, layered per-group agent configuration, taxonomy
+> extension groups (W8), config-group default scan selections, hot-folder scheduling,
 > AND the extensionless content-sniffing reclassify job — an opt-in
 > (`FILEARR_CONTENT_SNIFF_ENABLED`) on-demand maintenance action that
 > libmagic-sniffs a bounded prefix, maps MIME → the live taxonomy's groups,
@@ -791,3 +802,44 @@ genuinely the OS-specific reads and the plumbing, not the design.
 **Do not mistake the scaffold for a partial implementation.** Every entry point
 fails loudly and on purpose; there is no half-working path a user could stumble
 into.
+
+## 23. Staged binary-release rollout on the config tier engine
+
+**Deferred from P13 (2026-08-11).** The phased-rollout engine that P13 built for
+*configuration* is generic in everything except what it targets. It already has:
+tier validation (≤5 entries, `{percent, delay_minutes}`, strictly ascending,
+last must be 100), a stable storage-free cohort
+(`sha256(agent.id.bytes)[:4] % 100`, so a fleet that grows mid-rollout keeps a
+uniform slice), scheduled starts, one-live-per-target enforcement, promote-now
+and cancel endpoints, and the every-minute worker tick that advances one tier at
+a time and skips itself during maintenance mode. What it does **not** do is
+decide which agents are offered a binary.
+
+Binary releases meanwhile lost their staging in the same change: every uploaded
+release is generally visible once its artifacts are present, the `auto_update`
+key in a config group is the brake, and per-agent `self_update` commands are the
+targeting mechanism. That is honest and simple, but staging a fleet-wide binary
+update means hand-maintaining a group's membership — the busywork the tier
+engine exists to remove.
+
+The work, when someone wants it:
+
+- an `agent_release_rollouts` row (or a nullable `release_version` discriminator
+  on `agent_config_rollouts`) targeting a release version instead of a group
+  version;
+- the update-manifest poll (`api/agent_updates.py`) consults it: an agent whose
+  bucket is not covered gets the same `204` it gets today with `auto_update`
+  off. `auto_update: false` must still win — a rollout tier is "may be offered",
+  not "must take";
+- the worker's `_advance_config_rollouts()` generalises to "advance every due
+  rollout"; the tier semantics, audit events and cancel/promote endpoints are
+  reused verbatim;
+- the console's live-rollouts panel gains release rows alongside config rows.
+
+**Open question to settle first:** what "cancel" means for a binary rollout.
+Cancelling a config rollout makes covered agents fall *back* on their next poll,
+which is free. A binary cannot be un-swapped that way — the agent has already
+replaced its own executable — so cancel can only mean "stop offering it", and
+the doc must say so plainly rather than borrowing the config wording. The
+boot-counter automatic rollback (§8.3 of `docs/ops/agents.md`) stays the only
+real un-install path.

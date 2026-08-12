@@ -245,7 +245,7 @@ func webSettingsSnapshot(
 		}
 		if st := readJSON("state.json"); st != nil {
 			// identity + endpoints only; state.json holds no secrets.
-			for _, k := range []string{"agent_id", "central_url", "rollout_group", "ca_url"} {
+			for _, k := range []string{"agent_id", "central_url", "ca_url"} {
 				if v, ok := st[k]; ok {
 					snap[k] = v
 				}

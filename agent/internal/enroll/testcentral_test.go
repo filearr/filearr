@@ -32,7 +32,6 @@ type mockCentral struct {
 
 type mockAgent struct {
 	id           string
-	rolloutGroup string
 	enrollSecret string
 	secretUsed   bool
 	fingerprint  string
@@ -91,7 +90,7 @@ func (mc *mockCentral) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	agentID := newTestAgentIDFor(req.Token)
 	secret := "secret-" + randToken()
-	ag := &mockAgent{id: agentID, rolloutGroup: "default", enrollSecret: secret}
+	ag := &mockAgent{id: agentID, enrollSecret: secret}
 	mc.agents[agentID] = ag
 
 	var ott *string
@@ -101,7 +100,6 @@ func (mc *mockCentral) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := RegisterResponse{
 		AgentID:      agentID,
-		RolloutGroup: ag.rolloutGroup,
 		Status:       "pending",
 		EnrollSecret: secret,
 		CA: CABootstrap{

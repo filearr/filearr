@@ -55,7 +55,6 @@ type Enroller struct {
 // Result summarises a successful enrollment.
 type Result struct {
 	AgentID         string
-	RolloutGroup    string
 	CertFingerprint string
 	Leaf            *x509.Certificate
 }
@@ -151,7 +150,6 @@ func (e *Enroller) Enroll(ctx context.Context) (*Result, error) {
 		State: State{
 			AgentID:      reg.AgentID,
 			CentralURL:   e.Central.BaseURL,
-			RolloutGroup: reg.RolloutGroup,
 			CAURL:        reg.CA.URL,
 			CARootSHA256: reg.CA.Fingerprint,
 		},
@@ -170,7 +168,6 @@ func (e *Enroller) Enroll(ctx context.Context) (*Result, error) {
 
 	return &Result{
 		AgentID:         reg.AgentID,
-		RolloutGroup:    reg.RolloutGroup,
 		CertFingerprint: fp,
 		Leaf:            leaf,
 	}, nil

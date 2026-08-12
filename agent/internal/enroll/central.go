@@ -59,8 +59,9 @@ type CABootstrap struct {
 // provisioner JWK is unset/malformed (the documented fail-safe: registration
 // still succeeds but no cert can be minted until an operator re-issues one).
 type RegisterResponse struct {
-	AgentID      string      `json:"agent_id"`
-	RolloutGroup string      `json:"rollout_group"`
+	AgentID string `json:"agent_id"`
+	// (P13 removed central's rollout_group from this payload along with the
+	// column; an older central that still sends it is simply ignored here.)
 	Status       string      `json:"status"`
 	EnrollSecret string      `json:"enroll_secret"`
 	CA           CABootstrap `json:"ca"`

@@ -73,7 +73,8 @@ func NewPolicyClient(cfg ClientConfig) *PolicyClient {
 // Fetch does one conditional GET. etag is the cached ETag (empty on first fetch)
 // sent as If-None-Match; appliedVersion is the version the agent has FULLY
 // applied, reported via the ?applied= query param so central can stamp
-// agents.policy_version_applied. Returns ErrNotModified on 304 (cache current),
+// agents.config_generation_applied. Returns ErrNotModified on 304 (cache
+// current),
 // a FetchResult on 200, or an error on any other status / transport failure.
 func (c *PolicyClient) Fetch(ctx context.Context, etag string, appliedVersion int) (FetchResult, error) {
 	url := fmt.Sprintf("%s/api/v1/agents/%s/policy?applied=%d", c.baseURL, c.agentID, appliedVersion)

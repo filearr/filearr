@@ -1,4 +1,4 @@
-"""P5-T7 — signed agent update manifest + staged rollout (central-side).
+"""P5-T7 — signed agent update manifest distribution (central-side).
 
 The central half of the agent self-updater. Central STORES and SERVES signed
 release manifests + artifact binaries but is UNTRUSTED for update integrity
@@ -11,9 +11,17 @@ agent's sha256 check catches.
 Two planes, both behind ``FILEARR_AGENTS_ENABLED`` (404 when off):
 
 * **Operator/admin plane** (``admin`` scope): upload a release (the signed
-  manifest, then each artifact binary), promote canary→general (the R5 / §6.3
-  operator-confirmation gate), and list releases with the per-agent
+  manifest, then each artifact binary) and list releases with the per-agent
   confirmed-version rollup ("which version has each agent confirmed").
+
+  HISTORY (P13, 2026-08-11): uploads used to land as ``stage='canary'``, visible
+  only to agents in the configured canary rollout group, and needed an explicit
+  promote to reach the fleet. That staging died with ``rollout_group``. Every
+  release is now fleet-visible on upload; the brake is the per-group
+  ``auto_update`` policy key (enforced server-side on the manifest poll) and the
+  targeting tool is a per-agent ``self_update`` command. Configuration gets the
+  phased treatment instead — see ``agent_config_rollouts``; attaching binary
+  releases to that same tier engine is on the roadmap.
 * **Agent plane** (``_authenticate_agent`` reused from ``api.agent_commands`` —
   interim bearer / mTLS-header per ``FILEARR_AGENT_AUTH_MODE``): fetch the newest
   covering manifest for THIS agent, and download an artifact by filename (served
@@ -41,8 +49,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit
-from filearr import policy as policy_mod
+from filearr import agent_config, audit
 from filearr.api import agent_dist
 from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
@@ -159,9 +166,7 @@ def _compare_release(a: str, b: str) -> int:
 class ReleaseOut(BaseModel):
     id: uuid.UUID
     version: str
-    stage: str
     created_at: datetime
-    promoted_at: datetime | None
     artifacts: list[dict[str, Any]]
     ready: bool
     confirmed_count: int
@@ -171,9 +176,7 @@ class ReleaseOut(BaseModel):
         return cls(
             id=rel.id,
             version=rel.version,
-            stage=rel.stage,
             created_at=rel.created_at,
-            promoted_at=rel.promoted_at,
             artifacts=_manifest_artifacts(rel.manifest),
             ready=ready,
             confirmed_count=confirmed,
@@ -184,7 +187,6 @@ class AgentVersionOut(BaseModel):
     id: uuid.UUID
     name: str
     hostname: str
-    rollout_group: str
     agent_version: str | None
     last_seen_at: datetime | None
 
@@ -210,9 +212,10 @@ async def register_release(
 ) -> ReleaseOut:
     """Register a SIGNED release manifest (phase 1 of upload). The manifest is
     stored VERBATIM (including its ``signature``); central never validates the
-    signature (it holds no key). ``stage`` is forced to ``canary``. Artifacts are
-    uploaded next via PUT. A duplicate version is a 409 (releases are immutable —
-    re-cut a new version rather than mutating one)."""
+    signature (it holds no key). Artifacts are uploaded next via PUT, and the
+    release is only OFFERED once every artifact it names is on disk. A duplicate
+    version is a 409 (releases are immutable — re-cut a new version rather than
+    mutating one)."""
     version = manifest.get("version")
     if not isinstance(version, str) or not _SAFE_VERSION.match(version):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "manifest version missing or invalid")
@@ -237,14 +240,14 @@ async def register_release(
     settings = get_settings()
     _release_dir(settings, version).mkdir(parents=True, exist_ok=True)
 
-    rel = AgentRelease(version=version, stage="canary", manifest=manifest)
+    rel = AgentRelease(version=version, manifest=manifest)
     session.add(rel)
     await session.commit()
     await audit.emit(
         audit.AGENT_RELEASE_UPLOADED,
         request=request,
         principal_id=audit.actor_id(request),
-        details={"version": version, "stage": "canary", "artifacts": len(arts)},
+        details={"version": version, "artifacts": len(arts)},
     )
     return ReleaseOut.of(rel, _release_ready(settings, rel), 0)
 
@@ -309,42 +312,6 @@ async def upload_artifact(
     return {"version": version, "filename": filename, "size": size, "sha256": got}
 
 
-@router.post(
-    "/agent-releases/{version}/promote",
-    response_model=ReleaseOut,
-    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
-)
-async def promote_release(
-    version: str,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-) -> ReleaseOut:
-    """Promote a canary release to general (R5 / §6.3 operator-confirmation gate):
-    the whole fleet sees it after this. 409 if already general or if artifacts are
-    not all uploaded yet (a half-uploaded release must not go fleet-wide)."""
-    rel = (
-        await session.execute(select(AgentRelease).where(AgentRelease.version == version))
-    ).scalar_one_or_none()
-    if rel is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such release")
-    if rel.stage == "general":
-        raise HTTPException(status.HTTP_409_CONFLICT, "release already general")
-    settings = get_settings()
-    if not _release_ready(settings, rel):
-        raise HTTPException(status.HTTP_409_CONFLICT, "release artifacts incomplete")
-    rel.stage = "general"
-    rel.promoted_at = datetime.now(UTC)
-    await session.commit()
-    await audit.emit(
-        audit.AGENT_RELEASE_PROMOTED,
-        request=request,
-        principal_id=audit.actor_id(request),
-        details={"version": version, "stage": "general"},
-    )
-    confirmed = await _confirmed_count(session, rel.version)
-    return ReleaseOut.of(rel, True, confirmed)
-
-
 @router.get(
     "/agent-releases",
     response_model=ReleaseListOut,
@@ -380,7 +347,6 @@ async def list_releases(
                 id=ag.id,
                 name=ag.name,
                 hostname=ag.hostname,
-                rollout_group=ag.rollout_group,
                 agent_version=ag.agent_version,
                 last_seen_at=ag.last_seen_at,
             )
@@ -401,14 +367,6 @@ async def _confirmed_count(session: AsyncSession, version: str) -> int:
 # --------------------------------------------------------------------------- #
 # Agent plane                                                                  #
 # --------------------------------------------------------------------------- #
-def _covers(rel: AgentRelease, agent: Agent, canary_group: str) -> bool:
-    """A general release covers every agent; a canary release covers only agents
-    in the canary rollout_group (R5)."""
-    if rel.stage == "general":
-        return True
-    return rel.stage == "canary" and agent.rollout_group == canary_group
-
-
 # A "clean" release-tag version whose ordering CompareVersions understands
 # (v1.2.3 / 1.2.3-rc1). Anything else — branch@sha builds like "main-1a2b3c4" —
 # has NO defined ordering: for those, "differs from current" is the only
@@ -495,8 +453,8 @@ async def resolve_update_target(
     agent: Agent,
     releases: list[AgentRelease] | None = None,
 ) -> str | None:
-    """The version this agent WOULD be offered (newest covering ready signed
-    release, else the differing agent-dist bake), or None when up to date.
+    """The version this agent WOULD be offered (newest ready signed release,
+    else the differing agent-dist bake), or None when up to date.
     Shared by the console fields (update_available/update_target) and the
     self-update trigger endpoint — one definition of "update available".
     ``releases`` lets a paging caller preload the (small) release list once."""
@@ -510,10 +468,8 @@ async def resolve_update_target(
             ).scalars()
         )
     for rel in releases:
-        if not _covers(rel, agent, settings.agent_canary_group):
-            continue
         if current and not _version_newer(rel.version, current):
-            break  # newest covering release is not newer -> signed channel done
+            break  # newest release is not newer -> signed channel done
         if _release_ready(settings, rel):
             return rel.version
     dist = _dist_manifest_for(settings, current)
@@ -569,8 +525,8 @@ async def get_update_manifest(
     if (agent.capabilities or {}).get("container"):
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    _, _, effective = await policy_mod.resolve_effective_policy(session, agent)
-    auto = effective.get("auto_update")
+    effective = await agent_config.resolve_effective_config(session, agent)
+    auto = effective.document.get("auto_update")
     if auto is False and not await _pending_self_update(session, agent_id):
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -578,10 +534,8 @@ async def get_update_manifest(
         await session.execute(select(AgentRelease).order_by(AgentRelease.created_at.desc()))
     ).scalars().all()
     for rel in releases:  # newest first
-        if not _covers(rel, agent, settings.agent_canary_group):
-            continue
         if current and not _version_newer(rel.version, current):
-            # The newest covering release is not newer than what we run — the
+            # The newest release is not newer than what we run — the
             # signed channel is done (the dist fallback below may still differ).
             break
         if not _release_ready(settings, rel):

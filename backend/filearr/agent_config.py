@@ -1,17 +1,21 @@
-"""Agent configuration-group settings schema + validation (W6-D2).
+"""Agent configuration groups: settings schema, tier validation, layered
+resolution (W6-D2, rewritten for P13's config-group unification).
 
 The pure, request-free core behind the remote-configuration channel (config
 groups, ``docs/ops/agents.md`` § "Configuration groups"):
 
 * :class:`GroupSettings` / :func:`validate_settings` — typed, versioned v1
-  validation of a config group's ``settings`` object. Unlike the per-agent
-  *policy* body (:mod:`filearr.policy`, which PRESERVES unknown keys for
-  forward-compat), a config group's ``settings`` REJECTS unknown top-level keys
+  validation of a config group's ``settings`` object. Unlike the *policy* half of
+  the same group (:mod:`filearr.policy`, which PRESERVES unknown keys for
+  forward-compat), ``settings`` REJECTS unknown top-level keys
   (``extra='forbid'`` → 422) so an operator typo never silently no-ops.
-* :func:`merge_group_into_policy` / :func:`group_etag_tag` — how a group's
-  settings ride the EXISTING policy channel: merged into the effective policy doc
-  under a new top-level ``group`` section, with the group's ``updated_at`` folded
-  into the policy ETag so an edit invalidates agent caches.
+* :func:`validate_tiers` — the ≤5-tier percent/delay schedule a phased rollout
+  publishes through.
+* :func:`agent_bucket` / :func:`rollout_active_percent` — the stable, storage-free
+  coverage function that decides which agents a running rollout has reached.
+* :func:`resolve_effective_config` — the LAYERED merge: Global plus the agent's
+  member groups in ascending ``priority``, later groups overriding only the keys
+  they set, composed into the FROZEN wire document an agent already parses.
 
 Path specs (``scan_selections[].paths``) MAY carry env tokens
 (``%USERPROFILE%``, ``$HOME``, ``~``) and glob segments (``/home/*/documents``);
@@ -25,12 +29,23 @@ typo class).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import uuid
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from filearr.models import (
+    AgentConfigGroup,
+    AgentConfigGroupMember,
+    AgentConfigGroupVersion,
+    AgentConfigRollout,
+)
 from filearr.schedule import InvalidCronError, validate_cron
 
 # --- W6-R1 preset vocabulary (docs/research/agent-inventory-presets.md §5) ---
@@ -153,9 +168,9 @@ MAX_WATCH_PATHS = MAX_PATHS_PER_SELECTION
 MAX_RETAIN_SNAPSHOTS = 1000
 
 
-#: The config-group keys :func:`merge_group_into_policy` LIFTS to top-level policy
-#: keys on delivery (so agent binaries need no change to honour a per-group gate).
-#: Single source of truth — the admin effective-policy view derives per-key
+#: The settings keys :func:`compose_document` LIFTS to top-level policy keys on
+#: delivery (so agent binaries need no change to honour a per-group gate).
+#: Single source of truth — the admin effective-config view derives per-key
 #: provenance from the same tuple, so the two can never drift.
 LIFTED_LOCAL_KEYS: tuple[str, ...] = (
     "web_ui_enabled",
@@ -375,10 +390,10 @@ class GroupSettings(BaseModel):
     inventory: InventoryConfig | None = None
     scan_schedule_cron: str | None = None
     # Local-surface gates per CONFIG GROUP (user request 2026-07-27). None =
-    # inherit (global policy, else agent default). Delivery lifts these to the
-    # TOP-LEVEL policy keys the agent's P7-T4 gate already reads — see
-    # merge_group_into_policy for the precedence — so agent binaries need no
-    # change.
+    # inherit (let a lower-priority group, or the agent default, supply this).
+    # Delivery lifts these to the TOP-LEVEL policy keys the agent's P7-T4 gate
+    # already reads — see compose_document for the settings-wins tie-break — so
+    # agent binaries need no change.
     web_ui_enabled: bool | None = None
     local_access_enabled: bool | None = None
     auth_required: bool | None = None
@@ -444,83 +459,356 @@ def _summarise(err: ValidationError) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Policy-channel delivery (merge group settings into the effective policy doc)  #
+# Phased-rollout tiers                                                          #
 # --------------------------------------------------------------------------- #
-def group_etag_tag(group: Any | None) -> str | None:
-    """A compact, edit-sensitive tag for the agent's config group, or ``None``
-    when the agent has no group. Folded into the policy ETag so ANY group edit
-    (which bumps ``updated_at``) invalidates the agent's cached policy. ``None`` →
-    the ETag stays the pre-W6 ``"<scope>/<version>"`` form (no group section)."""
-    if group is None:
+#: Hard ceiling on tiers in one rollout. Five is the design's number and it is a
+#: UI decision as much as a storage one: a schedule an operator cannot hold in
+#: their head is a schedule they will not supervise.
+MAX_ROLLOUT_TIERS = 5
+
+
+class RolloutValidationError(ValueError):
+    """A malformed tier schedule (→ 422 at the API)."""
+
+
+def validate_tiers(tiers: Any) -> list[dict[str, int]]:
+    """Validate + normalise a phased-rollout tier list.
+
+    Shape: 1..:data:`MAX_ROLLOUT_TIERS` entries of
+    ``{"percent": 1..100, "delay_minutes": >= 0}``, percents STRICTLY ASCENDING,
+    and the LAST percent exactly 100.
+
+    The last-must-be-100 rule is deliberate, and the alternative was considered:
+    a rollout that stops at 60% would leave the group permanently split between
+    two documents with nothing in the schema recording that this was intentional.
+    "Publish to a subset and stop" is an edit to a narrower group, not a rollout.
+
+    ``delay_minutes`` of tier N is the wait after tier N-1 ACTIVATED; tier 0's
+    delay counts from the rollout's start (so ``delay_minutes: 0`` on tier 0
+    means "go live at the next tick"). Returns the normalised list (ints, only
+    the two known keys) — the caller stores THAT, not the raw input."""
+    if not isinstance(tiers, list) or not tiers:
+        raise RolloutValidationError("tiers must be a non-empty list")
+    if len(tiers) > MAX_ROLLOUT_TIERS:
+        raise RolloutValidationError(
+            f"tiers has {len(tiers)} entries; max {MAX_ROLLOUT_TIERS}"
+        )
+    out: list[dict[str, int]] = []
+    previous = 0
+    for i, tier in enumerate(tiers):
+        if not isinstance(tier, dict):
+            raise RolloutValidationError(f"tiers[{i}] must be an object")
+        percent = tier.get("percent")
+        delay = tier.get("delay_minutes", 0)
+        # bool is an int subclass; a JSON `true` here is a typo, not a percent.
+        if not isinstance(percent, int) or isinstance(percent, bool):
+            raise RolloutValidationError(f"tiers[{i}].percent must be an integer")
+        if not 1 <= percent <= 100:
+            raise RolloutValidationError(f"tiers[{i}].percent must be 1..100")
+        if percent <= previous:
+            raise RolloutValidationError(
+                f"tiers[{i}].percent ({percent}) must be greater than the previous "
+                f"tier's ({previous}) — tiers only ever widen coverage"
+            )
+        if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
+            raise RolloutValidationError(
+                f"tiers[{i}].delay_minutes must be an integer >= 0"
+            )
+        previous = percent
+        out.append({"percent": percent, "delay_minutes": delay})
+    if out[-1]["percent"] != 100:
+        raise RolloutValidationError(
+            "the last tier must be 100 — a rollout always finishes fleet-wide; "
+            "to configure a subset permanently, edit a narrower group instead"
+        )
+    return out
+
+
+def agent_bucket(agent_id: uuid.UUID) -> int:
+    """The agent's stable rollout bucket, 0..99.
+
+    ``sha256(agent.id.bytes)[:4]`` big-endian, modulo 100. Deterministic (the
+    same agent is always in the same bucket, across restarts and re-deploys),
+    uniform (a UUIDv7's time prefix would NOT be — consecutively-enrolled agents
+    would land in the same slice and a 10% tier would mean "the ten machines
+    installed on the same afternoon"), and free of any extra storage: nothing
+    records which agents a tier covers, so a fleet that grows mid-rollout keeps
+    a uniform slice with no backfill."""
+    return int.from_bytes(hashlib.sha256(agent_id.bytes).digest()[:4], "big") % 100
+
+
+def rollout_active_percent(rollout: AgentConfigRollout | None) -> int | None:
+    """The percentage a rollout currently covers, or ``None`` when it covers
+    nobody (no rollout, not running, or running with no tier activated yet).
+
+    Only a ``running`` rollout with ``current_tier >= 0`` covers anything. A
+    ``scheduled`` rollout whose ``starts_at`` has passed covers nobody until the
+    minute tick promotes it — at most a 60 s lag, and the alternative (deriving
+    activation from wall-clock at read time) would mean the API and the worker
+    each compute their own notion of "now" and disagree during the gap."""
+    if rollout is None or rollout.status != "running" or rollout.current_tier < 0:
         return None
-    import hashlib
-
-    basis = f"{group.id}:{group.updated_at.isoformat()}"
-    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
-
-
-def merge_group_into_policy(
-    policy: dict, group: Any | None, *, policy_scope: str = ""
-) -> dict:
-    """Merge the agent's config group ``settings`` into the effective policy doc
-    under a new top-level ``group`` section (W6-D2).
-
-    Precedence (documented on the policy endpoint): per-agent explicit policy keys
-    (the existing resolved ``policy``) > group settings > defaults. Concretely:
-
-    * NULL group → the doc is returned UNCHANGED (no ``group`` section).
-    * A group whose ``settings`` is empty ``{}`` → an empty ``group: {}`` section
-      (the agent sees "a group is assigned, it just carries no overrides").
-    * If the resolved per-agent policy ALREADY sets a top-level ``group`` key (an
-      operator authored it explicitly), that explicit key WINS — the group
-      settings are NOT injected (additive, non-clobbering).
-
-    LOCAL-SURFACE LIFT (user request 2026-07-27): the group's
-    ``web_ui_enabled`` / ``local_access_enabled`` / ``auth_required`` are
-    additionally lifted to the TOP-LEVEL keys the agent's P7-T4 gate reads —
-    a config group can gate its members' web UI without any agent change. The
-    lift honors this precedence per key:
-
-      explicit agent:/group: (rollout) policy doc  >  config-group settings
-      >  the GLOBAL policy doc  >  agent defaults
-
-    i.e. when the winning policy scope is ``global`` (or none), a set
-    config-group key OVERRIDES it — that is the whole point of a per-group
-    switch "outside of the global configuration". A narrower explicit policy
-    row still wins wholesale (unchanged wire contract).
-
-    Backward compat: current agent binaries that ignore ``group`` are unaffected
-    (the key is purely additive); the lifted keys are ones they already parse."""
-    if group is None:
-        return policy
-    if "group" in policy:
-        return policy
-    settings = group.settings or {}
-    merged = {**policy, "group": settings}
-    for key in lifted_local_keys(policy, group, policy_scope=policy_scope):
-        merged[key] = settings[key]
-    return merged
+    tiers = rollout.tiers or []
+    if rollout.current_tier >= len(tiers):
+        return None
+    percent = tiers[rollout.current_tier].get("percent")
+    return percent if isinstance(percent, int) else None
 
 
-def lifted_local_keys(
-    policy: dict, group: Any | None, *, policy_scope: str = ""
-) -> list[str]:
-    """Which :data:`LIFTED_LOCAL_KEYS` the group actually contributes to the
-    delivered policy — i.e. the keys :func:`merge_group_into_policy` overwrites.
+# --------------------------------------------------------------------------- #
+# Layered resolution (Global + member groups, ascending priority, last wins)    #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class GroupContribution:
+    """One group's contribution to an agent's effective configuration."""
 
-    Factored out so the admin effective-policy view can attribute each key to
-    ``group-settings`` vs the winning policy document without re-deriving (and
-    slowly diverging from) the precedence rule. Returns ``[]`` when there is no
-    group, when the operator authored an explicit top-level ``group`` key (which
-    suppresses the whole fold), or when a narrower policy row outranks the group
-    for every key it sets."""
-    if group is None or "group" in policy:
-        return []
-    settings = group.settings or {}
-    narrow_scope = policy_scope.startswith(("agent:", "group:"))
-    return [
-        key
-        for key in LIFTED_LOCAL_KEYS
-        # None = "inherit"; a narrower explicit policy row keeps its say.
-        if settings.get(key) is not None and not (narrow_scope and key in policy)
-    ]
+    group_id: uuid.UUID
+    name: str
+    priority: int
+    is_system: bool
+    #: The per-group version this agent actually received (``current_version``,
+    #: or a rollout's ``target_version`` when this agent's bucket is covered).
+    version_used: int
+    #: The snapshot's global generation counter (``agent_config_group_versions.seq``).
+    seq: int
+    #: True when ``version_used`` came from a running rollout rather than
+    #: ``current_version`` — i.e. this agent is an early adopter right now.
+    via_rollout: bool
+    settings: dict[str, Any]
+    policy: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EffectiveConfig:
+    """The resolved answer for one agent: the wire document plus everything the
+    console needs to explain it."""
+
+    #: The FROZEN wire document (merged policy keys at top level, ``group`` =
+    #: merged settings, the lifted local-surface keys). The server-injected
+    #: ``taxonomy_version`` is NOT part of it — see :func:`compose_document`.
+    document: dict[str, Any]
+    settings: dict[str, Any]  # the merged settings section on its own
+    policy: dict[str, Any]  # the merged policy section on its own
+    #: ``max(seq)`` over the contributing snapshots. Monotonic fleet-wide, so it
+    #: is comparable between two agents in entirely different groups.
+    generation: int
+    #: ``sha256`` (12 hex chars) of the canonical document — the ETag's content
+    #: half, so a rollback to a byte-identical document still re-validates.
+    hash: str
+    contributors: list[GroupContribution]
+    #: ``"<section>.<key>" -> {group_id, group_name, version}`` for every key any
+    #: group set. Sections are ``settings`` and ``policy``.
+    provenance: dict[str, dict[str, Any]]
+
+
+def compose_document(settings: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    """Compose the FROZEN wire document from the two merged sections.
+
+    The shape is exactly what agents have parsed since W6-D2, and it is frozen:
+    the Go ``config.Policy`` struct must need zero changes.
+
+    * merged ``policy`` keys sit at the TOP level (including unknown
+      forward-compat keys, which pass through verbatim);
+    * merged ``settings`` ride under a top-level ``group`` section;
+    * the three :data:`LIFTED_LOCAL_KEYS` are additionally lifted OUT of settings
+      to top-level keys the agent's P7-T4 gate already reads, so a group can gate
+      its members' local web UI with no agent change.
+
+    **Settings win the lift.** Pre-P13 the rule was a precedence dance between
+    the winning policy SCOPE and the config group; with one layered document
+    there are no scopes left to rank, so the tie-break is between the two
+    sections of the same merged document. Settings win because ``settings`` is
+    the typed, validated, console-rendered half — the half an operator edits with
+    checkboxes — while the same key in ``policy`` is a raw JSON escape hatch. A
+    ``None`` settings value means "inherit", so it never overrides anything.
+
+    A ``group`` key authored inside the POLICY section is overwritten by the
+    settings section: ``group`` IS the settings section now, so an operator
+    "setting" it in raw policy JSON is authoring a shadow of the real thing."""
+    doc: dict[str, Any] = {**policy, "group": settings}
+    for key in LIFTED_LOCAL_KEYS:
+        value = settings.get(key)
+        if value is not None:
+            doc[key] = value
+    return doc
+
+
+def canonical_hash(document: dict[str, Any]) -> str:
+    """The document's content fingerprint (first 12 hex chars of sha256 over its
+    canonical JSON). Sorted keys + compact separators so a semantically identical
+    document always hashes the same regardless of dict insertion order."""
+    payload = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+async def load_agent_groups(
+    session: AsyncSession, agent_id: uuid.UUID
+) -> list[AgentConfigGroup]:
+    """Global + the agent's explicit member groups, in MERGE ORDER.
+
+    Order is ``(priority, name, id)``: ascending priority with a deterministic
+    tie-break, because equal priorities are legal (forcing uniqueness would make
+    "insert a group between these two" a renumbering exercise) and two groups
+    that both set a key must still resolve the same way on every poll."""
+    q = (
+        select(AgentConfigGroup)
+        .outerjoin(
+            AgentConfigGroupMember,
+            (AgentConfigGroupMember.group_id == AgentConfigGroup.id)
+            & (AgentConfigGroupMember.agent_id == agent_id),
+        )
+        .where(
+            or_(
+                AgentConfigGroup.is_system.is_(True),
+                AgentConfigGroupMember.agent_id.is_not(None),
+            )
+        )
+        .order_by(
+            AgentConfigGroup.priority,
+            AgentConfigGroup.name,
+            AgentConfigGroup.id,
+        )
+    )
+    return list((await session.execute(q)).scalars())
+
+
+async def _live_rollouts(
+    session: AsyncSession, group_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, AgentConfigRollout]:
+    """The single live (scheduled/running) rollout per group, if any. One query
+    for the whole group set — an agent in eight groups must not cost eight."""
+    if not group_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(AgentConfigRollout).where(
+                AgentConfigRollout.group_id.in_(group_ids),
+                AgentConfigRollout.status.in_(("scheduled", "running")),
+            )
+        )
+    ).scalars()
+    return {r.group_id: r for r in rows}
+
+
+async def resolve_effective_config(
+    session: AsyncSession, agent: Any
+) -> EffectiveConfig:
+    """Resolve ``agent``'s effective configuration by LAYERED per-key merge.
+
+    1. Load Global + the agent's member groups in ``(priority, name, id)`` order.
+    2. For each group pick the version THIS agent gets: a running rollout whose
+       active tier covers the agent's :func:`agent_bucket` hands over
+       ``target_version``; everyone else gets ``current_version``.
+    3. Merge each section (``settings``, ``policy``) key by key in that order —
+       a later group overrides only the keys it sets. The merge is SHALLOW at the
+       top level of each section: a nested object (``inventory``,
+       ``scan_selections``) REPLACES wholesale rather than deep-merging, which
+       matches how an operator reads "this group sets the inventory config" and
+       avoids the un-explainable half-merged list.
+    4. Compose the frozen wire document, the generation and the content hash.
+
+    Always returns a complete answer — an agent with no groups at all still gets
+    Global, and a fleet with no Global row (only possible mid-migration) resolves
+    to an empty document rather than an error. An agent must never fail to get a
+    configuration."""
+    groups = await load_agent_groups(session, agent.id)
+    rollouts = await _live_rollouts(session, [g.id for g in groups])
+    bucket = agent_bucket(agent.id)
+
+    # Pick each group's active version first, then fetch every snapshot in ONE
+    # query (the alternative is a round-trip per group on every agent poll).
+    wanted: list[tuple[AgentConfigGroup, int, bool]] = []
+    for group in groups:
+        version = group.current_version
+        via_rollout = False
+        percent = rollout_active_percent(rollouts.get(group.id))
+        if percent is not None and bucket < percent:
+            rollout = rollouts[group.id]
+            # Only ever FORWARD: a rollout targeting an older version than the
+            # published one would silently downgrade covered agents.
+            if rollout.target_version > version:
+                version = rollout.target_version
+                via_rollout = True
+        wanted.append((group, version, via_rollout))
+
+    snapshots: dict[tuple[uuid.UUID, int], AgentConfigGroupVersion] = {}
+    if wanted:
+        rows = (
+            await session.execute(
+                select(AgentConfigGroupVersion).where(
+                    AgentConfigGroupVersion.group_id.in_([g.id for g, _, _ in wanted])
+                )
+            )
+        ).scalars()
+        snapshots = {(r.group_id, r.version): r for r in rows}
+
+    merged_settings: dict[str, Any] = {}
+    merged_policy: dict[str, Any] = {}
+    provenance: dict[str, dict[str, Any]] = {}
+    contributors: list[GroupContribution] = []
+    generation = 0
+
+    for group, version, via_rollout in wanted:
+        snap = snapshots.get((group.id, version))
+        if snap is None:
+            # Defensive: a group whose snapshot row is missing (only reachable
+            # via direct DB surgery) falls back to its live authoring columns
+            # rather than dropping out of the merge — a missing history row must
+            # not silently un-configure a fleet.
+            settings = dict(group.settings or {})
+            policy = dict(group.policy or {})
+            seq = 0
+        else:
+            settings = dict(snap.settings or {})
+            policy = dict(snap.policy or {})
+            seq = snap.seq
+        generation = max(generation, seq)
+        for section, source, target in (
+            ("settings", settings, merged_settings),
+            ("policy", policy, merged_policy),
+        ):
+            for key, value in source.items():
+                target[key] = value
+                provenance[f"{section}.{key}"] = {
+                    "group_id": str(group.id),
+                    "group_name": group.name,
+                    "version": version,
+                }
+        contributors.append(
+            GroupContribution(
+                group_id=group.id,
+                name=group.name,
+                priority=group.priority,
+                is_system=group.is_system,
+                version_used=version,
+                seq=seq,
+                via_rollout=via_rollout,
+                settings=settings,
+                policy=policy,
+            )
+        )
+
+    document = compose_document(merged_settings, merged_policy)
+    return EffectiveConfig(
+        document=document,
+        settings=merged_settings,
+        policy=merged_policy,
+        generation=generation,
+        hash=canonical_hash(document),
+        contributors=contributors,
+        provenance=provenance,
+    )
+
+
+def config_etag(generation: int, doc_hash: str, taxonomy_version: int) -> str:
+    """The strong validator served with the policy document.
+
+    ``"groups/<generation>/h:<hash>/t:<taxonomy_version>"``. Three independent
+    components because three independent things invalidate a cache: ANY
+    contributing group publishing (generation), the merged content changing
+    (hash — which also catches a membership or priority change that moves no
+    version number), and a taxonomy edit (the W8-E version gate). The Go client
+    re-applies on any ETag change, so all three are equally effective."""
+    return f'"groups/{generation}/h:{doc_hash}/t:{taxonomy_version}"'

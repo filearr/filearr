@@ -122,7 +122,8 @@ Policy sync (§6). Poll `GET /api/agents/{id}/policy` with `ETag`/`If-None-Match
 as the reliable background path; opportunistically hold an SSE stream open only
 while a local UI/CLI is active for near-instant apply. Applies the received
 policy (enabled libraries, `scan_paths`, preset bundles, local-access
-enable/disable flag) and reports `policy_version_applied` back. Every policy also
+enable/disable flag) and reports the applied config GENERATION back (central
+stamps `agents.config_generation_applied`). Every policy also
 carries a computed `taxonomy_version` (W8-E) folded into the ETag's `/t:<v>`
 segment; the poller's `AfterFetch` hook version-gates the `internal/taxonomy`
 cache refresh off it. mTLS is the only integrity layer (**R4**). Key types:
@@ -133,10 +134,12 @@ Self-update (§5). Fetches a **minisign-style signed manifest** (Tauri pattern �
 full TUF explicitly rejected as disproportionate), verifies its signature
 against a pinned Ed25519 public key, downloads and A/B-swaps the binary per-OS,
 and runs a crash-loop boot-counting rollback state machine (revert to the
-previous binary within N failed launches). Honors staged rollout via
-`agents.rollout_group` (**R5** — a text column now; documented migration path to
-phase-6 machine groups, never two parallel authorities). Key types: `Updater`,
-`Manifest`, `Verifier`, `RollbackGuard`.
+previous binary within N failed launches). Every release is offered fleet-wide;
+the brake is the `auto_update` key in the agent's configuration groups, enforced
+server-side on the manifest poll (P13 removed release staging along with
+`agents.rollout_group` — **R5** is settled: one grouping authority,
+`agent_config_group_members`). Key types: `Updater`, `Manifest`, `Verifier`,
+`RollbackGuard`.
 
 ### `internal/localapi`
 The local query surface (roadmap §2 / phase-7 doc): a `filearr query ...` CLI and

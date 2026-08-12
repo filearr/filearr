@@ -145,8 +145,9 @@ source IP. Either bucket crossing the threshold locks it, and the lock is checke
 Agent self-update integrity does **not** trust central. Releases are Ed25519-signed
 with a key that lives only on your signing machine (or hardware token); the public
 key is pinned into each agent binary at build time; a mismatched sha256 or an
-invalid signature refuses the update. Rollout is a **canary → promote** gate, and
-a crash-looping new binary is **automatically rolled back** by boot counting. See
+invalid signature refuses the update. Who takes a release is gated by the
+`auto_update` key in a [configuration group](agents.md#two-groupings), and a
+crash-looping new binary is **automatically rolled back** by boot counting. See
 [Agents → self-update](agents.md#self-update-with-signed-releases).
 
 Three complementary trust layers:

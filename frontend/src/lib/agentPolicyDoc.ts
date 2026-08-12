@@ -1,20 +1,22 @@
-// Agent policy document <-> form model (2026-08-09).
+// Agent policy document <-> form model (2026-08-09; re-homed 2026-08-11).
 //
-// The DOM-free core behind AgentPolicyEditor.svelte, kept here so the two rules
-// that would be DATA LOSS bugs if they regressed are unit-testable on Node:
+// The DOM-free core behind the POLICY half of the config-group dialog in
+// AgentsPage.svelte, kept here so the two rules that would be DATA LOSS bugs if
+// they regressed are unit-testable on Node:
 //
 //  1. **Unknown-key preservation.** The backend's PolicyModel is `extra="allow"`
 //     and stores the submitted document VERBATIM. A newer agent build may read a
 //     key this console has never heard of. The form must therefore round-trip
 //     every key it does not render (`passthroughFromDoc` -> `buildPolicyDoc`)
 //     instead of rebuilding the document from its own field list.
-//  2. **"Inherit" is an ABSENT key, not a null.** Policy resolution is
-//     most-specific-wins with NO key merging, and an absent key means "agent
-//     default". Emitting `{"watch_mode": null}` would be a different (and for
+//  2. **"Inherit" is an ABSENT key, not a null.** A key absent from THIS group's
+//     policy section is a key this group does not contribute to the merge — a
+//     lower-priority group, or the agent's built-in default, supplies it
+//     instead. Emitting `{"watch_mode": null}` would be a different (and for
 //     several keys, invalid) document than omitting it.
 //
 // Every field is therefore tri-state: `{ set: false }` = inherit/absent,
-// `{ set: true, value }` = an explicit value in this scope's document.
+// `{ set: true, value }` = a value THIS group contributes to the merge.
 
 /** A policy document as stored. All known keys optional; the index signature
  *  carries forward-compat keys central does not model (preserved verbatim). */
@@ -373,7 +375,7 @@ export const RESERVED_POLICY_KEYS: Record<string, string> = {
   taxonomy_version:
     "Injected by central per response (the file-extension taxonomy revision). Never operator-set.",
   group:
-    "Reserved for the assigned config group's settings. An operator-authored 'group' key SUPPRESSES the config-group fold entirely.",
+    "Reserved for the merged config-group SETTINGS section, which the composer writes into the delivered document. An operator-authored 'group' policy key is overwritten by it.",
 };
 
 export interface PolicyFieldState {
@@ -727,110 +729,9 @@ export function ignoredPolicySettings(
   return out;
 }
 
-// --------------------------------------------------------------------------- //
-// Scope strings                                                                 //
-// --------------------------------------------------------------------------- //
-
-/** Mirror of filearr.policy.parse_scope's grammar for a friendly label. */
-export function describeScope(scope: string): string {
-  if (scope === "global") return "Global (every agent)";
-  if (scope === "none") return "No policy document anywhere";
-  const [kind, ...rest] = scope.split(":");
-  const id = rest.join(":");
-  if (kind === "group") return `Rollout group "${id}"`;
-  if (kind === "agent") return `Agent ${id}`;
-  return scope;
-}
-
-/** The scope string an agent resolves, given the CURRENT policy rows.
- *
- *  A faithful mirror of `filearr.policy.resolve_effective_policy`: walk
- *  `agent:<id>` > `group:<rollout_group>` > `global` and return the first scope
- *  that has a document, or `"none"` when there is no document anywhere. The
- *  console can answer this from the rows it already loaded (`GET
- *  /agent-policies` returns one CURRENT row per scope), so the agents table shows
- *  `group:filers` per row without one effective-policy request per agent — the
- *  authoritative per-agent view stays the lazily-fetched details row.
- *
- *  Keep this in step with the backend resolver; the ordering is the contract. */
-export function resolvedPolicyScope(
-  scopes: readonly string[],
-  agent: { id: string; rollout_group: string },
-): string {
-  const have = new Set(scopes);
-  const agentScope = `agent:${agent.id}`;
-  if (have.has(agentScope)) return agentScope;
-  const groupScope = `group:${agent.rollout_group}`;
-  if (agent.rollout_group && have.has(groupScope)) return groupScope;
-  if (have.has("global")) return "global";
-  return "none";
-}
-
-/** The confirmation text for moving an agent between POLICY (rollout) groups.
- *
- *  Extracted as pure logic because it is the one place the console has to state
- *  BOTH consequences of a single field, and getting either wrong is how an
- *  operator ends up surprised:
- *
- *   1. the agent starts resolving a different policy document — and resolution
- *      is whole-document with NO key merging, so "it only changes EXIF" is never
- *      true if the target document omits the other keys;
- *   2. `rollout_group` doubles as the release-canary selector, so the same click
- *      adds or removes the machine from the canary cohort.
- */
-export function describePolicyGroupChange(opts: {
-  agentName: string;
-  from: string;
-  to: string;
-  /** Scope strings that currently have a policy document (GET /agent-policies). */
-  scopes: readonly string[];
-  /** The configured canary group (FILEARR_AGENT_CANARY_GROUP, default "canary"). */
-  canaryGroup: string;
-  /** Set when the agent has its OWN `agent:` document, which keeps winning. */
-  agentId: string;
-}): string {
-  const { agentName, from, to, scopes, canaryGroup, agentId } = opts;
-  const have = new Set(scopes);
-  const lines = [
-    `Move agent "${agentName}" from policy group "${from}" to "${to}"?`,
-    "",
-  ];
-  if (have.has(`agent:${agentId}`)) {
-    lines.push(
-      `This agent has its own agent: policy document, which outranks any group — its effective policy will NOT change until that document is removed.`,
-    );
-  } else if (have.has(`group:${to}`)) {
-    lines.push(
-      `It will resolve the group:${to} policy document instead of ${
-        have.has(`group:${from}`) ? `group:${from}` : "the global document"
-      }. The winning document replaces the previous one WHOLE — keys it does not set fall back to the agent's built-in default, not to the old group.`,
-    );
-  } else {
-    lines.push(
-      `There is no group:${to} policy document yet, so the agent falls back to ${
-        have.has("global") ? "the global document" : "its built-in defaults"
-      } until you author one.`,
-    );
-  }
-  const wasCanary = from === canaryGroup;
-  const willBeCanary = to === canaryGroup;
-  if (wasCanary !== willBeCanary) {
-    lines.push(
-      "",
-      willBeCanary
-        ? `It also JOINS the release-canary group "${canaryGroup}": it will be offered un-promoted canary agent builds.`
-        : `It also LEAVES the release-canary group "${canaryGroup}": it will only be offered promoted (general) agent builds.`,
-    );
-  }
-  lines.push("", "The change lands on the agent's next policy poll (~1 min).");
-  return lines.join("\n");
-}
-
-/** Human label for a `source_keys` entry from GET /agent-policies/effective. */
-export const SOURCE_LABELS: Record<string, string> = {
-  agent: "agent policy",
-  group: "rollout-group policy",
-  global: "global policy",
-  "group-settings": "config group",
-  default: "agent default",
-};
+// Scope strings are GONE (P13, 2026-08-11). There is no `global` / `group:<n>` /
+// `agent:<id>` precedence walk any more: a document is composed by merging the
+// configuration groups an agent belongs to in priority order. Per-key
+// provenance now comes from the server (`GET /agents/{id}/effective-config`) and
+// is formatted by ./configGroups — this module keeps only the field catalogue,
+// the form<->document mapping, and the capability cross-check.

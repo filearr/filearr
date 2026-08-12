@@ -7,7 +7,7 @@ enforcement is the agent's (``agent/internal/localapi/webcontrol.go``).
 
 What is pinned here:
 
-* the three keys round-trip through ``PUT /agent-policies/{scope}`` and appear
+* the three keys round-trip through a config group's ``policy`` section and appear
   in the admin effective-policy view with the right source;
 * absent, they are MODELLED keys reported as ``default`` (the console renders a
   field per known key) — not forward-compat unknowns;
@@ -39,6 +39,7 @@ from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import Agent
 from filearr.policy import PolicyValidationError, validate_policy
+from tests.agentcfg_helpers import effective, join, make_group, reset_config_groups, set_global
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -63,7 +64,7 @@ async def db_maker(pg_uri):
     command.upgrade(cfg, "head")
     engine = create_async_engine(_psycopg3(pg_uri))
     async with engine.begin() as conn:
-        await conn.execute(text("DELETE FROM policy_versions"))
+        await reset_config_groups(conn)
         await conn.execute(text("DELETE FROM agents"))
     maker = async_sessionmaker(engine, expire_on_commit=False)
     yield maker
@@ -117,52 +118,51 @@ async def test_local_control_keys_round_trip(client):
     c, maker, _ = client
     agent_id = await _seed_agent(maker)
 
-    r = await c.put("/api/v1/agent-policies/global", json={"policy": CONTROL_POLICY})
+    r = await set_global(c, policy=CONTROL_POLICY)
     assert r.status_code == 200, r.text
     assert r.json()["policy"] == CONTROL_POLICY
 
-    body = (await c.get(f"/api/v1/agent-policies/effective/{agent_id}")).json()
-    assert body["policy"] == CONTROL_POLICY
-    for key in CONTROL_POLICY:
-        assert body["source_keys"][key] == "global"
+    body = await effective(c, agent_id)
+    for key, value in CONTROL_POLICY.items():
+        assert body["document"][key] == value
+        assert body["provenance"][f"policy.{key}"]["group_name"] == "Global"
     # The explicit false survives as a false, not as an omission.
-    assert body["policy"]["local_schedule_control"] is False
+    assert body["document"]["local_schedule_control"] is False
 
 
 async def test_local_control_keys_are_known_defaults_when_absent(client):
-    """They must be MODELLED keys (reported as ``default``), not forward-compat
-    unknowns — the console renders a field per known key."""
+    """No group claims them, so they carry no provenance entry and no value — the
+    agent-side default (off) applies."""
     c, maker, _ = client
     agent_id = await _seed_agent(maker)
 
-    body = (await c.get(f"/api/v1/agent-policies/effective/{agent_id}")).json()
+    body = await effective(c, agent_id)
     for key in CONTROL_POLICY:
-        assert body["source_keys"][key] == "default"
-        assert key not in body["policy"]
+        assert f"policy.{key}" not in body["provenance"]
+        assert key not in body["document"]
 
 
-async def test_agent_scope_wins_and_can_revoke_a_global_delegation(client):
-    """Most-specific-wins with no key merging: an ``agent:`` document that turns
-    a permission off is how an operator claws one machine back, and the keys the
-    global document was providing fall back to the agent DEFAULT (off), not to
-    the global value."""
+async def test_a_higher_priority_group_can_revoke_one_delegation(client):
+    """P13 layered merge: a higher-priority group that turns ONE permission off
+    is how an operator claws a machine back — and, unlike the old
+    most-specific-wins resolution, the delegations it does NOT mention survive
+    instead of silently reverting to the agent default."""
     c, maker, _ = client
     agent_id = await _seed_agent(maker)
 
-    await c.put("/api/v1/agent-policies/global", json={"policy": CONTROL_POLICY})
-    r = await c.put(
-        f"/api/v1/agent-policies/agent:{agent_id}",
-        json={"policy": {"local_scan_control": False}},
+    await set_global(c, policy=CONTROL_POLICY)
+    narrow = await make_group(
+        c, "clawback", priority=900, policy={"local_scan_control": False}
     )
-    assert r.status_code == 200, r.text
+    assert (await join(c, agent_id, [narrow["id"]])).status_code == 200
 
-    body = (await c.get(f"/api/v1/agent-policies/effective/{agent_id}")).json()
-    assert body["policy"] == {"local_scan_control": False}
-    assert body["source_keys"]["local_scan_control"] == "agent"
-    # local_roots_control was granted globally; the narrower document does not
-    # carry it, so it is back to the agent default (off), NOT the global true.
-    assert body["source_keys"]["local_roots_control"] == "default"
-    assert "local_roots_control" not in body["policy"]
+    body = await effective(c, agent_id)
+    assert body["document"]["local_scan_control"] is False
+    assert body["provenance"]["policy.local_scan_control"]["group_name"] == "clawback"
+    # local_roots_control was granted in Global and the narrow group is silent
+    # about it, so it KEEPS the granted value.
+    assert body["document"]["local_roots_control"] is True
+    assert body["provenance"]["policy.local_roots_control"]["group_name"] == "Global"
 
 
 # --------------------------------------------------------------------------- #
@@ -173,7 +173,7 @@ async def test_agent_scope_wins_and_can_revoke_a_global_delegation(client):
 )
 async def test_local_control_keys_must_be_boolean(client, key):
     c, _, _ = client
-    r = await c.put("/api/v1/agent-policies/global", json={"policy": {key: "yes please"}})
+    r = await set_global(c, policy={key: "yes please"})
     assert r.status_code == 422
     assert key in r.json()["detail"]
 
@@ -202,15 +202,13 @@ async def test_the_schedule_keys_they_delegate_keep_their_own_bounds(client):
     validates a locally-typed interval against the SAME 300s floor central
     enforces here, so a value accepted locally would be accepted centrally."""
     c, _, _ = client
-    r = await c.put(
-        "/api/v1/agent-policies/global",
-        json={"policy": {"local_schedule_control": True, "scan_interval_seconds": 299}},
+    r = await set_global(
+        c, policy={"local_schedule_control": True, "scan_interval_seconds": 299}
     )
     assert r.status_code == 422
     assert "scan_interval_seconds" in r.json()["detail"]
 
-    r = await c.put(
-        "/api/v1/agent-policies/global",
-        json={"policy": {"local_schedule_control": True, "scan_interval_seconds": 300}},
+    r = await set_global(
+        c, policy={"local_schedule_control": True, "scan_interval_seconds": 300}
     )
     assert r.status_code == 200, r.text

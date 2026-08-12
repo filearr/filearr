@@ -6,9 +6,10 @@
 //   * a forward-compat key the console has never heard of must survive an edit
 //     (the backend stores the submitted document VERBATIM, and PolicyModel is
 //     extra="allow" precisely so newer agents can read newer keys);
-//   * "inherit" must serialize as an ABSENT key, never `null` — policy
-//     resolution is most-specific-wins with no key merging, so an absent key
-//     means "agent default" while a null is a different (often invalid) value.
+//   * "inherit" must serialize as an ABSENT key, never `null` — a key absent
+//     from a group's policy section is a key that group does not contribute to
+//     the merge (so a lower-priority group or the agent default supplies it),
+//     while a null is a different (often invalid) value.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -20,7 +21,6 @@ import {
   blankPolicyForm,
   buildPolicyDoc,
   cronShapeError,
-  describeScope,
   formFromDoc,
   ignoredPolicySettings,
   passthroughFromDoc,
@@ -427,12 +427,7 @@ test("cronShapeError catches the obvious typos, accepts 5 fields", () => {
   assert.match(cronShapeError("0 3 * * @weekly") ?? "", /unexpected characters/);
 });
 
-// --------------------------------------------------------------------------- //
-// Scope labels                                                                  //
-// --------------------------------------------------------------------------- //
-test("describeScope labels the frozen scope grammar", () => {
-  assert.equal(describeScope("global"), "Global (every agent)");
-  assert.equal(describeScope("group:canary"), 'Rollout group "canary"');
-  assert.match(describeScope("agent:0198-abc"), /^Agent 0198-abc$/);
-  assert.equal(describeScope("none"), "No policy document anywhere");
-});
+// Scope-string tests lived here until P13 (2026-08-11) replaced whole-document
+// policy scopes with per-key layering across configuration groups. The merge
+// order, tie-break and provenance rules that took their place are pinned in
+// configGroups.node.test.ts.

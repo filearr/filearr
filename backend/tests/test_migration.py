@@ -11,12 +11,16 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: b6e2d9f4a713 adds libraries.count_pruned_files (the opt-in that
-# makes seen + excluded + pruned_files reconcile with the on-disk file count).
-# Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
+# HEAD ASSERTION: a7f3c1e9d452 is the P13 config-group unification (layered
+# groups + membership + versions + rollouts; drops rollout_group/config_group_id/
+# policy_versions and the release staging pair).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "c6b1f24d70ae"
+HEAD = "a7f3c1e9d452"
+# P13's predecessor (reextract command kind) — the downgrade target that brings
+# back policy_versions + the two old grouping columns, EMPTY (structural revert;
+# the layered documents cannot be split back into the scope ladder).
+P13_PRED = "c6b1f24d70ae"
 # reextract command-kind revision's predecessor = maintenance mode.
 REEXTRACT_PRED = "a9c4e7f2b581"
 # maintenance-mode revision's predecessor = agent health/transport.
@@ -124,6 +128,30 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # P13 (config-group unification): the four new/widened objects exist at
+        # head and the three retired ones are gone; a one-step downgrade brings
+        # the old columns/table back EMPTY (documented structural revert).
+        assert {
+            "agent_config_group_members",
+            "agent_config_group_versions",
+            "agent_config_rollouts",
+        } <= _tables(engine)
+        acg_cols = _columns(engine, "agent_config_groups")
+        assert {"priority", "is_system", "policy", "current_version"} <= acg_cols
+        agents_cols_head = _columns(engine, "agents")
+        assert "config_generation_applied" in agents_cols_head
+        assert not ({"rollout_group", "config_group_id"} & agents_cols_head)
+        assert "policy_versions" not in _tables(engine)
+        assert not ({"stage", "promoted_at"} & _columns(engine, "agent_releases"))
+        assert "config_group_names" in _columns(engine, "enrollment_tokens")
+        command.downgrade(cfg, P13_PRED)
+        assert "policy_versions" in _tables(engine)
+        assert {"rollout_group", "config_group_id", "policy_version_applied"} <= (
+            _columns(engine, "agents")
+        )
+        assert "agent_config_group_versions" not in _tables(engine)
+        assert "agent_config_groups" in _tables(engine)  # predecessor intact
+        command.upgrade(cfg, "head")
         # Agent health/transport (2026-08-08): the three agents columns exist
         # at head; a one-step downgrade drops them and leaves app_logs intact.
         assert {"health", "health_at", "last_auth_mode"} <= _columns(engine, "agents")
@@ -230,10 +258,10 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         assert "capabilities" not in _columns(engine, "agents")
         assert "agents" in _tables(engine)
         command.upgrade(cfg, "head")
-        # W6-D2: agent_config_groups + agents.config_group_id at head; a one-step
-        # downgrade to the P10-T11 revision drops both cleanly.
+        # W6-D2: agent_config_groups at head (P13 dropped the paired
+        # agents.config_group_id — membership rows replaced it); a downgrade to
+        # the P10-T11 revision drops the table cleanly.
         assert "agent_config_groups" in _tables(engine)
-        assert "config_group_id" in _columns(engine, "agents")
         command.downgrade(cfg, "e4a7c2f1b9d6")
         assert "agent_config_groups" not in _tables(engine)
         assert "config_group_id" not in _columns(engine, "agents")
@@ -280,7 +308,8 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         # leaves the P10-T3 predecessor (items.last_verified_at) intact.
         assert "agent_releases" in _tables(engine)
         ar_cols = _columns(engine, "agent_releases")
-        assert {"id", "version", "stage", "manifest", "created_at", "promoted_at"} <= ar_cols
+        # P13 dropped the canary staging pair (stage/promoted_at).
+        assert {"id", "version", "manifest", "created_at"} <= ar_cols
         ar_uq = {c["name"] for c in inspect(engine).get_unique_constraints("agent_releases")}
         assert "uq_agent_releases_version" in ar_uq
         command.downgrade(cfg, P5T7_PRED)
@@ -294,11 +323,11 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         command.downgrade(cfg, P10T3_PRED)
         assert "last_verified_at" not in _columns(engine, "items")
         assert "policy_versions" in set(inspect(engine).get_table_names())  # pred intact
-        command.upgrade(cfg, "head")
-        # P5-T6: the policy_versions table present at head; a one-step
-        # downgrade drops it cleanly and leaves the P5-T5 predecessor (the
-        # reconcile sweep tables) intact (round-trip).
-        assert "policy_versions" in set(inspect(engine).get_table_names())
+        # P5-T6: policy_versions is GONE at head (P13 replaced the scope ladder
+        # with config-group snapshots), so this leg walks the chain from the
+        # P10-T3 predecessor we are already standing on rather than re-upgrading:
+        # the table + its index/constraint exist HERE, and a one-step downgrade
+        # drops them, leaving the P5-T5 reconcile tables intact (round-trip).
         pv_cols = _columns(engine, "policy_versions")
         assert {
             "id", "scope_type", "scope_id", "version", "policy", "actor", "created_at",
