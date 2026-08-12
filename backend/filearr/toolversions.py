@@ -64,6 +64,47 @@ HOST_TOOLS: tuple[str, ...] = (
     "pdftoppm",
 )
 
+#: What each tool is FOR, and where its documentation lives, as
+#: ``{name: (purpose, url)}``. Curated by necessity — a host binary carries no
+#: metadata to introspect the way a Python distribution does.
+#:
+#: WHY IT LIVES HERE and not in the module that renders it: two surfaces now
+#: describe the same seven tools — :func:`filearr.about.host_tools` (central's
+#: own machine) and :func:`filearr.agent_about.agent_about` (a remote agent's) —
+#: and a table copied into both would drift on the first edit. It would drift
+#: silently, too: nothing fails when one page calls pdftoppm "PDF page
+#: rasterisation (OCR)" and the other calls it something else, it just quietly
+#: teaches operators that the two pages are describing different things.
+#: :mod:`filearr.toolversions` is already the single registry both consult for
+#: order and minimums, so the prose belongs beside them.
+HOST_TOOL_INFO: dict[str, tuple[str, str]] = {
+    "ffprobe": ("Video/audio stream metadata", "https://ffmpeg.org/ffprobe.html"),
+    "ffmpeg": ("Thumbnail poster frames", "https://ffmpeg.org/ffmpeg.html"),
+    "exiftool": ("Image/EXIF metadata", "https://exiftool.org/"),
+    "tesseract": ("OCR for scanned documents", "https://tesseract-ocr.github.io/"),
+    "pdfinfo": ("PDF document properties", "https://poppler.freedesktop.org/"),
+    "pdftotext": ("PDF text extraction", "https://poppler.freedesktop.org/"),
+    "pdftoppm": ("PDF page rasterisation (OCR)", "https://poppler.freedesktop.org/"),
+}
+
+
+def tool_purpose(tool: str) -> str | None:
+    """What ``tool`` is used for, or ``None`` for a tool we do not know.
+
+    ``None`` is a real answer, not a gap to paper over: a NEWER agent build can
+    advertise a host tool this central release has never heard of, and the
+    honest render is the tool's name with no description rather than an invented
+    one."""
+    entry = HOST_TOOL_INFO.get(tool)
+    return entry[0] if entry else None
+
+
+def tool_url(tool: str) -> str | None:
+    """The upstream documentation link for ``tool``, or ``None``. See
+    :func:`tool_purpose` on why an unknown tool gets no guess."""
+    entry = HOST_TOOL_INFO.get(tool)
+    return entry[1] if entry else None
+
 # --- The minimums (researched 2026-08-11) ----------------------------------- #
 #
 # Two of the four justifications below are SECURITY ones, and that is not an

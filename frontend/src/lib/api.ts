@@ -15,8 +15,19 @@ import type { HostToolMinimum } from "./hostTools";
 // The About page's response shape lives in ./about alongside the pure render
 // helpers that consume it; re-exported here so callers keep one types import.
 import type { About } from "./about";
+// The PER-AGENT About report, same split for the same reason: the cell rules
+// ("not reported" vs "version unknown" vs "not installed") and the Markdown
+// dump are pure, so they are unit-tested on Node.
+import type { AgentAbout } from "./agentAbout";
 
 export type { About } from "./about";
+export type {
+  AgentAbout,
+  AgentAboutBuild,
+  AgentAboutIdentity,
+  AgentAboutModule,
+  AgentAboutTool,
+} from "./agentAbout";
 export type { CollectorCatalogueEntry } from "./inventoryCollectors";
 export type { HostToolMinimum } from "./hostTools";
 
@@ -3141,6 +3152,24 @@ export const listInventoryCollectors = () =>
  *  Shapes + chip rules live in ./hostTools. */
 export const listHostToolMinimums = () =>
   request<HostToolMinimum[]>("/agents/host-tool-minimums");
+
+/** GET /agents/{id}/about (admin) — the per-agent About / dependency report:
+ *  build stack, Go module dependencies, and host tools with version, resolved
+ *  PATH and central's verdict against the published minimums.
+ *
+ *  The per-agent counterpart of `GET /system/about`, with one crucial
+ *  difference in kind: that endpoint probes the machine it is running on, this
+ *  one reads what the agent last SELF-REPORTED on its command poll. Nothing is
+ *  queried from the agent — central never calls out to agents, agents poll — so
+ *  every value is as of `agent.capabilities_at`.
+ *
+ *  `admin` scope rather than `read` (which `/system/about` uses), deliberately:
+ *  this exposes filesystem paths from someone else's machine.
+ *
+ *  Shapes, cell rules and the Markdown dump live in ./agentAbout; status chips
+ *  come from ./hostTools so there is no second verdict vocabulary. */
+export const agentAbout = (agentId: string) =>
+  request<AgentAbout>(`/agents/${encodeURIComponent(agentId)}/about`);
 
 export const createConfigGroup = (body: ConfigGroupIn) =>
   request<ConfigGroupOut>("/agents/config-groups", {

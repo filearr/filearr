@@ -4,7 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/filearr/filearr/agent/internal/extract"
 )
@@ -31,14 +33,68 @@ const (
 )
 
 // toolKey memoizes a lookup by BOTH the tool name and the override value in
-// force. Detection is process-lifetime stable (a PATH lookup costs a handful of
-// stat calls, but the extraction pass asks per file), yet keying on the override
-// value keeps the cache honest: a test — or a service restarted with a different
-// environment — that changes the variable gets a fresh lookup instead of a stale
-// hit. There is no cache-invalidation hook to forget to call.
+// force. A PATH lookup costs a handful of stat calls and the extraction pass
+// asks per file, so the answer is memoized; keying on the override value keeps
+// the cache honest, because a test — or a service restarted with a different
+// environment — that changes the variable gets a fresh lookup instead of a
+// stale hit. There is no cache-invalidation hook to forget to call.
 type toolKey struct{ name, override string }
 
-var toolCache sync.Map // toolKey -> string ("" == not resolvable)
+// cachedString is a memoized answer plus WHEN it was learned. The timestamp is
+// the whole point: see toolCacheTTL.
+type cachedString struct {
+	value string
+	at    time.Time
+}
+
+// toolCacheTTL bounds how long a resolution (and the version probe keyed off
+// it) is reused before the tool is looked for again.
+//
+// WHY a TTL at all — this cache used to be process-lifetime, and that turned a
+// two-minute fix into a support case (live, 2026-08-11). An operator installed
+// exiftool machine-wide on a Windows agent host, watched the console keep
+// reporting it absent, and had no way to know that the only cure was restarting
+// the service: Capabilities() was computed once at daemon start and every tool
+// answer inside it was frozen for the life of the process. An agent that cannot
+// notice a tool being installed is an agent whose capability report is a
+// statement about boot time, not about the host.
+//
+// The cost of the TTL is bounded and small: at most one LookPath plus one
+// 3 s-bounded version probe per tool per 15 minutes (seven tools => seven
+// subprocesses per quarter hour, against a command poll that runs every 60 s).
+// The extraction hot path, which asks per FILE, still gets a cache hit
+// essentially always.
+//
+// A package var rather than a const so tests can collapse it to zero and prove
+// a stale entry re-probes, without sleeping for a quarter of an hour.
+var toolCacheTTL = 15 * time.Minute
+
+// cacheClock is the time source for cache entries; a var so a test can freeze
+// or advance it. Everything else in this package calls time.Now directly.
+var cacheClock = time.Now
+
+var toolCache sync.Map // toolKey -> cachedString ("" value == not resolvable)
+
+// cacheLoad returns a memoized answer that is still within toolCacheTTL. A
+// stale entry reports a miss (and is simply overwritten by the re-probe) rather
+// than being deleted: concurrent readers of a stale entry re-probing in
+// parallel is harmless, and Delete+Store would open a window where a caller
+// sees no entry at all.
+func cacheLoad(m *sync.Map, key toolKey) (string, bool) {
+	v, ok := m.Load(key)
+	if !ok {
+		return "", false
+	}
+	entry, ok := v.(cachedString)
+	if !ok || cacheClock().Sub(entry.at) >= toolCacheTTL {
+		return "", false
+	}
+	return entry.value, true
+}
+
+func cacheStore(m *sync.Map, key toolKey, value string) {
+	m.Store(key, cachedString{value: value, at: cacheClock()})
+}
 
 // ResolveTool returns the resolvable path of the host tool `name`, honoring its
 // env override, or "" when the tool is absent. Never fatal: an absent tool is a
@@ -46,8 +102,8 @@ var toolCache sync.Map // toolKey -> string ("" == not resolvable)
 func ResolveTool(name, envVar string) string {
 	override := os.Getenv(envVar)
 	key := toolKey{name: name, override: override}
-	if v, ok := toolCache.Load(key); ok {
-		return v.(string)
+	if v, ok := cacheLoad(&toolCache, key); ok {
+		return v
 	}
 	want := name
 	if override != "" {
@@ -79,7 +135,7 @@ func ResolveTool(name, envVar string) string {
 	if resolved == "" && override == "" {
 		resolved = searchWellKnown(name)
 	}
-	toolCache.Store(key, resolved)
+	cacheStore(&toolCache, key, resolved)
 	return resolved
 }
 
@@ -143,19 +199,76 @@ func HasPDFInfo() bool   { return PDFInfoPath() != "" }
 func HasPDFToText() bool { return PDFToTextPath() != "" }
 func HasPDFToPPM() bool  { return PDFToPPMPath() != "" }
 
+// hostToolEnvs is THE list of host tools this agent knows about, mapped to the
+// environment variable that overrides each one's location. It is deliberately
+// the single source for the three views built from it below (presence,
+// versions, paths): three separate literals is how one of them ends up missing
+// a tool that the other two report, and the console then shows a matrix with a
+// hole in it that nobody can explain.
+var hostToolEnvs = map[string]string{
+	"ffmpeg":    EnvFFmpegPath,
+	"ffprobe":   EnvFFprobePath,
+	"tesseract": EnvTesseractPath,
+	"exiftool":  EnvExiftoolPath,
+	"pdfinfo":   EnvPDFInfoPath,
+	"pdftotext": EnvPDFToTextPath,
+	"pdftoppm":  EnvPDFToPPMPath,
+}
+
+// HostToolNames lists the known host tools in a stable, sorted order. Used by
+// the local web UI so its rows do not shuffle between refreshes (Go map
+// iteration is deliberately randomized).
+func HostToolNames() []string {
+	names := make([]string, 0, len(hostToolEnvs))
+	for name := range hostToolEnvs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Tools is the host-tool matrix the agent advertises (and the local status page
 // renders). Keys are stable identifiers central's console gates on; a false
 // value means "this host cannot do the capability that tool backs".
 func Tools() map[string]bool {
-	return map[string]bool{
-		"ffmpeg":    HasFFmpeg(),
-		"ffprobe":   HasFFprobe(),
-		"tesseract": HasTesseract(),
-		"exiftool":  HasExiftool(),
-		"pdfinfo":   HasPDFInfo(),
-		"pdftotext": HasPDFToText(),
-		"pdftoppm":  HasPDFToPPM(),
+	out := make(map[string]bool, len(hostToolEnvs))
+	for name, env := range hostToolEnvs {
+		out[name] = ResolveTool(name, env) != ""
 	}
+	return out
+}
+
+// ToolPaths is the LOCATION half of the host-tool matrix: the resolved absolute
+// path of every tool that is present, absent tools omitted (the same
+// omit-don't-blank discipline ToolVersions uses, so the console renders "not
+// installed" from Tools() rather than an empty string that reads as a bug).
+//
+// WHY central is told the path (user request, 2026-08-11: "pull the tool
+// locations also"). "exiftool: yes" does not say WHICH exiftool, and on a
+// Windows host there are routinely several — a five-year-old zip in
+// C:\Program Files, a Chocolatey shim, a winget portable payload. When a
+// version looks wrong or output looks wrong, the path is the fact that ends the
+// argument.
+//
+// It is also the visible proof of a SECURITY property. Since 2026-08-11 the
+// resolver only ever searches machine-wide, admin-writable locations, because
+// this agent normally runs as LocalSystem/root and executing a binary out of a
+// user-writable directory would let any local user escalate. A displayed path
+// under a user profile would therefore mean that rule has regressed — the
+// negative is pinned by TestWellKnownNeverProbesUserProfile, and this display
+// is the second line of defence that an operator can see.
+//
+// Reuses ResolveTool, deliberately: a second resolution path here is exactly
+// how the displayed location and the executed location would drift apart, and
+// the displayed one would be the lie.
+func ToolPaths() map[string]string {
+	out := map[string]string{}
+	for name, env := range hostToolEnvs {
+		if p := ResolveTool(name, env); p != "" {
+			out[name] = p
+		}
+	}
+	return out
 }
 
 // ExtractFormats lists the taxonomy file_category values this build can actually

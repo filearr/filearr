@@ -34,6 +34,15 @@
     type HostToolMinimum,
   } from "./hostTools";
   import {
+    agentAboutMarkdown,
+    agentToolCell,
+    buildRows,
+    modulesSummary,
+    orUnknown,
+    toolPathCell,
+    type AgentAbout,
+  } from "./agentAbout";
+  import {
     MAX_COLLECTORS,
     addCollectorName,
     collectorEditorFromFetch,
@@ -45,6 +54,7 @@
   } from "./inventoryCollectors";
   import {
     ApiError,
+    agentAbout,
     getAgentSummary,
     getEffectiveConfig,
     listAgentCommands,
@@ -587,6 +597,69 @@
     expanded = a.id;
     await loadEffective(a.id);
   }
+
+  // ---- per-agent About / dependency report (2026-08-11) --------------------
+  //
+  // The console could always answer "which build is this SERVER running" (the
+  // About page) and knew exactly one string about a remote agent's software:
+  // its `agent_version`. This panel is the agent-side equivalent — build stack,
+  // Go module dependencies, and host tools with version, resolved PATH and
+  // central's verdict.
+  //
+  // A THIRD, opt-in disclosure inside the already-expanded row, alongside the
+  // effective-configuration one and for the same reason: it is long, and the
+  // question it answers ("what exactly is installed over there") is a
+  // deliberate investigation, not something to scroll past while checking
+  // membership. The capability CHIPS above stay exactly as they are — they are
+  // the at-a-glance view scanned across a fleet, this is the detailed view read
+  // about one machine.
+  //
+  // Fetched lazily on first open, one request per agent an operator actually
+  // asks about, and cached for the page's lifetime: it is a snapshot of what
+  // the agent last reported, so re-fetching on every toggle would cost a
+  // request to show the same bytes.
+  let aboutOpen = $state<Record<string, boolean>>({});
+  let about = $state<Record<string, AgentAbout>>({});
+  let aboutLoading = $state<Record<string, boolean>>({});
+  let aboutError = $state<Record<string, string>>({});
+  /** The module table is collapsed inside the panel that is itself collapsed:
+   *  ~120 rows of Go modules is the longest thing on this page by far, and it
+   *  is read once a year when a CVE lands in a transitive dependency. */
+  let modulesOpen = $state<Record<string, boolean>>({});
+  let aboutCopied = $state<string | null>(null);
+
+  async function toggleAbout(a: AgentOut) {
+    aboutOpen[a.id] = !aboutOpen[a.id];
+    if (!aboutOpen[a.id] || about[a.id] || aboutLoading[a.id]) return;
+    aboutLoading[a.id] = true;
+    aboutError[a.id] = "";
+    try {
+      about[a.id] = await agentAbout(a.id);
+    } catch (e) {
+      aboutError[a.id] = errDetail(e);
+    } finally {
+      aboutLoading[a.id] = false;
+    }
+  }
+
+  async function copyAbout(a: AgentOut) {
+    const report = about[a.id];
+    if (!report) return;
+    await copyText(agentAboutMarkdown(report));
+    aboutCopied = a.id;
+    setTimeout(() => (aboutCopied = null), 2000);
+  }
+
+  /** Tone → classes for the About panel's cells. Same vocabulary the About page
+   *  uses; `warn` stays reserved for a tool below its minimum so amber keeps
+   *  meaning "act on this", and `bad` appears only for the path rule violation
+   *  that must never happen. */
+  const ABOUT_TONE_CLASS: Record<"ok" | "bad" | "warn" | "muted", string> = {
+    ok: "text-slate-700 dark:text-slate-200",
+    bad: "text-red-600 dark:text-red-400",
+    warn: "text-amber-600 dark:text-amber-400",
+    muted: "text-slate-400",
+  };
 
   function fmtPolicyValue(v: unknown): string {
     if (v === undefined) return "not set";
@@ -1837,6 +1910,157 @@ ${detail}
           {/if}
         </div>
       {/if}
+
+      <!-- About / versions: what this agent IS, as opposed to what it can do.
+           A third opt-in disclosure for the same reason as the one above — it
+           is long, and it answers a deliberate investigation ("which exiftool
+           is actually on that box, and how old is it") rather than the
+           at-a-glance question the chips at the top already answer. -->
+      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            class="font-medium text-[var(--accent)]"
+            title="This agent's build stack, its Go module dependencies, and its host tools with version, resolved path and how each measures up to the recommended minimum. All self-reported on its command poll — central never queries an agent."
+            onclick={() => toggleAbout(a)}>
+            {aboutOpen[a.id] ? "▾" : "▸"} About / versions
+          </button>
+          {#if about[a.id]}
+            <button
+              class="text-[11px] text-slate-500"
+              title="Copy the whole report as a Markdown table — paste it straight into a bug report."
+              onclick={() => copyAbout(a)}>Copy as Markdown</button>
+            {#if aboutCopied === a.id}
+              <span class="text-[11px] text-[var(--accent)]">copied</span>
+            {/if}
+          {/if}
+        </div>
+
+        {#if aboutOpen[a.id]}
+          {#if aboutLoading[a.id]}
+            <p class="mt-1 text-slate-400">Loading…</p>
+          {:else if aboutError[a.id]}
+            <p class="mt-1 text-red-600">Could not load this agent's About report: {aboutError[a.id]}</p>
+          {:else if about[a.id]}
+            {@const rep = about[a.id]}
+            {@const mods = modulesSummary(rep)}
+            {#if !rep.reported}
+              <!-- Not an error and not zeros: an enrolled agent that has not
+                   polled yet genuinely has nothing to report, and saying so is
+                   a different statement from "everything is absent". -->
+              <p class="mt-1 text-slate-400">
+                This agent has never sent a capability advertisement — it has not polled
+                yet (a fresh enrollment), or it runs a build older than the capability
+                channel. Nothing below is missing; there is nothing yet to report.
+              </p>
+            {/if}
+
+            <!-- Build stack -->
+            <div class="mt-2 grid gap-x-6 gap-y-1 md:grid-cols-2">
+              {#each buildRows(rep) as row (row.label)}
+                <div class="flex flex-wrap items-baseline gap-1.5" title={row.hint}>
+                  <span class="text-slate-500">{row.label}</span>
+                  <b class="break-all font-mono text-[11px] text-slate-700 dark:text-slate-200">{row.value}</b>
+                </div>
+              {/each}
+            </div>
+
+            <!-- Host tools: version · location · verdict. The three things the
+                 boolean matrix above cannot say. -->
+            <div class="mt-3">
+              <span class="font-medium text-slate-500">Host tools on this agent</span>
+              <span class="text-slate-400">
+                — the resolved path is which copy the agent will actually run; the agent
+                only ever resolves tools from machine-wide, admin-writable locations
+              </span>
+              {#if rep.host_tools.length === 0}
+                <p class="mt-1 text-slate-400">Not reported.</p>
+              {:else}
+                <div class="mt-1 overflow-x-auto">
+                  <table class="w-full min-w-[46rem] text-[11px]">
+                    <thead class="text-left text-slate-500">
+                      <tr class="border-b border-slate-200 dark:border-slate-800">
+                        <th class="py-1 pr-3 font-medium">Tool</th>
+                        <th class="py-1 pr-3 font-medium">Version</th>
+                        <th class="py-1 pr-3 font-medium">Location</th>
+                        <th class="py-1 font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800/60">
+                      {#each rep.host_tools as t (t.name)}
+                        <!-- The chip comes from ./hostTools, the SAME helper the
+                             row above uses: one verdict vocabulary, one set of
+                             tooltips, no third opinion invented here. -->
+                        {@const chip = toolChip(t.name, caps, a.tool_verdicts, toolMinimums)}
+                        {@const cell = agentToolCell(t)}
+                        {@const path = toolPathCell(t)}
+                        <tr class="align-top">
+                          <td class="py-1 pr-3">
+                            {#if t.url}
+                              <a class="text-[var(--accent)]" href={t.url} target="_blank" rel="noreferrer noopener">{t.name}</a>
+                            {:else}
+                              <span>{t.name}</span>
+                            {/if}
+                            <div class="text-slate-400">{orUnknown(t.purpose, "purpose not published")}</div>
+                          </td>
+                          <td class="py-1 pr-3 {ABOUT_TONE_CLASS[cell.tone]}" title={cell.hint}>{cell.text}</td>
+                          <td class="py-1 pr-3 font-mono break-all {ABOUT_TONE_CLASS[path.tone]}" title={path.hint}>{path.text}</td>
+                          <td class="py-1">
+                            <span
+                              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {TOOL_CHIP_CLASS[chip.tone]}"
+                              title={chip.title}>
+                              {t.verdict}{t.verdict === "outdated" ? " ⚠" : ""}
+                            </span>
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Go modules: collapsed by default (it is ~120 rows), and when the
+                 agent trimmed it to fit its poll budget the row SAYS SO rather
+                 than rendering an empty table that reads as "no dependencies". -->
+            <div class="mt-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <button
+                  class="font-medium text-[var(--accent)] disabled:opacity-50"
+                  disabled={!rep.modules?.length}
+                  title="Every Go module linked into this agent binary. A Go binary is statically linked, so this list IS what is running — not a manifest of what was requested."
+                  onclick={() => (modulesOpen[a.id] = !modulesOpen[a.id])}>
+                  {modulesOpen[a.id] ? "▾" : "▸"} Go modules
+                </button>
+                <span class="{ABOUT_TONE_CLASS[mods.tone]}" title={mods.hint}>{mods.text}</span>
+              </div>
+              {#if modulesOpen[a.id] && rep.modules?.length}
+                <div class="mt-1 max-h-80 overflow-y-auto">
+                  <table class="w-full text-[11px]">
+                    <thead class="text-left text-slate-500">
+                      <tr class="border-b border-slate-200 dark:border-slate-800">
+                        <th class="py-1 pr-3 font-medium">Module</th>
+                        <th class="py-1 font-medium">Version</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800/60">
+                      {#each rep.modules as m (m.path)}
+                        <tr>
+                          <td class="py-1 pr-3 font-mono break-all">
+                            <a class="text-[var(--accent)]" href={m.url} target="_blank" rel="noreferrer noopener">{m.path}</a>
+                          </td>
+                          <td class="py-1 font-mono text-slate-600 dark:text-slate-300">
+                            {orUnknown(m.version, "version unknown")}
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        {/if}
+      </div>
     </div>
   {/snippet}
 

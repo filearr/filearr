@@ -1,7 +1,9 @@
 package inventory
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -198,6 +200,29 @@ func TestEveryAdvertisedToolHasWellKnownDirs(t *testing.T) {
 	for name := range Tools() {
 		if len(wellKnownDirs(name)) == 0 {
 			t.Errorf("tool %q is advertised but has no well-known directories to fall back on", name)
+		}
+	}
+}
+
+// TestWellKnownDirsAreMachineWide is the cross-platform half of the security
+// rule (the Windows-specific version, which can name %LOCALAPPDATA% explicitly,
+// lives in wellknown_windows_test.go). The agent runs as a service — LocalSystem
+// on Windows, root under systemd/launchd. Resolving a host tool out of a
+// user-writable directory would let any local user drop their own ffprobe there
+// and have the service execute it with full privileges, so a tool installed only
+// into a home directory is reported absent BY DESIGN. No candidate may live
+// under the current user's home.
+func TestWellKnownDirsAreMachineWide(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == string(filepath.Separator) {
+		t.Skip("no usable home directory to test against")
+	}
+	prefix := strings.ToLower(home) + string(filepath.Separator)
+	for name := range Tools() {
+		for _, dir := range wellKnownDirs(name) {
+			if strings.HasPrefix(strings.ToLower(dir), prefix) {
+				t.Errorf("wellKnownDirs(%q) yielded home-rooted path %q - a service must not execute from a user-writable directory", name, dir)
+			}
 		}
 	}
 }

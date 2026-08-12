@@ -1651,6 +1651,16 @@ class Agent(Base):
     # reads it to offer only the collectors an agent actually supports — so a new
     # inventory COMPOSITION never needs an agent redeploy, only a capable agent.
     capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 2026-08-11: when the advertisement above arrived, stamped on the poll that
+    # STORED it. Its own column rather than reusing ``health_at`` because the
+    # two are stored under independent size caps on the same poll — an oversize
+    # capabilities body is dropped while health is kept, and a shared timestamp
+    # would then date the capability report to a poll that never updated it.
+    # The per-agent About view leads with this: every fact it shows is "as of"
+    # this instant, and on an offline agent that can be days ago.
+    capabilities_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # 2026-08-08 fleet health: the compact self-reported snapshot the agent
     # attaches to its command poll (uptime, outbox backlog, index size, scan
     # state) — stored VERBATIM like ``capabilities``, size-capped at the API.

@@ -12,6 +12,15 @@ package inventory
 // Apple Silicon Homebrew first because it is the current default; Intel
 // Homebrew's /usr/local/bin next; then MacPorts. Every candidate is verified by
 // the caller with LookPath.
+//
+// Every location here is MACHINE-WIDE, and no $HOME-rooted directory is probed
+// on any platform (see wellknown_windows.go for the full statement of the rule).
+// The agent commonly runs as a system service; resolving a host tool out of a
+// user-writable directory would let a local user drop their own ffprobe there
+// and have the service execute it as root/SYSTEM. A tool installed only into a
+// user's home is deliberately reported as absent until it is installed
+// machine-wide — the FILEARR_AGENT_*_PATH overrides remain the explicit,
+// operator-chosen escape hatch.
 
 import "path/filepath"
 

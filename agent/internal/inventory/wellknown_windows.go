@@ -10,10 +10,27 @@ package inventory
 // Windows agent (2026-08-10). The UB-Mannheim Tesseract installer in particular
 // offers no "add to PATH" option at all.
 //
-// Ordering is deliberate: machine-wide installs first (what a service can
-// actually see), then per-user package-manager shims, which are only reachable
-// when the service runs as that user. A hit is still verified with LookPath by
-// the caller, so a leftover directory never yields an unusable path.
+// EVERY location here is MACHINE-WIDE and admin-writable. That is a security
+// rule, not a preference. The service runs as LocalSystem; resolving an
+// executable out of a user-writable directory would let any local user drop
+// their own exiftool.exe or ffprobe.exe into their profile and have SYSTEM
+// execute it — a plain local privilege-escalation path. So a tool installed
+// into a user profile is deliberately treated as NOT INSTALLED: the console
+// reports it absent, and it stays absent until someone installs it machine-wide.
+// Do not "helpfully" re-add %LOCALAPPDATA%\Microsoft\WinGet\Links, a Scoop
+// per-user shim directory, or %LOCALAPPDATA%\Programs — the negative is pinned
+// by TestWellKnownNeverProbesUserProfile.
+//
+// This bites in one specific way (2026-08-11): `winget install` without a scope
+// flag defaults to USER scope, so our own installers used to put these tools in
+// the operator's %LOCALAPPDATA%\Microsoft\WinGet\{Links,Packages} — invisible to
+// the service, which was reporting exiftool and poppler absent while ffmpeg and
+// tesseract (installed machine-wide by hand) resolved fine. The fix is on the
+// install side: the installers now pass `--scope machine`, and the machine
+// WinGet entries below are the detection half of it.
+//
+// A hit is still verified with LookPath by the caller, so a leftover directory
+// never yields an unusable path.
 
 import (
 	"os"
@@ -26,17 +43,17 @@ const exeSuffix = ".exe"
 func wellKnownDirs(name string) []string {
 	programFiles := envOrDefault("ProgramFiles", `C:\Program Files`)
 	programFilesX86 := envOrDefault("ProgramFiles(x86)", `C:\Program Files (x86)`)
-	localAppData := os.Getenv("LOCALAPPDATA")
 	programData := envOrDefault("ProgramData", `C:\ProgramData`)
-	userProfile := os.Getenv("USERPROFILE")
 
-	// Package-manager shim directories, shared by every tool: winget's link farm,
-	// Chocolatey's bin, and Scoop's shims. These are how most people actually end
-	// up with ffmpeg on Windows.
+	// Package-manager shim directories, shared by every tool. Only the
+	// machine-wide farms: winget's `--scope machine` link directory,
+	// Chocolatey's bin (always machine-wide), and Scoop's GLOBAL shims
+	// ($SCOOP_GLOBAL, admin-installed). Their per-user counterparts under
+	// %LOCALAPPDATA% / %USERPROFILE% are excluded on purpose — see the header.
 	shims := []string{
-		filepath.Join(localAppData, "Microsoft", "WinGet", "Links"),
+		filepath.Join(programFiles, "WinGet", "Links"),
 		filepath.Join(programData, "chocolatey", "bin"),
-		filepath.Join(userProfile, "scoop", "shims"),
+		filepath.Join(programData, "scoop", "shims"),
 	}
 
 	var specific []string
@@ -47,7 +64,6 @@ func wellKnownDirs(name string) []string {
 		specific = []string{
 			filepath.Join(programFiles, "Tesseract-OCR"),
 			filepath.Join(programFilesX86, "Tesseract-OCR"),
-			filepath.Join(localAppData, "Programs", "Tesseract-OCR"),
 		}
 	case "exiftool":
 		// The official distribution is a zip the user extracts; these are the
@@ -57,7 +73,6 @@ func wellKnownDirs(name string) []string {
 		// form would find a binary that pauses for a keypress and hangs the pass.
 		specific = []string{
 			filepath.Join(programFiles, "ExifTool"),
-			filepath.Join(localAppData, "Programs", "ExifTool"),
 			`C:\exiftool`,
 		}
 	case "ffmpeg", "ffprobe":
@@ -65,6 +80,7 @@ func wellKnownDirs(name string) []string {
 			filepath.Join(programFiles, "ffmpeg", "bin"),
 			`C:\ffmpeg\bin`,
 		}
+		specific = append(specific, wingetPackageDirs(name)...)
 	case "pdfinfo", "pdftotext", "pdftoppm":
 		// Poppler's Windows releases unpack to a VERSIONED directory
 		// (poppler-24.02.0\Library\bin), so a fixed path cannot find them —
@@ -77,8 +93,52 @@ func wellKnownDirs(name string) []string {
 			filepath.Join(programFiles, "poppler", "bin"),
 			`C:\poppler\bin`,
 		)
+		specific = append(specific, wingetPackageDirs(name)...)
 	}
 	return append(specific, shims...)
+}
+
+// wingetPackageRoot is where a `--scope machine` winget install unpacks package
+// payloads. The user-scope root (%LOCALAPPDATA%\Microsoft\WinGet\Packages) is
+// NOT probed — see the header: LocalSystem must not execute out of a profile.
+func wingetPackageRoot() string {
+	return filepath.Join(envOrDefault("ProgramFiles", `C:\Program Files`), "WinGet", "Packages")
+}
+
+// wingetPackagePatterns returns the glob patterns that locate `name` inside a
+// winget PORTABLE package payload under `root`.
+//
+// Portables unpack to <root>\<PackageId>_<SourceHash>\<inner-versioned-dir>\...,
+// where the inner directory is whatever the upstream archive contained
+// (poppler-24.02.0\Library\bin, ffmpeg-7.1-essentials_build\bin). Some packages
+// have no inner directory at all, so BOTH depths are probed. Go's filepath.Glob
+// has no `**` operator — the depths must be spelled out, which is why this is a
+// list of explicit two-level and one-level patterns rather than one recursive
+// walk.
+func wingetPackagePatterns(root, name string) []string {
+	switch name {
+	case "pdfinfo", "pdftotext", "pdftoppm":
+		return []string{
+			filepath.Join(root, "*", "*", "Library", "bin"),
+			filepath.Join(root, "*", "Library", "bin"),
+		}
+	case "ffmpeg", "ffprobe":
+		return []string{
+			filepath.Join(root, "*", "*", "bin"),
+			filepath.Join(root, "*", "bin"),
+		}
+	}
+	return nil
+}
+
+// wingetPackageDirs expands wingetPackagePatterns over the machine package root,
+// deeper pattern before shallower.
+func wingetPackageDirs(name string) []string {
+	var out []string
+	for _, pattern := range wingetPackagePatterns(wingetPackageRoot(), name) {
+		out = append(out, globDirs(pattern)...)
+	}
+	return out
 }
 
 func envOrDefault(key, def string) string {

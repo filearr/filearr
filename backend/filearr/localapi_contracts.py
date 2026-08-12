@@ -92,6 +92,31 @@ class QueryResponse(_Wire):
     notice: str | None = None  # e.g. typo-tolerance-gap copy (brief §4.3)
 
 
+class HostToolInfo(_Wire):
+    """One host-tool row of the agent's LOCAL status page (2026-08-11).
+
+    Mirrors ``localapi.HostToolInfo``. The local panel used to print a bare
+    ``exiftool: no, ffmpeg: yes`` line; it now reports, per tool, the version
+    found and the absolute path it resolved from — the two questions an operator
+    standing at that machine actually has after installing something.
+
+    Deliberately carries NO verdict. Whether a version clears Filearr's
+    recommended minimum is a central opinion (:mod:`filearr.toolversions`), and
+    this surface is same-host and reachable while central is not; a second
+    comparator here is exactly the drift the one-comparator rule forbids.
+    """
+
+    name: str
+    present: bool
+    #: Empty/absent when the tool is missing, or present but silent about its
+    #: version. ``present`` distinguishes those; neither renders as a blank.
+    version: str | None = None
+    #: Resolved absolute path, absent when the tool is not installed. Always a
+    #: machine-wide location by design (the agent never resolves a host tool out
+    #: of a user-writable directory — it runs as LocalSystem/root).
+    path: str | None = None
+
+
 class HealthResponse(_Wire):
     """agent → CLI/UI health/status probe."""
 

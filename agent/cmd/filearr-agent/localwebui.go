@@ -176,6 +176,36 @@ func indexRootAggregates(ctx context.Context, idx *index.Store) (map[string][2]i
 	return out, rows.Err()
 }
 
+// hostToolRows builds the local status page's host-tool table: every tool
+// Filearr knows about, in a stable order, each with its presence, version and
+// resolved path.
+//
+// Absent tools are KEPT as rows (present=false, no version, no path) rather
+// than filtered out — the wire contract's whole point is the full matrix, and
+// an operator scanning for "why is OCR not running here" needs to see a
+// tesseract row saying absent, not to notice that a row is missing.
+//
+// Assembled here rather than in package inventory so that inventory keeps
+// depending on nothing of the transport, and the wire STRUCT stays the single
+// authoritative statement of this shape (localapi/wire.go, mirrored in
+// backend/filearr/localapi_contracts.py).
+func hostToolRows() []localapi.HostToolInfo {
+	names := inventory.HostToolNames()
+	versions := inventory.ToolVersions()
+	paths := inventory.ToolPaths()
+	rows := make([]localapi.HostToolInfo, 0, len(names))
+	for _, name := range names {
+		path := paths[name]
+		rows = append(rows, localapi.HostToolInfo{
+			Name:    name,
+			Present: path != "",
+			Version: versions[name],
+			Path:    path,
+		})
+	}
+	return rows
+}
+
 func webSettingsSnapshot(
 	dataDir, addr string, allowRemote bool, policy func() localapi.PolicyView,
 	outboxPending func(ctx context.Context) (int, error),
@@ -217,6 +247,12 @@ func webSettingsSnapshot(
 			},
 			"tools":         inventory.Tools(),
 			"tool_versions": inventory.ToolVersions(),
+			// The same three facts as one ordered table (2026-08-11): name,
+			// version, and the resolved LOCATION. The bool maps stay for the
+			// older panel keys and for anything already reading them; this is
+			// what the page renders. Sorted, because Go randomizes map order
+			// and a table that reshuffles on every refresh is unreadable.
+			"host_tools": hostToolRows(),
 		}
 		// Effective extraction settings + the settings this host will ignore.
 		// This is the "never shell into a machine to answer what is this agent

@@ -101,6 +101,36 @@ type HealthResponse struct {
 	OfflineGraceExpiresAt *string `json:"offline_grace_expires_at"`
 }
 
+// HostToolInfo is one row of the local status page's host-tool table
+// (2026-08-11). Mirrors localapi_contracts.HostToolInfo.
+//
+// It replaces a boolean. The panel used to print "Host tools  exiftool: no,
+// ffmpeg: yes, …", which answers only whether a capability runs on this host —
+// and an operator standing at the machine, having just installed the thing, is
+// asking two further questions the booleans cannot answer: which version, and
+// WHICH COPY. On Windows in particular there are routinely several exiftools on
+// one box and only one of them is the one the service will execute.
+//
+// Absent tools are still listed, with Present false and no version or path: the
+// point of the table is the full matrix, and dropping the absent rows would
+// make "not installed" indistinguishable from "not a tool Filearr knows about".
+//
+// NO CENTRAL DATA crosses this surface and no judgement is made here: there is
+// no verdict field, because the minimum-version opinion lives centrally
+// (filearr/toolversions.py) and this page is reachable when central is not.
+type HostToolInfo struct {
+	Name    string `json:"name"`
+	Present bool   `json:"present"`
+	// Version is "" when the tool is absent OR present but unwilling to state a
+	// version (an old build, a wrapper script). The UI distinguishes those two
+	// using Present, and never renders an empty cell for either.
+	Version string `json:"version,omitempty"`
+	// Path is the resolved absolute location, "" when absent. On Windows this
+	// is always a machine-wide, admin-writable directory by design — a path
+	// under a user profile would mean the resolver's security rule regressed.
+	Path string `json:"path,omitempty"`
+}
+
 // errorBody is the JSON envelope for a failed request. It is NOT part of the
 // localapi_contracts.py mirror (that file models only success shapes); P7-T2
 // defines it here and the P7-T3 CLI decodes it. Kept intentionally small.

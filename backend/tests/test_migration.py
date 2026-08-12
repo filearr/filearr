@@ -11,12 +11,13 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: a7f3c1e9d452 is the P13 config-group unification (layered
-# groups + membership + versions + rollouts; drops rollout_group/config_group_id/
-# policy_versions and the release staging pair).
+# HEAD ASSERTION: b2e6d048f317 adds agents.capabilities_at — the arrival stamp
+# for the capability advertisement, which the per-agent About view leads with
+# (every fact it shows is "as of" that instant, and on an offline agent that can
+# be days ago). Its predecessor a7f3c1e9d452 is the P13 config-group unification.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "a7f3c1e9d452"
+HEAD = "b2e6d048f317"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).

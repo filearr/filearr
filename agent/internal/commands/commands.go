@@ -49,10 +49,23 @@ type Config struct {
 	// cleanly against a central that enqueues one.
 	Inventory *inventory.Runner
 
-	// Capabilities is the additive advertisement attached to EVERY poll body
-	// (inventory collector vocabulary + version); central stores it on the agent
-	// row so the UI can offer only composable collectors. Nil => omitted.
-	Capabilities map[string]any
+	// Capabilities produces the additive advertisement attached to EVERY poll
+	// body (inventory collector vocabulary + version, host-tool matrix with
+	// versions and resolved paths, build provenance); central stores it on the
+	// agent row so the UI can offer only composable collectors and render the
+	// per-agent About view. Nil, or a nil/empty return, => omitted.
+	//
+	// A FUNCTION rather than a snapshot (2026-08-11), mirroring Health. It was
+	// a map, evaluated once when the daemon wired this poller, and that made
+	// the advertisement a statement about the agent's BOOT — a host tool
+	// installed afterwards could never appear, because nothing re-asked. The
+	// operator-visible symptom was an exiftool that was demonstrably installed
+	// and permanently reported absent, curable only by restarting the service.
+	// Now it is re-evaluated per poll and the tool caches carry their own TTL.
+	//
+	// Must stay cheap: the underlying caches make the steady-state cost a few
+	// map reads, with one round of LookPath + version probes per TTL.
+	Capabilities func() map[string]any
 
 	// Health, when non-nil, produces the compact self-reported health snapshot
 	// (uptime, outbox backlog, index size, scan state) attached to every poll
@@ -133,7 +146,7 @@ type Poller struct {
 	exec         *Executor
 	rateProvider func() int64
 	inv          *inventory.Runner
-	caps         map[string]any
+	caps         func() map[string]any
 	health       func(ctx context.Context) map[string]any
 	version      string
 	maxCmds      int
@@ -338,9 +351,14 @@ func (p *Poller) poll(ctx context.Context) ([]commandOut, error) {
 	url := fmt.Sprintf("%s/api/v1/agents/%s/commands/poll", p.baseURL, p.agentID)
 	reqBody := map[string]any{"max": p.maxCmds}
 	if p.caps != nil {
-		// Additive capability advertisement — central persists it on the agent row.
-		// An older central that ignores the field is unaffected.
-		reqBody["capabilities"] = p.caps
+		// Additive capability advertisement — central persists it on the agent
+		// row. An older central that ignores the field is unaffected. Rebuilt
+		// per poll (see Config.Capabilities) so a host change reaches the
+		// console without a service restart; an empty return omits the field
+		// rather than overwriting a good stored advertisement with `{}`.
+		if c := p.caps(); len(c) > 0 {
+			reqBody["capabilities"] = c
+		}
 	}
 	if p.health != nil {
 		// Self-reported health snapshot: same additive contract as capabilities.

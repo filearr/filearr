@@ -29,6 +29,7 @@ is :func:`filearr.worker.expire_agent_commands`.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -47,6 +48,8 @@ from filearr.db import get_session
 from filearr.models import Agent, AgentCommand, Item
 from filearr.security import require_scope
 from filearr.worker import defer_agent_associate, defer_index_sync
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -142,6 +145,48 @@ class CompleteIn(BaseModel):
 
 def _json_len(obj: Any) -> int:
     return len(json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def _accept_sized(
+    agent_id: uuid.UUID, field: str, body: Any, settings: Any
+) -> bool:
+    """Should this self-reported blob be stored? Logs the drop when it is not.
+
+    ``capabilities`` and ``health`` are stored VERBATIM under independent size
+    caps, and an oversize body is dropped while the poll still succeeds — that
+    part is deliberate and stays: the command drain must never depend on an
+    advertisement, and a hostile or buggy agent must not be able to bloat its
+    row or fail its own command delivery.
+
+    What changes (2026-08-11) is the SILENCE. Dropping without a word means an
+    agent whose advertisement grew past the cap goes on polling happily forever
+    while central serves a stale capability report, with nothing anywhere saying
+    so — the console shows old tool versions, the operator debugs the agent, and
+    the answer was in a size check that never spoke. A warning naming the agent,
+    the field and the measured size turns that into a one-line diagnosis.
+
+    WARNING rather than ERROR because nothing is broken: commands still flow,
+    the previous advertisement still stands. The agent side has its own
+    self-trimming budget (``capabilitiesBudget``, 12 KiB, in
+    agent/internal/inventory/collector.go) precisely so this branch stays
+    unreachable in normal operation — reaching it means that budget and this cap
+    have drifted apart, which is a thing worth being told about.
+    """
+    if body is None:
+        return False
+    size = _json_len(body)
+    limit = settings.agent_capabilities_max_bytes
+    if size <= limit:
+        return True
+    log.warning(
+        "agent %s: dropped oversize %s advertisement (%d bytes > %d limit); "
+        "the stored value is unchanged and the poll still succeeded",
+        agent_id,
+        field,
+        size,
+        limit,
+    )
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -738,17 +783,15 @@ async def poll_commands(
     # them leaves the stored value untouched). Size-capped so a hostile/buggy body
     # cannot bloat the row; an oversize advertisement is dropped (never a poll
     # failure — the command drain must not depend on the advertisement).
-    if (
-        body.capabilities is not None
-        and _json_len(body.capabilities) <= settings.agent_capabilities_max_bytes
-    ):
+    # ``capabilities_at`` stamps the poll that actually STORED it, which is why
+    # it is set here and not beside health: the two caps are applied
+    # independently, so a dropped capabilities body must not advance this clock.
+    if _accept_sized(agent_id, "capabilities", body.capabilities, settings):
         agent.capabilities = body.capabilities
+        agent.capabilities_at = now
     # Self-reported health rides the same poll under the same size cap; the
     # arrival stamp lets the console show "as of Xm ago" honestly.
-    if (
-        body.health is not None
-        and _json_len(body.health) <= settings.agent_capabilities_max_bytes
-    ):
+    if _accept_sized(agent_id, "health", body.health, settings):
         agent.health = body.health
         agent.health_at = now
     # Version confirmation for updater-disabled agents (container image): the

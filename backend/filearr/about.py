@@ -456,17 +456,13 @@ _TOOL_VERSION_ARGS = {
 #: unknown" rather than a hung page.
 _TOOL_PROBE_TIMEOUT_S = 3.0
 
-#: What each tool is FOR, and where its documentation lives. Curated by
-#: necessity — a host binary has no metadata to introspect.
-_TOOL_INFO = {
-    "ffprobe": ("Video/audio stream metadata", "https://ffmpeg.org/ffprobe.html"),
-    "ffmpeg": ("Thumbnail poster frames", "https://ffmpeg.org/ffmpeg.html"),
-    "exiftool": ("Image/EXIF metadata", "https://exiftool.org/"),
-    "tesseract": ("OCR for scanned documents", "https://tesseract-ocr.github.io/"),
-    "pdfinfo": ("PDF document properties", "https://poppler.freedesktop.org/"),
-    "pdftotext": ("PDF text extraction", "https://poppler.freedesktop.org/"),
-    "pdftoppm": ("PDF page rasterisation (OCR)", "https://poppler.freedesktop.org/"),
-}
+#: What each tool is FOR and where its docs live —
+#: :data:`filearr.toolversions.HOST_TOOL_INFO`, imported rather than restated.
+#: The per-agent About view (:mod:`filearr.agent_about`) renders the same seven
+#: tools, and a second copy of this table would drift from this one silently:
+#: no test fails when two pages describe pdftoppm differently, operators just
+#: stop trusting either page.
+_TOOL_INFO = toolversions.HOST_TOOL_INFO
 
 
 def parse_tool_version(name: str, out: str) -> str | None:

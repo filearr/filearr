@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agentsync, audit, toolversions
+from filearr import agent_about, agentsync, audit, toolversions
 from filearr.agentsync import EnrollmentError
 from filearr.config import get_settings
 from filearr.db import get_session
@@ -269,6 +269,115 @@ class HostToolMinimumOut(BaseModel):
     minimum_version: str | None
     impact: str | None
     reason: str | None
+
+
+class AgentAboutIdentity(BaseModel):
+    """Who this report is about, and — crucially — WHEN it was reported."""
+
+    id: uuid.UUID
+    name: str
+    hostname: str
+    platform: str
+    status: str
+    agent_version: str | None
+    config_generation_applied: int | None
+    last_seen_at: datetime | None
+    #: Central's OBSERVATION of the transport the agent's last authenticated
+    #: request used ('bearer' | 'mtls'), never the agent's own claim.
+    auth_mode: str | None
+    #: When the advertisement everything below is derived from arrived. Null for
+    #: an agent that has never polled with one (or that last polled before this
+    #: column existed). The console leads with it because on an offline agent
+    #: this report can be days old and still look perfectly current.
+    capabilities_at: datetime | None
+
+
+class AgentAboutBuild(BaseModel):
+    """The agent binary's provenance, entirely self-reported.
+
+    ``go_version`` is the toolchain that COMPILED the binary — not a pin in
+    go.mod — and the console labels it "built with" for the same reason the
+    central About page separates a pyproject pin from installed metadata."""
+
+    go_version: str | None = None
+    goos: str | None = None
+    goarch: str | None = None
+    #: Human host OS version ("Windows 10.0 (build 26100)", "Ubuntu 22.04.4
+    #: LTS"). Often the whole explanation for an outdated host tool: the
+    #: distribution is what pins the package.
+    os_version: str | None = None
+    vcs_revision: str | None = None
+    vcs_time: str | None = None
+    #: True when the working tree was dirty at build time — the commit id alone
+    #: then does not identify the binary.
+    vcs_modified: bool | None = None
+    main_version: str | None = None
+    num_cpu: int | None = None
+
+
+class AgentAboutTool(BaseModel):
+    """One host tool on the AGENT's machine. Same shape as an About-page row
+    (``filearr.about.host_tools``) so one component renders both."""
+
+    name: str
+    purpose: str | None
+    present: bool
+    version: str | None
+    #: Resolved absolute path ON THE AGENT HOST. Answers "which copy", which
+    #: ``present`` cannot, and is the visible proof that the agent's
+    #: machine-wide-only resolution rule still holds.
+    path: str | None
+    url: str | None
+    minimum_version: str | None
+    #: ``ok`` | ``outdated`` | ``unknown`` | ``absent``, from the same
+    #: ``toolversions.tool_verdict`` that judges central's own tools.
+    verdict: str
+    impact: str | None
+
+
+class AgentAboutModule(BaseModel):
+    """One Go module linked into the agent binary."""
+
+    path: str
+    #: Null for a module with no recorded version (the main module of a
+    #: checkout build). Renders as "version unknown", never as a blank.
+    version: str | None
+    url: str
+
+
+class AgentAboutExtract(BaseModel):
+    """What this agent's extraction/inventory pass advertises it can do."""
+
+    schema_: int | None = Field(default=None, alias="schema")
+    formats: list[str] = []
+    collectors: list[str] = []
+    inventory_version: int | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class AgentAboutOut(BaseModel):
+    """The per-agent About report (2026-08-11).
+
+    Every section degrades independently and ``reported: false`` is a normal,
+    successful answer — see :mod:`filearr.agent_about`."""
+
+    agent: AgentAboutIdentity
+    #: Null when the agent reported no build block (an older build, or one that
+    #: has not polled since upgrading). Null, not a dict of nulls, so the
+    #: console can say "not reported" instead of drawing an empty table.
+    build: AgentAboutBuild | None
+    host_tools: list[AgentAboutTool]
+    #: Null when no module list was reported. Never ``[]`` — an empty list would
+    #: claim the binary has no dependencies.
+    modules: list[AgentAboutModule] | None
+    #: True when the AGENT deliberately left its module list out to stay inside
+    #: its poll-payload budget. The console renders "not reported (payload
+    #: budget)" rather than an empty table.
+    modules_omitted: bool
+    extract: AgentAboutExtract
+    #: False when this agent has never advertised capabilities at all.
+    reported: bool
 
 
 def _ca_bootstrap(settings) -> CaBootstrap:
@@ -729,6 +838,44 @@ async def list_host_tool_minimums() -> list[HostToolMinimumOut]:
         )
         for e in toolversions.HOST_TOOL_MINIMUMS
     ]
+
+
+@router.get(
+    "/agents/{agent_id}/about",
+    response_model=AgentAboutOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def get_agent_about(
+    agent_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> AgentAboutOut:
+    """This agent's build stack, Go dependencies and host tools — the per-agent
+    equivalent of ``GET /system/about`` (user request, 2026-08-11).
+
+    Pure assembly from the stored capability advertisement plus a few columns of
+    the agent row: ONE query, no network, no subprocess, nothing asked of the
+    agent. Central never reaches out to an agent — agents poll — so this reports
+    what the agent last SAID, and ``agent.capabilities_at`` is when it said it.
+    The composition rules (and why every unknown is a meaningful string rather
+    than a blank) live in :mod:`filearr.agent_about`.
+
+    **``admin`` scope, deliberately narrower than ``/system/about``'s ``read``.**
+    This exposes filesystem paths from a remote machine — where its exiftool
+    lives, how its Program Files is laid out — which is reconnaissance about
+    someone else's host rather than information about the server you are already
+    logged into. The rest of the agent admin surface is admin-scoped for the
+    same reason.
+
+    An agent that has never polled with capabilities returns 200 with
+    ``reported: false`` and empty sections. That is a normal state (a pending
+    enrollment, a machine not started yet), and 404-ing it would send an
+    operator hunting for a missing agent that is sitting right there in the
+    table.
+    """
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such agent")
+    return AgentAboutOut.model_validate(agent_about.agent_about(agent))
 
 
 @router.patch(

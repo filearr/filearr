@@ -535,10 +535,38 @@
         kvRow(dl, "Extract schema", caps.extract_schema);
         // The tool matrix IS the capability matrix: an operator upgrades this
         // agent by installing a binary, not by swapping the build.
-        var toolNames = Object.keys(tools).sort();
-        kvRow(dl, "Host tools", toolNames.length
-          ? toolNames.map(function (t) { return t + ": " + (tools[t] ? "yes" : "no"); }).join(", ")
-          : "—");
+        //
+        // One row per tool, with the VERSION and the resolved PATH (2026-08-11).
+        // This used to be a single "exiftool: no, ffmpeg: yes, …" line, which
+        // answers whether a capability runs here and nothing else. The person
+        // reading this page is standing at the machine, usually having just
+        // installed something, and their next two questions are always "which
+        // version did it get?" and "is that the copy the service will run?" —
+        // the second one especially on Windows, where a box can easily have
+        // three exiftools and the service deliberately ignores the ones in a
+        // user profile.
+        var hostTools = s.host_tools;
+        if (!hostTools) {
+          // Older agent binary against this page (a partial upgrade): fall back
+          // to the boolean map rather than showing nothing.
+          hostTools = Object.keys(tools).sort().map(function (t) {
+            return { name: t, present: !!tools[t] };
+          });
+        }
+        if (!hostTools.length) {
+          kvRow(dl, "Host tools", "—");
+        }
+        hostTools.forEach(function (t) {
+          var text;
+          if (!t.present) {
+            // Never a blank and never a bare "no": say what it means.
+            text = "not installed";
+          } else {
+            text = t.version || "installed, version unknown";
+            text += t.path ? "  ·  " + t.path : "  ·  path unknown";
+          }
+          kvRow(dl, "Tool: " + t.name, text);
+        });
         var ignored = ex.ignored_settings || [];
         if (!ignored.length) {
           kvRow(dl, "Ignored settings", "none — every policy setting applies here");

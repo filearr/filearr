@@ -7,6 +7,19 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "skipLibCheck": true,
+    // The app never compiles through tsc — `npm run build` is `vite build`, and
+    // this config exists solely for `svelte-check`. Stating it lets the two
+    // options below be set (TypeScript requires noEmit for them).
+    "noEmit": true,
+    // A src/lib module that imports a VALUE from a sibling must spell the
+    // ".ts" extension, because the same modules are executed unbundled by the
+    // Node test runner (`npm test`, type-stripping, real file resolution) —
+    // there is no bundler there to guess an extension. tsconfig.test.json has
+    // carried this for the tests themselves since they were written; it is
+    // needed here as well now that src/lib/agentAbout.ts reuses two formatters
+    // from src/lib/about.ts rather than reimplementing them. Vite resolves the
+    // explicit extension without complaint.
+    "allowImportingTsExtensions": true,
     "types": ["svelte", "vite/client"]
   },
   "include": ["src/**/*.ts", "src/**/*.svelte"]

@@ -335,43 +335,104 @@ if (-not (Test-Path filearr-agent.json)) {
 # validates package manifests against publisher hashes already. No winget (older
 # Windows 10, or a locked-down image) means we PRINT the links and continue —
 # a missing optional tool is a degraded capability, never a failed install.
+#
+# MACHINE SCOPE THROUGHOUT. The agent runs as a LocalSystem service, and
+# `winget install` without a scope flag defaults to USER scope: the shims and
+# payloads land in the installing operator's %LOCALAPPDATA%, while LocalSystem's
+# profile is under System32\config\systemprofile. That combination silently
+# produced agents reporting exiftool and poppler absent right after this script
+# "installed" them (2026-08-11).
+#
+# The agent also IGNORES user-profile installs on purpose — executing a binary
+# out of a user-writable directory as SYSTEM is a local privilege-escalation
+# path — so this script never probes a profile either. Machine-visible or
+# missing; there is no third answer.
+
+# Directories a LocalSystem service can actually read: the MACHINE PATH (NOT
+# $env:PATH, which is the operator's machine+user merge) plus the same machine
+# locations the agent probes.
+function Get-ServiceVisibleDirs {
+  $dirs = @()
+  $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  if ($machinePath) { $dirs += ($machinePath -split ";" | Where-Object { $_ }) }
+  $dirs += @(
+    "$env:ProgramFiles\Tesseract-OCR",
+    "${env:ProgramFiles(x86)}\Tesseract-OCR",
+    "$env:ProgramFiles\ExifTool",
+    "$env:ProgramFiles\ffmpeg\bin",
+    "C:\ffmpeg\bin",
+    "C:\exiftool",
+    "$env:ProgramFiles\WinGet\Links",
+    "$env:ProgramData\chocolatey\bin",
+    "$env:ProgramData\scoop\shims"
+  )
+  # Versioned payloads: poppler's own layout, and winget PORTABLE packages,
+  # which unpack to Packages\<Id>_<hash>\<inner-versioned-dir>\... (both depths,
+  # since some packages have no inner directory). Get-Item, not Get-ChildItem:
+  # we want the matching directories themselves, not their contents.
+  foreach ($g in @("$env:ProgramFiles\poppler*\Library\bin",
+                   "C:\poppler*\Library\bin",
+                   "$env:ProgramFiles\WinGet\Packages\*\*\Library\bin",
+                   "$env:ProgramFiles\WinGet\Packages\*\Library\bin",
+                   "$env:ProgramFiles\WinGet\Packages\*\*\bin",
+                   "$env:ProgramFiles\WinGet\Packages\*\bin")) {
+    $dirs += (Get-Item $g -ErrorAction SilentlyContinue |
+              Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName })
+  }
+  return ($dirs | Where-Object { $_ })
+}
+
+function Test-ServiceVisible([string]$cmd, [string[]]$dirs) {
+  foreach ($d in $dirs) {
+    if (Test-Path (Join-Path $d ($cmd + ".exe"))) { return $true }
+  }
+  return $false
+}
+
+function Test-Elevated {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  return ([Security.Principal.WindowsPrincipal]$id).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Install-ExtractionTools {
   $wanted = @(
-    @{ Cmd = "ffprobe";   Id = "Gyan.FFmpeg";               Name = "ffmpeg (ffprobe)" },
-    @{ Cmd = "pdftotext"; Id = "oschwartz10612.Poppler";    Name = "poppler-utils" },
-    @{ Cmd = "exiftool";  Id = "OliverBetz.ExifTool";       Name = "exiftool" },
-    @{ Cmd = "tesseract"; Id = "UB-Mannheim.TesseractOCR";  Name = "tesseract" }
+    @{ Cmd = "ffprobe"; Id = "Gyan.FFmpeg"; Name = "ffmpeg (ffprobe)"
+       Link = "https://www.gyan.dev/ffmpeg/builds/" },
+    @{ Cmd = "pdftotext"; Id = "oschwartz10612.Poppler"; Name = "poppler-utils"
+       Link = "https://github.com/oschwartz10612/poppler-windows/releases" },
+    @{ Cmd = "exiftool"; Id = "OliverBetz.ExifTool"; Name = "exiftool"
+       Link = "https://exiftool.org/  (rename exiftool(-k).exe to exiftool.exe)" },
+    @{ Cmd = "tesseract"; Id = "UB-Mannheim.TesseractOCR"; Name = "tesseract"
+       Link = "https://github.com/UB-Mannheim/tesseract/wiki" }
   )
-  # The agent finds tools in their well-known install directories as well as on
-  # PATH, so "already installed" must be checked the same generous way rather
-  # than by Get-Command alone — otherwise a re-run reinstalls Tesseract every
-  # time (its installer does not add itself to PATH).
-  $wellKnown = @(
-    "$env:ProgramFiles\Tesseract-OCR", "$env:ProgramFiles\ExifTool",
-    "$env:ProgramFiles\ffmpeg\bin", "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
-  )
+  # "Already installed" is asked exactly the way the SERVICE will ask it. Using
+  # Get-Command here would answer "can the operator run this?", which is how a
+  # user-scope install passes as present forever and never gets repaired.
+  $visibleDirs = Get-ServiceVisibleDirs
+
   $missing = @()
   foreach ($t in $wanted) {
-    $found = [bool](Get-Command $t.Cmd -ErrorAction SilentlyContinue)
-    if (-not $found) {
-      foreach ($d in $wellKnown) {
-        if (Test-Path (Join-Path $d ($t.Cmd + ".exe"))) { $found = $true; break }
-      }
-    }
+    $found = Test-ServiceVisible $t.Cmd $visibleDirs
     if (-not $found -or $ForceTools) { $missing += $t }
   }
-  if ($missing.Count -eq 0) { Write-Host "extraction tools: already present"; return }
+  if ($missing.Count -eq 0) { Write-Host "extraction tools: already present machine-wide"; return }
 
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Warning "winget not available - install these yourself, then restart the service:"
-    Write-Host "  ffmpeg     https://www.gyan.dev/ffmpeg/builds/"
-    Write-Host "  poppler    https://github.com/oschwartz10612/poppler-windows/releases"
-    Write-Host "  exiftool   https://exiftool.org/  (rename exiftool(-k).exe to exiftool.exe)"
-    Write-Host "  tesseract  https://github.com/UB-Mannheim/tesseract/wiki"
+    Write-Warning ("winget not available - install these yourself MACHINE-WIDE " +
+      "(under $env:ProgramFiles, never a per-user directory: the service runs as " +
+      "LocalSystem and ignores user-profile installs), then restart the service:")
+    foreach ($t in $wanted) { Write-Host ("  {0,-10} {1}" -f $t.Cmd, $t.Link) }
     return
   }
+  if (-not (Test-Elevated)) {
+    Write-Warning ("not elevated - 'winget --scope machine' requires admin. Re-run " +
+      "this from an elevated PowerShell, or the tools land in YOUR profile, where " +
+      "the agent ignores them.")
+  }
+  $installedAny = $false
   foreach ($t in $missing) {
-    Write-Host "extraction tools: installing $($t.Name) via winget"
+    Write-Host "extraction tools: installing $($t.Name) via winget (machine scope)"
     # --accept-*-agreements keeps this non-interactive; a failure is reported and
     # skipped, never fatal.
     $wa = @("install", "--id", $t.Id, "--exact", "--silent",
@@ -380,12 +441,32 @@ function Install-ExtractionTools {
     # --force is what makes -ForceTools mean anything: without it winget no-ops
     # on an id it already considers installed.
     if ($ForceTools) { $wa += "--force" }
+    & winget @wa --scope machine 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { $installedAny = $true; continue }
+    # Not every package honours machine scope (some installer types and some
+    # portables are user-only). Retry once WITHOUT the flag so the tool at least
+    # exists, and be explicit that the agent still will not use it.
     & winget @wa 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
       Write-Warning "  $($t.Name) failed (winget exit $LASTEXITCODE) - reported absent"
+    } else {
+      Write-Warning ("  $($t.Name) refused machine scope and installed for THIS " +
+        "USER only - the agent IGNORES user-profile installs (LocalSystem must not " +
+        "execute from a user-writable directory) and will report it absent. " +
+        "Install it machine-wide by hand: $($t.Link)")
     }
   }
-  Write-Host "extraction tools: done. A new PATH entry needs a service restart to be seen."
+  if ($installedAny) {
+    # Said without looking anywhere: a pre-existing user-scope copy is left in
+    # place (uninstalling someone else's software is not this script's job) and
+    # may still win in the operator's own terminal.
+    Write-Host ("extraction tools: note - a copy installed for your user is left " +
+      "alone and may still win in YOUR terminal, so 'Get-Command <tool>' can show " +
+      "a different path than the agent uses.")
+  }
+  Write-Host ("extraction tools: done. The 'filearr-agent.exe install' step below " +
+    "starts the service, and a service reads the MACHINE environment at start - " +
+    "that is when these become visible to it.")
 }
 
 if ($SkipTools) {

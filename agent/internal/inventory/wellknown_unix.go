@@ -11,9 +11,16 @@ package inventory
 // container with a trimmed PATH, or a Snap/Flatpak/Nix install all produce the
 // same symptom as the Windows service case, so the same fallback applies.
 //
-// Deliberately NOT probed: /usr/games, ~/.local/bin (per-user, and a service
-// running as root would resolve the wrong user's copy). The env override
-// remains the escape hatch for anything unusual.
+// Deliberately NOT probed: /usr/games, and anything under $HOME (~/.local/bin,
+// ~/bin, a per-user Nix or Flatpak profile). Every location here is
+// MACHINE-WIDE, and that is a security rule rather than a preference — see
+// wellknown_windows.go for the full statement. The agent commonly runs as a
+// system service; resolving a host tool out of a user-writable directory would
+// let a local user drop their own ffprobe there and have the service execute it
+// as root. A tool installed only into a home directory is deliberately reported
+// as absent until it is installed machine-wide, and the FILEARR_AGENT_*_PATH
+// override remains the explicit, operator-chosen escape hatch for anything
+// unusual.
 
 // exeSuffix is empty on Unix — tool names are used verbatim.
 const exeSuffix = ""

@@ -12,6 +12,7 @@ package inventory
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"sort"
@@ -98,12 +99,25 @@ func DefaultRegistry() *Registry {
 // host tools, so a build degrades PER CAPABILITY at runtime and central's console
 // can tell an operator exactly which policy keys this agent will ignore, and why.
 // ``ffmpeg`` stays a top-level key for the older centrals that read it there.
+//
+// 2026-08-11 adds the per-agent ABOUT payload — `tool_paths`, `build` and
+// (budget permitting) `modules`. Two notes on that:
+//
+//   - `inventory_version` is NOT bumped. It versions the collector vocabulary a
+//     central composes against, not this advertisement. Every key here is
+//     additive and an older central ignores what it does not read; bumping the
+//     contract version for an additive field would make centrals gate on a
+//     capability change that never happened.
+//   - This function is called ONCE PER POLL (it used to be called once per
+//     process, at daemon start). That is what makes the TTL'd tool caches
+//     visible: a tool installed after the agent started now appears in the
+//     console within one toolCacheTTL, with no service restart.
 func Capabilities() map[string]any {
 	names := DefaultRegistry().Names()
 	sorted := make([]string, len(names))
 	copy(sorted, names)
 	sort.Strings(sorted)
-	return map[string]any{
+	caps := map[string]any{
 		"inventory_collectors": sorted,
 		"inventory_version":    CapabilityVersion,
 		"ffmpeg":               HasFFmpeg(),
@@ -122,8 +136,79 @@ func Capabilities() map[string]any {
 		// console renders "installed, version unknown" from the two maps rather
 		// than an empty string.
 		"tool_versions": ToolVersions(),
-		"formats":       ExtractFormats(),
+		// WHERE each present tool resolved from (2026-08-11, user request:
+		// "pull the tool locations also"). Absent tools omitted. See
+		// ToolPaths — the path is both the answer to "which copy is running"
+		// and the visible proof of the no-user-directories security rule.
+		"tool_paths": ToolPaths(),
+		// This agent's own build provenance: toolchain, target platform, VCS
+		// commit, host OS version. The agent-side half of central's About page,
+		// which can interrogate its own process but has never had any way to
+		// ask an agent the same questions.
+		"build":   buildBlock(),
+		"formats": ExtractFormats(),
 	}
+	attachModules(caps)
+	return caps
+}
+
+// capabilitiesBudget is the size this advertisement keeps itself under, in
+// bytes of marshalled JSON.
+//
+// Central caps a `capabilities` body at ``agent_capabilities_max_bytes``
+// (16 KiB, config.py) and DROPS an oversize one — the poll still succeeds, the
+// commands still drain, and the stored advertisement is silently left at
+// whatever it was before. That is a genuinely nasty failure mode from this
+// side: adding a field could make an agent's entire capability report stop
+// updating, with no error anywhere.
+//
+// So the agent measures itself and trims first. 12 KiB rather than 16 leaves
+// headroom for two things: fields added later without this calculation being
+// revisited, and the fact that central applies its cap to the body it decodes,
+// not to the bytes we measured (key ordering and escaping can differ). The one
+// block big enough to matter is `modules`, so that is the block that gets
+// dropped — and dropped LOUDLY, via `modules_omitted`, because a console
+// showing an empty dependency table would be asserting this binary has no
+// dependencies.
+//
+// A var, not a const, so a test can shrink it without building a synthetic
+// 12 KiB module graph.
+var capabilitiesBudget = 12 * 1024
+
+// moduleLister is Modules, indirected for tests that need an oversize graph.
+var moduleLister = Modules
+
+// attachModules adds the Go module dependency list to caps IF the result still
+// fits the budget, and otherwise records that it was left out.
+//
+// Measured by actually marshalling, not estimated: the estimate is what would
+// be wrong, and it would be wrong silently in exactly the case that matters.
+func attachModules(caps map[string]any) {
+	mods := moduleLister()
+	if len(mods) == 0 {
+		// No build table to read (see Modules). Neither a list nor an omission
+		// flag — there is nothing to report and nothing was suppressed.
+		return
+	}
+	caps["modules"] = mods
+	if b, err := json.Marshal(caps); err == nil && len(b) <= capabilitiesBudget {
+		return
+	}
+	delete(caps, "modules")
+	// An explicit flag rather than a bare absence: the console says "not
+	// reported (payload budget)" and offers the agent's local web UI, which has
+	// no such limit because nothing crosses a network to reach it.
+	caps["modules_omitted"] = true
+}
+
+// buildBlock is BuildInfo plus the host OS version — build-time facts and the
+// one run-time platform fact that belongs with them.
+func buildBlock() map[string]any {
+	b := BuildInfo()
+	if v := OSVersion(); v != "" {
+		b["os_version"] = v
+	}
+	return b
 }
 
 // InContainer reports whether the agent runs inside a container. The shipped

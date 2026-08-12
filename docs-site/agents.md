@@ -110,6 +110,11 @@ minimum Filearr recommends — see
 [Minimum recommended versions](#agent-tool-minimums) for the numbers, the
 reasoning behind each one, and what an amber chip is asking you to do.
 
+The chips are the at-a-glance view. For the detailed one — the agent's build
+stack, its Go module dependencies, and each host tool's version *and resolved
+path* — open **About / versions** in the same details panel; see
+[The per-agent About view](#agent-about).
+
 #### Host tools: what each one buys {#agent-host-tools}
 
 Every one of these is optional. Install only what the libraries on *that* host
@@ -206,12 +211,37 @@ sudo pacman -S ffmpeg poppler perl-image-exiftool tesseract tesseract-data-eng
 apk add ffmpeg poppler-utils exiftool tesseract-ocr tesseract-ocr-data-eng
 # macOS (Homebrew — never run as root)
 brew install ffmpeg poppler exiftool tesseract
-# Windows
-winget install Gyan.FFmpeg
-winget install oschwartz10612.Poppler
-winget install OliverBetz.ExifTool
-winget install UB-Mannheim.TesseractOCR
+# Windows — --scope machine is REQUIRED, see the warning below
+winget install --id Gyan.FFmpeg --scope machine
+winget install --id oschwartz10612.Poppler --scope machine
+winget install --id OliverBetz.ExifTool --scope machine
+winget install --id UB-Mannheim.TesseractOCR --scope machine
 ```
+
+!!! warning "Windows: install machine-wide, or the agent will not use it"
+    The Windows agent runs as a service under **LocalSystem**, and it only ever
+    resolves host tools from **machine-wide, admin-writable** locations —
+    `C:\Program Files\...`, `C:\ProgramData\chocolatey\bin`, the machine WinGet
+    link and package directories. A tool installed into a **user profile**
+    (`%LOCALAPPDATA%`) is **ignored on purpose**: executing a binary out of a
+    user-writable directory as SYSTEM would let any local user drop their own
+    `exiftool.exe` there and have it run with full privileges.
+
+    This matters because **`winget` defaults to user scope** when you do not say
+    otherwise. The symptom is unmistakable: the tool runs fine in your terminal,
+    and the agent's chip in the console says `✕`. It is not a detection bug — the
+    agent is declining to run a binary out of your profile.
+
+    The fix is either re-running `manage-windows-agent.ps1` (it now checks
+    presence the way the *service* sees it, and reinstalls anything missing with
+    `--scope machine`), or the `winget --scope machine` commands above from an
+    **elevated** shell — machine scope requires admin. A user-scope copy you
+    already have is left alone; it may still win in your own terminal, so
+    `Get-Command exiftool` can report a different path than the agent uses. A
+    newly installed machine-wide tool appears in the console **within about 15
+    minutes** without a restart (see
+    [When a newly installed tool shows up](#agent-tool-freshness)); the manage
+    script restarts the service anyway, which makes it immediate.
 
 Direct downloads, when a package manager is not an option:
 
@@ -231,11 +261,17 @@ Direct downloads, when a package manager is not an option:
 
     So when `PATH` misses, the agent also probes the conventional locations:
     `C:\Program Files\Tesseract-OCR`, `C:\Program Files\ExifTool`,
-    `C:\Program Files\ffmpeg\bin`, versioned `poppler-*\Library\bin`, the
-    winget/Chocolatey/Scoop shim directories, `/opt/homebrew/bin`,
-    `/usr/local/bin`, `/opt/local/bin`, `/snap/bin` and the Nix/Flatpak profile
-    paths. If your install is somewhere else, the `FILEARR_AGENT_*_PATH`
-    overrides below still win over everything.
+    `C:\Program Files\ffmpeg\bin`, versioned `poppler-*\Library\bin`, the machine
+    winget link and package directories, `C:\ProgramData\chocolatey\bin`, the
+    global Scoop shims, `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`,
+    `/snap/bin` and the system-wide Nix/Flatpak paths.
+
+    Every one of those is **machine-wide**. Nothing under a home directory or
+    `%LOCALAPPDATA%` is probed on any platform — a service running as
+    SYSTEM/root must not execute a binary out of a user-writable directory, so a
+    tool installed only into a profile is reported absent by design. If your
+    install is somewhere else, the `FILEARR_AGENT_*_PATH` overrides below are the
+    explicit, operator-chosen escape hatch and still win over everything.
 
 **Which install gets what.** The **container agent ships all of them** — ffmpeg,
 poppler-utils, exiftool and tesseract with English data — so a containerized host
@@ -255,6 +291,67 @@ Windows often means a years-old zip). A chip showing `✓` without a version mea
 the tool is there but did not report one; `✕` means it is not on `PATH` at all.
 The same matrix, with versions, appears on the agent's own local status page and
 is printed by `filearr-agent install`.
+
+##### The per-agent About view {#agent-about}
+
+The chips answer *what can this agent do*. Open **details → About / versions**
+for the other question — *what exactly is installed over there*. It is the
+per-agent counterpart of the console's own **About** page, and it shows three
+things:
+
+**The build stack.** The agent version, the **Go toolchain that compiled the
+binary** (labelled "built with" — that is the compiler, not the `go` directive
+in `go.mod`, and the two differ routinely), the platform it was built for, the
+host **OS version**, and the source commit with a `(modified)` marker when the
+working tree was dirty at build time. The host OS line is often the whole
+explanation for an outdated host tool: the distribution is what pins the
+package.
+
+**Host tools, with version *and* location.** One row per tool: the version found,
+the **absolute path it resolved from**, and the verdict. The path is the answer
+to *which copy* — a machine can easily carry three ffmpegs, and "installed" does
+not say which one the service will execute. It is also the visible proof of the
+machine-wide-only rule described above: **a path here should never sit under a
+user profile**, and the console flags one in red if it ever does, because that
+would mean the agent had resolved a binary out of a user-writable directory
+while running as SYSTEM/root.
+
+A verdict of `unknown` is a judgement of **"unjudged", not "bad"**. It means the
+tool is installed but could not be measured — it reported no version, its version
+has no comparable number in it (an ffmpeg built from git), or Filearr publishes
+no minimum for it. Only `outdated` is a warning, and only ever after an actual
+numeric comparison of two parseable versions.
+
+**Go module dependencies.** Every module linked into the agent binary, with a
+link to its `pkg.go.dev` page. A Go binary is statically linked, so this list *is*
+what is running — not a manifest of what a build was asked for. It is the answer
+to "does any agent in this fleet ship a vulnerable version of *x*". The table is
+collapsed by default because it runs to well over a hundred rows. If it says
+**"not reported (payload budget)"**, the agent deliberately left the list out to
+keep its status poll small; the agent's own local web UI shows it in full, since
+nothing crosses a network to reach that page.
+
+Everything on the panel is **self-reported**. Central never queries an agent —
+agents poll — so the panel leads with a *Reported* timestamp, and on a machine
+that has been offline for a week those numbers are a week old while looking
+perfectly current. An agent that has never polled says so plainly rather than
+rendering a page of zeros. **Copy as Markdown** dumps the whole report,
+timestamp included, for pasting into a bug report.
+
+The view needs the **admin** scope — deliberately narrower than the server About
+page's `read`, because it exposes filesystem paths from someone else's machine.
+
+##### When a newly installed tool shows up {#agent-tool-freshness}
+
+**Within about 15 minutes, with no service restart.** The agent caches its tool
+lookups (a scan asks per file, so the cache is not optional), but each entry
+expires after 15 minutes, and the capability report is rebuilt on every poll.
+Install a tool machine-wide and the console reflects it by itself.
+
+This used to be untrue and it cost real time: the lookups were cached for the
+life of the process, so a tool installed after the agent started was invisible
+until someone happened to restart the service. If you are impatient, restarting
+the agent still works and is instant.
 
 Each tool also honours an explicit path override, which wins over `PATH`:
 `FILEARR_AGENT_FFMPEG_PATH`, `FILEARR_AGENT_FFPROBE_PATH`,

@@ -117,6 +117,37 @@ async def test_install_scripts_templated_with_central_url(client):
     assert "Get-FileHash" in r.text
 
 
+async def test_install_ps1_installs_tools_machine_scope(client):
+    """The Windows agent runs as a LocalSystem service, so host tools MUST be
+    installed machine-wide: winget defaults to user scope, whose payloads live in
+    the operator's %LOCALAPPDATA% and are unreachable for LocalSystem (and are
+    ignored on purpose — executing from a user-writable directory as SYSTEM is a
+    privilege-escalation path). Regression guard for a live 2026-08-11 report of
+    exiftool/poppler reading as absent right after the installer ran."""
+    c, _, _ = client
+    r = await c.get("/api/v1/agent-dist/install.ps1")
+    ps = r.text
+
+    assert "--scope machine" in ps
+    # Presence is asked as the SERVICE sees it: the MACHINE PATH, never the
+    # operator's merged $env:PATH and never Get-Command on the tool.
+    assert '[Environment]::GetEnvironmentVariable("Path", "Machine")' in ps
+    for cmd in ("ffprobe", "pdftotext", "exiftool", "tesseract"):
+        assert f"Get-Command {cmd}" not in ps
+    # No user-profile location is probed for a tool (the words may appear in the
+    # comments explaining WHY; what must not appear is an expansion of them).
+    assert "$env:LOCALAPPDATA" not in ps
+    assert "$env:USERPROFILE" not in ps
+    # Machine winget locations ARE probed, at both portable-payload depths.
+    assert r"$env:ProgramFiles\WinGet\Links" in ps
+    assert r"$env:ProgramFiles\WinGet\Packages\*\*\Library\bin" in ps
+    assert r"$env:ProgramFiles\WinGet\Packages\*\*\bin" in ps
+    # Machine scope needs elevation, and a package that refuses it must warn
+    # rather than quietly land in a profile.
+    assert "Test-Elevated" in ps
+    assert "refused machine scope" in ps
+
+
 async def test_manage_windows_agent_script_served_templated(client):
     """The unified Windows lifecycle script is served with THIS central's URL
     baked into the -CentralUrl default; the split-placeholder runtime guard
@@ -134,3 +165,8 @@ async def test_manage_windows_agent_script_served_templated(client):
     assert "enrollment-tokens" in r.text
     assert "Stop-Service filearr-agent" in r.text
     assert "Get-FileHash" in r.text
+    # Same machine-scope contract as install.ps1 — the two surfaces must not
+    # drift, because this one is what repairs an already-provisioned box.
+    assert "--scope machine" in r.text
+    assert '[Environment]::GetEnvironmentVariable("Path", "Machine")' in r.text
+    assert r"$env:ProgramFiles\WinGet\Packages\*\*\Library\bin" in r.text

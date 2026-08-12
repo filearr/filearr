@@ -12,11 +12,16 @@ package inventory
 // and it is the one you think".
 //
 // Cost discipline: each version costs ONE subprocess, so it is resolved at most
-// once per (tool, override) per process and cached forever afterwards — the
-// capability advertisement is rebuilt on every command poll (~1/min) and must
-// never spawn seven processes to do it. The probe is bounded by its own short
-// timeout: a wedged binary must degrade to "version unknown", never hang the
-// poll that reports it.
+// once per (tool, resolved path) per toolCacheTTL — the capability
+// advertisement is rebuilt on every command poll (~1/min) and must never spawn
+// seven processes to do it. The probe is bounded by its own short timeout: a
+// wedged binary must degrade to "version unknown", never hang the poll that
+// reports it.
+//
+// The cache is TTL'd rather than permanent (2026-08-11) for the same reason the
+// resolution cache is — see toolCacheTTL in tools.go. A tool UPGRADED in place
+// keeps its path, so a path-keyed permanent cache would report the old version
+// forever; a quarter of an hour later this one re-probes and tells the truth.
 
 import (
 	"bytes"
@@ -40,7 +45,7 @@ const versionProbeTimeout = 3 * time.Second
 // build banner can run to kilobytes, and no real version needs more than this.
 const versionMaxChars = 64
 
-var versionCache sync.Map // toolKey -> string ("" == unknown/absent)
+var versionCache sync.Map // toolKey -> cachedString ("" value == unknown/absent)
 
 // versionArgs is the argument that makes each tool print its version, and it is
 // deliberately per-tool rather than a guessed common flag: `-version` is what
@@ -67,11 +72,11 @@ func ToolVersion(name, envVar string) string {
 		return "" // absent: Tools() already reports that, no probe to run
 	}
 	key := toolKey{name: name, override: path}
-	if v, ok := versionCache.Load(key); ok {
-		return v.(string)
+	if v, ok := cacheLoad(&versionCache, key); ok {
+		return v
 	}
 	version := probeToolVersion(name, path)
-	versionCache.Store(key, version)
+	cacheStore(&versionCache, key, version)
 	return version
 }
 
@@ -178,15 +183,7 @@ func cleanVersion(s string) string {
 // the pair of maps instead of rendering a blank.
 func ToolVersions() map[string]string {
 	out := map[string]string{}
-	for name, env := range map[string]string{
-		"ffmpeg":    EnvFFmpegPath,
-		"ffprobe":   EnvFFprobePath,
-		"tesseract": EnvTesseractPath,
-		"exiftool":  EnvExiftoolPath,
-		"pdfinfo":   EnvPDFInfoPath,
-		"pdftotext": EnvPDFToTextPath,
-		"pdftoppm":  EnvPDFToPPMPath,
-	} {
+	for name, env := range hostToolEnvs {
 		if v := ToolVersion(name, env); v != "" {
 			out[name] = v
 		}

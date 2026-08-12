@@ -94,7 +94,7 @@ func newInvPoller(srv *httptest.Server) *Poller {
 		AuthFn:       func() string { return "fp" },
 		HTTP:         srv.Client(),
 		Inventory:    inventory.NewRunner(nil, pathspec.OSHost()),
-		Capabilities: inventory.Capabilities(),
+		Capabilities: inventory.Capabilities,
 		LeaseSeconds: 300,
 	})
 }

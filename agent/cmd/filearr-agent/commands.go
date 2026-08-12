@@ -45,8 +45,12 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		// W6-D3: the inventory runner (real OS host) + the additive capability
 		// advertisement it attaches to every poll so central can store what this
 		// agent supports.
-		Inventory:    inventory.NewRunner(nil, nil),
-		Capabilities: inventory.Capabilities(),
+		Inventory: inventory.NewRunner(nil, nil),
+		// Re-evaluated per poll (2026-08-11), not snapshotted here: the tool
+		// caches inside it are TTL'd, so this is what lets a host tool
+		// installed after the agent started show up in the console within
+		// ~15 minutes instead of never.
+		Capabilities: inventory.Capabilities,
 		// 2026-08-08 fleet health: the compact self-reported snapshot central
 		// stores on the agent row and the console renders per agent — plus the
 		// running version, so central stays current even when the self-update
