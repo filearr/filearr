@@ -10,6 +10,45 @@ Five Community Applications–format templates (`Container version="2"`):
 | 4 | `filearr-worker.xml` | same image, Post Arguments run the Procrastinate worker |
 | — | `filearr-agent.xml` | ghcr.io/pwsh/filearr-agent (standalone inventory agent — standalone install, needs only a central URL + enrollment token) |
 
+## Why four containers and not one
+
+Four templates is more setup than one, and that friction is real. It is a
+deliberate homelab trade, not borrowed enterprise practice:
+
+1. **A bundled Postgres welds its major version to the app image.** When the pin
+   moves (18 → 19), every existing data directory needs `pg_upgrade` run with
+   BOTH majors present — which a single image shipping exactly one major cannot
+   do. Separate means the operator chooses when Postgres moves.
+2. **Updating Filearr does not cycle the database.** Pull the app image, restart
+   two containers; Postgres and Meilisearch keep running with warm caches.
+3. **Memory isolation.** The documented >6 GiB Meilisearch indexing flush kills
+   Meilisearch alone — and the index is a rebuildable projection — instead of
+   taking the database down with it.
+4. **Per-container logs and health are Unraid's primary debugging affordance.**
+   "Which one is unhealthy" is a glance at the Docker tab.
+
+The install friction is being reduced by other means — merging app+worker into
+one container, publishing the CA template, better defaults — rather than by
+bundling the database, which would trade a one-time setup cost for a permanent
+upgrade cliff.
+
+## Backups
+
+Full runbook (native `docker exec` commands, a User Scripts schedule, the
+restore sequence, and how the CA "Backup/Restore Appdata" plugin differs):
+`docs-site/deployment/unraid.md#backup-and-restore`. The short version:
+
+- `docker exec filearr-postgres pg_dump -U filearr -Fc filearr > /mnt/user/backups/filearr/filearr-$(date -u +%Y%m%dT%H%M%SZ).dump`
+  (no `-T` — that flag is a `docker compose exec` requirement, and adding `-t`
+  here corrupts the binary dump).
+- **`FILEARR_SECRET_KEY` is NOT in the dump.** Restoring under a different key
+  succeeds while leaving every encrypted alert-channel secret permanently
+  undecryptable. Record it separately.
+- If the Backup/Restore Appdata plugin is doing the work, point it at **both**
+  `/mnt/user/appdata/filearr` and `/mnt/cache/appdata/filearr-postgres` — the
+  split below is deliberate, and a plugin sweeping only `/mnt/user/appdata`
+  backs up thumbnails and misses the database.
+
 `filearr-agent` is independent of the stack above: install it when this Unraid
 box should *feed* a central Filearr running elsewhere (it inventories
 `/mnt/user` read-only and replicates outbound over mTLS). It needs no

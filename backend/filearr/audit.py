@@ -51,6 +51,11 @@ SEARCH = "search"
 # P11-T10 report export artifact download (data-exfiltration-shaped; audited
 # unconditionally, mirroring the transfer download carve-out).
 REPORT_EXPORT_DOWNLOADED = "report_export_downloaded"
+# BK-T3 in-app backup bundle download. The most exfiltration-shaped action the
+# API offers — one request carries the entire catalogue, every user_metadata
+# edit and every alert-channel ciphertext — so it is audited unconditionally,
+# on the same reasoning as the export/transfer downloads above.
+BACKUP_DOWNLOADED = "backup_downloaded"
 # P5-T1 distributed-agent enrollment (fleet trust root)
 AGENT_TOKEN_MINTED = "agent_token_minted"
 AGENT_TOKEN_REVOKED = "agent_token_revoked"

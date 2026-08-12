@@ -1248,6 +1248,50 @@ export const runMaintenance = (key: string) =>
     method: "POST",
   });
 
+// ---- BK-T3 in-app backup ----
+// A bundle produced INSIDE the container. `complete` is always false for these
+// and the API repeats why in `incomplete_note`: a container cannot read the
+// host .env (FILEARR_SECRET_KEY) or the step-ca volume, and a restore under a
+// different secret key succeeds while silently orphaning every encrypted
+// alert-channel secret. The UI must never present one of these as a full
+// disaster-recovery backup.
+export interface BackupBundle {
+  name: string;
+  bytes: number;
+  dump_file: string | null;
+  created_at: string | null;
+  item_count: number | null;
+  alembic_head: string | null;
+  app_version: string | null;
+  complete: boolean;
+  missing: string[];
+}
+
+/** Queue an in-app backup (admin). 409 when one is already queued/running. */
+export const runBackup = () =>
+  request<{ job_id: number | null; incomplete_note: string }>("/system/backup", {
+    method: "POST",
+  });
+
+/** List in-app backup bundles, newest first (admin). */
+export const listBackups = () =>
+  request<{
+    bundles: BackupBundle[];
+    dir: string;
+    keep: number;
+    incomplete_note: string;
+  }>("/system/backups");
+
+/** Download one bundle's Postgres dump. Blob save, not an `<a href>`: the
+ *  endpoint is admin-scoped and a plain link cannot carry the Bearer header
+ *  (same reasoning as `downloadExport`). */
+export async function downloadBackup(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/system/backups/${encodeURIComponent(name)}`, {
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  await saveBlob(res, `${name}.dump`);
+}
+
 /** Override an editable task's schedule and/or toggle it (admin). Pass
  *  `cron: null` to reset to the registry default; omit `cron` to leave the
  *  schedule untouched. Applied by the next scheduler tick (≤1 min). */

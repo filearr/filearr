@@ -3,14 +3,18 @@
   import {
     ApiError,
     clearFailedJobs,
+    downloadBackup,
     failedJobs,
     jobsSummary,
+    listBackups,
     listMaintenance,
     reapStalledJobs,
+    runBackup,
     runMaintenance,
     setJobPriority,
     setMaintenanceMode,
     updateMaintenance,
+    type BackupBundle,
     type FailedJob,
     type JobsSummary,
     type MaintenanceTask,
@@ -205,6 +209,54 @@
     }
   }
 
+  // --- BK-T3 in-app backup ------------------------------------------------
+  // Loaded lazily alongside the maintenance registry. The list is admin-only,
+  // so a read-scoped operator simply sees an empty panel rather than an error.
+  let backups = $state<BackupBundle[]>([]);
+  let backupNote = $state("");
+  let backupDir = $state("");
+  let backupKeep = $state(0);
+  let backupBusy = $state(false);
+  let backupMsg = $state("");
+
+  async function refreshBackups() {
+    try {
+      const r = await listBackups();
+      backups = r.bundles;
+      backupNote = r.incomplete_note;
+      backupDir = r.dir;
+      backupKeep = r.keep;
+    } catch {
+      // best-effort panel (403 for a non-admin, 404 on an older backend)
+    }
+  }
+
+  async function backupNow() {
+    backupBusy = true;
+    backupMsg = "";
+    try {
+      const r = await runBackup();
+      backupMsg = r.job_id != null ? `queued (job ${r.job_id})` : "queued";
+      // The dump runs on the worker; the bundle appears on a later poll. Give
+      // it one nudge rather than pretending it is instant.
+      setTimeout(() => void refreshBackups(), 4000);
+      await refreshMaint(true);
+    } catch (e) {
+      backupMsg = apiDetail(e);
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function backupDownload(b: BackupBundle) {
+    backupMsg = "";
+    try {
+      await downloadBackup(b.name);
+    } catch (e) {
+      backupMsg = apiDetail(e);
+    }
+  }
+
   function apiDetail(e: unknown): string {
     if (e instanceof ApiError) {
       try {
@@ -291,6 +343,9 @@
       computeIoNet(s);
       await refreshFailures();
       await refreshMaint();
+      // Rides the same throttle as the maintenance registry (both are cheap
+      // and neither needs the 4s summary cadence).
+      if (Date.now() - maintFetched < 1000) await refreshBackups();
     } catch (e) {
       error = String(e);
     } finally {
@@ -1487,6 +1542,86 @@
         {/each}
       </tbody>
     </table>
+  {/if}
+
+  <!--
+    BK-T3 backups. The honest caveat is rendered ABOVE the button, not in a
+    tooltip and not only in the manual: an operator who believes this button
+    produces a disaster-recovery backup will discover otherwise at the worst
+    possible moment. `incomplete_note` comes from the backend
+    (filearr.backup.INCOMPLETE_NOTE) so the wording here can never drift from
+    the wording in the manifest inside the bundle.
+  -->
+  <h3 class="mt-6 text-base font-semibold">Backups</h3>
+  <div
+    class="mt-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+    role="note">
+    <span class="font-semibold">This is not, on its own, a disaster-recovery backup.</span>
+    {backupNote ||
+      "A backup taken inside the container cannot include the host .env (which holds FILEARR_SECRET_KEY) or the step-ca volume. Restoring this dump under a different secret key succeeds while leaving every encrypted alert-channel secret permanently undecryptable. Copy .env and the step-ca volume separately, or run scripts/backup.sh on the host, which does both."}
+  </div>
+  <div class="mt-2 flex flex-wrap items-center gap-3">
+    <button
+      class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+      onclick={backupNow}
+      disabled={backupBusy}
+      title="Queue a pg_dump + manifest bundle into the config volume (admin). Runs on the worker; the bundle appears below when it finishes.">
+      {backupBusy ? "…" : "Back up now"}</button>
+    {#if backupDir}
+      <span class="text-xs text-slate-500">
+        {backupDir} · keeping the newest {backupKeep}
+      </span>
+    {/if}
+    {#if backupMsg}<span class="text-xs text-slate-500">{backupMsg}</span>{/if}
+  </div>
+  {#if backups.length > 0}
+    <table class="mt-2 w-full text-sm">
+      <thead>
+        <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
+          <th class="py-2 pr-3 font-medium">Bundle</th>
+          <th class="py-2 pr-3 font-medium">Taken</th>
+          <th class="py-2 pr-3 text-right font-medium">Items</th>
+          <th class="py-2 pr-3 text-right font-medium">Size</th>
+          <th class="py-2 pr-3 font-medium">Covers</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each backups as b (b.name)}
+          <tr class="border-b border-slate-100 dark:border-slate-900">
+            <td class="py-2 pr-3 font-mono text-xs">{b.name}</td>
+            <td class="py-2 pr-3 text-xs text-slate-500">
+              {b.created_at ? relTime(b.created_at) : "—"}
+            </td>
+            <td class="py-2 pr-3 text-right text-xs">{b.item_count ?? "—"}</td>
+            <td class="py-2 pr-3 text-right text-xs">{fmtBytes(b.bytes)}</td>
+            <td class="py-2 pr-3 text-xs">
+              <!-- Never render a partial bundle as simply "ok": the missing
+                   pieces are named on the row an operator is about to trust. -->
+              <span
+                class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {b.complete
+                  ? 'bg-emerald-500 text-white'
+                  : 'bg-amber-500 text-white'}"
+                title={b.complete ? "" : `Not included: ${b.missing.join(", ")}`}>
+                {b.complete ? "full" : "database only"}</span>
+            </td>
+            <td class="py-2 text-right">
+              <button
+                class="rounded-lg border border-slate-300 px-2 py-0.5 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                onclick={() => backupDownload(b)}
+                title="Download this bundle's Postgres dump. Keep it OFF this box — a backup on the volume it protects is not a backup.">
+                Download</button>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {:else}
+    <p class="mt-2 text-xs text-slate-500">
+      No bundles yet. Backups written here live on the config volume — download
+      them, or take them off the box another way. See the manual for the full
+      restore procedure and for what else must be backed up.
+    </p>
   {/if}
 
   <div class="mt-6">

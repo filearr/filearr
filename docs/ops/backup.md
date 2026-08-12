@@ -1,9 +1,26 @@
 # Backup & restore (Postgres)
 
-Postgres is the **source of truth**. Everything a user cannot get back by
-re-scanning lives there, so Postgres is the only thing that MUST be backed up.
-Meilisearch and the thumbnail cache are **disposable projections** — rebuilt
-from Postgres on demand — and are deliberately NOT part of the backup.
+> **This page is now the Postgres-specific half of a larger picture.** The
+> canonical, complete procedure — including the two pieces of state that are NOT
+> in a Postgres dump and whose loss is otherwise silent — is
+> `docs-site/operations.md#backup-and-restore` (BK-T2/T5, 2026-08-12). Read the
+> state inventory there before you rely on anything below.
+>
+> The two gaps, in one paragraph: **`FILEARR_SECRET_KEY`** is the AES-GCM
+> envelope key for alert-channel secrets and lives outside Postgres by design, so
+> a dump carries the ciphertext and not the key — restore under a fresh key and
+> every step reports success while every stored SMTP password / webhook secret /
+> apprise URL becomes permanently undecryptable. And the **`stepca_data`**
+> volume holds the CA root: lose it and step-ca auto-inits a NEW root, every
+> certificate it ever issued stops validating, and every enrolled agent must
+> re-enroll. `scripts/backup.sh` now takes all three (dump + `.env` + CA tar) as
+> one bundle with a `MANIFEST.json`, and `scripts/verify-backup.sh` checks a
+> bundle before you trust it.
+
+Postgres is the **source of truth** for the catalogue. Everything a user cannot
+get back by re-scanning lives there, so Postgres is what must be backed up *as
+data*. Meilisearch and the thumbnail cache are **disposable projections** —
+rebuilt from Postgres on demand — and are deliberately NOT part of the backup.
 
 ## What's irreplaceable vs. rebuildable
 
@@ -41,10 +58,19 @@ docker compose exec -T postgres pg_dump -U filearr -Fc filearr > filearr-$(date 
 
 ### Helper script + retention
 
-`scripts/backup.sh` wraps the above: it writes a timestamped `-Fc` dump into
-`<compose-dir>/config/backups/` (persisted with the rest of `./config`) and
-prunes to the newest **7** (override `BACKUP_KEEP`). It is `set -euo pipefail`
-with an ERR trap and is safe to run unattended:
+`scripts/backup.sh` does more than the above (rewritten for BK-T2, 2026-08-12):
+it writes a timestamped **bundle** — the `-Fc` dump, a 0600 copy of `.env`, a tar
+of the step-ca volume, and a `MANIFEST.json` carrying key *fingerprints*
+(`sha256(value)[:16]`, never values) plus restore notes. Output goes to a
+`backups/` directory **beside** the compose project (override `BACKUP_DIR`), no
+longer into `<compose-dir>/config/backups/` — that was the one tree the manual
+told operators they need not back up, so the backups were excluded from the
+backup by their own documentation. Retention is still the newest **7**
+(`BACKUP_KEEP`), the write is still atomic (`.partial` → rename), and it is still
+`set -euo pipefail` with an ERR trap, safe to run unattended.
+
+⚠ **A bundle contains secrets** (`.env` verbatim, CA private keys). Treat it like
+the `.env` itself. `SKIP_ENV=1` / `SKIP_CA=1` omit either half.
 
 ```bash
 # manual
@@ -102,8 +128,18 @@ you do NOT need a Meili or thumbnail backup.
 
 ## Verify a backup (scratch round-trip)
 
-Prove a dump actually restores before you trust it (do this on a throwaway DB, not
-production):
+**Do this FIRST, as step 1 of any restore — not afterwards as a nice-to-have.**
+`scripts/verify-backup.sh <bundle-or-dump>` automates everything below and adds
+the check that matters most: it compares the secret-key fingerprint recorded
+*inside* the dump against this deployment's `.env`, so you learn that a restore
+would orphan your encrypted alert-channel secrets before you perform it rather
+than weeks later.
+
+```bash
+bash /opt/filearr/scripts/verify-backup.sh /path/to/backups/filearr-YYYYmmddTHHMMSSZ
+```
+
+The manual equivalent (throwaway DB, never production):
 
 ```bash
 # spin a scratch postgres, load the dump, count the irreplaceable rows

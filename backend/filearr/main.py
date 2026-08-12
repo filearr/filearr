@@ -23,6 +23,14 @@ async def lifespan(app: FastAPI):
     from filearr.logsink import install as install_logsink
 
     install_logsink("app")
+    # BK-T1: compare the environment's FILEARR_SECRET_KEY (and the step-ca root
+    # pin) against the fingerprints recorded IN this database, stamping them on
+    # a fresh instance. Deliberately AFTER install_logsink so a mismatch ERROR
+    # lands in the console Logs panel too, and deliberately non-fatal — see
+    # filearr.keyguard for why a wrong key must not block boot.
+    from filearr import keyguard
+
+    await keyguard.run_startup_check()
     # P4-T1: register the code-shipped metadata profiles (idempotent upsert).
     await seed_profiles_to_db()
     await ensure_index()

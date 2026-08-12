@@ -19,6 +19,8 @@
     embeddingSummary,
     formatBytes,
     formatWhen,
+    keyFingerprintBad,
+    keyFingerprintLabel,
     packageCell,
     serviceCell,
     shortSha,
@@ -27,6 +29,19 @@
     type Cell,
     type FrontendStack,
   } from "./about";
+
+  // BK-T1 key-fingerprint rows. Operator-facing names + the tooltip that
+  // explains WHY a fingerprint of a secret is worth a row on this page at all.
+  const KEY_FP_LABELS: Record<string, string> = {
+    secret_key: "Secret key",
+    ca_root: "Agent CA root",
+  };
+  const KEY_FP_TITLES: Record<string, string> = {
+    secret_key:
+      "sha256(FILEARR_SECRET_KEY)[:16] — never the key itself. Compared against the fingerprint recorded inside this database, which is what its encrypted alert-channel secrets were written under. A mismatch means those secrets can no longer be decrypted.",
+    ca_root:
+      "First 16 hex of the step-ca root fingerprint (public pinning material). A mismatch means the CA was replaced — every certificate it issued has stopped validating and agents need re-enrollment.",
+  };
 
   let about = $state<About | null>(null);
   let error = $state("");
@@ -133,7 +148,44 @@
             <a class="underline hover:text-[var(--accent)]" href={app.source_url} target="_blank" rel="noopener noreferrer">{app.source_url}</a>
           </dd>
         </div>
+        <!--
+          BK-T1: the key-fingerprint rows. Rendered only when the environment
+          actually configures the thing (state "unset" means there is nothing to
+          say), so a stack with no alert channels and no CA gains no clutter —
+          but a WRONG key is impossible to miss here, which is the entire point:
+          restoring a dump under a fresh FILEARR_SECRET_KEY otherwise succeeds
+          silently and leaves every encrypted channel secret unreadable.
+        -->
+        {#each Object.entries(app.key_fingerprints ?? {}) as [name, k] (name)}
+          {#if k.state !== "unset"}
+            {@const bad = keyFingerprintBad(k)}
+            <div class="flex gap-2">
+              <dt class="w-36 shrink-0 text-slate-500" title={KEY_FP_TITLES[name] ?? ""}>
+                {KEY_FP_LABELS[name] ?? name}
+              </dt>
+              <dd class="font-mono break-all {bad ? 'text-red-600 dark:text-red-400' : 'text-slate-800 dark:text-slate-100'}">
+                {keyFingerprintLabel(k)}
+              </dd>
+            </div>
+          {/if}
+        {/each}
       </dl>
+      <!-- The consequence, in prose, straight from the backend's single source
+           of wording (keyguard.SECRET_KEY_MISMATCH_REASON) so the log line, the
+           dashboard banner and this page cannot drift apart. -->
+      {#each Object.entries(app.key_fingerprints ?? {}) as [name, k] (name)}
+        {#if keyFingerprintBad(k) && k.reason}
+          <p
+            class="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+            role="alert">
+            <span class="font-semibold">{KEY_FP_LABELS[name] ?? name} mismatch.</span>
+            {k.reason}
+            {#if k.recorded_at}
+              <span class="block mt-1 opacity-80">Recorded {formatWhen(k.recorded_at)}.</span>
+            {/if}
+          </p>
+        {/if}
+      {/each}
     </section>
 
     <!-- Services ---------------------------------------------------------- -->

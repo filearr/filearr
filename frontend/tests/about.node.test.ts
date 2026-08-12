@@ -15,6 +15,8 @@ import {
   embeddingSummary,
   formatBytes,
   formatWhen,
+  keyFingerprintBad,
+  keyFingerprintLabel,
   packageCell,
   serviceCell,
   shortSha,
@@ -288,4 +290,43 @@ test("aboutMarkdown escapes pipes so a path cannot break the table", () => {
   );
   assert.ok(md.includes("1\\|2"));
   assert.ok(md.includes("/od\\|d"));
+});
+
+// --- BK-T1 key-fingerprint guard --------------------------------------------
+// The whole point of these helpers is that a wrong FILEARR_SECRET_KEY reads as
+// BROKEN rather than as "something changed": a restore under a fresh key looks
+// entirely successful while every encrypted alert-channel secret becomes
+// permanently undecryptable.
+
+test("keyFingerprintBad: only mismatch and missing demand action", () => {
+  assert.equal(keyFingerprintBad({ state: "mismatch" }), true);
+  assert.equal(keyFingerprintBad({ state: "missing" }), true);
+  for (const state of ["unset", "stamped", "match", "unknown"] as const) {
+    assert.equal(keyFingerprintBad({ state }), false, state);
+  }
+  assert.equal(keyFingerprintBad(undefined), false);
+});
+
+test("keyFingerprintLabel: a mismatch names both fingerprints, loudly", () => {
+  const label = keyFingerprintLabel({
+    state: "mismatch",
+    current: "aaaaaaaaaaaaaaaa",
+    recorded: "bbbbbbbbbbbbbbbb",
+  });
+  assert.ok(label.includes("aaaaaaaaaaaaaaaa"));
+  assert.ok(label.includes("bbbbbbbbbbbbbbbb"));
+  assert.ok(label.includes("DOES NOT MATCH"));
+});
+
+test("keyFingerprintLabel: the healthy states read as reassurance, not noise", () => {
+  assert.match(keyFingerprintLabel({ state: "match", current: "0123456789abcdef" }), /matches/);
+  assert.match(keyFingerprintLabel({ state: "stamped", current: "0123456789abcdef" }), /recorded/);
+  assert.equal(keyFingerprintLabel({ state: "unset" }), "not configured");
+  assert.equal(keyFingerprintLabel(undefined), "not checked");
+});
+
+test("keyFingerprintLabel: a key removed from the environment still names what the database expects", () => {
+  const label = keyFingerprintLabel({ state: "missing", recorded: "0123456789abcdef" });
+  assert.ok(label.includes("0123456789abcdef"));
+  assert.match(label, /not configured/);
 });

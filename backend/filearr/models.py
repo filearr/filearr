@@ -2378,3 +2378,46 @@ class MaintenanceSchedule(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
+
+
+# --------------------------------------------------------------------------- #
+# Instance meta (BK-T1): a tiny key/value table for facts that describe THIS   #
+# deployment rather than its catalogue, and that must survive a pg_dump ->     #
+# pg_restore onto different hardware so the restore can be CHECKED.            #
+#                                                                             #
+# Its first inhabitants are key FINGERPRINTS. FILEARR_SECRET_KEY is the        #
+# AES-GCM envelope key for alert-channel secrets and lives OUTSIDE Postgres by #
+# design (alerts/crypto.py) -- which means a restore onto a box with a freshly #
+# generated key SUCCEEDS in every visible way (rows return, migrations run,    #
+# the index rebuilds) while silently leaving every stored channel secret as    #
+# undecryptable ciphertext. Nothing surfaced that until this table: the        #
+# failure mode is discovered weeks later, as an alert that quietly stopped     #
+# sending. Stamping sha256(key)[:16] here makes the mismatch a startup ERROR   #
+# instead of a mystery (filearr.keyguard).                                     #
+#                                                                             #
+# NEVER store a secret VALUE in this table -- the whole point of the envelope  #
+# key living outside Postgres is that a stolen dump yields no credentials, and #
+# a dump carries this table. Fingerprints only.                                #
+# --------------------------------------------------------------------------- #
+
+
+class InstanceMeta(Base):
+    """One key/value fact about this deployment (see the block comment above).
+
+    ``key`` is a short stable identifier (``secret_key_fingerprint``,
+    ``ca_root_fingerprint``); ``value`` is a short opaque string -- never a
+    secret. Deliberately schemaless so a future check needs no migration."""
+
+    __tablename__ = "instance_meta"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    # When this fact was FIRST recorded and when it was last written. Both
+    # matter to an operator reading a mismatch: "stamped in March, changed
+    # today" is a very different story from a row written five minutes ago.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )

@@ -70,6 +70,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tesseract-ocr poppler-utils libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
+# BK-T3: pg_dump for the in-app backup ("Back up now" on the Jobs page).
+# Debian trixie ships postgresql-client-17 at most, and pg_dump must be >= the
+# SERVER's major version (18.4 here) or it can emit an archive missing
+# catalogue constructs it does not understand — a dump that restores "fine" and
+# is quietly incomplete, which is the exact failure class BK-T1 exists to
+# eliminate. So the client comes from PGDG, pinned to 18 to match the compose
+# Postgres. The task ALSO checks `pg_dump --version` against `SHOW
+# server_version_num` at runtime and refuses rather than writing a partial
+# dump, because this pin and the server can drift apart on an operator's stack.
+# Key via the keyring file (not apt-key, removed in Debian 12+).
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg; \
+    install -d /usr/share/postgresql-common/pgdg; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-client-18; \
+    apt-get purge -y --auto-remove curl gnupg; \
+    rm -rf /var/lib/apt/lists/*; \
+    pg_dump --version
+
 WORKDIR /app
 COPY backend/pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml

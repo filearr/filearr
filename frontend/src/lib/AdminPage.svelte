@@ -694,6 +694,30 @@
   </div>
 
   {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
+  <!--
+    BK-T1: the key-fingerprint guard's verdict, folded into the SAME `degraded`
+    map /stats already publishes. A wrong FILEARR_SECRET_KEY after a restore is
+    the one failure in this stack that reports success everywhere and destroys
+    data anyway — every encrypted alert-channel secret becomes unreadable, and
+    the operator finds out weeks later from an alert that never arrived. So this
+    banner is deliberately NOT dismissible: the condition persists until someone
+    fixes the key or re-enters the secrets.
+  -->
+  {#each ["secret_key", "ca_root"] as fpKey (fpKey)}
+    {#if statsDegraded[fpKey]}
+      <div
+        class="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+        role="alert">
+        <div class="font-semibold">
+          {fpKey === "secret_key" ? "Secret key mismatch" : "Agent CA root mismatch"}
+        </div>
+        <p class="mt-0.5 text-xs">{statsDegraded[fpKey]}</p>
+        <p class="mt-1 text-xs opacity-80">
+          Fingerprints are on the <a class="underline" href="#/about">About page</a>.
+        </p>
+      </div>
+    {/if}
+  {/each}
   {#if statsDegraded.extract_errors}
     <p class="mt-2 text-sm text-amber-600 dark:text-amber-500">
       Extraction-error counts unavailable ({statsDegraded.extract_errors}) — the

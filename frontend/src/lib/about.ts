@@ -22,7 +22,46 @@ export type AboutApplication = {
   platform: string;
   system: string;
   machine: string;
+  /** BK-T1 key-fingerprint guard. Absent on an instance older than the guard. */
+  key_fingerprints?: Record<string, KeyFingerprint>;
 };
+
+/** One BK-T1 fingerprint check. `recorded`/`current` are `sha256(secret)[:16]`
+ *  hex — never a secret value. `mismatch`/`missing` are the states that mean
+ *  encrypted data in this database can no longer be read; they carry `reason`. */
+export type KeyFingerprint = {
+  state: "unset" | "stamped" | "match" | "mismatch" | "missing" | "unknown";
+  recorded?: string | null;
+  current?: string | null;
+  recorded_at?: string | null;
+  reason?: string;
+};
+
+/** True when a check is in a state an operator must act on. */
+export function keyFingerprintBad(k: KeyFingerprint | undefined): boolean {
+  return k?.state === "mismatch" || k?.state === "missing";
+}
+
+/** The one-line summary shown next to a fingerprint row. Says what is BROKEN
+ *  rather than what "changed" — the whole failure mode is that the change looks
+ *  harmless (see backend filearr/keyguard.py). */
+export function keyFingerprintLabel(k: KeyFingerprint | undefined): string {
+  if (!k) return "not checked";
+  switch (k.state) {
+    case "match":
+      return `${k.current} — matches this database`;
+    case "stamped":
+      return `${k.current} — recorded on this database`;
+    case "mismatch":
+      return `${k.current} — DOES NOT MATCH the recorded ${k.recorded}`;
+    case "missing":
+      return `not configured — this database recorded ${k.recorded}`;
+    case "unknown":
+      return "could not be checked";
+    default:
+      return "not configured";
+  }
+}
 
 export type AboutService = {
   name: string;

@@ -58,19 +58,28 @@ async def client(db, monkeypatch):
         yield c
 
 
+#: BK-T3 widened "editable implies scheduled". `backup_now` is editable with NO
+#: default cron on purpose: an unattended pg_dump that fills {config} is worse
+#: than no backup, so the schedule is opt-in. Editable is exactly what makes
+#: opting in possible, and the tick now skips any task whose EFFECTIVE cron is
+#: still None. Anything added here must justify itself the same way.
+_EDITABLE_WITHOUT_DEFAULT_CRON = {"backup_now"}
+
+
 async def test_registry_is_coherent():
     """Every task documents itself; tick-scheduled tasks are exactly the
-    editable-with-cron subset; keys/task names never collide."""
+    editable subset; keys/task names never collide."""
     specs = list(maintenance.MAINT_TASKS.values())
     assert len(specs) >= 20
     assert len({s.task_name for s in specs}) == len(specs)
     for s in specs:
         assert s.title and len(s.description) > 30, s.key
-        if s.editable:
+        if s.editable and s.key not in _EDITABLE_WITHOUT_DEFAULT_CRON:
             assert s.default_cron, s.key  # editable implies scheduled
-    assert set(maintenance.TICK_SCHEDULED) == {
-        s for s in specs if s.editable and s.default_cron
-    }
+    # The tick considers every editable task; the ones with no effective cron
+    # are skipped inside it rather than filtered out here, so an operator's
+    # override on an opt-in task actually fires.
+    assert set(maintenance.TICK_SCHEDULED) == {s for s in specs if s.editable}
     # the tick itself is registered, fixed, and not runnable
     tick = maintenance.MAINT_TASKS["maintenance_tick"]
     assert not tick.editable and not tick.runnable

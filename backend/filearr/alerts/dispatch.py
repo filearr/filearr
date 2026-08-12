@@ -627,5 +627,27 @@ def encrypt_channel_secret(plaintext: str, key: bytes) -> str:
 def decrypt_channel_secret(ciphertext: str, key: bytes) -> str:
     """Inverse of :func:`encrypt_channel_secret`; in-process at dispatch only.
 
-    Decrypted values are never logged and never returned to the API client."""
-    return crypto.decrypt_secret(ciphertext, key)
+    Decrypted values are never logged and never returned to the API client.
+
+    BK-T1: a failure here is, in practice, almost never corruption — it is a
+    WRONG FILEARR_SECRET_KEY, and this is the exact point at which the silent
+    restore failure finally becomes visible ("the alert that quietly stopped
+    sending"). So the raised error names that cause and points at the
+    fingerprint comparison, instead of leaving an operator with GCM's
+    (accurate but unactionable) "wrong key or tampering"."""
+    try:
+        return crypto.decrypt_secret(ciphertext, key)
+    except crypto.SecretDecryptError as exc:
+        from filearr import keyguard
+
+        fp = keyguard.last_result() or {}
+        state = (fp.get("secret_key") or {}).get("state")
+        hint = (
+            " The key-fingerprint guard reports FILEARR_SECRET_KEY does NOT "
+            "match what this database was encrypted under — see the About page."
+            if state in ("mismatch", "missing")
+            else " Most often this means FILEARR_SECRET_KEY differs from the "
+            "one this secret was encrypted under (e.g. a restore onto a box "
+            "with a freshly generated key)."
+        )
+        raise crypto.SecretDecryptError(str(exc) + hint) from exc

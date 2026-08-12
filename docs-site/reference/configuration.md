@@ -92,6 +92,7 @@ model and the source `config.py` for every field.
 | `FILEARR_RECYCLE_RETENTION_DAYS` | `30` | Recycle-bin retention before purge. |
 | `FILEARR_STAGED_PIPELINE` | `true` | Defer all extraction to scan end (vs trickle during walk). |
 | `FILEARR_AUDIT_RETENTION_DAYS` | `90` | Retention for extractor-sourced item audit rows (user edits exempt). |
+| `FILEARR_BACKUP_KEEP` | `7` | Bundles the [in-app backup](../operations.md#in-app-backup) keeps in `{config}/backups`. Matters more than it looks: those bundles sit on the volume the disk monitor watches. (`scripts/backup.sh` reads the same number from its own `BACKUP_KEEP`.) |
 
 ## Workers, queues & the reaper
 

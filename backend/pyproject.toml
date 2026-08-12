@@ -198,6 +198,12 @@ ignore = ["B008"]
 # coroutines is deliberate + bounded local filesystem work, same accepted
 # convention as tasks/thumbs.py above (research §6/§7 artifact staging).
 "filearr/exports.py" = ["ASYNC230", "ASYNC240"]
+# BK-T3 in-app backup: same accepted convention. The dump BYTES are written by
+# the pg_dump subprocess straight to the file descriptor, never through this
+# process; what remains on the loop is opening that descriptor plus bounded
+# stat/rmtree calls on the local {config}/backups directory. The genuinely
+# walk-heavy part (list_bundles) is offloaded by its caller in api/system.py.
+"filearr/backup.py" = ["ASYNC230", "ASYNC240"]
 "filearr/report_delivery.py" = ["ASYNC230", "ASYNC240"]
 # xlsx_response assembles the workbook to a bounded temp file then streams it;
 # download endpoints stat the local artifact path.

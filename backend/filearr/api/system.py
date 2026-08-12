@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import os
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -294,6 +295,21 @@ async def stats(session: AsyncSession = Depends(get_session)) -> dict:
     disk = await section(
         "disk", run_in_threadpool(_disk_section), {"status": "unknown", "paths": []}
     )
+    # BK-T1: two single-row lookups on a tiny table — negligible beside the
+    # aggregates above, and worth doing per poll rather than once at startup so
+    # the dashboard clears the moment an operator corrects the key. Bounded like
+    # every other section: if it cannot be read, the guard itself is what
+    # degrades, never the page.
+    from filearr import keyguard
+
+    keys = await section("key_fingerprints", keyguard.check_all(session), {})
+    # A mismatch is folded into ``degraded`` on purpose. That map is the one
+    # place the dashboard ALREADY treats as "something here is not right, and
+    # here is why in words" — and the entire defect being fixed is that a wrong
+    # FILEARR_SECRET_KEY produces no signal anywhere. Reusing the existing
+    # channel means the warning cannot be missed by a UI that forgot to render
+    # a new field.
+    degraded.update(keyguard.mismatches(keys))
     return {
         "by_type": by_type,
         "queues": queues["queues"],
@@ -303,6 +319,8 @@ async def stats(session: AsyncSession = Depends(get_session)) -> dict:
         "semantic": semantic,
         "thumbs": thumbs,
         "disk": disk,
+        # {secret_key: {...}, ca_root: {...}} — see filearr.keyguard.check_all.
+        "key_fingerprints": keys,
         # Empty on a healthy instance. {section: reason} for anything that was
         # bounded out, so the UI can label the gap instead of rendering a zero.
         "degraded": degraded,
@@ -881,6 +899,16 @@ async def about_view(session: AsyncSession = Depends(get_session)) -> dict:
     payload = await run_in_threadpool(about.sync_sections, stamp)
     payload["services"] = await about.services_section(session)
     payload["agents"] = await about.agent_fleet(session)
+    # BK-T1: the key-fingerprint guard's live verdict, hung off ``application``
+    # because it is a fact about THIS deployment's identity, next to the build
+    # stamp an operator is already here to read. Fingerprints only — the values
+    # are sha256(secret)[:16] and can never be walked back to a key (see
+    # filearr.keyguard). Evaluated live rather than served from the startup
+    # cache so an operator who fixes the key and reloads sees it clear without
+    # restarting the container.
+    from filearr import keyguard
+
+    payload["application"]["key_fingerprints"] = await keyguard.check_all(session)
     return payload
 
 
@@ -965,6 +993,110 @@ async def maintenance_run(key: str) -> dict:
     except AlreadyQueued as exc:
         raise HTTPException(409, detail=f"a run is already queued: {exc}") from exc
     return {"job_id": job_id}
+
+
+# --- BK-T3: in-app backup ---------------------------------------------------
+# Three admin endpoints so a backup needs no shell: trigger, list, download.
+# Every one of them repeats the same caveat the manifest and the Jobs page
+# carry — an in-app bundle cannot include the host .env or the step-ca volume
+# and is therefore not, alone, a disaster-recovery backup. That sentence is
+# defined once (filearr.backup.INCOMPLETE_NOTE) and echoed, never re-worded.
+
+
+@router.post(
+    "/system/backup",
+    status_code=202,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def backup_trigger() -> dict:
+    """Queue an in-app backup (admin). 409 when one is already queued/running.
+
+    Returns the deferred ``job_id`` plus ``incomplete_note`` — the API answer
+    states the limitation even for a caller that never reads the docs or the
+    UI."""
+    from fastapi import HTTPException
+
+    from filearr.backup import INCOMPLETE_NOTE
+    from filearr.maintenance import AlreadyQueued, run_now
+
+    try:
+        job_id = await run_now("backup_now")
+    except AlreadyQueued as exc:
+        raise HTTPException(409, detail=f"a backup is already queued: {exc}") from exc
+    return {"job_id": job_id, "incomplete_note": INCOMPLETE_NOTE}
+
+
+@router.get(
+    "/system/backups",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def backups_list() -> dict:
+    """List in-app backup bundles, newest first (admin).
+
+    Admin rather than read: a bundle's mere existence, size and item count
+    describe the deployment's recovery posture, and the download beside it is
+    the entire database."""
+    from starlette.concurrency import run_in_threadpool
+
+    from filearr import backup
+
+    settings = get_settings()
+    # os.walk over a handful of directories on the /config volume — cheap, but
+    # /config can be a network mount, so it does not run on the event loop.
+    bundles = await run_in_threadpool(backup.list_bundles, settings)
+    return {
+        "bundles": bundles,
+        "dir": backup.backup_dir(settings),
+        "keep": settings.backup_keep,
+        "incomplete_note": backup.INCOMPLETE_NOTE,
+    }
+
+
+@router.get(
+    "/system/backups/{name}",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def backup_download(name: str, request: Request):
+    """Stream one bundle's Postgres dump (admin).
+
+    Mirrors the report-export download discipline (``api/exports.py``): the
+    scope is re-checked at FETCH time rather than trusted from the trigger, no
+    operator string ever reaches a filesystem path (``name`` must match the
+    generated ``filearr-<UTC>`` pattern AND resolve inside the backup
+    directory), and the download is audited UNCONDITIONALLY — regardless of
+    ``FILEARR_AUDIT_READS`` — because pulling a full database dump is the most
+    exfiltration-shaped action this API offers.
+
+    404 for an unknown or malformed name; the two are deliberately
+    indistinguishable so the endpoint is not a probe for what exists on disk."""
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+    from starlette.concurrency import run_in_threadpool
+
+    from filearr import audit, backup
+
+    def _resolve() -> tuple[str, int] | None:
+        # Resolution + stat together in ONE threadpool hop: /config can be a
+        # network mount, and neither the realpath containment check nor the
+        # size read belongs on the event loop.
+        p = backup.bundle_path(get_settings(), name)
+        if p is None or not os.path.exists(p):
+            return None
+        return p, os.path.getsize(p)
+
+    found = await run_in_threadpool(_resolve)
+    if found is None:
+        raise HTTPException(404, "backup not found")
+    path, size = found
+    await audit.emit(
+        audit.BACKUP_DOWNLOADED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={"bundle": name, "file_size_bytes": size},
+    )
+    return FileResponse(
+        path, media_type="application/octet-stream", filename=os.path.basename(path)
+    )
 
 
 class ClearFailedJobs(BaseModel):

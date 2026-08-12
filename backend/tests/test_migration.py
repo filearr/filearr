@@ -11,14 +11,14 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: d4f1a7c93e60 widens the agent_commands kind CHECK for QH-T6's
-# `rehash_sweep` — the agent-scoped quick_hash migration sweep, the only thing
-# that can repair the 64-128 KiB hashes an agent computed before 2026-07-18
-# (central holds no hash provenance for agent-owned rows and does not host the
-# files). Its predecessor b2e6d048f317 adds agents.capabilities_at.
+# HEAD ASSERTION: f3a9d5c81b62 adds `instance_meta`, the BK-T1 key/value table
+# that carries sha256(FILEARR_SECRET_KEY)[:16] INSIDE the database so a restore
+# under a different key is caught at boot instead of weeks later, by an alert
+# that quietly stopped sending. Its predecessor d4f1a7c93e60 widens the
+# agent_commands kind CHECK for QH-T6's `rehash_sweep`.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "d4f1a7c93e60"
+HEAD = "f3a9d5c81b62"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).
@@ -130,6 +130,12 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # BK-T1: the fingerprint table must exist at head — it is what makes a
+        # restore under the wrong FILEARR_SECRET_KEY detectable at all.
+        assert "instance_meta" in _tables(engine)
+        assert {"key", "value", "created_at", "updated_at"} == _columns(
+            engine, "instance_meta"
+        )
         # P13 (config-group unification): the four new/widened objects exist at
         # head and the three retired ones are gone; a one-step downgrade brings
         # the old columns/table back EMPTY (documented structural revert).

@@ -237,6 +237,27 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         category="integrity", default_cron="55 4 * * *",
         lock="rehash-small-files", editable=True,
     ),
+    # BK-T3. Category `integrity` rather than `cleanup`: it produces state
+    # rather than reclaiming it, and it is the only task here whose failure
+    # means an operator has no recovery path. NO default cron, on purpose —
+    # an unattended pg_dump that fills {config} is a worse outcome than no
+    # backup, so the schedule is opt-in. `editable=True` is what makes that
+    # opt-in possible (a cron set here is picked up by maintenance_tick).
+    MaintTaskSpec(
+        key="backup_now",
+        task_name="filearr.worker.backup_now",
+        title="Back up now",
+        description=(
+            "Writes a Postgres dump + manifest bundle to {config}/backups, "
+            "downloadable from this page. NOT a complete disaster-recovery "
+            "backup on its own: a container cannot read the host .env (which "
+            "holds FILEARR_SECRET_KEY) or the step-ca volume — copy those "
+            "separately, or run scripts/backup.sh on the host, which does "
+            "both. No schedule by default; set one here to run it unattended."
+        ),
+        category="integrity", default_cron=None,
+        lock="backup-now", editable=True,
+    ),
     # --- monitors (fixed 5-minute cadence; run-now allowed) -----------------
     MaintTaskSpec(
         key="reap_stalled_jobs",
@@ -414,9 +435,13 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
 MAINT_TASKS: dict[str, MaintTaskSpec] = {s.key: s for s in _SPECS}
 
 #: Tasks the maintenance tick schedules (editable ⇒ no static periodic decorator).
-TICK_SCHEDULED: tuple[MaintTaskSpec, ...] = tuple(
-    s for s in _SPECS if s.editable and s.default_cron
-)
+#: BK-T3 widened this from ``s.editable and s.default_cron`` to plain
+#: ``s.editable``: ``backup_now`` is editable with NO default cron (unattended
+#: backups are opt-in), and under the old predicate an operator could set a cron
+#: on the Jobs page, see it stored and displayed, and have it never fire. The
+#: tick skips any task whose EFFECTIVE cron is still None, so nothing else
+#: changes.
+TICK_SCHEDULED: tuple[MaintTaskSpec, ...] = tuple(s for s in _SPECS if s.editable)
 
 
 # --------------------------------------------------------------------------- #
@@ -502,6 +527,8 @@ async def run_maintenance_tick(tick: datetime, *, defer=_defer_spec) -> list[str
             if row is not None and not row.enabled:
                 continue
             cron = (row.cron if row is not None and row.cron else None) or spec.default_cron
+            if not cron:
+                continue  # opt-in task with no operator schedule yet (BK-T3)
             last = row.last_cron_fired_at if row is not None else None
             occ = due_occurrence(cron, tick, last, max_catchup_minutes=cap)
             if occ is None:

@@ -1475,6 +1475,35 @@ async def purge_report_exports(timestamp: int) -> int:
         return await exports.purge_expired_exports(session, get_settings())
 
 
+# BK-T3. NOT periodic and NOT scheduled by default: an unattended pg_dump that
+# fills {config} is worse than no dump, so an operator opts in by setting a cron
+# on the Jobs page (the registry entry is `editable`, which is what makes an
+# override schedulable at all). No retry — a failed backup must be VISIBLE on
+# the failed-jobs list, not quietly re-attempted until it happens to fit.
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.backup_now",
+    queueing_lock="backup-now",
+)
+async def backup_now(timestamp: int) -> dict:
+    """Write one in-app backup bundle to ``{config}/backups``.
+
+    Deliberately lets :class:`filearr.backup.BackupError` propagate: a refusal
+    (pg_dump older than the server, pg_dump absent, disk at the critical floor)
+    must land on the Jobs page as a failed run with its reason, never as a
+    success with no file behind it."""
+    from filearr import backup
+
+    async with SessionLocal() as session:
+        manifest = await backup.run_backup(session, get_settings())
+    return {
+        "bundle": manifest["contents"]["dump"]["file"].removesuffix(".dump"),
+        "bytes": manifest["contents"]["dump"]["bytes"],
+        "items": manifest["item_count"],
+        "complete": manifest["complete"],
+    }
+
+
 @proc_app.periodic(cron="*/10 * * * *")
 @proc_app.task(
     queue="maintenance",

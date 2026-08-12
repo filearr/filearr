@@ -43,7 +43,7 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 | Saved searches | `saved-searches` | Persisted search definitions. |
 | Metadata | `metadata-profiles`, `custom-fields` | Extraction profiles and user-defined fields. |
 | Filesystem | `fs/browse` | Allow-listed server-side folder browser (for the library form). |
-| System | `system` (health, disk, jobs, `logs`, `update-check`, `rebuild-index`, share-map, version) | Ops endpoints, including the unified app+worker log tail and the operator-initiated GitHub update check. |
+| System | `system` (health, disk, jobs, `logs`, `update-check`, `rebuild-index`, `backup`/`backups`, share-map, version) | Ops endpoints, including the unified app+worker log tail, the operator-initiated GitHub update check, and the [in-app backup](../operations.md#in-app-backup) (`POST /system/backup`, `GET /system/backups`, `GET /system/backups/{name}` — admin; the download is audited unconditionally, and the bundle is explicitly *not* a complete disaster-recovery backup). |
 | Stats | `stats` (`timeline`, `libraries`) | Catalog statistics: the mtime histogram and per-library file counts / total bytes with catalog-wide totals. |
 | Auth & identity | `auth`, `oidc`, `rbac`, `audit` | Login/session, SSO, path grants, audit log. |
 | Alerts | `alerts` | Channels, rules, events. |

@@ -926,6 +926,16 @@ class Settings(BaseSettings):
     # are a DISPOSABLE projection (invariant 1) so eviction only costs regen.
     disk_gc_target_free_gb: float = 0.0
 
+    # --- BK-T3: in-app backup (Jobs page "Back up now") ----------------------
+    # How many bundles ``{config_dir}/backups`` keeps. Same knob and default as
+    # scripts/backup.sh's BACKUP_KEEP, and it matters MORE here: in-app bundles
+    # sit on the /config volume the disk monitor watches, so an unbounded pile
+    # of dumps is a self-inflicted disk-full incident. There is deliberately NO
+    # default schedule for the task (see filearr.maintenance) — an unattended
+    # dump filling a disk is worse than no dump, so operators opt in by setting
+    # a cron on the Jobs page.
+    backup_keep: int = 7
+
     # --- P11-T5/T9/T11: background report exports + scheduled delivery -------
     # Async report/export jobs stream to a diskguarded staging file under
     # ``{config_dir}/exports`` (never a web-served static root); a periodic sweep
