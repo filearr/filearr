@@ -349,6 +349,36 @@ async def test_reap_stale_shadows_deletes_only_old_shadows(monkeypatch):
     assert "items" in fake.indexes  # live index untouched
 
 
+async def test_reap_never_touches_another_apps_index(monkeypatch):
+    """A shared Meilisearch must not lose a foreign index to our cleanup sweep.
+
+    ``get_indexes()`` is instance-wide with no server-side filter, and until
+    2026-08-12 the sweep judged a candidate on NAME SHAPE alone — anything
+    ending ``_rebuild_<digits>``. An unrelated application sharing the instance
+    with its own rebuild convention would have had that index silently deleted
+    on the hourly cron. Ownership is now the gate, and this pins it: same shape,
+    same age, foreign prefix, must survive."""
+    now = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
+    old_ts = now - timedelta(hours=10)
+
+    fake = FakeClient()
+    fake._seed("items")
+    ours = shadow_uid("items", old_ts)
+    ours_chunks = shadow_uid("items_chunks", old_ts)
+    theirs = shadow_uid("products", old_ts)        # another app, same shape+age
+    theirs_odd = shadow_uid("items_extra", old_ts)  # prefix-LIKE ours, still not ours
+    for uid in (ours, ours_chunks, theirs, theirs_odd):
+        fake._seed(uid)
+    monkeypatch.setattr(search_mod, "client", lambda: fake)
+
+    reaped = await reap_stale_shadows(now=now, max_age=timedelta(hours=6))
+
+    assert sorted(reaped) == sorted([ours, ours_chunks])
+    assert theirs in fake.indexes, "another application's index was deleted"
+    assert theirs_odd in fake.indexes, "a look-alike prefix must not count as ours"
+    assert "items" in fake.indexes
+
+
 async def test_reap_uses_configured_default_age(monkeypatch):
     from filearr.config import get_settings
 

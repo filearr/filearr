@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import hmac
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -375,16 +376,31 @@ def is_stale_shadow(
     uid: str,
     now: datetime | int | float,
     max_age: timedelta | int | float,
+    *,
+    base_uids: Collection[str] | None = None,
 ) -> bool:
-    """True when ``uid`` is a shadow index older than ``max_age``.
+    """True when ``uid`` is one of OUR shadow indexes, older than ``max_age``.
 
     Non-shadow names return False (never reaped). ``now`` may be a datetime or
     epoch; ``max_age`` a timedelta or a number of seconds. Round-trips with
     ``shadow_uid``: ``is_stale_shadow(shadow_uid(b, t), t + max_age + 1, max_age)``
     is True, and ``... t, max_age)`` is False.
+
+    ``base_uids`` is the OWNERSHIP gate and the caller should always pass it
+    (2026-08-12). Before that date this function judged a uid on its SHAPE
+    alone — anything ending ``_rebuild_<digits>`` — and :func:`reap_stale_shadows`
+    walks EVERY index in the Meilisearch instance, so a second application
+    sharing that instance and using a similar rebuild-naming convention could
+    have its index deleted by our hourly sweep. Deleting another tenant's data
+    is not a risk worth carrying for a cleanup job, so a uid now only qualifies
+    when its prefix is one of the base indexes we actually own. ``None`` keeps
+    the old shape-only behaviour for the pure round-trip tests; production
+    callers pass the real set.
     """
     created = parse_shadow_ts(uid)
     if created is None:
+        return False
+    if base_uids is not None and uid.rpartition(_SHADOW_SEP)[0] not in base_uids:
         return False
     max_age_s = max_age.total_seconds() if isinstance(max_age, timedelta) else float(max_age)
     age = _to_epoch(now) - created
@@ -826,6 +842,15 @@ async def reap_stale_shadows(
     6h). A live rebuild's in-flight shadow is younger than the age bound and so is
     never reaped mid-build. Non-shadow indexes (the live index) never match
     ``is_stale_shadow`` and are untouched. Returns the reaped uids.
+
+    ONLY our own indexes are candidates. ``get_indexes()`` is instance-wide with
+    no server-side filter, so on a Meilisearch shared with another application
+    this sweep sees that application's indexes too — and until 2026-08-12 it
+    judged them on name shape alone and would delete a foreign
+    ``*_rebuild_<digits>`` index older than six hours. The ownership set below is
+    what makes sharing an instance safe; a foreign candidate is counted and
+    logged rather than touched, because an operator who sees that line is
+    probably about to ask why their other app's index vanished.
     """
     from filearr.config import get_settings
     from filearr.search import client
@@ -835,17 +860,33 @@ async def reap_stale_shadows(
     if max_age is None:
         max_age = timedelta(hours=s.meili_shadow_max_age_hours)
 
+    # Every base index this deployment owns. A shadow is named
+    # "<base>_rebuild_<epoch>", so these are exactly the prefixes we may reap.
+    from filearr.chunking import chunks_index_uid
+
+    base_uids = {s.meili_index, chunks_index_uid(s)}
+
     reaped: list[str] = []
+    foreign = 0
     async with client() as c:
         indexes = await c.get_indexes() or []
         for idx in indexes:
             uid = idx.uid
-            if is_stale_shadow(uid, now, max_age):
+            if is_stale_shadow(uid, now, max_age, base_uids=base_uids):
                 await c.delete_index_if_exists(uid)
                 reaped.append(uid)
+            elif is_shadow_uid(uid) and uid.rpartition(_SHADOW_SEP)[0] not in base_uids:
+                foreign += 1
     if reaped:
         logger.info(
             "reap_stale_shadows: deleted %d orphan shadow index(es): %s", len(reaped), reaped
+        )
+    if foreign:
+        logger.info(
+            "reap_stale_shadows: left %d rebuild-shaped index(es) alone — they do not "
+            "belong to this deployment (owned base indexes: %s)",
+            foreign,
+            sorted(base_uids),
         )
     return reaped
 
