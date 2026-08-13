@@ -884,3 +884,36 @@ replaced its own executable — so cancel can only mean "stop offering it", and
 the doc must say so plainly rather than borrowing the config wording. The
 boot-counter automatic rollback (§8.3 of `docs/ops/agents.md`) stays the only
 real un-install path.
+
+## 24. Nvidia GPU acceleration — assessed 2026-08-12, not worth building today
+
+Assessed against the reference deployment (1.09M items; pictures 470k, video
+330k; agent libraries over SMB). Verdict: **no current workload justifies it.**
+
+- **Video thumbnails (NVDEC):** the workload is seek-then-ONE-frame per fresh
+  subprocess over SMB — decode is not the bottleneck, the CUDA context init is
+  paid on every call, and consumer-card session caps (2-3) collide with the
+  configured inline concurrency (4). The existing QSV path is decode-only with
+  software fallback for the same reason.
+- **Image thumbnails:** Pillow has no GPU path; not GPU-eligible work.
+- **Text embeddings (bge-small, 384-dim):** maybe 2-4x on a job deliberately
+  throttled to one lowest-priority worker (~5.5h one-time backfill that blocks
+  nothing). onnxruntime-gpu's CUDA/cuDNN layers add hundreds of MB-GB to EVERY
+  operator's image and pin a CUDA version against Unraid's driver-plugin
+  lineage — the same version-matrix tax this file already tracks for
+  Meilisearch and Vite.
+- **OCR:** the blocker is licensing/stability, not GPU availability — Surya
+  rejected (OpenRAIL-M revenue cap), PaddleOCR blocked on a Docker segfault at
+  research time (re-verify upstream before revisiting; that check was NOT
+  completed in this assessment).
+- **The one genuine GPU payoff** — CLIP-class IMAGE embeddings (Immich's
+  actual use case: semantic photo search, faces) — is a feature Filearr does
+  not have and this roadmap does not plan. THE RULE: the GPU question is
+  downstream of greenlighting that feature. If vision search is ever built,
+  ship GPU support with it (as an opt-in image variant, never in the default
+  image); until then, do not add CUDA anything.
+
+Caveat recorded honestly: the web half of the assessment (NVDEC one-shot
+numbers, PaddleOCR status) is reasoned rather than freshly source-verified;
+the codebase half is first-hand. The verdict's load-bearing argument — no
+live bottleneck exists for a GPU to relieve — rests on the codebase half.
