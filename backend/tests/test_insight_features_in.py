@@ -313,6 +313,12 @@ async def test_detail_rbac_scope_is_pushed_into_the_subquery(api):
     await _mk_item(maker, lib, "Private/b.bin", size=100, content_hash="dead",
                    mtime=now - timedelta(days=2), path_scope=hidden)
 
+    # Resolve text-vs-ltree from the LIVE column, as production does
+    # (security.py) — pgserver has no contrib so local runs see text,
+    # while CI's postgres created a real ltree column (2026-08-13 CI
+    # failure: starts_with(ltree, varchar) does not exist).
+    async with maker() as _s:
+        use_ltree = await rbac_sql.path_scope_uses_ltree(_s)
     clause = rbac_sql.scope_where_clause(
         rbac.Role.USER,
         # path_to_ltree encodes each segment ("Movies" -> "_4dovies"); a grant
@@ -324,7 +330,7 @@ async def test_detail_rbac_scope_is_pushed_into_the_subquery(api):
         )],
         action="search_metadata",
         column=_Item.path_scope,
-        use_ltree=False,
+        use_ltree=use_ltree,
     )
     report = get_report("duplicate_files_detail")
     stmt = report.statement(ReportParams(limit=100), clause)
@@ -639,6 +645,12 @@ async def test_folder_tree_applies_rbac_scope(api):
         await _mk_item(
             maker, lib, rel, size=size, path_scope=rbac.path_to_ltree(rel, library_id=lib)
         )
+    # Resolve text-vs-ltree from the LIVE column, as production does
+    # (security.py) — pgserver has no contrib so local runs see text,
+    # while CI's postgres created a real ltree column (2026-08-13 CI
+    # failure: starts_with(ltree, varchar) does not exist).
+    async with maker() as _s:
+        use_ltree = await rbac_sql.path_scope_uses_ltree(_s)
     clause = rbac_sql.scope_where_clause(
         rbac.Role.USER,
         # path_to_ltree encodes each segment ("Movies" -> "_4dovies"); a grant
@@ -650,7 +662,7 @@ async def test_folder_tree_applies_rbac_scope(api):
         )],
         action="search_metadata",
         column=_Item.path_scope,
-        use_ltree=False,
+        use_ltree=use_ltree,
     )
     async with maker() as s:
         body = await _folder_tree_children(s, lib, "", 100, clause)
