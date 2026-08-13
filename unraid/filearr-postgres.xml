@@ -21,7 +21,7 @@
   <Requires>docker network 'filearr'</Requires>
   <Config Name="Data" Target="/var/lib/postgresql" Default="/mnt/cache/appdata/filearr-postgres" Mode="rw" Description="Database files. Use the DIRECT pool path (/mnt/cache/appdata/...) — Postgres through the /mnt/user FUSE layer risks locking/corruption (the classic Unraid database rule). Never on the array." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/filearr-postgres</Config>
   <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="filearr" Mode="" Description="Database user" Type="Variable" Display="always" Required="true" Mask="false">filearr</Config>
-  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="Database password — must match the DSNs in filearr and filearr-worker" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="Database password — must match the DSNs on the filearr container" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="filearr" Mode="" Description="Database name" Type="Variable" Display="always" Required="true" Mask="false">filearr</Config>
   <Config Name="Port (optional)" Target="5432" Default="" Mode="tcp" Description="Only map if you need external DB access (psql/pgAdmin from LAN). Leave empty otherwise." Type="Port" Display="advanced" Required="false" Mask="false"/>
 </Container>

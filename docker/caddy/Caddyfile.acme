@@ -5,8 +5,8 @@
 # DNS-01 challenge (no inbound :80 / HTTP-01 needed; works behind NAT), and three
 # hostnames are served off port 443:
 #
-#   filearr.<domain>  -> the web UI / API                     (reverse_proxy app:8000)
-#   agents.<domain>   -> the agent plane, mTLS REQUIRED       (reverse_proxy app:8000)
+#   filearr.<domain>  -> the web UI / API                     (reverse_proxy -> the app)
+#   agents.<domain>   -> the agent plane, mTLS REQUIRED       (reverse_proxy -> the app)
 #   ca.<domain>       -> step-ca, RAW SNI/L4 passthrough      (proxy -> step-ca:9000)
 #
 # Env parameters (from .env; the deploy script prompts/generates them):
@@ -14,6 +14,15 @@
 #   FILEARR_TLS_DOMAIN          the apex zone, e.g. example.com
 #   CLOUDFLARE_API_TOKEN        scoped token: Zone:DNS:Edit on the zone (SECRET)
 #   FILEARR_PROXY_SHARED_SECRET shared secret the backend trusts (SECRET)
+#   FILEARR_APP_UPSTREAM        app container host:port  (default app:8000)
+#   FILEARR_CA_UPSTREAM         step-ca host:port        (default step-ca:9000)
+#
+# UR-T1 (2026-08-12): the two upstreams are env-parameterised because this file
+# is now BAKED into the published ghcr.io/pwsh/filearr-caddy image, and the
+# compose service names it was written against (`app`, `step-ca`) are not the
+# names an Unraid install uses (`filearr`, `filearr-stepca`). The `{$VAR:default}`
+# form keeps the compose defaults literal, and docker-compose.yml sets both
+# explicitly as well so the compose path never depends on the default at all.
 {
 	email {$FILEARR_ACME_EMAIL}
 
@@ -43,7 +52,7 @@
 				@ca tls sni ca.{$FILEARR_TLS_DOMAIN}
 				route @ca {
 					proxy {
-						upstream step-ca:9000
+						upstream {$FILEARR_CA_UPSTREAM:step-ca:9000}
 					}
 				}
 			}
@@ -71,7 +80,7 @@
 	@filearr host filearr.{$FILEARR_TLS_DOMAIN}
 	handle @filearr {
 		encode zstd gzip
-		reverse_proxy app:8000
+		reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000}
 	}
 
 	# Unknown subdomain: do not silently serve the app.
@@ -99,7 +108,7 @@ agents.{$FILEARR_TLS_DOMAIN} {
 		}
 	}
 
-	reverse_proxy app:8000 {
+	reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000} {
 		header_up X-Filearr-Agent-Fp {http.request.tls.client.fingerprint}
 		header_up X-Filearr-Agent-San {http.request.tls.client.san.dns_names.0}
 		header_up X-Filearr-Proxy-Auth {$FILEARR_PROXY_SHARED_SECRET}

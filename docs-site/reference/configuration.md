@@ -34,7 +34,8 @@ variables, and the Proxmox deploy writes each one into the container's `.env`
     `app` and `worker` must agree. The worker is what actually loads the semantic
     embedder and runs the content-sniff pass; the app only serves the flags to
     the console. The bundled compose file keeps both in sync automatically — on
-    Unraid, set the same value on the `filearr` and `filearr-worker` containers.
+    Unraid it is a single `filearr` container (the worker was merged in on
+    2026-08-12), so there is only one place to set it.
 
 **Not env vars:** OCR and RAG passage chunking are **per-library** toggles you
 flip in the console's library settings (their `FILEARR_OCR_*` /
@@ -106,6 +107,29 @@ model and the source `config.py` for every field.
 | `FILEARR_REAP_MAX_ATTEMPTS` | `10` | Requeue budget for a stalled non-scan job before it is failed. |
 | `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` | `2880` | Furthest-back missed cron a recovery tick fires (48h). |
 | `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` | `600` | Grace before finalizing an orphaned scan run. |
+
+!!! note "Container-level variables, read by the entrypoint rather than the app"
+    These two are consumed by the image's entrypoint script, so they do not
+    appear in the settings object or on the About page.
+
+    | Variable | Default | Purpose |
+    |---|---|---|
+    | `FILEARR_AUTO_INIT_DB` | `true` | Run the idempotent database bootstrap on start. `false` if you run `scripts/init_db.py` yourself. |
+    | `FILEARR_STOP_GRACE_SECONDS` | `60` | **Merged mode only.** How long the supervisor waits for the worker to finish in-flight jobs after `SIGTERM` before `SIGKILL`. |
+
+    **Merged mode** is what the container does when its command is the single
+    word `all`: it bootstraps the database once, then runs uvicorn *and* a
+    Procrastinate worker as children of one supervisor, forwarding signals to
+    both and taking the container down if either dies. It is how the Unraid
+    template ships. Docker Compose deliberately does **not** use it — separate
+    `app` and `worker` services keep `docker compose up -d --scale worker=N`
+    available, which one supervised container cannot express.
+
+    `FILEARR_STOP_GRACE_SECONDS` must be ≤ the container's own stop timeout
+    (`stop_grace_period: 60s` in compose, `--stop-timeout=60` in the Unraid
+    template's Extra Parameters), or Docker kills the container before the grace
+    can elapse. 60 s is not arbitrary: the 10 s default regularly cut
+    Procrastinate jobs off mid-transaction during redeploys.
 
 ### Adaptive extract backpressure
 

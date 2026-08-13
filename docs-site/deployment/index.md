@@ -13,8 +13,9 @@ how the host and storage are prepared.
 
 - :material-nas: **[Unraid](unraid.md)**
 
-    Community-Applications-format templates for the four containers, with a
-    reverse-proxy note for HTTPS.
+    Community-Applications-format templates. Three containers for the simple
+    tier, five for full mutual-TLS agent parity — installed step by step from an
+    empty box.
 
 - :material-server-network: **[Proxmox LXC](proxmox.md)**
 

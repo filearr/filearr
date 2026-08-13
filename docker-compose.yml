@@ -78,6 +78,16 @@ services:
     image: filearr-caddy:local   # xcaddy: caddy 2.11.4 + cloudflare v0.2.4 + caddy-l4 v0.1.2
     restart: unless-stopped
     env_file: .env               # FILEARR_TLS_DOMAIN / *_ACME_EMAIL / CLOUDFLARE_API_TOKEN / *_PROXY_SHARED_SECRET
+    environment:
+      # UR-T1 (2026-08-12): both Caddyfiles now read their upstreams from env so
+      # the SAME files can ship inside the published ghcr.io/pwsh/filearr-caddy
+      # image, where the container names are Unraid's (`filearr`,
+      # `filearr-stepca`) rather than compose's. They carry `{$VAR:app:8000}`
+      # style defaults that already match this stack — these two lines exist so
+      # the compose path does not DEPEND on that default resolving, which is the
+      # only way this refactor could have regressed it.
+      FILEARR_APP_UPSTREAM: app:8000
+      FILEARR_CA_UPSTREAM: step-ca:9000
     ports:
       - "8443:443"
       - "443:443"

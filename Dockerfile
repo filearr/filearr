@@ -115,8 +115,15 @@ EXPOSE 8000
 # command only (waits for Postgres; FILEARR_AUTO_INIT_DB=false opts out) — an
 # Unraid/compose first start needs no manual console step. Worker/watcher
 # command overrides skip it and pass straight through to exec.
+#
+# UR-T2 (2026-08-12) added a THIRD shape: the single-word command `all` runs the
+# bootstrap once and then supervises uvicorn AND the worker as children of one
+# process (unraid/filearr.xml uses it via Post Arguments). CMD below is
+# deliberately unchanged — merged mode is strictly opt-in, and compose keeps its
+# separate app/worker services so `--scale worker=N` still works.
 RUN chmod +x scripts/docker-entrypoint.sh
 ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
-# app:   uvicorn filearr.main:app
+# app:    uvicorn filearr.main:app
 # worker: procrastinate --app=filearr.worker.proc_app worker
+# both:   all
 CMD ["uvicorn", "filearr.main:app", "--host", "0.0.0.0", "--port", "8000"]

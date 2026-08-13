@@ -21,3 +21,26 @@ RUN xcaddy build v2.11.4 \
 
 FROM caddy:2.11.4
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+
+# UR-T1 (2026-08-12): this image is now PUBLISHED as ghcr.io/pwsh/filearr-caddy
+# so an Unraid install can reach mTLS parity without a compose file. compose
+# still BUILDS it locally and bind-mounts ./docker/caddy over /etc/caddy — the
+# local build stays the source of truth for the Proxmox path — so everything
+# below has to be inert under compose. It is: the bind mount shadows the copied
+# Caddyfiles with the identical files, and the CMD is overridden by the service's
+# own `command:`.
+#
+# Both profiles are baked because a template-only host has nowhere else to put a
+# config file. See entrypoint.sh for the FILEARR_CADDY_PROFILE selection and why
+# it is CMD rather than ENTRYPOINT.
+#
+# The build context is the REPO ROOT (docker-compose.yml sets `context: .` with
+# `dockerfile: docker/caddy/Dockerfile`, and build.yml mirrors that), so these
+# paths are repo-relative, not Dockerfile-relative.
+COPY docker/caddy/Caddyfile.acme docker/caddy/Caddyfile.internal /etc/caddy/
+COPY docker/caddy/entrypoint.sh /usr/local/bin/filearr-caddy-entrypoint.sh
+RUN chmod +x /usr/local/bin/filearr-caddy-entrypoint.sh
+
+# No ENTRYPOINT on purpose (upstream caddy sets none either): a `command:`
+# override in compose must bypass the profile selector entirely.
+CMD ["/usr/local/bin/filearr-caddy-entrypoint.sh"]

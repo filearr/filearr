@@ -38,7 +38,10 @@
 		on_demand
 	}
 
-	reverse_proxy app:8000
+	# UR-T1: env-parameterised so the published filearr-caddy image works on
+	# Unraid, where the app container is named `filearr`, not `app`. compose
+	# sets FILEARR_APP_UPSTREAM explicitly; the default keeps it literal.
+	reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000}
 
 	# Give the poster/thumbnail and large-response paths room; homelab-scale.
 	encode zstd gzip

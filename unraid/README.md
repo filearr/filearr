@@ -1,18 +1,73 @@
 # Unraid templates for the Filearr stack
 
-Five Community Applications–format templates (`Container version="2"`):
+Six Community Applications–format templates (`Container version="2"`). You do not
+need all of them — pick a tier, then install that tier's templates **in order**.
 
-| Install order | Template | Image |
+| Tier | Install order | Templates |
 |---|---|---|
-| 1 | `filearr-postgres.xml` | postgres:18.4 (source of truth + job queue — back this up) |
-| 2 | `filearr-meilisearch.xml` | getmeili/meilisearch:v1.49.0 (disposable, rebuildable index) |
-| 3 | `filearr.xml` | ghcr.io/pwsh/filearr (web UI + API, port 8484) |
-| 4 | `filearr-worker.xml` | same image, Post Arguments run the Procrastinate worker |
-| — | `filearr-agent.xml` | ghcr.io/pwsh/filearr-agent (standalone inventory agent — standalone install, needs only a central URL + enrollment token) |
+| **Simple** | 1 → 2 → 3 | `filearr-postgres`, `filearr-meilisearch`, `filearr` |
+| **Proxied** | 1 → 2 → 3 | the same three, behind a reverse proxy you already run |
+| **Full parity** | 1 → 2 → 3 → 4 → 5 | the same three, then `filearr-stepca`, then `filearr-caddy` |
 
-## Why four containers and not one
+| # | Template | Image | Role |
+|---|---|---|---|
+| 1 | `filearr-postgres.xml` | `postgres:18.4` | Source of truth + job queue — **back this up** |
+| 2 | `filearr-meilisearch.xml` | `getmeili/meilisearch:v1.53.0` | Disposable, rebuildable search index |
+| 3 | `filearr.xml` | `ghcr.io/pwsh/filearr` | Web UI + API **and** the background worker (port 8484) |
+| 4 | `filearr-stepca.xml` | `smallstep/step-ca:0.30.2` | Private CA for agent client certificates — only for `mtls-header` |
+| 5 | `filearr-caddy.xml` | `ghcr.io/pwsh/filearr-caddy` | TLS reverse proxy + the mTLS agent plane |
+| — | `filearr-agent.xml` | `ghcr.io/pwsh/filearr-agent` | Standalone inventory agent — independent install, needs only a central URL + enrollment token |
 
-Four templates is more setup than one, and that friction is real. It is a
+The install order matters for one reason each: Postgres before everything because
+the app bootstraps its schema on first start; Meilisearch before the app because
+the app configures its index at startup; step-ca before Caddy because Caddy reads
+the CA root as its client-certificate trust pool.
+
+**Templates 1 and 2 are the "I do not already have these" path.** If you already
+run a Postgres 18+ server or a Meilisearch 1.53.x instance, skip them and point
+the app's DSNs at yours — but read the three constraints (PG18 floor, a dedicated
+DATABASE rather than a schema, and the broad-reach Meili key) in
+`docs-site/deployment/unraid.md#existing-servers` first.
+
+**Templates 4 and 5 are optional** unless you set `FILEARR_AGENT_AUTH_MODE` to
+`mtls-header` or `both`, which is the only configuration that requires them.
+
+Full setup guide, field by field, from empty box to enrolled agent:
+[`docs-site/deployment/unraid.md`](../docs-site/deployment/unraid.md).
+
+## Upgrading: `filearr-worker` has been removed {#worker-removed}
+
+**If you run a `filearr-worker` container, remove it.** As of 2026-08-12 the
+`filearr` container runs both the API and the background worker, selected by `all`
+in its Post Arguments.
+
+1. Docker tab → `filearr-worker` → **Remove**. It has no volumes of its own that
+   `filearr` does not also mount, so nothing is lost.
+2. Delete `my-filearr-worker.xml` from
+   `/boot/config/plugins/dockerMan/templates-user/`.
+3. Edit `filearr`: add `all` to **Post Arguments** and `--stop-timeout=60` to
+   **Extra Parameters**. Apply.
+
+Nothing in the database changes and no re-scan is needed. The log should show one
+database bootstrap followed by a line naming both child processes.
+
+`--stop-timeout=60` is not decoration. Docker SIGTERMs the container, waits, then
+SIGKILLs — and the wait defaults to 10 seconds. The merged entrypoint forwards
+SIGTERM to both children and waits up to `FILEARR_STOP_GRACE_SECONDS` (60) so the
+worker can finish in-flight jobs; `docker-compose.yml` carries the same 60s as
+`stop_grace_period` because the 10s default regularly cut Procrastinate jobs off
+mid-transaction during redeploys. Without the flag the container dies at 10s and
+the in-container grace never applies.
+
+If you deliberately ran a second worker for throughput, you still can: install
+`filearr` again under a different name with the Procrastinate worker command in
+Post Arguments — or use the repo's `docker-compose.yml`, which keeps separate
+`app` and `worker` services and the documented `--scale worker=N` scale-out for
+exactly that case.
+
+## Why three containers and not one
+
+Three templates is more setup than one, and that friction is real. It is a
 deliberate homelab trade, not borrowed enterprise practice:
 
 1. **A bundled Postgres welds its major version to the app image.** When the pin
@@ -20,23 +75,28 @@ deliberate homelab trade, not borrowed enterprise practice:
    BOTH majors present — which a single image shipping exactly one major cannot
    do. Separate means the operator chooses when Postgres moves.
 2. **Updating Filearr does not cycle the database.** Pull the app image, restart
-   two containers; Postgres and Meilisearch keep running with warm caches.
+   one container; Postgres and Meilisearch keep running with warm caches.
 3. **Memory isolation.** The documented >6 GiB Meilisearch indexing flush kills
    Meilisearch alone — and the index is a rebuildable projection — instead of
    taking the database down with it.
 4. **Per-container logs and health are Unraid's primary debugging affordance.**
    "Which one is unhealthy" is a glance at the Docker tab.
 
-The install friction is being reduced by other means — merging app+worker into
-one container, publishing the CA template, better defaults — rather than by
-bundling the database, which would trade a one-time setup cost for a permanent
-upgrade cliff.
+The app and the worker had none of those properties: same image, same
+environment, same volumes, differing only in the command — and every variable had
+to be kept byte-identical across two templates by hand, which was a standing
+drift risk (`FILEARR_SEMANTIC_ENABLED` set on one and not the other produced
+behaviour nobody could explain). Merging *those two* cost nothing and removed the
+risk. Collapsing the database into the app image would instead trade a one-time
+setup cost for a permanent upgrade cliff, which is why it is not on the list.
 
 ## Backups
 
 Full runbook (native `docker exec` commands, a User Scripts schedule, the
 restore sequence, and how the CA "Backup/Restore Appdata" plugin differs):
-`docs-site/deployment/unraid.md#backup-and-restore`. The short version:
+`docs-site/deployment/unraid.md#backup-and-restore`. Moving to a different host
+rather than restoring in place: `docs-site/operations.md#migrate-to-a-new-host`.
+The short version:
 
 - `docker exec filearr-postgres pg_dump -U filearr -Fc filearr > /mnt/user/backups/filearr/filearr-$(date -u +%Y%m%dT%H%M%SZ).dump`
   (no `-T` — that flag is a `docker compose exec` requirement, and adding `-t`
@@ -44,16 +104,21 @@ restore sequence, and how the CA "Backup/Restore Appdata" plugin differs):
 - **`FILEARR_SECRET_KEY` is NOT in the dump.** Restoring under a different key
   succeeds while leaving every encrypted alert-channel secret permanently
   undecryptable. Record it separately.
-- If the Backup/Restore Appdata plugin is doing the work, point it at **both**
-  `/mnt/user/appdata/filearr` and `/mnt/cache/appdata/filearr-postgres` — the
-  split below is deliberate, and a plugin sweeping only `/mnt/user/appdata`
-  backs up thumbnails and misses the database.
+- **Full parity: back up `/mnt/cache/appdata/filearr-stepca` too.** It is CA
+  private key material — the one thing in the stack that re-scanning cannot
+  rebuild. A new CA invalidates every certificate it ever issued and every agent
+  must re-enrol.
+- If the Backup/Restore Appdata plugin is doing the work, point it at **all** of
+  `/mnt/user/appdata/filearr`, `/mnt/cache/appdata/filearr-postgres` and
+  `/mnt/cache/appdata/filearr-stepca` — the split below is deliberate, and a
+  plugin sweeping only `/mnt/user/appdata` backs up thumbnails and misses the
+  database.
 
 `filearr-agent` is independent of the stack above: install it when this Unraid
 box should *feed* a central Filearr running elsewhere (it inventories
 `/mnt/user` read-only and replicates outbound over mTLS). It needs no
 Postgres/Meilisearch/network setup here — just a token minted from the central
-console. Full runbook: `docs/ops/agents.md` §12.
+console. Full runbook: `docs-site/agents.md`.
 
 ## One-time setup
 
@@ -73,41 +138,46 @@ console. Full runbook: `docs/ops/agents.md` §12.
 
 3. Set the same `POSTGRES_PASSWORD` / DSNs and the same `MEILI_MASTER_KEY`
    across containers (templates default to matching values; passwords are masked
-   fields you fill once each).
+   fields you fill once each). At full parity, `FILEARR_PROXY_SHARED_SECRET` must
+   be byte-identical on `filearr` and `filearr-caddy`.
 
-4. That's it — on first start the `filearr` app container bootstraps the
-   database itself (idempotent `scripts/init_db.py`, retrying while Postgres
-   is still coming up). No console step. Set `FILEARR_AUTO_INIT_DB=false` on
-   the container only if you prefer to run migrations manually.
+4. That's it — on first start the `filearr` container bootstraps the database
+   itself (idempotent `scripts/init_db.py`, retrying while Postgres is still
+   coming up), once, before either of its child processes starts. No console
+   step. Set `FILEARR_AUTO_INIT_DB=false` only if you prefer to run migrations
+   manually.
 
 ## Notes
 
-- Media is mounted read-only (`/data/media`) in both app and worker — identical
-  mapping in both is required so paths in the catalog match.
-- Database-backed containers (postgres, meilisearch, the agent's SQLite) use
-  DIRECT pool paths (`/mnt/cache/appdata/...`), not `/mnt/user/appdata/...`:
+- Media is mounted read-only at `/data/media`. Library paths you create in the UI
+  are the IN-CONTAINER paths under that mapping.
+- Database-backed containers (postgres, meilisearch, step-ca, the agent's SQLite)
+  use DIRECT pool paths (`/mnt/cache/appdata/...`), not `/mnt/user/appdata/...`:
   the `/mnt/user` FUSE (shfs) layer has unreliable file locking/mmap, the
   classic Unraid cause of `database is locked` stalls and index corruption.
   Same share, same files — just the path that bypasses FUSE. (On 6.12+ a
   cache-only "exclusive" appdata share makes `/mnt/user` equivalent; the
-  `/mnt/cache` default is simply correct everywhere.) The `filearr` app/worker
+  `/mnt/cache` default is simply correct everywhere.) The `filearr` container's
   `/config` (thumbnails/caches) is lock-insensitive and stays on `/mnt/user`.
 - Port 5432/7700 mappings are intentionally unmapped by default; the stack talks
   over the `filearr` network internally.
+- **`filearr-caddy` wants its own IP.** Set Network Type: Custom br0 with a fixed
+  address so ports 80/443 do not collide with Unraid's web GUI or an existing
+  reverse proxy. This is the expected Unraid pattern for a proxy container.
+- **TLS.** Templates 1–3 serve plain HTTP on 8484. For HTTPS, either put the app
+  behind a reverse proxy you already run (SWAG / Nginx Proxy Manager / Unraid's
+  built-in — real cert, no per-client CA trust), or install `filearr-caddy`:
+  profile `internal` gives you self-signed HTTPS with no domain required, profile
+  `acme` gives you a real Let's Encrypt wildcard **plus** the mTLS agent plane.
+  Auth is on by default and its session cookie is `Secure`, so set one of these
+  up before relying on logins.
+- **iGPU thumbnails (optional):** to hardware-accelerate video poster-frames, add
+  `--device /dev/dri --group-add $(stat -c '%g' /dev/dri/renderD128)` to the
+  **`filearr`** container's Extra Parameters (this used to go on the worker).
+  Safe to skip — the pipeline falls back to software automatically.
 - Publishing to Community Applications later: submit via ca.unraid.net/submit
   (needs HTTPS PNG icon, support thread, overview — all present; the templates
   point at the real ghcr.io/pwsh images and github.com/pwsh/filearr URLs).
-- **TLS (OPS-T1):** these CA templates ship the app over plain HTTP on port 8484.
-  For HTTPS, either (a) put the app behind Unraid's built-in reverse proxy /
-  SWAG / Nginx-Proxy-Manager (recommended on Unraid — real cert, no per-client
-  CA trust), or (b) use the repo `docker-compose.yml` which includes the Caddy
-  TLS sidecar (self-signed LAN CA, https on 8443). A standalone `filearr-caddy`
-  CA template is NOT provided yet — the reverse-proxy route is the Unraid-native
-  path. Wave 4 login will require HTTPS (Secure cookies), so set this up before
-  enabling auth.
-- **iGPU thumbnails (optional, P12/OPS-T7):** to hardware-accelerate video
-  poster-frames, add `--device=/dev/dri` and the render group to the
-  `filearr-worker` container (Extra Parameters: `--device /dev/dri --group-add
-  $(stat -c '%g' /dev/dri/renderD128)`). Safe to skip — the pipeline falls back
-  to software automatically when the device is absent.
-- Alternative: use the repo's `docker-compose.yml` with the Compose Manager plugin.
+- Alternative: use the repo's `docker-compose.yml` with the Compose Manager
+  plugin. It keeps `app` and `worker` as separate services on purpose and does
+  not use the merged `all` mode.

@@ -1297,6 +1297,195 @@ out of agreement with the source of truth — see architecture invariant 1.
 application; the project's history is kept in a git bundle that you clone rather
 than initializing a repo on a network share (SMB corrupts git lock/rename ops).
 
+## Move an existing deployment to a new host {#migrate-to-a-new-host}
+
+Written for the common case — a Docker Compose or Proxmox LXC deployment moving
+to a new box, at full `mtls-header` parity — but the order and the reasoning hold
+for any host-to-host move. Nothing here is reversible once you decommission the
+source, so the whole point of the sequence is that **verification happens while
+the old deployment is still running**.
+
+If you are weighing this against simply starting fresh on the new host, read
+[Coming from an existing
+deployment](deployment/unraid.md#fresh-vs-migrate) first: re-scanning rebuilds
+the catalogue, but it cannot rebuild the user overlay (hand edits, tags, saved
+searches, accounts, grants, schedules, agent enrollments, frecency).
+
+### 1. Take a bundle backup on the SOURCE, and verify it
+
+```bash
+scripts/backup.sh
+scripts/verify-backup.sh backups/filearr-<timestamp>/
+```
+
+The bundle is a directory containing the `pg_dump -Fc` archive, a copy of `.env`,
+a tar of the step-ca volume, and a `MANIFEST.json` recording the app version, the
+Alembic head, the Postgres server version, the item count, and **fingerprints**
+(never values) of `FILEARR_SECRET_KEY` and the CA root.
+
+`verify-backup.sh` is the step people skip and should not. It restores the dump
+into a throwaway `postgres:18.4` container, reads `pg_restore --list` to prove the
+archive is not truncated, counts `items` against the manifest, compares the
+restored `alembic_version` to the manifest's head, and cross-checks the secret-key
+fingerprint against the deployment's current key. Run it **before** you touch
+anything on the new host. A backup you have never restored is a hypothesis.
+
+### 2. Stand up Postgres 18 on the target, with a dedicated database
+
+Postgres 18 is a floor, not a preference — `uuidv7()` is a PG18 native used as
+the server-side default on 34 primary keys, probed at migration time and at every
+boot. And Filearr assumes it owns the whole **database**: no schema isolation,
+generic table names, the job queue's tables in the same schema, and a backup
+`pg_dump` with no `-n`/`-t` filter. A dedicated schema inside a shared database is
+not sufficient. No superuser is required — ordinary `CREATE` on its own database.
+
+### 3. Restore the dump, THEN let the app migrate
+
+```bash
+pg_restore --clean --if-exists --no-owner -U filearr -d filearr \
+  backups/filearr-<timestamp>/filearr-<timestamp>.dump
+```
+
+Load first, migrate second. `scripts/init_db.py` — which the app container runs
+itself on start — is the only thing that can take an arbitrary prior schema state
+and bring it to head, and it can only do that once the schema is actually there.
+Running it against an empty database and *then* restoring gets you a
+`--clean`-ed schema and a confusing Alembic state.
+
+### 4. Carry the secrets across from `env.backup`
+
+The bundle's `env.backup` is the authoritative copy. Two entries decide whether
+the migration succeeded:
+
+- **`FILEARR_SECRET_KEY`** — the envelope key for alert-channel credentials. It
+  is not in the dump. Restore under a different key and every stored SMTP
+  password, webhook secret and Apprise URL is permanently undecryptable, while
+  everything reports success.
+- **`FILEARR_PROXY_SHARED_SECRET`** — at `mtls-header` this **fails closed**. An
+  unset or mismatched value does not degrade to fingerprint auth; it rejects
+  every agent request.
+
+Also carry `POSTGRES_PASSWORD`, `MEILI_MASTER_KEY`, `FILEARR_CA_FINGERPRINT` and
+`FILEARR_CA_PROVISIONER_JWK`.
+
+!!! tip "The secret key has a built-in verification signal — use it"
+    The database records a fingerprint of the key it was encrypted under. If you
+    carried the wrong one, the About page shows a **red `Secret key` row**, the
+    Admin dashboard shows a banner, and the log says `KEY FINGERPRINT MISMATCH`.
+    A quiet About page is positive confirmation, not merely absence of an error.
+    See [the secret-key mismatch warning](#secret-key-mismatch).
+
+### 5. Restore the step-ca volume
+
+```bash
+tar xzf backups/filearr-<timestamp>/stepca/stepca-data.tar.gz \
+  -C /var/lib/docker/volumes/filearr_stepca_data/_data
+```
+
+(Adjust the destination to wherever the new host's CA volume or appdata path
+lives; on Unraid that is the `filearr-stepca` container's Data path.)
+
+**At `mtls-header` this is mandatory.** A freshly initialised step-ca mints a new
+root, and a new root cannot validate a single certificate the old one issued —
+so every agent's client certificate stops working simultaneously and every agent
+needs re-enrolment. Nothing warns you at restore time; you find out when the
+fleet goes dark.
+
+??? question "What if you skip step 5?"
+    It is a legitimate choice if the fleet is small. The cost is precise: mint a
+    fresh enrollment token per agent and re-enrol each one, then delete the stale
+    agent records from the console. Budget a few minutes per machine plus a trip
+    to any machine you cannot reach remotely. Take the decision deliberately and
+    up front — the failure mode of *accidentally* skipping it is identical, minus
+    the plan.
+
+    Update `FILEARR_CA_FINGERPRINT` to the new root's fingerprint when you do; the
+    `ca_root_fingerprint` guard reports the change rather than letting you
+    discover it through authentication failures.
+
+### 6. Remap the library root paths {#migrate-remap-library-roots}
+
+**This is the step that is most often missed and it is the most expensive one to
+miss.**
+
+Item identity is `(library_id, rel_path)` — the *relative* path within a library.
+The absolute `path` column is refreshed on every scan. That is exactly why
+remapping a library's root to the new host's mount is safe and correct: the items
+keep their identity, their metadata, their tags and their history, and the next
+scan simply records new absolute paths.
+
+It is also why **skipping** it is destructive. If the old root was
+`/data/media/movies` and that path does not exist on the new host, the first scan
+finds zero files under it and tombstones the entire library as `missing` — a
+catalogue-wide deletion event that then ages out on the recycle-bin retention
+schedule.
+
+Fix it before the first scan, in the console (Admin → Libraries → each library →
+edit the path), or in SQL:
+
+```sql
+-- Inspect first.
+SELECT id, name, root_path, native_prefix FROM libraries ORDER BY name;
+
+-- Then remap. Prefix-replace so nested libraries move consistently.
+UPDATE libraries
+   SET root_path = replace(root_path, '/data/media', '/mnt/user/data/media')
+ WHERE root_path LIKE '/data/media%';
+```
+
+Revisit `native_prefix` in the same pass: it is what maps in-container paths back
+to the source system's paths for network-open links, and it moves with the host
+whether or not the container path did. If agents contribute libraries, check
+their share mappings too.
+
+### 7. Point the agents at the new central URL
+
+Change each agent's configured central URL to the new host. A configured URL
+outranks the copy an agent recorded in its `state.json` at enrollment time, so
+this takes effect without re-enrolling.
+
+At `mtls-header`, remember the ordering rule: enrolment must run against the main
+URL, because the mTLS site refuses clients that have no certificate yet. Agents
+that are *already* enrolled go straight to the mTLS URL and present their
+certificate automatically.
+
+### 8. Start everything and rebuild the index
+
+```bash
+curl -X POST https://filearr.example.com/api/v1/system/rebuild-index
+```
+
+Meilisearch is never backed up — it is a disposable projection, and rebuilding it
+from Postgres is both the supported path and the only one that cannot leave the
+index disagreeing with the source of truth. The same action is on the Jobs page.
+
+### 9. Verification checklist
+
+Work through all of it before decommissioning the source. Each line is a signal
+that something specific went right, not a formality:
+
+- [ ] **About page** shows the expected app version, Alembic head and Postgres
+      server version — and a **quiet `Secret key` row**. A red row means step 4
+      carried the wrong key.
+- [ ] **Agents page**: every agent shows a recent `last_seen_at` and
+      `last_auth_mode: mtls-header`. An agent stuck on `fingerprint` has not been
+      moved to the mTLS URL; an agent that never checks in points at step 5 or 7.
+- [ ] **Scan one library** and read the result. Zero or near-zero new tombstones
+      is the pass condition. A mass-tombstone report means step 6 was missed —
+      stop and fix the root path before the recycle-bin retention window starts
+      counting.
+- [ ] **Search returns results** for something you know is catalogued (this
+      exercises the rebuilt index end to end).
+- [ ] **A duplicate report renders.** It reads hashes, groups and stored
+      metadata, so it is a cheap smoke test of the parts a row count does not
+      cover.
+- [ ] **Alert channels send.** If any are configured, fire a test — this is the
+      only check that actually proves `FILEARR_SECRET_KEY` decrypts, rather than
+      that its fingerprint matches.
+
+Keep the source host's bundle until the new one has been running long enough that
+you would not go back to it.
+
 ## Authentication and the first admin {#enabling-authentication}
 
 Auth is **on by default** (`FILEARR_AUTH_ENABLED=true`). On a fresh install the
