@@ -39,7 +39,7 @@ With `FILEARR_AUTH_ENABLED=false`, routes are open (development only).
 | Libraries | `libraries`, `scan-paths` | Define libraries, roots, schedules, presets. |
 | Scans | `scans` (with SSE) | Trigger/stop scans; live progress via Server-Sent Events. |
 | Query | `query/preview`, `query/keys`, `query/assist` | Filter-builder DSL preview, value pickers, and natural-language → DSL translation (heuristic; optional local Ollama). |
-| Reports | `reports`, `custom-reports`, `report-schedules`, `exports` | Prebuilt (canned) reports — unmapped extensions, future-dated files, extraction errors, largest files, largest folders (du-style recursive totals), low-quality video, duplicates — plus saved reports, scheduled delivery, CSV/NDJSON/XLSX exports. |
+| Reports | `reports`, `reports/folder-tree`, `custom-reports`, `report-schedules`, `exports` | Prebuilt (canned) reports — unmapped extensions, future-dated files, extraction errors, largest files, largest folders (du-style recursive totals), low-quality video, duplicate groups **and per-copy duplicate detail**, files not modified in *N* days — plus saved reports, scheduled delivery, and CSV/NDJSON/XML/XLSX exports. `GET /reports/folder-tree` returns one drill level of folder totals (direct children of a parent) for the treemap view. See [Reports & exports](../reports.md) for the export formats and the [ready-made cleanup scripts](../reports.md#acting-on-duplicates). |
 | Saved searches | `saved-searches` | Persisted search definitions. |
 | Metadata | `metadata-profiles`, `custom-fields` | Extraction profiles and user-defined fields. |
 | Filesystem | `fs/browse` | Allow-listed server-side folder browser (for the library form). |

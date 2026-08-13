@@ -16,15 +16,22 @@
 <script lang="ts">
   import { copyText } from "./clipboard";
   import {
+    ApiError,
     friendlyError,
     getItem,
     itemCopies,
+    listCustomFields,
+    patchItem,
     touchItem,
     similarItems,
+    type CustomField,
+    type ItemPatchBody,
     type ItemRecord,
     type CopiesResponse,
     type SimilarResponse,
   } from "./api";
+  import CustomFieldInput from "./CustomFieldInput.svelte";
+  import { applicableFields, coerceCustomValue } from "./bulkEdit";
   import RawView from "./RawView.svelte";
   import Breadcrumbs from "./Breadcrumbs.svelte";
   import { gotoBrowse } from "./routes";
@@ -98,8 +105,174 @@
   const mediaType = $derived(str("file_category") ?? "");
   const CardComponent = $derived(cardFor(mediaType));
   const cardTabLabel = $derived(cardLabel(mediaType));
-  type TabId = "card" | "raw";
+  // IN-T4: editing is a THIRD tab rather than an inline-per-field affordance.
+  // The card and Raw views are dense read-only layouts; sprinkling pencil icons
+  // through them would mean redesigning both, whereas a tab reuses the switcher
+  // that is already there and keeps "looking" and "changing" visibly distinct.
+  type TabId = "card" | "raw" | "edit";
   let active = $state<TabId>("card");
+
+  // ------------------------------------------------------------------------ //
+  // IN-T4 single-item edit. Companion to the bulk bar and deliberately the      //
+  // ONLY place `title` can be changed: one title applied to N files is nearly   //
+  // always a mistake, so the bulk bar omits it by design.                       //
+  //                                                                            //
+  // Empty input = CLEAR (explicit null on the wire, which pops the key /        //
+  // nulls the column) — `patchItem` has had those semantics all along; it       //
+  // simply had zero callers until now.                                          //
+  // ------------------------------------------------------------------------ //
+  let eTitle = $state("");
+  let eYear = $state("");
+  let eTags = $state<string[]>([]);
+  let eTagDraft = $state("");
+  // Raw control values per custom-field NAME (see CustomFieldInput for why the
+  // binding stays a raw string/boolean rather than the coerced JSON type).
+  let eFields = $state<Record<string, string | boolean>>({});
+  let defs = $state<CustomField[]>([]);
+  let saving = $state(false);
+  let editError = $state("");
+
+  // Only fields whose applies_to / library_ids cover THIS item (same rule the
+  // key-facts card uses to decide what to display).
+  const editableFields = $derived(
+    applicableFields(defs, [{ file_category: mediaType, library_id: libId }]),
+  );
+
+  const userMeta = $derived(
+    (item?.user_metadata as Record<string, unknown> | undefined) ?? {},
+  );
+
+  /** Render a stored user_metadata value back into a raw control value. */
+  function toRaw(v: unknown): string | boolean {
+    if (v == null) return "";
+    if (typeof v === "boolean") return v;
+    return String(v);
+  }
+
+  /** Seed the form from the item currently loaded, then switch to the tab. A
+   *  fresh seed on every entry means a cancelled edit leaves nothing behind. */
+  function startEdit() {
+    if (!item) return;
+    editError = "";
+    eTitle = typeof item.title === "string" ? item.title : "";
+    eYear = typeof item.year === "number" ? String(item.year) : "";
+    // Deduped on seed: the chip list is a keyed {#each}, and a stored duplicate
+    // (possible — nothing enforces uniqueness on the column) would crash it.
+    eTags = [
+      ...new Set(
+        Array.isArray(item.tags)
+          ? (item.tags as unknown[]).filter((t): t is string => typeof t === "string")
+          : [],
+      ),
+    ];
+    eTagDraft = "";
+    const seeded: Record<string, string | boolean> = {};
+    for (const d of editableFields) seeded[d.name] = toRaw(userMeta[d.name]);
+    eFields = seeded;
+    active = "edit";
+  }
+
+  function commitTagDraft() {
+    const parts = eTagDraft.split(",").map((s) => s.trim()).filter(Boolean);
+    const out = [...eTags];
+    for (const p of parts) {
+      if (!out.some((t) => t.toLowerCase() === p.toLowerCase())) out.push(p);
+    }
+    eTags = out;
+    eTagDraft = "";
+  }
+
+  function onTagKey(e: KeyboardEvent) {
+    if (e.key !== "Enter" && e.key !== ",") return;
+    // Enter must not bubble to the dialog / window handlers.
+    e.preventDefault();
+    e.stopPropagation();
+    commitTagDraft();
+  }
+
+  function editErrDetail(e: unknown): string {
+    if (e instanceof ApiError) {
+      try {
+        const j = JSON.parse(e.body);
+        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      } catch {
+        /* body not JSON */
+      }
+      return e.body || String(e);
+    }
+    return String(e);
+  }
+
+  async function saveEdit() {
+    if (!item) return;
+    if (eTagDraft.trim()) commitTagDraft();
+    editError = "";
+
+    const patch: ItemPatchBody = {};
+    const curTitle = typeof item.title === "string" ? item.title : "";
+    if (eTitle.trim() !== curTitle) patch.title = eTitle.trim() || null;
+
+    const curYear = typeof item.year === "number" ? item.year : null;
+    if (!eYear.trim()) {
+      if (curYear != null) patch.year = null;
+    } else {
+      const y = Number(eYear.trim());
+      if (!Number.isInteger(y) || y < 1 || y > 9999) {
+        editError = "Year must be a whole number between 1 and 9999.";
+        return;
+      }
+      if (y !== curYear) patch.year = y;
+    }
+
+    const curTags = Array.isArray(item.tags)
+      ? (item.tags as unknown[]).filter((t): t is string => typeof t === "string")
+      : [];
+    if (eTags.length !== curTags.length || eTags.some((t, i) => t !== curTags[i])) {
+      patch.tags = eTags; // arrays REPLACE (schema contract)
+    }
+
+    // Only CHANGED custom fields ride along: an untouched key must stay absent
+    // so it is left alone, and a cleared one must be an explicit null.
+    const meta: Record<string, unknown> = {};
+    for (const d of editableFields) {
+      // Only fields whose control was actually SEEDED (i.e. rendered) count. If a
+      // definition arrived after the form opened, its control was never shown —
+      // treating its absent raw value as "blank" would send an explicit null and
+      // silently delete a value the user never laid eyes on.
+      if (!(d.name in eFields)) continue;
+      const raw = eFields[d.name] ?? "";
+      const blank = raw === "" || raw == null;
+      const had = userMeta[d.name] != null;
+      if (blank) {
+        if (had) meta[d.name] = null;
+        continue;
+      }
+      const res = coerceCustomValue(d, raw);
+      if (!res.ok) {
+        editError = res.error;
+        return;
+      }
+      if (res.value !== userMeta[d.name]) meta[d.name] = res.value;
+    }
+    if (Object.keys(meta).length) patch.user_metadata = meta;
+
+    if (!Object.keys(patch).length) {
+      active = "card";
+      return;
+    }
+
+    saving = true;
+    try {
+      // The PATCH response IS the updated projection, so the panel refreshes
+      // without a second GET (and without waiting on the async index sync).
+      item = await patchItem(id, patch);
+      active = "card";
+    } catch (e) {
+      editError = editErrDetail(e);
+    } finally {
+      saving = false;
+    }
+  }
 
   // P10-T3/T10: agent-hosted items (library owned by an agent) surface the
   // hosting agent's identity, online status, verify freshness, and an inline
@@ -185,6 +358,12 @@
     similarLoading = false;
     similarError = "";
     active = "card"; // reset to the typed card whenever a different item opens
+    editError = "";
+    // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
+    // as KeyFactsCard; a failure just means no custom-field rows to edit.
+    listCustomFields()
+      .then((d) => (defs = d))
+      .catch(() => (defs = []));
     getItem(id)
       .then((r) => (item = r))
       // RBAC (P6-T4): a 403/404 shows a friendly line, never a blank/raw dump.
@@ -299,6 +478,16 @@
           ? 'bg-[var(--accent)] text-white'
           : 'text-slate-500'}"
         onclick={() => (active = "raw")}>Raw</button>
+      <!-- IN-T4: the ONLY metadata-writing surface for a single item. Only ever
+           writes `user_metadata` + the editable columns — invariant 2 (extracted
+           `metadata` belongs to scans) is a backend rule this UI never asks to
+           break. -->
+      <button
+        class="rounded-lg px-3 py-1 text-sm {active === 'edit'
+          ? 'bg-[var(--accent)] text-white'
+          : 'text-slate-500'}"
+        disabled={!item}
+        onclick={startEdit}>Edit</button>
       <span class="grow"></span>
       <button
         class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
@@ -312,6 +501,92 @@
         <p class="text-slate-500">Loading…</p>
       {:else if active === "raw"}
         <RawView {item} />
+      {:else if active === "edit"}
+        <!-- Same typed controls the bulk bar uses (CustomFieldInput), same
+             coercion rules (bulkEdit.coerceCustomValue) — one implementation, so
+             the two surfaces cannot disagree about what a field accepts. -->
+        <div class="flex flex-col gap-3">
+          {#if editError}
+            <p class="rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
+              {editError}
+            </p>
+          {/if}
+
+          <label class="text-xs text-slate-500" for="edit-title">Title</label>
+          <input
+            id="edit-title"
+            class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--accent)] dark:border-slate-700"
+            placeholder="(empty clears the title)"
+            bind:value={eTitle} />
+
+          <label class="text-xs text-slate-500" for="edit-year">Year</label>
+          <!-- value/oninput, NOT bind:value: Svelte's number binding would
+               rewrite `eYear` to a `number | null` behind its declared string
+               type, breaking the empty-means-clear check in saveEdit(). -->
+          <input
+            id="edit-year"
+            type="number"
+            min="1"
+            max="9999"
+            step="1"
+            class="-mt-2 w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-[var(--accent)] dark:border-slate-700"
+            placeholder="(empty)"
+            value={eYear}
+            oninput={(e) => (eYear = e.currentTarget.value)} />
+
+          <label class="text-xs text-slate-500" for="edit-tags">Tags</label>
+          <div class="-mt-2 flex flex-wrap items-center gap-1">
+            <input
+              id="edit-tags"
+              class="w-44 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-[var(--accent)] dark:border-slate-700"
+              placeholder="add tag…"
+              bind:value={eTagDraft}
+              onkeydown={onTagKey}
+              onblur={commitTagDraft} />
+            {#each eTags as t (t)}
+              <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-xs text-[var(--accent)]">
+                {t}
+                <button
+                  type="button"
+                  class="rounded-full px-1 leading-none"
+                  aria-label={`Remove tag ${t}`}
+                  onclick={() => (eTags = eTags.filter((x) => x !== t))}>×</button>
+              </span>
+            {/each}
+          </div>
+
+          {#if editableFields.length}
+            <div class="mt-1 border-t border-slate-200 pt-3 dark:border-slate-800">
+              <p class="mb-2 text-xs text-slate-500">
+                Custom fields — leaving one empty removes it from this item.
+              </p>
+              <div class="flex flex-col gap-2">
+                {#each editableFields as d (d.id)}
+                  <div class="flex flex-wrap items-center gap-2">
+                    <label class="w-40 shrink-0 text-xs text-slate-500" for={`edit-cf-${d.id}`}
+                      >{d.label}</label>
+                    <CustomFieldInput
+                      def={d}
+                      id={`edit-cf-${d.id}`}
+                      bind:value={eFields[d.name]} />
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <div class="mt-2 flex items-center gap-2">
+            <button
+              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
+              disabled={saving}
+              onclick={saveEdit}>{saving ? "Saving…" : "Save changes"}</button>
+            <button
+              class="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+              disabled={saving}
+              onclick={() => { editError = ""; active = "card"; }}>Cancel</button>
+            <span class="text-xs text-slate-500">Search results update shortly after saving.</span>
+          </div>
+        </div>
       {:else}
         {@const Card = CardComponent}
         <Card {item} />

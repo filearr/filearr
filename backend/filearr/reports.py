@@ -157,6 +157,13 @@ class ReportParams:
 
     library_id: uuid.UUID | None = None
     limit: int = 1000
+    #: IN-T2 (2026-08-13) — ONE generic numeric slot for reports that declare
+    #: ``supports_threshold``. Deliberately generic rather than a per-report
+    #: field: canned reports take *light* params by design (module docstring), and
+    #: a single validated int (1..36500 at the API layer, see
+    #: ``api.reports._check_common``) cannot be shaped into a malformed filter.
+    #: ``None`` => the report's ``default_threshold_days``.
+    threshold_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +190,43 @@ class CannedReport:
     #: ``search_hash`` — aggregate hash group -> ``#/search?hash=<hash>``;
     #: ``none`` — no interaction.
     row_link: str = "none"
+    #: IN-T2 (2026-08-13) — this report reads ``ReportParams.threshold_days``. The
+    #: UI renders a numeric input ONLY for reports that declare it (the flag is
+    #: surfaced in :meth:`meta`), so no other report grows a stray control.
+    supports_threshold: bool = False
+    #: Human label for that input (e.g. "Not modified in the last (days)").
+    threshold_label: str = ""
+    #: Value used when the caller passes no ``threshold_days``.
+    default_threshold_days: int = 0
+    #: IN-T1 (2026-08-13) — OPTIONAL builder that folds the RBAC scope predicate
+    #: INTO the statement instead of having the caller ``.where()`` it on afterwards.
+    #:
+    #: Rationale (this is a correctness *and* a security constraint, not a style
+    #: choice): a report whose top-level statement selects from a SUBQUERY — which
+    #: ``duplicate_files_detail`` must, because a window function is illegal in
+    #: ``WHERE`` — cannot accept an outer ``.where(Item.path_scope ...)``. Item is
+    #: not in that statement's FROM list, so SQLAlchemy would auto-add ``items``
+    #: and produce a CARTESIAN PRODUCT: wrong rows AND a silently ineffective
+    #: scope filter. Such a report supplies ``scoped_build`` and pushes the clause
+    #: down to the inner per-item select, which also preserves the documented
+    #: guarantee that a denied item never *contributes to a group* (its copy count
+    #: must not leak through an aggregate either — see
+    #: :func:`stream_report_rows`).
+    scoped_build: Callable[[ReportParams, Any], Select] | None = None
+
+    def statement(self, params: ReportParams, scope_clause=None) -> Select:
+        """The runnable statement for ``params``, scope predicate already applied.
+
+        The ONE place that knows whether a report scopes via ``scoped_build``
+        (pushed down) or via a plain outer ``.where()``. Every execution path
+        (JSON page, streaming export, background export, LLM tool) goes through
+        here so none of them can accidentally skip the push-down."""
+        if self.scoped_build is not None:
+            return self.scoped_build(params, scope_clause)
+        stmt = self.build(params)
+        if scope_clause is not None:
+            stmt = stmt.where(scope_clause)
+        return stmt
 
     def meta(self) -> dict:
         """Registry-listing shape (no query executed)."""
@@ -195,6 +239,11 @@ class CannedReport:
             "is_capped": self.is_capped,
             "default_limit": self.default_limit,
             "row_link": self.row_link,
+            # IN-T2: the UI renders the threshold input off these three (and only
+            # for reports where supports_threshold is true).
+            "supports_threshold": self.supports_threshold,
+            "threshold_label": self.threshold_label,
+            "default_threshold_days": self.default_threshold_days,
         }
 
 
@@ -487,6 +536,192 @@ def _row_duplicates(r: Any) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 6b. duplicate_files_detail — ONE ROW PER COPY (IN-T1, 2026-08-13)            #
+# --------------------------------------------------------------------------- #
+# WHY this exists alongside the aggregate ``duplicate_files``: that report's
+# ``paths`` column is a single ``string_agg`` blob with no ``item_id`` and no
+# path translation, so a script cannot act on it safely — it cannot tell which
+# physical file on which machine each entry is, and it cannot re-verify anything
+# before touching bytes. Phase-11 research §11 Q6 flagged the aggregate as an
+# INTERIM shape "awaiting per-copy convergence"; this is that convergence. The
+# summary report stays untouched (it is the cheap "how much is wasted" view).
+#
+# Filearr still never acts on media (governing principle: insight, not
+# management). This report + its exports are the input to the operator's OWN
+# script on the operator's OWN machine — see docs-site/reports.md.
+#
+# The two derived group columns are computed with WINDOW functions over the same
+# base predicate as the aggregate, NOT with a self-join or a second pass:
+#   * ``copies_in_group`` = COUNT(*) OVER (PARTITION BY dup_key)  -> the >1 filter
+#   * ``group_rank``      = ROW_NUMBER() OVER (PARTITION BY dup_key
+#                                             ORDER BY mtime DESC, item_id) - 1
+# A window function is ILLEGAL in WHERE, so the whole thing is wrapped in a
+# subquery and filtered outside — which is exactly why this report carries a
+# ``scoped_build`` (see CannedReport.scoped_build for the cartesian-product trap).
+def _dup_key_expr():
+    """The grouping key, IDENTICAL to ``_build_duplicates`` (one definition of
+    "same file" across the summary and the per-copy view — divergence here would
+    mean the two reports disagree about what a duplicate is)."""
+    return func.coalesce(
+        Item.content_hash,
+        Item.quick_hash.concat(literal(":")).concat(cast(Item.size, Text)),
+    )
+
+
+def _build_duplicates_detail(params: ReportParams, scope_clause=None) -> Select:
+    dup_key = _dup_key_expr()
+    part = dup_key  # PARTITION BY expression, reused by every window below
+    # mtime DESC ranks the NEWEST copy 0. ``Item.id`` is the deterministic
+    # tie-break: uuidv7 PKs are unique, so two copies sharing a byte-identical
+    # mtime (common — a cp -p / rsync -a duplicate keeps the timestamp) still
+    # rank stably ACROSS RE-RUNS. Without it Postgres is free to return a
+    # different winner each run and a script's "keep" file would drift.
+    rank = (
+        func.row_number().over(partition_by=part, order_by=(Item.mtime.desc(), Item.id.asc()))
+        - 1
+    ).label("group_rank")
+    copies = func.count().over(partition_by=part).label("copies_in_group")
+    # Group-level wasted bytes (all copies but the largest), used ONLY for
+    # ordering — the biggest win streams first, so a capped/limited export is
+    # still the rows an operator most wants, and whole groups stay adjacent.
+    wasted = (
+        func.sum(Item.size).over(partition_by=part)
+        - func.max(Item.size).over(partition_by=part)
+    ).label("group_wasted_bytes")
+    # QH-T5 tier, computed as a WINDOW max rather than per row so every row in a
+    # group reports the SAME tier the aggregate report would report for it (a
+    # mixed group — content_hash on one row, a colliding quick:size key on
+    # another — must not hand a script two different confidence answers).
+    tier = case(
+        (func.max(Item.content_hash).over(partition_by=part).isnot(None), literal("content_hash")),
+        else_=literal("quick_hash"),
+    ).label("hash_tier")
+    inner = (
+        select(
+            Item.id.label("item_id"),
+            Item.rel_path,
+            Item.path,
+            Library.name.label("library"),
+            Library.native_prefix.label("native_prefix"),
+            Library.share_prefix.label("share_prefix"),
+            Item.size,
+            Item.mtime,
+            Item.content_hash,
+            Item.quick_hash,
+            dup_key.label("group_key"),
+            rank,
+            copies,
+            wasted,
+            tier,
+        )
+        .join(Library, Item.library_id == Library.id)
+        # Same predicate as the aggregate, including the QH-T5 size>0 exclusion
+        # (every empty file trivially shares a hash — the live 3,711-copy cluster).
+        .where(
+            _ACTIVE,
+            Item.size > 0,
+            or_(Item.content_hash.isnot(None), Item.quick_hash.isnot(None)),
+        )
+    )
+    inner = _apply_library(inner, params)
+    # RBAC pushed DOWN into the per-item select: a denied item must neither appear
+    # nor inflate copies_in_group / group_rank for the rows that do appear.
+    if scope_clause is not None:
+        inner = inner.where(scope_clause)
+    sub = inner.subquery("dups")
+    return (
+        select(sub)
+        .where(sub.c.copies_in_group > 1)
+        .order_by(
+            sub.c.group_wasted_bytes.desc(),
+            sub.c.group_key.asc(),
+            sub.c.group_rank.asc(),
+        )
+    )
+
+
+def _build_duplicates_detail_plain(params: ReportParams) -> Select:
+    """``build`` shim (the registry's mandatory unscoped entry point). Every
+    execution path goes through :meth:`CannedReport.statement`, which prefers
+    ``scoped_build``; this exists for callers that legitimately have no scope
+    predicate (auth-off / admin / API key) and for ``EXPLAIN``-style use."""
+    return _build_duplicates_detail(params, None)
+
+
+def _row_duplicates_detail(r: Any) -> dict:
+    return {
+        "item_id": str(r.item_id),
+        "group_key": r.group_key,
+        "group_rank": int(r.group_rank),
+        "copies_in_group": int(r.copies_in_group),
+        "hash_tier": r.hash_tier,
+        # DATA, NOT A DECISION. "newest mtime wins" is one reasonable default and
+        # nothing more; the docs say so plainly and the example scripts filter on
+        # ``keep_hint == "candidate"``, never delete a "keep" row, and re-verify
+        # size/mtime against the live file before touching anything.
+        "keep_hint": "keep" if int(r.group_rank) == 0 else "candidate",
+        "rel_path": r.rel_path,
+        "library": r.library,
+        "size": int(r.size),
+        "mtime": r.mtime.isoformat() if r.mtime is not None else None,
+        "content_hash": r.content_hash,
+        "quick_hash": r.quick_hash,
+        **_path_context(r),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 6c. stale_files — mtime older than a PARAMETERIZED threshold (IN-T2)        #
+# --------------------------------------------------------------------------- #
+#: ``stale_files`` default window: two years. Chosen as "old enough that nobody
+#: argues" rather than tuned — the whole point is that the operator sets it.
+STALE_DEFAULT_DAYS = 730
+
+
+def _build_stale(params: ReportParams) -> Select:
+    days = STALE_DEFAULT_DAYS if params.threshold_days is None else int(params.threshold_days)
+    # make_interval(years, months, weeks, days) keeps ``days`` a BIND PARAMETER —
+    # no interval string is ever concatenated from caller input. (The API also
+    # validates 1..36500 before we get here; this is the second lock.)
+    cutoff = func.now() - func.make_interval(0, 0, 0, days)
+    # Floor-days since mtime, computed in SQL so it stays correct for a streaming
+    # export (no per-row Python clock drift across a 20-minute 750k-row dump).
+    age_days = func.floor(
+        func.extract("epoch", func.now() - Item.mtime) / 86400.0
+    ).label("age_days")
+    stmt = (
+        select(
+            Item.id.label("item_id"),
+            Item.rel_path,
+            Item.path,
+            Library.name.label("library"),
+            Library.native_prefix.label("native_prefix"),
+            Library.share_prefix.label("share_prefix"),
+            Item.mtime,
+            age_days,
+            Item.size,
+        )
+        .join(Library, Item.library_id == Library.id)
+        .where(_ACTIVE, Item.mtime < cutoff)
+        # Oldest first: the operator wants the far tail, not the boundary cases.
+        .order_by(Item.mtime.asc(), Item.rel_path.asc())
+    )
+    return _apply_library(stmt, params)
+
+
+def _row_stale(r: Any) -> dict:
+    return {
+        "item_id": str(r.item_id),
+        "rel_path": r.rel_path,
+        "library": r.library,
+        "mtime": r.mtime.isoformat() if r.mtime is not None else None,
+        "age_days": int(r.age_days or 0),
+        "size": int(r.size),
+        **_path_context(r),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 7. largest_folders — du-style recursive folder totals (capped)              #
 # --------------------------------------------------------------------------- #
 def _build_largest_folders(params: ReportParams) -> Select:
@@ -643,6 +878,73 @@ _REPORTS: tuple[CannedReport, ...] = (
         row_link="search_hash",
     ),
     CannedReport(
+        id="duplicate_files_detail",
+        title="Duplicate copies",
+        description=(
+            "ONE ROW PER COPY of every duplicate group (the actionable companion "
+            "to 'Duplicate files', which is one aggregated row per group). Each "
+            "row carries its own item, full path context, size, mtime and hashes, "
+            "plus group_rank (0 = newest copy by mtime, ties broken by item id so "
+            "re-runs are stable) and keep_hint ('keep' for rank 0, else "
+            "'candidate'). keep_hint is DATA, not a decision — 'newest mtime' is "
+            "just one reasonable default; scripts filter on it. Groups stream "
+            "biggest-waste-first and stay contiguous. A 'quick_hash' tier group is "
+            "a SAMPLED signal, NOT byte-verified — verify before deleting. "
+            "Filearr never touches the files: export this and act with your own "
+            "script (docs: Reports & exports)."
+        ),
+        columns=(
+            "group_key",
+            "group_rank",
+            "copies_in_group",
+            "hash_tier",
+            "keep_hint",
+            "rel_path",
+            "library",
+            "size",
+            "mtime",
+            "content_hash",
+            "quick_hash",
+            *PATH_CONTEXT_COLUMNS,
+        ),
+        build=_build_duplicates_detail_plain,
+        scoped_build=_build_duplicates_detail,
+        row=_row_duplicates_detail,
+        supports_library=True,
+        # NOT capped: a limited export must still be usable, and it is — the
+        # ordering keeps whole groups adjacent, biggest waste first.
+        row_link="item",
+    ),
+    CannedReport(
+        id="stale_files",
+        title="Not modified in years",
+        description=(
+            "Files whose LAST-MODIFIED time is older than the chosen threshold "
+            "(default 730 days), oldest first, with the age in whole days. "
+            "IMPORTANT: this is modification age, not access age — Filearr does "
+            "not capture filesystem access times at all (and atime is unreliable "
+            "or disabled outright on most mounts, including every noatime and "
+            "network mount), so 'untouched' here means 'unmodified', never "
+            "'unread'. A file you watch weekly and never edit is stale by this "
+            "definition."
+        ),
+        columns=(
+            "rel_path",
+            "library",
+            "mtime",
+            "age_days",
+            "size",
+            *PATH_CONTEXT_COLUMNS,
+        ),
+        build=_build_stale,
+        row=_row_stale,
+        supports_library=True,
+        row_link="item",
+        supports_threshold=True,
+        threshold_label="Not modified in the last (days)",
+        default_threshold_days=STALE_DEFAULT_DAYS,
+    ),
+    CannedReport(
         id="largest_folders",
         title="Largest folders",
         description=(
@@ -690,10 +992,10 @@ async def stream_report_rows(
     ``scope_clause`` (P6-T4) is an optional RBAC ``WHERE`` predicate over
     ``items.path_scope``: a scoped principal's report/export never surfaces a row
     they cannot read. It is applied BEFORE any grouping/limit, so a denied item
-    neither appears nor contributes to an aggregate (e.g. a duplicate group)."""
-    stmt = report.build(params)
-    if scope_clause is not None:
-        stmt = stmt.where(scope_clause)
+    neither appears nor contributes to an aggregate (e.g. a duplicate group) —
+    :meth:`CannedReport.statement` handles both the plain outer-``where`` case and
+    the pushed-down ``scoped_build`` case (IN-T1)."""
+    stmt = report.statement(params, scope_clause)
     if report.is_capped:
         stmt = stmt.limit(params.limit)
     result = await session.stream(stmt.execution_options(yield_per=YIELD_PER))

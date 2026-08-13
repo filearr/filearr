@@ -55,6 +55,7 @@ async def enqueue_export(
     fmt: str,
     library_id: uuid.UUID | None = None,
     limit: int | None = None,
+    threshold_days: int | None = None,
     triggered_by: str = "manual",
 ) -> ReportExport:
     """Create a queued ``report_exports`` row + defer its job. The caller's RBAC
@@ -92,6 +93,10 @@ async def enqueue_export(
         params["library_id"] = str(library_id)
     if limit is not None:
         params["limit"] = int(limit)
+    if threshold_days is not None:
+        # IN-T2: rebuilt by filearr.exports._resolve_report. Already bounds-checked
+        # by the caller (api.reports._check_threshold) — stored, never re-derived.
+        params["threshold_days"] = int(threshold_days)
     snap = ctx.scope_snapshot()
     if snap is not None:
         params["scope"] = snap

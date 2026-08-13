@@ -97,11 +97,20 @@ async def _resolve_report(
     lib = params_json.get("library_id")
     library_id = uuid.UUID(lib) if lib else None
     limit = int(params_json.get("limit") or 1000)
+    # IN-T2 (2026-08-13): threshold_days must survive the enqueue -> job hop, or a
+    # background export of `stale_files` would silently run at the report DEFAULT
+    # while the UI showed the operator the number they typed. Validated at the API
+    # layer (1..36500) before it is ever written to export.params; ``None`` here
+    # means "use the report default", exactly as on the sync path.
+    thr = params_json.get("threshold_days")
+    threshold_days = int(thr) if thr is not None else None
     if export.canned_report_key is not None:
         report = get_report(export.canned_report_key)
         if report is None:
             raise ValueError(f"unknown canned report {export.canned_report_key!r}")
-        return report, ReportParams(library_id=library_id, limit=limit)
+        return report, ReportParams(
+            library_id=library_id, limit=limit, threshold_days=threshold_days
+        )
     from filearr.custom_fields import def_from_model
     from filearr.custom_reports import build_custom_report
     from filearr.models import CustomField, ReportDefinition

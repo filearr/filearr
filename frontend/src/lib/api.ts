@@ -142,9 +142,52 @@ export function search(
   return request(`/search?${qs}`, { signal });
 }
 
-export function patchItem(id: string, patch: Record<string, unknown>) {
-  return request(`/items/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+/** Single-item metadata edit (IN-T4). Absent key = untouched, explicit ``null``
+ *  = clear — including key-by-key inside ``user_metadata``. Returns the item
+ *  through the same GPS-gated projection as GET, so the caller can render the
+ *  result without a second fetch. */
+export function patchItem(id: string, patch: ItemPatchBody) {
+  return request<ItemRecord>(`/items/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
+
+// ---- IN-T4 bulk metadata edit -----------------------------------------------
+/** One item's patch on the wire. ABSENT key = untouched, explicit ``null`` =
+ *  clear (both for the scalar columns and, key-by-key, inside user_metadata).
+ *  ``tags`` REPLACES the whole list — the add/remove arithmetic is done per item
+ *  on the client (see ./bulkEdit.ts) precisely because of that. */
+export interface ItemPatchBody {
+  title?: string | null;
+  year?: number | null;
+  tags?: string[];
+  user_metadata?: Record<string, unknown>;
+  external_ids?: Record<string, unknown>;
+}
+
+/** ``POST /items/batch`` response: one result per requested id. ``"ok"`` on
+ *  success; a string ``"error: …"`` for per-item RBAC/lookup failures; a
+ *  structured object for a custom-field validation rejection. The caller MUST
+ *  surface the failures — see summarizeResults() in ./bulkEdit.ts. */
+export type BatchItemResult =
+  | "ok"
+  | string
+  | { error: string; detail: unknown[] };
+
+export interface BatchPatchResponse {
+  results: Record<string, BatchItemResult>;
+}
+
+/** Apply a DIFFERENT patch to each of up to 500 items in one request.
+ *  Callers chunk at ``BATCH_CHUNK`` (500) — the server rejects a larger map with
+ *  a 413, so chunking is the contract, not an optimisation. Partial failure is
+ *  normal and is reported per item, never as a request-level error. */
+export const batchPatchItems = (patches: Record<string, ItemPatchBody>) =>
+  request<BatchPatchResponse>("/items/batch", {
+    method: "POST",
+    body: JSON.stringify(patches),
+  });
 
 /** A full single-item record: every stored column, with ``metadata`` and
  *  ``user_metadata`` returned as separate unmerged objects. Backs the Raw tab. */
@@ -1832,6 +1875,13 @@ export interface ReportMeta {
   default_limit: number;
   /** How the UI makes a row interactive (P11 polish). */
   row_link: RowLink;
+  // IN-T2: one generic numeric parameter slot. A report DECLARES that it takes
+  // a day threshold (``stale_files`` does; ``bad_mtime``'s 48h stays hardcoded),
+  // and the UI renders the input only for those — no per-report special-casing
+  // in the page. Older backends omit these keys, hence the optional types.
+  supports_threshold?: boolean;
+  threshold_label?: string;
+  default_threshold_days?: number;
 }
 
 /** The streaming machine-readable export formats (JSON stays the paginated
@@ -1853,21 +1903,70 @@ export interface ReportPage {
 export const listReports = () =>
   request<{ reports: ReportMeta[] }>("/reports").then((r) => r.reports);
 
+/** The parameters every report-running path accepts. ``thresholdDays`` (IN-T2)
+ *  is only meaningful for a report whose meta declares ``supports_threshold``;
+ *  it is dropped from the query when absent, so nothing changes for the rest. */
+export interface ReportRunOpts {
+  limit?: number;
+  offset?: number;
+  libraryId?: string;
+  thresholdDays?: number;
+}
+
 /** Build the query string shared by the JSON-page and CSV-download paths. */
-function reportQuery(opts: { limit?: number; offset?: number; libraryId?: string }): string {
+function reportQuery(opts: ReportRunOpts): string {
   const qs = new URLSearchParams();
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   if (opts.offset != null) qs.set("offset", String(opts.offset));
   if (opts.libraryId) qs.set("library_id", opts.libraryId);
+  if (opts.thresholdDays != null) qs.set("threshold_days", String(opts.thresholdDays));
   const s = qs.toString();
   return s ? `?${s}` : "";
 }
 
 /** Run a canned report and return one JSON page. */
-export const runReport = (
-  id: string,
-  opts: { limit?: number; offset?: number; libraryId?: string } = {},
-) => request<ReportPage>(`/reports/${id}${reportQuery(opts)}`);
+export const runReport = (id: string, opts: ReportRunOpts = {}) =>
+  request<ReportPage>(`/reports/${id}${reportQuery(opts)}`);
+
+// ---- IN-T3 folder tree (treemap drill-down) ---------------------------------
+/** One direct child of the requested folder. ``name`` is the single path segment
+ *  (or the reserved ``"."`` bucket for files sitting DIRECTLY in the parent);
+ *  ``folder`` is the full rel-path of that child. */
+export interface FolderTreeChild {
+  name: string;
+  folder: string;
+  library_id: string;
+  library: string;
+  file_count: number;
+  total_bytes: number;
+  /** Whether anything lives deeper than one segment below — drives whether the
+   *  cell offers a drill affordance at all. */
+  has_children: boolean;
+}
+
+export interface FolderTreeResponse {
+  parent: string;
+  library_id: string | null;
+  children: FolderTreeChild[];
+  /** More children exist than ``limit`` returned (largest-first, so the tail is
+   *  the small stuff). The UI says so rather than implying a complete picture. */
+  truncated: boolean;
+}
+
+/** ``GET /reports/folder-tree`` — the direct children of one folder, ONE level
+ *  at a time. Deliberately not a canned report: a treemap drills, and each drill
+ *  is a small independent query. With no ``libraryId`` the root level returns one
+ *  child per LIBRARY; every deeper call pins the library from the child row. */
+export const folderTree = (
+  opts: { libraryId?: string; parent?: string; limit?: number } = {},
+) => {
+  const qs = new URLSearchParams();
+  if (opts.libraryId) qs.set("library_id", opts.libraryId);
+  if (opts.parent) qs.set("parent", opts.parent);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const s = qs.toString();
+  return request<FolderTreeResponse>(`/reports/folder-tree${s ? `?${s}` : ""}`);
+};
 
 /** Save a streamed fetch Response body to a download file. Central because a
  *  bare <a download> link can't carry the Bearer auth header, so every export
@@ -1894,7 +1993,7 @@ function stampToday(): string {
 export async function downloadReport(
   id: string,
   format: ExportFormat,
-  opts: { limit?: number; libraryId?: string } = {},
+  opts: ReportRunOpts = {},
 ): Promise<void> {
   const q = reportQuery({ ...opts, offset: undefined });
   const sep = q ? "&" : "?";
@@ -1927,15 +2026,18 @@ export interface ReportExport {
   downloadable: boolean;
 }
 
-/** Queue a background export of a canned report. */
+/** Queue a background export of a canned report. ``thresholdDays`` rides through
+ *  ``export.params`` so a scheduled/background run reproduces exactly what the
+ *  operator saw on screen (IN-T2). */
 export const enqueueReportExport = (
   id: string,
   format: ExportFormat,
-  opts: { limit?: number; libraryId?: string } = {},
+  opts: ReportRunOpts = {},
 ) => {
   const qs = new URLSearchParams({ format });
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   if (opts.libraryId) qs.set("library_id", opts.libraryId);
+  if (opts.thresholdDays != null) qs.set("threshold_days", String(opts.thresholdDays));
   return request<ReportExport>(`/reports/${id}/export?${qs.toString()}`, {
     method: "POST",
   });

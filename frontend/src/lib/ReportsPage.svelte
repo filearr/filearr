@@ -4,6 +4,7 @@
   import ExportsPanel from "./ExportsPanel.svelte";
   import ReportSchedulesPanel from "./ReportSchedulesPanel.svelte";
   import ItemDetail from "./ItemDetail.svelte";
+  import FolderTreemap from "./FolderTreemap.svelte";
   import { encodeSearchHash } from "./searchparams";
   import { gotoBrowse } from "./routes";
   import {
@@ -40,6 +41,24 @@
   let showAllColumns = $state(false);
   let detailId = $state<string | null>(null); // open ItemDetail id
   let queued = $state(""); // background-export queued notice
+
+  // IN-T3: `largest_folders` gains a treemap MODE. Deliberately a mode of this
+  // page, not a separate page or a forked component tree — the report selector,
+  // library filter and export dropdown all still apply, and the canned report
+  // (and every export of it) is completely unchanged. The treemap drives its own
+  // hierarchical endpoint because the flat top-N report cannot express nesting.
+  const TREEMAP_REPORT = "largest_folders";
+  let viewMode = $state<"table" | "treemap">("table");
+  const treemapAvailable = $derived(selected?.id === TREEMAP_REPORT);
+  const showTreemap = $derived(treemapAvailable && viewMode === "treemap");
+
+  // IN-T2: one generic numeric parameter, rendered ONLY for reports whose meta
+  // declares `supports_threshold`. No per-report special-casing here — a future
+  // report that declares it gets the input for free.
+  let thresholdDays = $state(0);
+  const thresholdParam = $derived(
+    selected?.supports_threshold && thresholdDays > 0 ? thresholdDays : undefined,
+  );
 
   const pageSize = $derived(selected ? selected.default_limit : 100);
 
@@ -119,6 +138,12 @@
     selected = r;
     offset = 0;
     showAllColumns = false;
+    // Every report starts in the table: the treemap is an opt-in lens, and
+    // landing in it would hide the columns the report actually documents.
+    viewMode = "table";
+    // Seed the threshold from the report's own declared default (730 days for
+    // `stale_files`) so the first run matches what the description promises.
+    thresholdDays = r.default_threshold_days ?? 0;
     if (!r.supports_library) library = "";
     await load();
   }
@@ -132,6 +157,7 @@
         limit: pageSize,
         offset,
         libraryId: selected.supports_library ? library || undefined : undefined,
+        thresholdDays: thresholdParam,
       });
     } catch (e) {
       error = String(e);
@@ -161,6 +187,7 @@
       await downloadReport(selected.id, format, {
         limit: pageSize,
         libraryId: selected.supports_library ? library || undefined : undefined,
+        thresholdDays: thresholdParam,
       });
     } catch (e) {
       error = String(e);
@@ -177,6 +204,7 @@
     try {
       await enqueueReportExport(selected.id, format, {
         libraryId: selected.supports_library ? library || undefined : undefined,
+        thresholdDays: thresholdParam,
       });
       queued = `Queued a background ${format.toUpperCase()} export — see the Exports panel below.`;
     } catch (e) {
@@ -242,11 +270,48 @@
             {/each}
           </select>
         {/if}
-        {#if hasWideColumns}
+        {#if selected.supports_threshold}
+          <!-- IN-T2 threshold. Rendered off the report's own metadata, with the
+               report's own label ("Not modified in the last N days") — the page
+               knows nothing about which report this is. -->
+          <label class="inline-flex items-center gap-1.5 text-xs text-slate-500">
+            {selected.threshold_label || "Threshold (days)"}
+            <input
+              type="number"
+              class="w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+              min="1"
+              max="36500"
+              step="1"
+              bind:value={thresholdDays}
+              onchange={() => { offset = 0; load(); }} />
+          </label>
+        {/if}
+        {#if hasWideColumns && !showTreemap}
           <label class="inline-flex items-center gap-1.5 text-xs text-slate-500">
             <input type="checkbox" bind:checked={showAllColumns} />
             Show path columns
           </label>
+        {/if}
+        {#if treemapAvailable}
+          <!-- IN-T3 table/treemap toggle. Same chip-group convention as the
+               Search page's list/grid/map switch. -->
+          <div
+            class="flex items-center overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+            role="group"
+            aria-label="Folder view">
+            <button
+              type="button"
+              class="px-3 py-1 text-sm {viewMode === 'table' ? 'bg-[var(--accent)] text-white' : ''}"
+              aria-pressed={viewMode === "table"}
+              title="The canned report: a flat top-N of the largest folders across every depth"
+              onclick={() => (viewMode = "table")}>Table</button>
+            <button
+              type="button"
+              class="px-3 py-1 text-sm {viewMode === 'treemap' ? 'bg-[var(--accent)] text-white' : ''}"
+              aria-pressed={viewMode === "treemap"}
+              title="A drill-down map: one level at a time, cell area proportional to folder size"
+              onclick={() => (viewMode = "treemap")}>Treemap</button>
+          </div>
         {/if}
         <div class="grow"></div>
         <!-- Download dropdown: CSV / NDJSON / XML streaming exports -->
@@ -280,17 +345,30 @@
         </div>
       </div>
 
-      {#if selected.id === "duplicate_files"}
+      {#if selected.id === "duplicate_files" || selected.id === "duplicate_files_detail"}
+        <!-- The same amber caveat covers the per-COPY report (IN-T1): hash_tier
+             rides every row there, and an operator about to feed the export to a
+             delete script needs the sampled-vs-verified distinction in front of
+             them, not only in the docs. -->
         <p class="mb-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
           A <code>quick_hash</code> tier is a <strong>sampled signal, not
           byte-verified</strong> — groups keyed on a partial (head+tail) hash may
           include files that merely share those windows. A <code>content_hash</code>
           tier is a full-hash-confirmed exact duplicate. Zero-byte files are
           excluded.
+          {#if selected.id === "duplicate_files_detail"}
+            <strong>keep_hint</strong> is DATA, not a decision: rank 0 is simply the
+            newest copy in its group. Filearr never touches your files — export the
+            rows and let your own script act.
+          {/if}
         </p>
       {/if}
 
-      {#if loading}
+      {#if showTreemap}
+        <!-- Treemap mode replaces the table only; the report selector, library
+             filter and exports above stay exactly as they were. -->
+        <FolderTreemap libraryId={selected.supports_library ? library : ""} />
+      {:else if loading}
         <p class="text-sm text-slate-500">Running…</p>
       {:else if page}
         <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">

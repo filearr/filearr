@@ -218,7 +218,11 @@ async def _mk_item(
 # --------------------------------------------------------------------------- #
 # Registry + validation                                                       #
 # --------------------------------------------------------------------------- #
-async def test_registry_lists_all_seven(api):
+async def test_registry_lists_every_canned_report(api):
+    """The registry is an exact set, not a superset — a report added without a
+    deliberate decision (and without docs/UI wiring) fails here. Grew from seven
+    to nine on 2026-08-13 with IN-T1 ``duplicate_files_detail`` and IN-T2
+    ``stale_files``; their behaviour is covered in test_insight_features_in.py."""
     client, _ = api
     r = await client.get("/api/v1/reports")
     assert r.status_code == 200
@@ -230,7 +234,9 @@ async def test_registry_lists_all_seven(api):
         "largest_files",
         "low_quality_video",
         "duplicate_files",
+        "duplicate_files_detail",
         "largest_folders",
+        "stale_files",
     }
 
 

@@ -530,7 +530,16 @@ Remaining, non-trivial:
   Two bounded limitations remain, both by design and neither a defect:
   (a) files LARGER than 128 KiB are still head+tail sampled, so a genuinely
   ambiguous pair needs `content_hash` or `mid_hash` to separate — the report's
-  `hash_tier` column says which tier grouped a cluster; (b) **CLOSED 2026-08-12
+  `hash_tier` column says which tier grouped a cluster. **Hardened 2026-08-13
+  (IN-T1):** `hash_tier` now also rides EVERY row of the new per-copy
+  `duplicate_files_detail` report (computed as a window max, so all rows of a
+  group report the same tier the aggregate does), and the documented cleanup
+  scripts in docs-site `reports.md` **skip `quick_hash`-tier groups by default** —
+  a sampled signal is a candidate for verification, never an input to `rm`.
+  Opt-in `--allow-quick-hash`, or `--verify-hash` which re-hashes the keeper and
+  the candidate with `xxhsum -H2` and compares them to EACH OTHER (never to a
+  stored digest, so it is immune to how we happen to store hashes today);
+  (b) **CLOSED 2026-08-12
   (QH-T6)** — agent-owned libraries were excluded from central's sweep (central
   cannot open those files, and `agentsync.apply_batch` never writes
   `policy_version` for agent rows, so no central query can even identify a stale
@@ -917,3 +926,71 @@ Caveat recorded honestly: the web half of the assessment (NVDEC one-shot
 numbers, PaddleOCR status) is reasoned rather than freshly source-verified;
 the codebase half is first-hand. The verdict's load-bearing argument — no
 live bottleneck exists for a GPU to relieve — rests on the codebase half.
+
+## 25. Insight features — duplicates-as-action, staleness, treemap, bulk edit (IN-T1..T4, 2026-08-13)
+
+Design: `archive/docs/design-insight-features.md` (approved 2026-08-13; built by
+two parallel agents, A = backend + docs, B = frontend). The governing principle
+is the user's own framing, and it is worth restating because it decides every
+open question in this area:
+
+> "This project is not for management of the files, but providing insight."
+
+Filearr never acts on media. So the answer to "the duplicates report is not
+actionable" is **not** a delete button — it is a per-copy export plus documented,
+native-tool scripts the operator runs themselves.
+
+- **IN-T1 — `duplicate_files_detail` (SHIPPED).** One row per COPY alongside the
+  untouched aggregate `duplicate_files`. Window query over the same base
+  predicate: `COUNT(*) OVER (PARTITION BY dup_key) > 1`, `group_rank` =
+  `ROW_NUMBER()` by (mtime DESC, item_id) minus one, `keep_hint` = keep/candidate.
+  The item_id tie-break is load-bearing: without it Postgres may reorder freely
+  and a nightly script would delete a different copy each run. Ordered
+  wasted-bytes DESC then group, so a truncated export is still whole-groups-first.
+  Because a window function is illegal in `WHERE`, the statement selects from a
+  subquery — which is why `CannedReport` gained `scoped_build` + `statement()`:
+  an outer `.where(Item.path_scope ...)` on such a statement would re-add `items`
+  to the FROM list and CARTESIAN-JOIN, i.e. wrong rows *and* a silently
+  ineffective ACL. Any future subquery-topped report must use the same hook.
+  This closes the Phase-11 research §11 Q6 tension (the aggregate was explicitly
+  an interim shape "awaiting per-copy convergence"); §16's `hash_tier` caveat is
+  carried onto every per-copy row.
+- **IN-T2 — `stale_files` + a parameterized threshold (SHIPPED).**
+  `ReportParams.threshold_days` (ONE generic numeric slot, validated 1..36500 at
+  the API layer — 0 would mean "every file" and a negative would invert into
+  `bad_mtime`'s query) plus `CannedReport.supports_threshold` /
+  `threshold_label` / `default_threshold_days` surfaced in `meta()` so the UI
+  renders the input for exactly the reports that declare it. Threaded through
+  `export.params` in BOTH directions, because a queued export silently running at
+  the default while the UI showed the operator their number is the failure mode.
+  **Honesty requirement, restated in the description, the UI and the docs:** this
+  is LAST-MODIFIED age. No atime is captured anywhere and none will be inferred —
+  `noatime` is the norm and network mounts are worse, so an access-based
+  "untouched" report would be confidently wrong.
+- **IN-T3 — `GET /reports/folder-tree` (backend SHIPPED).** Deliberately not a
+  canned report: `largest_folders` is a flat global top-N across all depths and
+  cannot drive a treemap (a du-style recursive list double-counts every
+  ancestor). Returns the direct children of one parent, one level, ordered bytes
+  DESC, with a reserved `"."` files-here child, a `has_children` drill
+  affordance, and an all-libraries root mode (library-sized rectangles).
+  `has_children` is a single-pass `bool_or` over a deeper-separator probe rather
+  than N per-child `EXISTS` round-trips.
+- **IN-T4 — batch-edit hardening (SHIPPED).** `POST /items/batch` gained the
+  single PATCH's null-pops-key semantics (it previously wrote a literal JSON
+  `null`, so a bulk "clear this field" would have poisoned every row it touched
+  and fed the null into the Meili projection and every export) and a 500-key
+  request cap returning 413. Bulk edit is the first surface that makes clearing a
+  field routine, which is why the divergence had to close before it shipped.
+
+Still open in this area (not started, deliberately):
+
+- **Per-level treemap has no category dimension.** Colour is library hash at the
+  root and a size-graded single hue inside a library; category colouring would
+  need a category dimension in the drill query and is deferred until someone
+  actually wants it.
+- **Select-type custom-field membership is not server-enforced** — the bulk-edit
+  UI constrains to the defined options, but the API accepts any value. If that
+  matters, it is a validator change in `custom_fields`, not a UI change.
+- **No "act on it" beyond documentation.** By design, per the principle above.
+  If this is ever revisited, the bar is not "add a delete button" but "explain
+  why a catalog that deletes is still trustworthy when it is wrong".

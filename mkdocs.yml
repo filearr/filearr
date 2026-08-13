@@ -79,6 +79,7 @@ nav:
       - Unraid: deployment/unraid.md
       - Proxmox LXC: deployment/proxmox.md
       - Upgrades & migrations: deployment/upgrades.md
+  - Reports & exports: reports.md
   - Distributed agents: agents.md
   - LLM integration: llm.md
   - Security: security.md

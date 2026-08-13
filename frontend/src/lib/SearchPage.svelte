@@ -5,7 +5,11 @@
   import ItemDetail from "./ItemDetail.svelte";
   import Thumb from "./Thumb.svelte";
   import DslHelp from "./DslHelp.svelte";
+  import BulkEditBar from "./BulkEditBar.svelte";
   import {
+    ApiError,
+    batchPatchItems,
+    getItem,
     search,
     listLibraries,
     listSavedSearches,
@@ -21,7 +25,20 @@
     type Library,
     type SavedSearch,
     type TagSuggestion,
+    type ItemPatchBody,
   } from "./api";
+  import {
+    buildPatches,
+    chunk,
+    mergeSummaries,
+    rangeIndices,
+    summarizeResults,
+    type BulkFailure,
+    type BulkOps,
+    type BulkSummary,
+    type BulkTarget,
+    type FieldTarget,
+  } from "./bulkEdit";
   import { buildDisplayPath } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
@@ -238,6 +255,211 @@
     return segs;
   }
 
+  // ------------------------------------------------------------------------ //
+  // IN-T4 — multi-select + bulk edit.                                         //
+  //                                                                           //
+  // Selection is a Set of item IDs, NOT indices: rows unmount under            //
+  // virtualization and `loadMore()` appends to `hits`, so an index-based        //
+  // selection would drift the moment the user scrolls. IDs survive both, which  //
+  // is why the same Set drives the list and the grid with no translation.       //
+  //                                                                            //
+  // Svelte 5 does not deep-proxy a Set, so every mutation REPLACES it —         //
+  // reassignment is what publishes the change to the template.                 //
+  // ------------------------------------------------------------------------ //
+  let selectedIds = $state<Set<string>>(new Set());
+  // Anchor for shift-click ranges, in the CURRENT result order.
+  let lastToggledIndex = $state(-1);
+  let bulkBusy = $state(false);
+  let bulkError = $state("");
+  // The last batch's per-item outcome. Kept until dismissed or a new query —
+  // a failure list that vanishes with the toast would be worthless.
+  let bulkSummary = $state<BulkSummary | null>(null);
+  let bulkFailuresOpen = $state(false);
+
+  // Only hits still on screen can be selected, so intersecting is safe and keeps
+  // the bulk targets in the result's current order.
+  const selectedHits = $derived(hits.filter((h) => selectedIds.has(hitId(h))));
+  // Category + library per selected item, for the custom-field applicability
+  // intersection in the bulk bar.
+  const bulkTargets = $derived<FieldTarget[]>(
+    selectedHits.map((h) => ({
+      file_category: str(h, "file_category"),
+      library_id: str(h, "library_id"),
+    })),
+  );
+
+  function clearSelection() {
+    selectedIds = new Set();
+    lastToggledIndex = -1;
+  }
+
+  function selectAllLoaded() {
+    selectedIds = new Set(hits.map((h) => hitId(h)).filter(Boolean));
+    lastToggledIndex = hits.length - 1;
+  }
+
+  /** Toggle one row. With ``shift`` the whole range from the last-toggled row is
+   *  forced to the NEW state of the clicked row (standard file-manager
+   *  behaviour: shift-click extends a selection, it does not invert a range). */
+  function toggleSelect(index: number, shift: boolean) {
+    const h = hits[index];
+    if (!h) return;
+    const id = hitId(h);
+    if (!id) return;
+    const next = new Set(selectedIds);
+    const turningOn = !next.has(id);
+    if (shift && lastToggledIndex >= 0 && lastToggledIndex < hits.length) {
+      for (const i of rangeIndices(lastToggledIndex, index)) {
+        const rid = hitId(hits[i]);
+        if (!rid) continue;
+        if (turningOn) next.add(rid);
+        else next.delete(rid);
+      }
+    } else if (turningOn) {
+      next.add(id);
+    } else {
+      next.delete(id);
+    }
+    selectedIds = next;
+    lastToggledIndex = index;
+  }
+
+  /** Narrow the selection to the ids the last batch REJECTED, so the operator can
+   *  fix scope/permissions and re-apply the operations still sitting in the bar. */
+  function selectFailedOnly(failures: BulkFailure[]) {
+    selectedIds = new Set(failures.map((f) => f.id));
+    lastToggledIndex = -1;
+  }
+
+  // Local mirror of AgentsPage/TaxonomyPage's helper: pull FastAPI's ``detail``
+  // out of a 4xx body instead of dumping "<status>: <raw json>" at the user.
+  function errDetail(e: unknown): string {
+    if (e instanceof ApiError) {
+      try {
+        const j = JSON.parse(e.body);
+        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      } catch {
+        /* body not JSON */
+      }
+      return e.body || String(e);
+    }
+    return String(e);
+  }
+
+  /** Resolve each selected item's CURRENT tag list — the input the per-item tag
+   *  arithmetic needs, because `tags` replaces the whole list on the wire.
+   *
+   *  Search hits carry `tags` (it is projected into the Meili doc), so the common
+   *  path costs nothing. A hit that somehow lacks the array is re-fetched rather
+   *  than assumed empty: treating "unknown" as [] would DELETE every tag on that
+   *  item the moment any tag operation ran. An item we cannot resolve is reported
+   *  as a failure and excluded from the batch — never guessed at. */
+  async function resolveTargets(): Promise<{ targets: BulkTarget[]; unresolved: BulkFailure[] }> {
+    const targets: BulkTarget[] = [];
+    const unresolved: BulkFailure[] = [];
+    const needsFetch: Hit[] = [];
+    for (const h of selectedHits) {
+      const raw = h.tags;
+      if (Array.isArray(raw)) {
+        targets.push({
+          id: hitId(h),
+          tags: raw.filter((t): t is string => typeof t === "string"),
+          file_category: str(h, "file_category"),
+          library_id: str(h, "library_id"),
+        });
+      } else {
+        needsFetch.push(h);
+      }
+    }
+    // Bounded concurrency: the same chunking discipline as the submit path, so a
+    // 2,000-item selection cannot open 2,000 sockets.
+    for (const group of chunk(needsFetch, 20)) {
+      const recs = await Promise.all(
+        group.map((h) => getItem(hitId(h)).catch(() => null)),
+      );
+      recs.forEach((rec, i) => {
+        const h = group[i];
+        if (!rec) {
+          unresolved.push({ id: hitId(h), reason: "could not read this item's current tags" });
+          return;
+        }
+        const raw = rec.tags;
+        targets.push({
+          id: hitId(h),
+          tags: Array.isArray(raw) ? raw.filter((t): t is string => typeof t === "string") : [],
+          file_category: str(h, "file_category"),
+          library_id: str(h, "library_id"),
+        });
+      });
+    }
+    return { targets, unresolved };
+  }
+
+  /** Reflect a successful patch in the rows already on screen.
+   *
+   *  Not a refetch: `defer_index_sync` is asynchronous, so re-running the query
+   *  right now would very likely return the OLD document and look like the edit
+   *  was lost. Patching the loaded hits shows the truth immediately, and the
+   *  toast says the index catches up shortly rather than pretending it already
+   *  has. (user_metadata is not projected into search hits, so only tags/year
+   *  need mirroring here.) */
+  function applyLocally(okIds: string[], patches: Record<string, ItemPatchBody>) {
+    const ok = new Set(okIds);
+    hits = hits.map((h) => {
+      const id = hitId(h);
+      if (!ok.has(id) || !patches[id]) return h;
+      const p = patches[id];
+      const next: Hit = { ...h };
+      if (p.tags) next.tags = p.tags;
+      if ("year" in p) next.year = p.year;
+      return next;
+    });
+  }
+
+  async function applyBulk(ops: BulkOps) {
+    bulkBusy = true;
+    bulkError = "";
+    bulkSummary = null;
+    bulkFailuresOpen = false;
+    try {
+      const { targets, unresolved } = await resolveTargets();
+      const patches = buildPatches(targets, ops);
+      const ids = Object.keys(patches);
+      if (!ids.length && !unresolved.length) {
+        flash("Nothing to change — every selected item already matches.");
+        return;
+      }
+      // Chunked at exactly the server's cap: a request over 500 keys is rejected
+      // with a 413, so chunking is the contract rather than a nicety.
+      const parts: BulkSummary[] = [];
+      for (const group of chunk(ids)) {
+        const body: Record<string, ItemPatchBody> = {};
+        for (const id of group) body[id] = patches[id];
+        const res = await batchPatchItems(body);
+        parts.push(summarizeResults(res.results));
+      }
+      const sum = mergeSummaries(parts);
+      // Items we could not read are failures too — they never reached the batch,
+      // and silently dropping them would misreport the count.
+      sum.failures = [...sum.failures, ...unresolved];
+      bulkSummary = sum;
+      bulkFailuresOpen = sum.failures.length > 0;
+      applyLocally(sum.ok, patches);
+      if (!sum.failures.length) clearSelection();
+      flash(
+        sum.failures.length
+          ? `${sum.ok.length} updated, ${sum.failures.length} failed — search index updates shortly.`
+          : `${sum.ok.length} updated — search index updates shortly.`,
+      );
+    } catch (e) {
+      // A request-level failure (auth, 413, network). Per-ITEM failures never
+      // land here — they come back inside a 200 and are shown in the list.
+      bulkError = errDetail(e);
+    } finally {
+      bulkBusy = false;
+    }
+  }
+
   // ---- query params -------------------------------------------------------
   function buildParams(): Record<string, string> {
     const term = q.trim();
@@ -443,6 +665,12 @@
     searched = true;
     error = "";
     loading = true;
+    // IN-T4: a NEW query means a new result set — carrying a selection across it
+    // would let an invisible, unrelated item ride along into the next bulk edit.
+    // (Paging the SAME query via loadMore() deliberately keeps the selection.)
+    clearSelection();
+    bulkSummary = null;
+    bulkError = "";
     reflectHash(); // keep the URL in sync with the query being run (deep-linkable)
     try {
       const r = await search(buildParams(), ctrl.signal);
@@ -800,6 +1028,13 @@
       e.preventDefault();
       if (e.metaKey || e.ctrlKey) copyPath(hits[selectedIndex]);
       else openItem(hits[selectedIndex]);
+    } else if (e.key === " ") {
+      // IN-T4: Space toggles the roving row's SELECTION (shift extends). The
+      // keyboard path had no way to build a selection otherwise, and Space was
+      // previously unbound here (its default is to page-scroll the listbox,
+      // which arrow navigation already does better).
+      e.preventDefault();
+      toggleSelect(selectedIndex, e.shiftKey);
     }
   }
 
@@ -1247,6 +1482,93 @@
       <p class="mt-4 text-sm text-slate-500">{total} results</p>
     {/if}
 
+    <!-- IN-T4 selection controls. Deliberately "all LOADED", never "all
+         matching": the batch API takes explicit ids, and a button that silently
+         meant "every one of 1.09M results" would be a trap. -->
+    {#if hits.length}
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        <button
+          type="button"
+          class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
+          onclick={selectAllLoaded}>Select all loaded ({hits.length})</button>
+        {#if selectedIds.size}
+          <button
+            type="button"
+            class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
+            onclick={clearSelection}>Clear selection</button>
+        {:else}
+          <span class="opacity-70">
+            Tick a row (or press Space) to select; shift-click extends a range.
+          </span>
+        {/if}
+      </div>
+    {/if}
+
+    {#if selectedIds.size}
+      <BulkEditBar
+        count={selectedIds.size}
+        targets={bulkTargets}
+        busy={bulkBusy}
+        onApply={applyBulk}
+        onClear={clearSelection} />
+    {/if}
+
+    {#if bulkError}
+      <p class="mt-2 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
+        {bulkError}
+      </p>
+    {/if}
+
+    <!-- Per-item outcomes. RBAC path grants can deny an arbitrary subset of a
+         selection, so partial failure is NORMAL here, not exceptional — the
+         reasons come back per item and are shown verbatim rather than folded
+         into a single "some items failed". -->
+    {#if bulkSummary}
+      <div class="mt-2 rounded-lg border border-slate-200 px-3 py-2 text-xs dark:border-slate-800">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="font-medium text-slate-600 dark:text-slate-300">
+            {bulkSummary.ok.length} updated
+            {#if bulkSummary.failures.length}
+              · <span class="text-red-500">{bulkSummary.failures.length} failed</span>
+            {/if}
+          </span>
+          {#if bulkSummary.failures.length}
+            <button
+              type="button"
+              class="rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+              aria-expanded={bulkFailuresOpen}
+              onclick={() => (bulkFailuresOpen = !bulkFailuresOpen)}
+              >{bulkFailuresOpen ? "Hide" : "Show"} failures</button>
+            <button
+              type="button"
+              class="rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+              title="Keep only the items that failed selected, so you can retry the same change"
+              onclick={() => selectFailedOnly(bulkSummary?.failures ?? [])}
+              >Select only the failed</button>
+          {/if}
+          <span class="grow"></span>
+          <button
+            type="button"
+            class="rounded px-2 py-0.5 hover:bg-slate-100 dark:hover:bg-slate-800"
+            onclick={() => (bulkSummary = null)}>Dismiss</button>
+        </div>
+        {#if bulkFailuresOpen && bulkSummary.failures.length}
+          <ul class="mt-2 max-h-48 overflow-auto">
+            {#each bulkSummary.failures as f (f.id)}
+              <li class="flex items-start gap-2 border-t border-slate-100 py-1 dark:border-slate-800">
+                <button
+                  type="button"
+                  class="shrink-0 font-mono text-[10px] text-[var(--accent)] underline decoration-dotted"
+                  title="Open this item"
+                  onclick={() => (selected = f.id)}>{f.id.slice(0, 8)}</button>
+                <span class="min-w-0 flex-1 break-words text-red-600 dark:text-red-400">{f.reason}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+
     {#if view === "grid"}
       <!-- P12 slice 2: responsive thumbnail GRID. Non-virtualized (a CSS grid of
            the already-loaded, paginated hits) with lazy <img>s (loading="lazy")
@@ -1269,11 +1591,27 @@
             role="option"
             tabindex={-1}
             aria-selected={index === selectedIndex}
-            class="group flex cursor-pointer flex-col overflow-hidden rounded-lg border text-left {index === selectedIndex
+            class="group relative flex cursor-pointer flex-col overflow-hidden rounded-lg border text-left {index === selectedIndex
               ? 'border-[var(--accent)] ring-1 ring-[var(--accent)]'
               : 'border-slate-200 hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700'}"
             onclick={() => { selectedIndex = index; openItem(hit); }}
           >
+            <!-- IN-T4 tile checkbox. Hidden until hover while nothing is
+                 selected (the grid is a picture wall — permanent chrome on every
+                 tile would compete with the thumbnails), then permanently
+                 visible once a selection exists so the user can see what is in
+                 it while scrolling. -->
+            <span
+              class="absolute left-1.5 top-1.5 z-10 rounded bg-white/85 p-0.5 shadow-sm transition-opacity dark:bg-slate-900/85
+                {selectedIds.size ? '' : 'opacity-0 focus-within:opacity-100 group-hover:opacity-100'}">
+              <input
+                type="checkbox"
+                class="block accent-[var(--accent)]"
+                aria-label={`Select ${str(hit, "title") || str(hit, "filename") || hitId(hit)}`}
+                checked={selectedIds.has(hitId(hit))}
+                onmousedown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+                onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
+            </span>
             <Thumb id={hitId(hit)} size="aspect-square w-full h-auto" rounded="rounded-none" />
             <div class="flex min-w-0 flex-col gap-1 p-2">
               <span class="truncate text-sm font-medium" title={str(hit, "title") || str(hit, "filename")}
@@ -1325,6 +1663,18 @@
             : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'}"
           onclick={() => { selectedIndex = index; openItem(hit); }}
         >
+          <!-- IN-T4 row checkbox. Same show/hide rule as the grid: on hover, or
+               always once a selection exists. stopPropagation keeps ticking a box
+               from also opening the detail modal; the mousedown guard stops
+               shift-click from smearing a text selection across rows. -->
+          <input
+            type="checkbox"
+            class="shrink-0 accent-[var(--accent)] transition-opacity
+              {selectedIds.size ? '' : 'opacity-0 focus:opacity-100 group-hover:opacity-100'}"
+            aria-label={`Select ${str(hit, "title") || str(hit, "filename") || hitId(hit)}`}
+            checked={selectedIds.has(hitId(hit))}
+            onmousedown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+            onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
           <Thumb id={hitId(hit)} size="h-9 w-9" />
           <span class="shrink-0 rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800"
             >{str(hit, "file_category")}</span>

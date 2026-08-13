@@ -589,6 +589,16 @@ async def patch_item(
     return _with_native_path(item, library, share_url, share_source)
 
 
+#: IN-T4 (2026-08-13) — hard ceiling on keys in ONE ``POST /items/batch`` body.
+#: The map was previously unbounded: every entry costs a SELECT, an RBAC
+#: evaluation, a custom-field validation pass and an ``ItemVersion`` insert, all
+#: inside a single transaction, so one request could pin a worker and a connection
+#: for minutes. 500 is the bulk-edit UI's own chunk size, so the UI never trips
+#: it and a scripted caller gets a clear, actionable limit instead of a timeout.
+#: 413 (not 422) because this is about REQUEST SIZE, not a malformed value.
+MAX_BATCH_PATCH_ITEMS = 500
+
+
 @router.post("/batch")
 async def batch_patch(
     patches: dict[uuid.UUID, ItemPatch],
@@ -596,6 +606,12 @@ async def batch_patch(
     session: AsyncSession = Depends(get_session),
     ctx: PermissionContext = Depends(require_permission("edit_metadata")),
 ) -> dict:
+    if len(patches) > MAX_BATCH_PATCH_ITEMS:
+        raise HTTPException(
+            413,
+            f"batch too large: {len(patches)} items (max {MAX_BATCH_PATCH_ITEMS} "
+            f"per request; split into chunks)",
+        )
     results: dict[str, object] = {}
     synced: list[str] = []
     defs = await _load_custom_field_defs(session)
@@ -606,15 +622,35 @@ async def batch_patch(
             # per item below, never failing the whole batch).
             ctx.authorize_item(item, action="edit_metadata")
             changes = patch.model_dump(exclude_unset=True)
+            # IN-T4 (2026-08-13): the presence test must match the single PATCH's
+            # (`in changes and is not None`), NOT a truthiness test. A truthy test
+            # is indistinguishable between "field absent" and "field == {}", and it
+            # is the same expression that guarded the merge below — which is how
+            # the null-clear divergence survived.
+            has_um = "user_metadata" in changes and changes["user_metadata"] is not None
             # P4-T4: validate custom-field values for this item BEFORE applying,
             # so a rejected item mutates nothing (and records no version row).
-            if changes.get("user_metadata"):
+            if has_um:
                 _validate_user_metadata_write(defs, item, changes["user_metadata"])
             for field in ("title", "year", "tags", "external_ids"):
                 if field in changes:
                     setattr(item, field, changes[field])
-            if changes.get("user_metadata"):
-                item.user_metadata = {**item.user_metadata, **changes["user_metadata"]}
+            if has_um:
+                # IN-T4: SAME merge semantics as the single PATCH (:568) —
+                # absent key untouched, explicit null POPS the key. Previously the
+                # batch did a plain dict-spread, which wrote a literal `null` into
+                # user_metadata; a bulk "clear this field on 500 items" therefore
+                # poisoned every row with a JSON null instead of removing the key
+                # (and the null then flowed into the Meili projection and every
+                # export). Bulk edit is the first surface that makes clearing a
+                # field a routine operation, so this had to converge before it.
+                merged = dict(item.user_metadata)
+                for k, v in changes["user_metadata"].items():
+                    if v is None:
+                        merged.pop(k, None)
+                    else:
+                        merged[k] = v
+                item.user_metadata = merged
             session.add(
                 ItemVersion(
                     item_id=item.id, actor=getattr(request.state, "actor", "ui"), patch=changes

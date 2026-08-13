@@ -108,9 +108,12 @@ async def preview_query(
     # Capped total: wrap the report's SELECT (order stripped — irrelevant to a
     # count and cheaper) in a LIMIT COUNT_CAP+1 subquery and count that. A result
     # of COUNT_CAP+1 means "at least this many" -> total_capped=True.
-    base = report.build(params)
-    if scope_clause is not None:
-        base = base.where(scope_clause)
+    # statement() (not build() + .where()) so a report that scopes by PUSH-DOWN
+    # rather than an outer predicate stays correct here too — see
+    # CannedReport.scoped_build (IN-T1, 2026-08-13). Custom reports never set it,
+    # so this is byte-identical for today's only caller; it is the trap that
+    # matters, not the current behaviour.
+    base = report.statement(params, scope_clause)
     capped_sub = base.order_by(None).limit(COUNT_CAP + 1).subquery()
     total = (
         await session.execute(select(func.count()).select_from(capped_sub))

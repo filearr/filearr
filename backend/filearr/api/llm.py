@@ -531,7 +531,11 @@ async def run_report(
         )
     limit = _cap(args.limit, 100, 200)
     offset = max(0, args.offset)
-    stmt = report.build(ReportParams(limit=limit + offset + 1))
+    # statement(..., None) rather than build(): identical result today, but it
+    # routes through the one place that knows how a report applies a scope
+    # predicate, so a subquery-topped report (IN-T1) cannot be mis-scoped here if
+    # this path ever grows RBAC filtering.
+    stmt = report.statement(ReportParams(limit=limit + offset + 1), None)
     result = await session.execute(stmt)
     fetched = [report.row(r) for r in result.all()]
     page = fetched[offset : offset + limit]

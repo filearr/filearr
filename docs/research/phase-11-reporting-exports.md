@@ -466,6 +466,18 @@ Phase 6's own timeline).
 6. Duplicate-groups report (§8 item 6) should reuse P3-T10's aggregate once it
    exists; if Phase 11 lands first, P11-T6 needs an interim query with an
    explicit TODO to converge, avoiding two divergent "copy count" paths.
+   **RESOLVED 2026-08-13 (IN-T1).** Phase 11 did land first, and the interim
+   aggregate shipped as `duplicate_files` — one `string_agg` blob of paths per
+   group, with no `item_id` and no path translation, so nothing downstream could
+   act on it safely. The convergence is `duplicate_files_detail`: a per-COPY
+   report built as a WINDOW query over the *same* base predicate and the *same*
+   `dup_key` expression as the aggregate (one definition of "same file";
+   `_dup_key_expr()` is now shared), so the two reports can never disagree about
+   copy counts or grouping. The aggregate stays as the cheap "how much is wasted"
+   overview — deliberately NOT replaced. There is still exactly one copy-count
+   path. Design + rationale: `archive/docs/design-insight-features.md`;
+   user-facing docs (including the multi-OS cleanup scripts that consume the
+   export): docs-site `reports.md`.
 7. Should `report_runs` support cancellation (mirroring `ScanRun`'s SSE
    cancel, T4)? Not a task above; recommend a small P11-T5 addendum if
    confirmed.
