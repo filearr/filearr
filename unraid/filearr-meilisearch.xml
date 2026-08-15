@@ -11,7 +11,11 @@
   <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.53.0 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;UPGRADING from an older pin: leave MEILI_UPGRADE_DB=true. A newer Meilisearch REFUSES to open an older database and the container will restart-loop without it; with it, the database is migrated in place on first start (verified 1.49.0 -&gt; 1.53.0). It is a no-op once the database is current, so it is safe to leave on.&#13;&#10;&#13;&#10;Install before the filearr container.&#13;&#10;&#13;&#10;NETWORKING: two topologies are supported. DEFAULT — every container on one user-defined Docker network, addressing each other by NAME; create it once with  docker network create filearr. ALTERNATIVE — every container fully bridged (Network Type: Custom br0) with its own fixed LAN IP, and IPs in place of names. Pick one before installing anything: https://pwsh.github.io/filearr/deployment/unraid/#step-0-networking</Overview>
   <Category>Other:</Category>
   <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-meilisearch.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/meilisearch/meilisearch/main/assets/logo.svg</Icon>
+  <!-- PNG, not SVG: Unraid's Docker-page icon pipeline (and the CA submission
+       rules) want a raster PNG over HTTPS; the upstream repo only ships an SVG,
+       which renders as a broken icon (live report 2026-08-14). dashboard-icons
+       (homarr-labs) is the community-maintained icon set most CA templates use. -->
+  <Icon>https://raw.githubusercontent.com/homarr-labs/dashboard-icons/main/png/meilisearch.png</Icon>
   <ExtraParams>--restart=unless-stopped</ExtraParams>
   <Requires>docker network 'filearr'</Requires>
   <Config Name="Data" Target="/meili_data" Default="/mnt/cache/appdata/filearr-meilisearch" Mode="rw" Description="Index data (LMDB, mmap-based). Use the DIRECT pool path (/mnt/cache/appdata/...) — mmap through the /mnt/user FUSE layer is unreliable, and search latency depends on the fast pool." Type="Path" Display="always" Required="true" Mask="false">/mnt/cache/appdata/filearr-meilisearch</Config>
