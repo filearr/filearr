@@ -725,11 +725,18 @@ docker exec filearr-stepca sh -c 'step ca provisioner list \
   | grep -o '"encryptedKey": *"[^"]*"' | head -1 | cut -d'"' -f4 \
   > /mnt/cache/appdata/filearr-stepca/provisioner.jwe
 
+# Files written from the Unraid shell are owned by ROOT, and the container
+# runs as step (UID 1000) - it cannot read a root-owned 600 file, so the
+# decrypt below fails with "open /home/step/adminpw failed: permission
+# denied". chown BOTH staging files to the container user first.
+chown 1000:1000 /mnt/cache/appdata/filearr-stepca/provisioner.jwe
+
 # Decrypt it. Under Remote Management the password is the CA ADMINISTRATIVE
 # password from the first-boot log — NOT /home/step/secrets/password, which is
 # the CA key password. This trips people up constantly.
 printf '%s' 'PASTE-THE-ADMIN-PASSWORD' > /mnt/cache/appdata/filearr-stepca/adminpw
 chmod 600 /mnt/cache/appdata/filearr-stepca/adminpw
+chown 1000:1000 /mnt/cache/appdata/filearr-stepca/adminpw
 docker exec filearr-stepca sh -c \
   'step crypto jwe decrypt --password-file /home/step/adminpw < /home/step/provisioner.jwe'
 
