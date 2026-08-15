@@ -19,7 +19,7 @@ you have to have ready.
 |---|---|---|---|
 | **Simple** | `filearr` + `filearr-postgres` + `filearr-meilisearch` | `fingerprint` | Nothing but the box |
 | **Proxied** | the three above, behind a reverse proxy you already run | `fingerprint` | Your existing SWAG / NPM / Unraid proxy |
-| **Full parity** | the three above + `filearr-stepca` + `filearr-caddy` | `mtls-header` or `both` | A domain, a Cloudflare-hosted DNS zone, a spare LAN IP |
+| **Full parity** | the three above + `filearr-stepca` + `filearr-caddy` | `mtls-header` or `both` | A domain, a Cloudflare-hosted DNS zone, a spare LAN IP, a LAN resolver you can add records to |
 
 Three containers is the floor and it is a real floor: **Postgres and Meilisearch
 are not optional**, they are where the catalogue and the search index live. What
@@ -79,20 +79,360 @@ container and forgotten on the other produced behaviour nobody could explain.
     SMTP password and webhook secret becomes permanently undecryptable, silently.
 
 - **Full parity only:** a domain whose DNS is hosted at Cloudflare, a Cloudflare
-  API token scoped `Zone:DNS:Edit` on that zone (not a Global API Key), and a
-  free IP address on your LAN for the proxy container.
+  API token scoped `Zone:DNS:Edit` on that zone (not a Global API Key), a free IP
+  address on your LAN for the proxy container — or one per container if you
+  choose [Option B](#option-b) below — and somewhere to publish three
+  [DNS records](#dns-records) for your LAN.
 
-## Step 0 — the shared Docker network
+## Step 0 — pick a network topology {#step-0-networking}
 
-Container-name DNS does not work on Unraid's default bridge, and every DSN in
-these templates addresses containers by name. Create the network once:
+Container-name DNS does not work on Unraid's default bridge, so every container
+in this stack has to be told where the others live — and *how* you tell it is one
+decision that lands in six other fields (both DSNs, the Meilisearch URL, the two
+Caddy upstreams, and the CA's own certificate). Make it before you install
+anything. Changing it later is an edit to every container, not a redeploy.
+
+Two shapes are supported, and both are first-class.
+
+| | **A — one shared Docker network** | **B — every container on `br0`** |
+|---|---|---|
+| Unraid **Network Type** | `filearr` on all of them | `Custom : br0` on all of them |
+| Services find each other by | container **name** | fixed **LAN IP** |
+| LAN addresses consumed | one (the proxy) | one per container |
+| Reachable from the rest of the LAN | only what you publish on the host | everything, on its own address |
+| Reachable **from the Unraid host itself** | yes | **no** until you enable host access — [the macvlan trap](#macvlan-host-isolation) |
+| The fragile part | the proxy must be on **two** networks at once | IP bookkeeping; a moved address breaks a DSN |
+| Per-service firewall rules | no — one Docker network, one host address | yes — each container is its own LAN host |
+| **Verdict** | **The default. Start here.** | A deliberate choice; weigh [the trade-offs](#option-b-costs) |
+
+Option A is what the templates ship configured for and what the rest of this page
+assumes. Option B changes no behaviour, only addresses — and every value that
+differs is in [one table](#option-b-field-map).
+
+### Option A — one shared Docker network {#option-a}
+
+Create the network once, from the Unraid terminal:
 
 ```bash
 docker network create filearr
 ```
 
-Everything except `filearr-caddy` sits on it. `filearr-caddy` is the exception
-and it is deliberate — see [step 5](#step-5-caddy).
+Then set **Network Type: filearr** on `filearr-postgres`, `filearr-meilisearch`,
+`filearr` and `filearr-stepca` — which is what the templates already default to —
+and leave every DSN at its shipped container-name value. For the Simple and
+Proxied tiers that is the whole of the networking configuration; skip to
+[installing a template](#installing-a-template).
+
+Only the full-parity tier has more to do, because of the proxy.
+
+#### The proxy has to be on two networks at once {#dual-homing}
+
+`filearr-caddy` wants ports 80 and 443, which on a typical Unraid box the web GUI
+or a reverse proxy you already run has taken. Giving it its own LAN address on
+`br0` sidesteps that collision — the standard Unraid pattern for a proxy
+container. But it *also* has to reach `filearr:8000` and `filearr-stepca:9000`,
+and a container on `br0` cannot see the `filearr` bridge. It has to be on **both
+networks**, and Unraid's template has exactly one **Network Type** dropdown.
+
+!!! danger "`docker network connect` works, and does not survive an Apply"
+    The obvious move —
+
+    ```bash
+    docker network connect filearr filearr-caddy
+    ```
+
+    — takes effect instantly and is **not durable**. A network attachment is a
+    property of the *container object*: it survives `docker stop`/`start` and a
+    reboot, but Unraid's **Apply** button rebuilds the whole `docker run`
+    invocation from the saved template and re-creates the container — and so does
+    every image update, manual or automatic. The new container carries only the
+    one network its template names, and Caddy starts returning 502 on an upstream
+    it can no longer resolve. The symptom arrives one edit *after* the cause,
+    which is what makes it worth spelling out.
+
+    There is no dropdown for this: Unraid's **Network Type** has been a single,
+    mutually-exclusive selector through 7.1.x, and adding a second attachment in
+    the UI is still an open feature request.
+
+Three ways to keep it attached, and a fourth to avoid needing it.
+
+**1. Re-attach in Post Arguments — fires exactly when the attachment is lost.**
+Post Arguments is not a post-create hook; it is text appended to the `docker run`
+command line Unraid assembles, which is why `filearr-postgres` uses it to pass
+`-c shared_buffers=1GB` to Postgres and `filearr` uses it to pass `all`. Because
+that line is run by a shell, a leading `&&` deliberately breaks out of it. On
+`filearr-caddy` (whose Post Arguments are otherwise empty) set:
+
+```text
+&& docker network connect filearr filearr-caddy
+```
+
+It runs immediately after the container is created, on every Apply and every
+update — precisely the two events that drop the attachment — with no polling gap.
+It is a shell escape from a field meant for container arguments, so treat it as
+load-bearing and verify it after the first Apply rather than assuming:
+
+```bash
+docker inspect -f '{{json .NetworkSettings.Networks}}' filearr-caddy
+```
+
+Both `filearr` and `br0` must be listed.
+
+**2. Declare both networks in Extra Parameters (Unraid 7.x only).** Since Docker
+25 a container can be given more than one `--network` *at creation*, and Unraid
+passes **Extra Parameters** through to the create command. That makes the second
+network part of the template itself rather than a repair after the fact. Set
+**Network Type** to `filearr` (so Unraid emits no `--ip` of its own) and add:
+
+```text
+--network=name=br0,ip=192.168.1.64
+```
+
+The *extended* form is required rather than a bare `--network=br0` plus the
+template's IP field: with more than one network Docker rejects the standalone
+`--ip` as ambiguous, so per-network settings have to ride on the `--network`
+value itself. Check the engine first — Unraid 7.x ships Docker 27 or newer;
+6.12's 20.10–24.0 does not support a repeated `--network` and fails at create
+time:
+
+```bash
+docker version --format '{{.Server.Version}}'      # must be 25 or newer
+```
+
+This is the mechanically cleanest of the three and the least travelled — verify
+with the same `docker inspect` above before you rely on it.
+
+**3. Re-attach from a User Script.** The approach with the most mileage on it,
+and the only one that works on every Unraid version. Install **User Scripts**,
+add `filearr-caddy-network`, and give it an idempotent body:
+
+```bash
+#!/bin/bash
+# Re-attach filearr-caddy to the filearr network after an Apply or an image
+# update re-created the container. Safe to run any number of times.
+docker network inspect filearr -f '{{range .Containers}}{{.Name}} {{end}}' \
+  | grep -qw filearr-caddy \
+  || docker network connect filearr filearr-caddy
+```
+
+Schedule it *Custom* at `*/10 * * * *`. Not *At First Array Start Only* — that
+misses the case this exists for, which is a single container being re-created
+while the array stays up. Be honest about what it is: between an Apply and the
+next tick, the proxy is down. It pairs well with option 1 as a safety net.
+
+**4. Do not dual-home at all.** Point **App Upstream** and **CA Upstream** at LAN
+addresses instead of container names, and give Caddy a single `br0` leg. That is
+[Option B](#option-b) applied to two containers — and if you have arrived here,
+read Option B properly and apply it to the whole stack rather than running a
+hybrid you will have to remember.
+
+### Option B — every container on `br0` {#option-b}
+
+Every container gets its own address on your LAN. Nothing resolves by name any
+more, so each inter-service reference becomes an IP — and in exchange there is no
+Docker network to create, nothing to dual-home, and every service is a
+first-class host your firewall and your monitoring can see.
+
+#### 1. Reserve the addresses
+
+Pick a contiguous block **outside your router's DHCP pool**. These are static
+assignments made in the container template, not leases; an address the DHCP
+server can also hand to a laptop is an outage waiting for the next reboot.
+
+| Container | Example IP | Listens on | Talked to by |
+|---|---|---|---|
+| `filearr-postgres` | `192.168.1.60` | 5432 | `filearr` |
+| `filearr-meilisearch` | `192.168.1.61` | 7700 | `filearr` |
+| `filearr` | `192.168.1.62` | 8000 | you, `filearr-caddy`, agents |
+| `filearr-stepca` | `192.168.1.63` | 9000 | `filearr-caddy`, `filearr` |
+| `filearr-caddy` | `192.168.1.64` | 80, 443 | everything from outside |
+| *(spare)* | `192.168.1.65` | — | a second worker, or `filearr-agent` |
+
+`192.168.1.x` is an example throughout this section — substitute your own subnet.
+
+#### 2. Set Network Type on every template
+
+On each container: **Network Type: Custom : br0**, then **Fixed IP address** from
+the row above. Unraid names the interface after your bridge, so on a box with
+bridging disabled the entry reads `eth0` rather than `br0`; the mechanics are
+identical.
+
+!!! warning "Port *mappings* stop meaning anything"
+    A container with its own LAN address publishes nothing through the host:
+    every port it listens on is reachable at its own address. Two consequences,
+    and both surprise people.
+
+    The **WebUI Port** field's `8484` is a host mapping, so the console moves to
+    **`http://192.168.1.62:8000`** — the container port. Every `:8484` URL on this
+    page becomes `:8000` at the app's own address.
+
+    And leaving the Postgres and Meilisearch **Port** fields empty no longer
+    keeps them off the network: **5432 and 7700 are now reachable from every
+    device on your LAN.** That is the moment `POSTGRES_PASSWORD` and
+    `MEILI_MASTER_KEY` stop being a formality, and the moment per-container
+    firewall rules — one of the reasons to choose Option B — start earning their
+    keep.
+
+#### 3. Repoint every reference {#option-b-field-map}
+
+One table, every field that differs. Nothing else in the templates changes.
+
+| Container | Field | Option A (names) | Option B (the plan above) |
+|---|---|---|---|
+| `filearr` | Database URL | `postgresql+psycopg://filearr:…@filearr-postgres:5432/filearr` | `postgresql+psycopg://filearr:…@192.168.1.60:5432/filearr` |
+| `filearr` | Procrastinate DSN | `postgresql://filearr:…@filearr-postgres:5432/filearr` | `postgresql://filearr:…@192.168.1.60:5432/filearr` |
+| `filearr` | Meilisearch URL | `http://filearr-meilisearch:7700` | `http://192.168.1.61:7700` |
+| `filearr` | CA URL | `https://ca.example.com` | `https://ca.example.com` — **unchanged** |
+| `filearr-caddy` | App Upstream | `filearr:8000` | `192.168.1.62:8000` |
+| `filearr-caddy` | CA Upstream | `filearr-stepca:9000` | `192.168.1.63:9000` |
+| `filearr-stepca` | CA DNS Names | `localhost,filearr-stepca,ca.example.com` | `localhost,ca.example.com,192.168.1.63` |
+
+Three notes on that table:
+
+- **CA URL does not become an IP.** It is the name *agents* bootstrap against and
+  it is served by Caddy on 443, so it stays `https://ca.example.com` in both
+  topologies. The `filearr` container fetches the CA root from
+  `<CA URL>/root/<fingerprint>` itself, which means the app container must
+  resolve that name too — one more reason the records below belong on a
+  LAN-wide resolver rather than in somebody's `hosts` file.
+- **CA DNS Names is first boot only.** If `filearr-stepca` has already
+  initialised, editing it does nothing; the certificate is minted. Get it right
+  before the container's first start, or re-init the CA and re-enrol every agent.
+- **`filearr-agent` on this same box** defaults to `bridge`. Under Option B put
+  it on `br0` too, or read [the macvlan trap](#macvlan-host-isolation) first —
+  a bridge-mode agent cannot reach a `br0` central.
+
+Skip `docker network create filearr` entirely: under Option B nothing uses it.
+
+#### 4. The macvlan trap {#macvlan-host-isolation}
+
+!!! danger "On `br0`, the Unraid host and its containers cannot reach each other"
+    This is macvlan working as designed, not a misconfiguration: a macvlan child
+    interface and its parent are deliberately isolated, so traffic between the
+    Unraid host and any `br0` container is dropped in **both** directions.
+    Concretely, with the stack on `br0`:
+
+    - **The console is unreachable from the Unraid box itself.** `curl
+      http://192.168.1.62:8000` in the Unraid terminal hangs, while every laptop,
+      phone and other server on the LAN loads it instantly. This is the most
+      confusing symptom in the whole topology, because "the server can't reach
+      it" reads as "it's broken".
+    - **A `filearr-agent` container on this box, left in bridge or host mode,
+      cannot reach central.** Its traffic leaves through the host, and the host
+      is the one address `br0` will not answer. Put the agent on `br0` as well —
+      `br0` containers talk to each other freely — or keep central on Option A.
+    - **Backup scripts are fine.** Everything in
+      [Backup and restore](#backup-and-restore) goes through `docker exec`, which
+      is not network traffic.
+    - **Unraid itself is unaffected.** Update checks, plugins and array
+      operations do not talk to your containers over the network.
+
+    **The fix is Settings → Docker → "Host access to custom networks": Yes.**
+    Unraid adds a shim interface in the host's own namespace, as a *sibling* of
+    the containers rather than their parent, and routes host traffic through it —
+    which is the only way around a rule the kernel enforces. The Docker service
+    has to be stopped to change the setting: stop the array, toggle, start it
+    again. Check it after your next reboot, too; the shim not coming back after
+    an unclean shutdown is a known and recurring complaint, and re-toggling
+    rebuilds it.
+
+!!! warning "`ipvlan` fixes the crashes, not the isolation — they are different problems"
+    Settings → Docker → **Docker custom network type** offers `macvlan` and
+    `ipvlan`, and it is widely and wrongly assumed that switching solves the
+    above. It does not: host-to-container isolation applies either way, and
+    either way "Host access to custom networks" is what lifts it.
+
+    What the setting does change is stability and identity.
+
+    - **`ipvlan`** has been the default for new installs since 6.11.5. All
+      containers share the host's MAC and are distinguished at layer 3. It is
+      also the standing recommendation for boxes that hit the long-running
+      macvlan kernel call traces, which are triggered by exactly this shape —
+      fixed-IP containers on a bridge parent.
+    - **`macvlan`** gives every container its own MAC, so your router lists them
+      as distinct devices and DHCP reservations, per-device firewall rules,
+      parental controls and network scanners all behave naturally. Anything keyed
+      on MAC sees one device under `ipvlan`, and some switches with port security
+      object to several MACs on one port under `macvlan`.
+
+    Fixed IPs set in the template are unaffected by this choice, which is exactly
+    why Option B assigns them in the template rather than relying on DHCP
+    reservations that only one of the two modes can express.
+
+#### 5. What Option B costs, honestly {#option-b-costs}
+
+It buys a stable address per service, per-container firewall rules that are
+worth writing because each container is a real LAN host, and no dual-homing to go
+stale on the next Apply. It costs:
+
+- **The host-isolation gotcha above**, permanently, unless you enable host access.
+- **IP bookkeeping.** Six addresses that have to stay out of the DHCP pool and
+  stay written down somewhere. Nothing here self-heals.
+- **A moved address is an outage with a bad error message.** If a container's IP
+  changes, `filearr` reports that it cannot reach a database which is running
+  perfectly. This is why every address is *fixed in the template* — a template
+  value cannot be changed by anything else on the network.
+- **Everything is on the LAN**, including the database. See the port warning
+  above.
+
+### DNS records {#dns-records}
+
+Only the full-parity tier needs these, and they are **the same in both
+topologies** — all three names point at `filearr-caddy`, whichever way you
+attached it.
+
+| Record | Type | Points at | Serves |
+|---|---|---|---|
+| `filearr.example.com` | A | Caddy — `192.168.1.64` | the web UI and API |
+| `agents.example.com` | A | Caddy — `192.168.1.64` | the agent plane; a client certificate is **required** |
+| `ca.example.com` | A | Caddy — `192.168.1.64` | step-ca, passed through **raw** |
+
+`ca.example.com` points at Caddy, **not** at `filearr-stepca`, even under Option B
+where step-ca has a perfectly good address of its own. Agents bootstrap against
+`https://ca.example.com` with no port, which is 443 — a port step-ca does not
+serve — and Caddy's layer-4 listener peeks the TLS ClientHello and raw-proxies
+that one hostname straight through without terminating it. Nothing is lost by
+going via the proxy: the connection the CA sees is still the agent's own, which
+is the entire point of the passthrough ([step 5](#step-5-caddy)).
+
+**Where to put them**, in descending order of how well it scales:
+
+- **Your router or firewall's DNS resolver.** One place, every device on the LAN,
+  including containers. On OPNsense: *Services → Unbound DNS → Overrides → Host
+  Overrides*. On pfSense: *Services → DNS Resolver → Host Overrides*. Most
+  consumer routers have the same thing under "local DNS" or "static DNS".
+- **Pi-hole** (*Local DNS → DNS Records*) or **AdGuard Home** (*Filters → DNS
+  rewrites*, where a single `*.example.com` rewrite covers all three at once) —
+  if either is already your LAN's resolver.
+- **A real DNS server** — BIND, Technitium, Windows DNS: three A records in the
+  zone, nothing special about them.
+- **A `hosts` file**, as a last resort. It works, and it is per-machine: you will
+  add the same three lines to every laptop, phone (where you often cannot),
+  agent host and container that needs them — and the `filearr` container needs
+  `ca.example.com` to resolve, which a host's `hosts` file does not give it.
+
+!!! note "With the `acme` profile your public zone stays empty"
+    The wildcard certificate comes from a DNS-01 challenge, which needs only a
+    `_acme-challenge` **TXT** record — created and deleted by Caddy through the
+    Cloudflare API, automatically. No A record for `filearr.example.com` has to
+    exist in the public zone at all: the addresses above live only on your LAN
+    resolver, and the names simply do not resolve from the internet. That is
+    split-horizon DNS, and it is why this works behind NAT with nothing
+    port-forwarded.
+
+    The flip side is the trap in [step 5](#step-5-caddy): because your LAN
+    resolver now answers authoritatively for this zone, Caddy's DNS-01
+    propagation self-check deliberately queries *public* resolvers instead. Leave
+    those `resolvers` lines alone — overriding the zone on the LAN without them
+    is a live incident (2026-07-17) where Cloudflare has published the record and
+    issuance times out anyway.
+
+!!! tip "Simple and Proxied tiers: probably no records at all"
+    Without `filearr-caddy` there is nothing to publish. Reach the console at
+    `http://<tower>:8484` under Option A, or `http://192.168.1.62:8000` under
+    Option B, and stop. If you want a name anyway, one A record pointing at that
+    address is the entire job — but note it is plain HTTP, and auth's session
+    cookie is `Secure` ([HTTPS on Unraid](#https-on-unraid)).
 
 ## Installing a template {#installing-a-template}
 
@@ -231,7 +571,9 @@ migrate.
 
 ### First run
 
-Open `http://<tower>:8484`.
+Open `http://<tower>:8484` — or, under [Option B](#option-b), the container's own
+address on its container port, `http://192.168.1.62:8000`, because a container
+with its own LAN IP publishes nothing through the host.
 
 1. **Create the admin account.** With `FILEARR_AUTH_ENABLED=true` the first visit
    shows a one-time bootstrap screen. It is one-time in the strict sense — once
@@ -273,7 +615,7 @@ private certificate authority that issues each agent its own client certificate.
 | Data | required | `/mnt/cache/appdata/filearr-stepca` | **CA private key material.** |
 | CA Port | optional | *(unmapped)* | Leave empty; agents reach it through Caddy. |
 | CA Name | required | `Filearr Agents CA` | First boot only. |
-| CA DNS Names | required | `localhost,filearr-stepca` | **Add your public CA hostname**, e.g. `localhost,filearr-stepca,ca.example.com`. First boot only. |
+| CA DNS Names | required | `localhost,filearr-stepca` | **Add your public CA hostname**, e.g. `localhost,filearr-stepca,ca.example.com`. First boot only, so get it right now. Under [Option B](#option-b) the container name resolves to nothing — use the [field map](#option-b-field-map) value instead. |
 | Provisioner Name | required | `filearr-agents` | Must match the app's CA Provisioner. |
 | Remote Management | optional | `true` | Keep on. |
 | Init Password | **secret**, optional | *(auto-generated)* | Set it, or scrape it from the log. |
@@ -367,9 +709,12 @@ configuration note.
     entirely, and the three public names then point at *that* address rather than
     at the server.
 
-    A container on `br0` can still reach the `filearr` network by name, because
-    Unraid attaches it to both; if your setup does not, use the app container's
-    IP in **App Upstream** instead of `filearr:8000`.
+    Under [Option A](#option-a) that makes this the one container on **two**
+    networks, so that it can still reach `filearr:8000` and `filearr-stepca:9000`
+    by name — and the extra attachment does **not** survive an Apply on its own.
+    Read [the proxy has to be on two networks at once](#dual-homing) before you
+    fill this template in. Under [Option B](#option-b) the question does not
+    arise: the two upstreams are LAN addresses and this container has one leg.
 
 | Field | Required | Default | Notes |
 |---|---|---|---|
@@ -392,8 +737,10 @@ DNS credentials and no internet, and proves the proxy can reach the app before
 any certificate machinery is involved. Browse to `https://<caddy-ip>/`, accept
 the warning, confirm you get the Filearr console.
 
-**Then switch Profile to `acme`.** Point three DNS records at the container's IP
-first:
+**Then switch Profile to `acme`.** Point three DNS records at this container's IP
+first — all three at *this* container, including `ca.`; where to publish them and
+why they never need to exist in the public zone is [DNS
+records](#dns-records) in step 0.
 
 | Name | Serves |
 |---|---|

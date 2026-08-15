@@ -122,10 +122,31 @@ console. Full runbook: `docs-site/agents.md`.
 
 ## One-time setup
 
-1. Create the shared Docker network (container-name DNS doesn't work on Unraid's
-   default bridge):
+1. **Pick a network topology first** — it decides what goes in both DSNs, the
+   Meilisearch URL, both Caddy upstreams and the CA's own certificate, so
+   changing it later is an edit to every container. Full comparison, worked field
+   map and DNS records:
+   `docs-site/deployment/unraid.md#step-0-networking`.
 
-       docker network create filearr
+   - **Option A, the default:** one shared Docker network, containers address
+     each other by NAME. Container-name DNS doesn't work on Unraid's default
+     bridge, so create the user-defined network once:
+
+             docker network create filearr
+
+     `filearr-caddy` is the exception — it needs a LAN address of its own for
+     ports 80/443 *and* the `filearr` network for its upstreams, and Unraid's
+     single Network Type dropdown can't express both. A plain
+     `docker network connect` is discarded every time Apply or an image update
+     re-creates the container; the guide's
+     [`#dual-homing`](../docs-site/deployment/unraid.md#dual-homing) section
+     gives three ways to make it persist.
+   - **Option B, fully bridged:** every container gets `Custom : br0` and its own
+     fixed LAN IP, and every reference becomes an IP. No shared network, nothing
+     to dual-home, per-container firewall rules — at the cost of IP bookkeeping
+     and the macvlan host-isolation gotcha (a `br0` container and the Unraid host
+     cannot reach each other until Settings → Docker → *Host access to custom
+     networks* is enabled; `ipvlan` does **not** fix that, it fixes the crashes).
 
 2. Manual template install (until published to CA): copy the XML files to
    `/boot/config/plugins/dockerMan/templates-user/` on your Unraid server, then
@@ -159,11 +180,26 @@ console. Full runbook: `docs-site/agents.md`.
   cache-only "exclusive" appdata share makes `/mnt/user` equivalent; the
   `/mnt/cache` default is simply correct everywhere.) The `filearr` container's
   `/config` (thumbnails/caches) is lock-insensitive and stays on `/mnt/user`.
-- Port 5432/7700 mappings are intentionally unmapped by default; the stack talks
-  over the `filearr` network internally.
+- Port 5432/7700 mappings are intentionally unmapped by default; on the shared
+  `filearr` network the stack talks internally and nothing reaches the LAN. That
+  guarantee does **not** hold under the fully bridged option — a container with
+  its own LAN address publishes every port it listens on at that address,
+  regardless of the Port fields, so the app moves to `http://<its-ip>:8000`
+  (container port, not the 8484 host mapping) and Postgres/Meilisearch become
+  LAN-reachable. Generate real credentials.
 - **`filearr-caddy` wants its own IP.** Set Network Type: Custom br0 with a fixed
   address so ports 80/443 do not collide with Unraid's web GUI or an existing
-  reverse proxy. This is the expected Unraid pattern for a proxy container.
+  reverse proxy. This is the expected Unraid pattern for a proxy container — and
+  on the shared-network option it is the one container that must be on **two**
+  networks, which Unraid's single Network Type dropdown cannot express and Apply
+  silently undoes. See `docs-site/deployment/unraid.md#dual-homing`.
+- **Three DNS records, at the proxy.** Full parity needs `filearr.<domain>`,
+  `agents.<domain>` and `ca.<domain>` all pointing at `filearr-caddy`'s IP —
+  including `ca.`, which Caddy raw-passes through on 443. Publish them on your
+  LAN resolver (router/firewall host override, Pi-hole, AdGuard, a real DNS
+  server); with the `acme` profile the PUBLIC zone needs no A records at all,
+  because DNS-01 only ever creates a TXT record. Details and the split-horizon
+  caveat: `docs-site/deployment/unraid.md#dns-records`.
 - **TLS.** Templates 1–3 serve plain HTTP on 8484. For HTTPS, either put the app
   behind a reverse proxy you already run (SWAG / Nginx Proxy Manager / Unraid's
   built-in — real cert, no per-client CA trust), or install `filearr-caddy`:
