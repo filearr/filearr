@@ -664,6 +664,23 @@ chown -R 1000:1000 /mnt/cache/appdata/filearr-stepca
 | Remote Management | optional | `true` | Keep on. |
 | Init Password | **secret**, optional | *(auto-generated)* | Set it, or scrape it from the log. |
 
+??? note "Changing provisioner settings later (certificate durations, renewal)"
+    With remote management on (the default here), provisioners live in
+    step-ca's **admin database** — editing `ca.json` does nothing. Every
+    `step ca provisioner ...` command must authenticate as the CA admin, or it
+    stops with *"No admin credentials found. You must login to execute admin
+    commands."* The Unraid form:
+
+    ```bash
+    docker exec filearr-stepca step ca provisioner update filearr-agents       --x509-min-dur=24h --x509-default-dur=48h --x509-max-dur=72h       --admin-subject=step --admin-provisioner=filearr-agents       --admin-password-file=/home/step/secrets/password       --ca-url https://localhost:9000 --root /home/step/certs/root_ca.crt
+    ```
+
+    The admin is subject `step` on the init provisioner; the password file is
+    `secrets/password` on a fresh init (check `docker exec filearr-stepca ls
+    /home/step/secrets/` — deployments touched by the Proxmox script persist it
+    as `secrets/admin_password`). No file at all? It is the password from the
+    first-boot log; drop the flag and run with `-it` to be prompted.
+
 !!! warning "Two values are printed once, into the container log, and never again"
     The **root certificate fingerprint** and the **CA administrative password**.
     Read both out immediately:
