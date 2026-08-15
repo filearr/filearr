@@ -130,7 +130,11 @@ console. Full runbook: `docs-site/agents.md`.
 
    - **Option A, the default:** one shared Docker network, containers address
      each other by NAME. Container-name DNS doesn't work on Unraid's default
-     bridge, so create the user-defined network once:
+     bridge, so a user-defined network is needed — but FIRST enable
+     Settings → Docker → (Advanced View) → "Preserve user defined networks",
+     which requires stopping the Docker service to change. Without it Unraid
+     deletes CLI-created networks on every service restart and the template
+     dropdown never lists them. THEN create it once:
 
              docker network create filearr
 

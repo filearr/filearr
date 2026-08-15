@@ -111,15 +111,40 @@ differs is in [one table](#option-b-field-map).
 
 ### Option A — one shared Docker network {#option-a}
 
-Create the network once, from the Unraid terminal:
+Unraid will not show — and will not keep — a CLI-created network until you tell
+it to preserve user-defined networks, so the ORDER of these steps matters. Do
+the setting first; a network created before it is enabled is deleted the next
+time the Docker service restarts, which is exactly the confusing state where
+`docker network ls` showed it a minute ago and the template dropdown has never
+heard of it.
 
-```bash
-docker network create filearr
-```
+1. **Settings → Docker → Enable Docker: No**, Apply. (Docker settings are
+   locked while the service is running.)
+2. Toggle **Advanced View** (top right) and set
+   **Preserve user defined networks: Yes**, Apply.
+3. **Enable Docker: Yes**, Apply.
+4. Now create the network, from the Unraid terminal:
 
-Then set **Network Type: filearr** on `filearr-postgres`, `filearr-meilisearch`,
-`filearr` and `filearr-stepca` — which is what the templates already default to —
-and leave every DSN at its shipped container-name value. For the Simple and
+    ```bash
+    docker network create filearr
+    ```
+
+5. Open (or re-open) a container's edit page — **Network Type** now lists
+   **Custom : filearr**.
+
+!!! note "If the dropdown still only shows Bridge / Host / None"
+    The network does not exist right now, whatever it did earlier — run
+    `docker network ls` and re-create it if it is gone. Two known edge cases:
+    a network whose name STARTS WITH A NUMBER is not preserved even with the
+    setting on (long-standing Unraid bug — `filearr` is safe, but if you chose
+    your own name, start it with a letter), and after an Unraid OS upgrade the
+    dropdown has been known to lose custom entries until the Docker service is
+    cycled once more.
+
+Set **Network Type: Custom : filearr** on `filearr-postgres`,
+`filearr-meilisearch`, `filearr` and `filearr-stepca` — which is what the
+templates already default to — and leave every DSN at its shipped
+container-name value. For the Simple and
 Proxied tiers that is the whole of the networking configuration; skip to
 [installing a template](#installing-a-template).
 
