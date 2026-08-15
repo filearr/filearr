@@ -74,7 +74,10 @@ dependencies = [
     # (2026-07-13): the newest advisory GHSA-w8p2-r796-3vmq (2026-06-08) is
     # patched only in 1.6.10/1.7.1, so the floor moves UP from the brief's
     # >=1.6.9 to >=1.7.1 (resolves to 1.7.2). Pulls joserfc (JOSE backend).
-    "authlib>=1.7.1",
+    # <2: oidc.py imports authlib.jose, which 2.0 REMOVES (deprecated in favour
+    # of joserfc; 1.7 already delegates the crypto there). Lift only with the
+    # roadmap §26 migration — the ID-token validation path must move too.
+    "authlib>=1.7.1,<2",
     # Phase 6 P6-T6 (LDAP/AD bind auth): ldap3 as the directory client. LGPL-v3
     # library-usage is AGPL-compatible. A DELIBERATE override of the research
     # doc's python-ldap preference (docs/ops/auth.md § "LDAP library choice"):

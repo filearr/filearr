@@ -43,8 +43,21 @@ from filearr.config import Settings, get_settings
 # Authlib's ``authlib.jose`` is deprecated in favour of joserfc but remains the
 # supported, CVE-patched API through the 1.x line (compat guaranteed before 2.0);
 # the deprecation warning is noise here.
+#
+# The obvious ``simplefilter("ignore")`` DOES NOT WORK, and shipped broken until
+# a live Unraid deploy surfaced the warning (2026-08-14): importing authlib.jose
+# first imports ``authlib.deprecate``, whose MODULE BODY executes
+# ``warnings.simplefilter("always", AuthlibDeprecationWarning)`` — inside this
+# context, after our filter, and most-recent-wins. So their module defeats any
+# caller's pre-installed suppression. The fix is ordering: import their module
+# FIRST so its filter lands, THEN install ours on top. catch_warnings restores
+# the global filter list on exit either way, so neither filter leaks.
 with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
+    import authlib.deprecate as _authlib_deprecate
+
+    warnings.filterwarnings(
+        "ignore", category=_authlib_deprecate.AuthlibDeprecationWarning
+    )
     from authlib.jose import JsonWebToken
     from authlib.jose.errors import JoseError
     from authlib.oidc.core import CodeIDToken

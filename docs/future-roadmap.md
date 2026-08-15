@@ -994,3 +994,20 @@ Still open in this area (not started, deliberately):
 - **No "act on it" beyond documentation.** By design, per the principle above.
   If this is ever revisited, the bar is not "add a delete button" but "explain
   why a catalog that deletes is still trustworthy when it is wrong".
+
+## 26. Migrate oidc.py off authlib.jose to joserfc (before Authlib 2.0)
+
+Recorded 2026-08-14 after a deployed container surfaced the deprecation
+warning. Authlib's `jose` module is deprecated and REMOVED in 2.0; 1.7 already
+delegates its crypto to joserfc, so today's exposure is an import shim, not a
+crypto risk — pyproject pins `authlib>=1.7.1,<2` until this lands.
+
+The migration is NOT mechanical: `oidc.py` uses `JsonWebToken.decode(...,
+claims_cls=CodeIDToken)` — Authlib's OIDC Core ID-token validation (iss/aud/
+exp/nonce/azp/at_hash semantics). joserfc provides JWS/JWT primitives but not
+that OIDC claims layer, so moving means re-wiring the validation while keeping
+every fail-closed property (the `_JOSE_ERRORS` funnel, the at_hash
+defence-in-depth check). Security-sensitive; do it deliberately with the OIDC
+test suite as the gate, not as part of a routine bump. The suppression-ordering
+gotcha (authlib.deprecate's module body installs an "always" filter that
+defeats callers' ignores) dies with the migration.
