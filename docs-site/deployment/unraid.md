@@ -727,7 +727,8 @@ this is a published image (`ghcr.io/pwsh/filearr-caddy`) rather than a
 configuration note.
 
 !!! tip "Give this container its own IP"
-    Set **Network Type: Custom : br0** and assign a **fixed IP address** on your
+    The template now defaults to `br0`; confirm **Network Type: Custom : br0**
+    and assign a **fixed IP address** on your
     LAN. This is the expected Unraid pattern and it exists because the proxy wants
     ports 80 and 443 — which on a typical Unraid box are already taken by the web
     GUI or by a reverse proxy you already run. Its own IP sidesteps the collision

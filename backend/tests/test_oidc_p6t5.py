@@ -64,11 +64,13 @@ def mint_id_token(
     *,
     nonce: str,
     sub: str = "sub-123",
-    aud: str = CLIENT_ID,
+    aud: str | list[str] = CLIENT_ID,
     iss: str = ISSUER,
     access_token: str | None = "access-tok",
     at_hash: str | None = "__auto__",
     exp_delta: int = 300,
+    iat_delta: int = 0,
+    nbf_delta: int | None = None,
     extra: dict | None = None,
     key=_KEY,
 ) -> str:
@@ -78,9 +80,11 @@ def mint_id_token(
         "sub": sub,
         "aud": aud,
         "exp": now + exp_delta,
-        "iat": now,
+        "iat": now + iat_delta,
         "nonce": nonce,
     }
+    if nbf_delta is not None:
+        payload["nbf"] = now + nbf_delta
     if access_token is not None and at_hash == "__auto__":
         payload["at_hash"] = _at_hash(access_token)
     elif at_hash not in (None, "__auto__"):
@@ -203,6 +207,94 @@ def test_authenticate_alg_none_rejected():
     p = oidc.OIDCProvider(_config())
     with pytest.raises(oidc.OIDCError):
         p.authenticate(_credentials(tok, nonce="n1", access_token=""))
+
+
+# --------------------------------------------------------------------------- #
+# azp (authorized party) — OIDC Core §2 / §3.1.3.7 step 4-5                    #
+#                                                                             #
+# Added 2026-08-14 as the roadmap §26 (authlib -> joserfc) migration gate.     #
+# These pin the multi-audience semantics that the ID-token validator MUST      #
+# enforce: an ID token whose ``aud`` lists several parties is only ours if     #
+# ``azp`` names us as the authorized party.                                    #
+# --------------------------------------------------------------------------- #
+def test_authenticate_multi_aud_with_correct_azp_accepted():
+    # aud = [us, someone-else] + azp = us  =>  the token IS ours. Accept.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", aud=[CLIENT_ID, "other-rp"], extra={"azp": CLIENT_ID})
+    res = p.authenticate(_credentials(tok, nonce="n1"))
+    assert res.external_subject == "sub-123"
+
+
+def test_authenticate_multi_aud_with_wrong_azp_rejected():
+    # aud lists us, but the token was AUTHORIZED FOR another RP: not ours.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", aud=[CLIENT_ID, "other-rp"], extra={"azp": "other-rp"})
+    with pytest.raises(oidc.OIDCError):
+        p.authenticate(_credentials(tok, nonce="n1"))
+
+
+def test_authenticate_multi_aud_without_azp_rejected():
+    # Multiple audiences and no azp at all => the authorized party is unknown.
+    # Fail closed (OIDC Core §3.1.3.7 step 4: azp is required in this case).
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", aud=[CLIENT_ID, "other-rp"])
+    with pytest.raises(oidc.OIDCError):
+        p.authenticate(_credentials(tok, nonce="n1"))
+
+
+def test_authenticate_single_aud_with_wrong_azp_rejected():
+    # OIDC Core §2: "If present, [azp] MUST contain the OAuth 2.0 Client ID of
+    # this party" — unconditionally, single audience included.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", extra={"azp": "other-rp"})
+    with pytest.raises(oidc.OIDCError):
+        p.authenticate(_credentials(tok, nonce="n1"))
+
+
+def test_authenticate_single_aud_with_matching_azp_accepted():
+    # azp MAY be included even when it equals the sole audience.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", extra={"azp": CLIENT_ID})
+    assert p.authenticate(_credentials(tok, nonce="n1")).external_subject == "sub-123"
+
+
+# --------------------------------------------------------------------------- #
+# Clock-skew leeway bounds (120 s) — exp / iat / nbf                          #
+# --------------------------------------------------------------------------- #
+def test_authenticate_iat_in_future_within_leeway_accepted():
+    # A fast IdP clock (+60 s) is inside the 120 s skew allowance.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", iat_delta=60)
+    assert p.authenticate(_credentials(tok, nonce="n1")).external_subject == "sub-123"
+
+
+def test_authenticate_iat_beyond_leeway_rejected():
+    # Issued 10 minutes in the future: beyond any plausible skew => reject.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", iat_delta=600)
+    with pytest.raises(oidc.OIDCError):
+        p.authenticate(_credentials(tok, nonce="n1"))
+
+
+def test_authenticate_exp_within_leeway_accepted():
+    # Expired 60 s ago but inside the 120 s allowance => still accepted.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", exp_delta=-60)
+    assert p.authenticate(_credentials(tok, nonce="n1")).external_subject == "sub-123"
+
+
+def test_authenticate_nbf_in_future_rejected():
+    # not-before beyond the leeway: the token is not yet valid.
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", nbf_delta=600)
+    with pytest.raises(oidc.OIDCError):
+        p.authenticate(_credentials(tok, nonce="n1"))
+
+
+def test_authenticate_nbf_within_leeway_accepted():
+    p = oidc.OIDCProvider(_config())
+    tok = mint_id_token(nonce="n1", nbf_delta=60)
+    assert p.authenticate(_credentials(tok, nonce="n1")).external_subject == "sub-123"
 
 
 # --------------------------------------------------------------------------- #

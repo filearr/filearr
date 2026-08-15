@@ -9,9 +9,14 @@ Postgres session (``authx.create_session``) — there is deliberately NO paralle
 auth path; every mechanism converges on a plain session cookie.
 
 Security posture:
-* **Authlib pin re-verified live at implementation (R5):** the newest advisory
-  (GHSA-w8p2-r796-3vmq, 2026-06-08) is patched only in 1.6.10/1.7.1, so the floor
-  moved UP from the brief's ``>=1.6.9`` to ``>=1.7.1`` (pyproject.toml).
+* **JOSE library: joserfc** (roadmap §26 migration, 2026-08-14). This module used
+  to drive Authlib's ``authlib.jose`` + ``authlib.oidc.core.CodeIDToken``;
+  ``authlib.jose`` is deprecated and REMOVED in Authlib 2.0, and Authlib 1.7
+  already delegated all JOSE crypto to joserfc — so the swap changed WHO enforces
+  the OIDC claims semantics, not the crypto. Authlib is now gone from the
+  dependency tree entirely; the ID-token claims validation that ``CodeIDToken``
+  used to perform is re-implemented, explicitly and citably, in
+  :func:`_validate_id_token_claims` below.
 * **Signature algorithms are allow-listed to asymmetric families** (never
   ``none``, never HMAC) so the ``alg:none`` (GHSA-7wc2-qxgw-g8gg) and
   algorithm-confusion (CVE-2024-37568) classes cannot reach us.
@@ -27,51 +32,36 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import secrets
 import time
-import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode, urlsplit
 
 import httpx
+from joserfc import jwt as jose_jwt
+from joserfc.errors import (
+    ExpiredTokenError,
+    InvalidClaimError,
+    JoseError,
+    MissingClaimError,
+)
+from joserfc.jwk import KeySet
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.config import Settings, get_settings
 
-# Authlib's ``authlib.jose`` is deprecated in favour of joserfc but remains the
-# supported, CVE-patched API through the 1.x line (compat guaranteed before 2.0);
-# the deprecation warning is noise here.
-#
-# The obvious ``simplefilter("ignore")`` DOES NOT WORK, and shipped broken until
-# a live Unraid deploy surfaced the warning (2026-08-14): importing authlib.jose
-# first imports ``authlib.deprecate``, whose MODULE BODY executes
-# ``warnings.simplefilter("always", AuthlibDeprecationWarning)`` — inside this
-# context, after our filter, and most-recent-wins. So their module defeats any
-# caller's pre-installed suppression. The fix is ordering: import their module
-# FIRST so its filter lands, THEN install ours on top. catch_warnings restores
-# the global filter list on exit either way, so neither filter leaks.
-with warnings.catch_warnings():
-    import authlib.deprecate as _authlib_deprecate
-
-    warnings.filterwarnings(
-        "ignore", category=_authlib_deprecate.AuthlibDeprecationWarning
-    )
-    from authlib.jose import JsonWebToken
-    from authlib.jose.errors import JoseError
-    from authlib.oidc.core import CodeIDToken
-
-# Authlib 1.7 delegates JOSE crypto to ``joserfc``; the errors raised at
-# decode/validate time are ``joserfc.errors.*`` (NOT subclasses of Authlib's own
-# ``JoseError``). Catch both bases so EVERY validation failure funnels into a
-# fail-closed :class:`OIDCError`.
-try:
-    from joserfc.errors import JoseError as _JoseRfcError
-
-    _JOSE_ERRORS: tuple = (JoseError, _JoseRfcError, ValueError, KeyError, TypeError)
-except Exception:  # pragma: no cover - joserfc always present with Authlib 1.7+
-    _JOSE_ERRORS = (JoseError, ValueError, KeyError, TypeError)
+# EVERY failure inside the decode/validate block must funnel into a fail-closed
+# :class:`OIDCError`. ``JoseError`` is joserfc's own base (bad signature, bad
+# header, unsupported alg, and — since we raise them ourselves in
+# :func:`_validate_id_token_claims` — the claim errors). The three builtins cover
+# malformed input that never reaches a JOSE-typed error: a JWKS that is not a
+# dict of the expected shape (``KeyError``), a claim of the wrong Python type
+# (``TypeError`` — notably a non-ASCII ``nonce`` reaching ``compare_digest``), and
+# joserfc's own ``ValueError``s for empty/malformed key material.
+_JOSE_ERRORS: tuple = (JoseError, ValueError, KeyError, TypeError)
 
 # Asymmetric signature families only — ``none`` and HMAC are NEVER accepted (they
 # are the alg:none / HMAC-confusion bypass classes). Intersected with the IdP's
@@ -81,6 +71,184 @@ ALLOWED_SIGNING_ALGS: frozenset[str] = frozenset(
 )
 
 _GLOBAL_ROLE_RANK = {"viewer": 0, "user": 1, "admin": 2}
+
+# Clock-skew allowance applied to every time-based claim (exp/nbf/iat), in
+# seconds. Unchanged from the Authlib era (``claims.validate(leeway=120)``).
+ID_TOKEN_LEEWAY_SECONDS = 120
+
+
+# --------------------------------------------------------------------------- #
+# ID-token claims validation (OIDC Core 1.0 §3.1.3.7)                         #
+# --------------------------------------------------------------------------- #
+# Hand-rolled since the roadmap §26 migration (2026-08-14) replaced Authlib's
+# ``authlib.oidc.core.CodeIDToken`` — joserfc ships JWS/JWT primitives but no OIDC
+# claims layer. Everything below is deliberately explicit: this is the code a
+# security review reads, so every check names the spec clause it implements and
+# every failure path raises (never returns a flag), so a forgotten branch cannot
+# degrade into an accept.
+def _half_hash(value: str, alg: str) -> str | None:
+    """The OIDC "left-most half" hash used by ``at_hash`` (and ``c_hash``).
+
+    OIDC Core §3.1.3.6: base64url (no padding) of the LEFT HALF of the hash of the
+    ASCII octets of ``value``, where the hash is the one implied by the ID token's
+    JOSE header ``alg`` (RS256/ES256/PS256 → SHA-256, ...384 → SHA-384, ...512 →
+    SHA-512; EdDSA → SHA-512).
+
+    Returns ``None`` for an alg we cannot map — callers MUST treat that as a
+    verification FAILURE, never as "skip the check" (this reproduces Authlib's
+    ``create_half_hash``/``_verify_hash`` pair, where a ``None`` hash made
+    ``_verify_hash`` return False).
+    """
+    if alg == "EdDSA":
+        hash_alg = hashlib.sha512
+    else:
+        # "RS256" -> "sha256". getattr on hashlib is bounded by the alg allow-list
+        # applied at decode time, so this can only ever resolve a SHA-2 family.
+        hash_alg = getattr(hashlib, f"sha{alg[2:]}", None)
+    if hash_alg is None:
+        return None
+    digest = hash_alg(value.encode("ascii", "strict")).digest()
+    return _b64url(digest[: len(digest) // 2])
+
+
+def _validate_id_token_claims(
+    claims: dict,
+    header: dict,
+    *,
+    issuer: str,
+    client_id: str,
+    nonce: str,
+    access_token: str,
+    leeway: int = ID_TOKEN_LEEWAY_SECONDS,
+    now: int | None = None,
+) -> None:
+    """Validate a *signature-verified* ID token's claims. Raises on ANY failure.
+
+    The signature, the ``alg`` allow-list and the key selection are already done
+    by :func:`joserfc.jwt.decode` before this is called — this function is purely
+    OIDC Core §3.1.3.7 steps 2-11 (the steps a JWT library cannot do for you
+    because they depend on RP identity and per-request state).
+
+    Raises ``joserfc.errors`` claim errors so that every failure lands in the
+    caller's ``_JOSE_ERRORS`` funnel and becomes ``OIDCError("invalid_id_token")``
+    — identical outward behaviour to the Authlib implementation this replaced.
+    """
+    now = int(time.time()) if now is None else now
+
+    # (1) REQUIRED claims must be present at all. OIDC Core §2 marks iss/sub/aud/
+    #     exp/iat REQUIRED in every ID token; Authlib's IDToken.ESSENTIAL_CLAIMS
+    #     enforced exactly this list. A missing claim is a malformed token, not a
+    #     claim we get to skip.
+    for name in ("iss", "sub", "aud", "exp", "iat"):
+        if claims.get(name) is None:
+            raise MissingClaimError(f"Claim {name!r} is required in an ID token")
+
+    # (2) iss — §3.1.3.7 step 2: the issuer MUST be EXACTLY the configured one.
+    #     String equality, no prefix/suffix tolerance, no normalisation beyond the
+    #     rstrip("/") already applied to the configured value at config load.
+    iss = claims["iss"]
+    if not isinstance(iss, str) or iss != issuer:
+        raise InvalidClaimError("iss", "ID token issuer does not match the configured issuer")
+
+    # (3) aud — §3.1.3.7 step 3: the audience MUST contain our client_id. ``aud`` is
+    #     either a single StringOrURI or an array of them (RFC 7519 §4.1.3).
+    aud = claims["aud"]
+    if isinstance(aud, str):
+        audiences = [aud]
+    elif isinstance(aud, list) and all(isinstance(a, str) for a in aud):
+        audiences = aud
+    else:
+        raise InvalidClaimError("aud", "Claim 'aud' must be a string or an array of strings")
+    if client_id not in audiences:
+        raise InvalidClaimError("aud", "ID token audience does not include this client_id")
+
+    # (4) azp — §3.1.3.7 steps 4-5, and §2's definition of the claim.
+    #     * step 4: if ``aud`` holds MULTIPLE audiences, ``azp`` MUST be present —
+    #       otherwise we cannot tell whether this token was authorized for US or
+    #       merely mentions us, so we fail closed.
+    #     * step 5 / §2 ("If present, it MUST contain the OAuth 2.0 Client ID of
+    #       this party"): whenever ``azp`` IS present it MUST equal our client_id —
+    #       enforced unconditionally, single-audience tokens included.
+    #     NOTE (roadmap §26, 2026-08-14): the Authlib implementation this replaced
+    #     had this check WIRED DEAD. ``IDToken.validate_azp`` reads
+    #     ``self.params["client_id"]``, and oidc.py only ever passed ``nonce`` and
+    #     ``access_token`` in ``claims_params`` — so client_id was None and BOTH
+    #     branches were unreachable. The migration closes that gap; the three
+    #     ``*_azp_*`` cases in tests/test_oidc_p6t5.py pin it.
+    azp = claims.get("azp")
+    if azp is None:
+        if len(audiences) > 1:
+            raise MissingClaimError("Claim 'azp' is required when 'aud' has multiple values")
+    elif not isinstance(azp, str) or azp != client_id:
+        raise InvalidClaimError("azp", "ID token was authorized for a different party")
+
+    # (5) exp / nbf / iat — §3.1.3.7 steps 9-10, with a ``leeway`` second clock-skew
+    #     allowance on each bound (matching the previous ``validate(leeway=120)``).
+    #     Bounds are copied from joserfc's own JWTClaimsRegistry so the accept/reject
+    #     edges are bit-identical to the Authlib-era behaviour.
+    exp = claims["exp"]
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        raise InvalidClaimError("exp", "Claim 'exp' must be a NumericDate value")
+    if exp < (now - leeway):
+        raise ExpiredTokenError("ID token has expired")
+
+    iat = claims["iat"]
+    if not isinstance(iat, (int, float)) or isinstance(iat, bool):
+        raise InvalidClaimError("iat", "Claim 'iat' must be a NumericDate value")
+    if iat > (now + leeway):
+        raise InvalidClaimError("iat", "ID token was issued in the future")
+
+    nbf = claims.get("nbf")  # OPTIONAL, but binding when present.
+    if nbf is not None:
+        if not isinstance(nbf, (int, float)) or isinstance(nbf, bool):
+            raise InvalidClaimError("nbf", "Claim 'nbf' must be a NumericDate value")
+        if nbf > (now + leeway):
+            raise InvalidClaimError("nbf", "ID token is not yet valid")
+
+    # (6) nonce — §3.1.3.7 step 11: the replay defence. We ALWAYS send a nonce in
+    #     the authorization request, so we always have one to compare; if we have
+    #     one, the claim is mandatory and must match exactly.
+    #     Compared with ``hmac.compare_digest`` rather than ``==``: the nonce is a
+    #     secret-equality check on attacker-influenced input, so the comparison is
+    #     kept constant-time to deny a byte-at-a-time timing oracle on our
+    #     server-side nonce. ``compare_digest`` raises TypeError on non-ASCII str
+    #     input — that lands in the caller's funnel and fails closed, which is the
+    #     right answer for a nonce that could never have come from us anyway.
+    if nonce:
+        claim_nonce = claims.get("nonce")
+        if not claim_nonce:
+            raise MissingClaimError("Claim 'nonce' is required (one was sent in the request)")
+        if not isinstance(claim_nonce, str) or not hmac.compare_digest(claim_nonce, nonce):
+            raise InvalidClaimError("nonce", "ID token nonce does not match the request nonce")
+
+    # (7) at_hash — §3.1.3.8 (and the CVE-2026-28498 fail-open class): when the
+    #     token carries the access-token binding AND we hold an access token, the
+    #     binding MUST verify. An unmappable ``alg`` yields ``None`` and is treated
+    #     as a mismatch, never as "unverifiable, therefore fine".
+    #     Constant-time compare for the same reason as the nonce.
+    #     The COMPLEMENTARY presence requirement — "an access token exists, so
+    #     at_hash must not be missing" — lives in :meth:`OIDCProvider.authenticate`
+    #     because it carries its own ``OIDCError`` reason (``missing_at_hash``).
+    at_hash = claims.get("at_hash")
+    if at_hash and access_token:
+        expected = _half_hash(access_token, str(header.get("alg", "")))
+        if (
+            expected is None
+            or not isinstance(at_hash, str)
+            or not hmac.compare_digest(at_hash, expected)
+        ):
+            raise InvalidClaimError("at_hash", "at_hash does not bind the presented access token")
+
+    # (8) Shape checks Authlib performed on optional claims; kept so a malformed
+    #     token is rejected rather than silently reinterpreted downstream.
+    auth_time = claims.get("auth_time")
+    if auth_time is not None and (
+        not isinstance(auth_time, (int, float)) or isinstance(auth_time, bool)
+    ):
+        raise InvalidClaimError("auth_time", "Claim 'auth_time' must be a NumericDate value")
+    amr = claims.get("amr")
+    if amr is not None and not isinstance(amr, list):
+        raise InvalidClaimError("amr", "Claim 'amr' must be an array")
 
 
 class OIDCError(Exception):
