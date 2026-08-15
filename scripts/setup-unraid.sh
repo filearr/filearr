@@ -560,6 +560,10 @@ preflight() {
 
   step "storage"
   local cache_parent="${APPDATA_CACHE:-/mnt/cache/appdata}"
+  case "$cache_parent" in
+    /mnt/user/*|/mnt/user0/*)
+      failr "cache pool path" "$cache_parent is on the shfs FUSE layer — Postgres/Meili/CA corrupt there; use the pool's direct path" ;;
+  esac
   if [[ -d "$(dirname "$cache_parent")" ]]; then
     if [[ -w "$(dirname "$cache_parent")" ]]; then
       pass "cache pool path" "$(dirname "$cache_parent") writable"
@@ -736,7 +740,20 @@ wizard() {
   echo "  mmap behaviour is the classic Unraid cause of database corruption."
   echo "  The app's /config (thumbnails, caches, exports) is lock-insensitive and"
   echo "  stays on the user share."
-  ask "cache-pool appdata root" "${APPDATA_CACHE:-/mnt/cache/appdata}"; APPDATA_CACHE="$REPLY"
+  # A /mnt/user answer here would silently reintroduce the exact corruption
+  # class the cache/user split exists to prevent: shfs FUSE locking + mmap are
+  # the classic Unraid cause of "database is locked" and LMDB index damage.
+  # Re-ask until the answer is a direct pool path (/mnt/<pool>/..., not user).
+  while :; do
+    ask "cache-pool appdata root (a DIRECT pool path, e.g. /mnt/cache/appdata or /mnt/nvme/appdata)" "${APPDATA_CACHE:-/mnt/cache/appdata}"
+    case "$REPLY" in
+      /mnt/user/*|/mnt/user0/*)
+        echo "  Postgres, Meilisearch and the CA must NOT live under /mnt/user —"
+        echo "  pick the pool's direct path (what /mnt/user maps to underneath)." ;;
+      *) break ;;
+    esac
+  done
+  APPDATA_CACHE="$REPLY"
   ask "user-share appdata root (for filearr /config)" "${APPDATA_USER:-/mnt/user/appdata}"; APPDATA_USER="$REPLY"
   ask "media root to mount READ-ONLY into filearr" "${MEDIA_PATH:-/mnt/user/data/media}"; MEDIA_PATH="$REPLY"
 
