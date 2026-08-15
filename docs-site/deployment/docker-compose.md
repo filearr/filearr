@@ -53,7 +53,7 @@ The web UI is then at `http://localhost:8484` (first visit shows the one-time
       control, so a freshly triggered scan is never stuck behind a big extract
       backlog.
 - **`postgres`** — `postgres:18.4`. The source of truth and the job queue.
-- **`meilisearch`** — `getmeili/meilisearch:v1.49.0`, analytics disabled, master
+- **`meilisearch`** — `getmeili/meilisearch:v1.53.0`, analytics disabled, master
   key from `.env`. Its LMDB store lives on a **local** named volume, never on the
   media mount.
 - **`caddy`** *(optional TLS front)* and **`step-ca`** *(optional `agents`
@@ -136,8 +136,8 @@ docker compose run --rm app python scripts/init_db.py
 This is **idempotent** and safe to re-run. It:
 
 1. Creates or migrates the schema. On a brand-new database it stamps the Alembic
-   baseline and runs migrations to head; on a pre-Alembic database it detects
-   that and stamps the baseline before migrating.
+   baseline and runs migrations to head; on a database that has tables but no
+   `alembic_version` row it stamps the baseline before migrating.
 2. Applies the Procrastinate job-queue schema (checking first — the Procrastinate
    `apply_schema` step is *not* itself idempotent, so Filearr guards it).
 3. Ensures the Meilisearch index exists.

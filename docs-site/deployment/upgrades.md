@@ -2,7 +2,7 @@
 
 Filearr upgrades are designed to be low-drama: the database bootstrap is
 idempotent, the search index is disposable and rebuildable, and migrations are
-managed by Alembic with a stamping path for databases that predate it.
+managed by Alembic.
 
 ## The golden rule: back up Postgres first
 
@@ -53,8 +53,8 @@ The bootstrap, `scripts/init_db.py`, is **idempotent** and handles every state:
 
 - **Brand-new database** — creates the schema, stamps the Alembic baseline, runs
   migrations to head.
-- **Pre-Alembic database** — detects that the tables exist but there is no
-  `alembic_version` table, **stamps the baseline**, then upgrades to head.
+- **Existing database, no `alembic_version` table** (a restore from an
+  unstamped dump) — **stamps the baseline**, then upgrades to head.
 - **Up-to-date database** — a no-op beyond confirming head.
 
 It then applies the Procrastinate job-queue schema (guarded — Procrastinate's own

@@ -43,9 +43,8 @@ The wizard saves your answers so redeploys never re-ask. It prompts once for:
 
 ### The "Optional app settings" step {#optional-app-settings}
 
-Optional features ship **off**, and used to be visible only inside the
-container's `.env`. The wizard now asks about them and writes the answers into
-`deploy.conf`, where you can see and edit them on the host:
+Optional features ship **off**. The wizard asks about them and writes the answers
+into `deploy.conf`, where you can see and edit them on the host:
 
 ```text
 ── Optional app settings ──
@@ -232,7 +231,7 @@ What state you're in:
 
 The two usual causes are a **full CT disk** (`pct exec <vmid> -- df -h /`)
 and **Docker Hub being unreachable** (the build pulls base images); the
-script now aborts at the build step with the real error, so scroll up to it.
+script aborts at the build step with the real error, so scroll up to it.
 After fixing the cause, retry with `FORCE_REBUILD=1 ./deploy-proxmox.sh
 <same args>` — that forces a cache-less rebuild, which also cures the rarer
 corrupted-build-cache case.

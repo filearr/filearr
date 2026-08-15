@@ -9,6 +9,108 @@ to an enrolled agent replicating into a catalogue you can search. Read it in
 order the first time; the [field reference](#field-reference) at the end is what
 you come back to.
 
+There are two ways through it. [**Scripted setup**](#scripted-setup) is the
+recommended one and does everything below except the Apply clicks and your DNS
+records. [**Manual setup**](#manual-setup) is the same install by hand — it is
+the script's documentation of record, and the path for an air-gapped box.
+
+## Scripted setup {#scripted-setup}
+
+`scripts/setup-unraid.sh` walks the whole install: it checks the Docker
+settings, creates the network in the right order, creates every appdata
+directory with the right ownership, generates your secrets once, writes the five
+container templates with every field already filled in, then walks you through
+the Apply clicks **one container at a time**, probing each one for real
+readiness before suggesting the next — and harvests the CA's fingerprint,
+administrative password and provisioner key the moment step-ca first boots.
+
+Run it in the **Unraid terminal** — the `>_` icon in the header, or SSH. That
+shell is already root; there is no `sudo` step.
+
+```bash
+mkdir -p /boot/config/plugins/filearr
+curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/main/scripts/setup-unraid.sh \
+  -o /boot/config/plugins/filearr/setup-unraid.sh
+bash /boot/config/plugins/filearr/setup-unraid.sh
+```
+
+Then follow the prompts. That is the whole thing.
+
+Three deliberate details in those three lines:
+
+- **It is downloaded onto the flash**, not into `/tmp`. `/boot` survives
+  reboots and array stops, so the resumed run after you reboot the box, the
+  `--check` you run in three months, and your saved answers are all the same
+  copy. Its state lives beside it in `/boot/config/plugins/filearr/`.
+- **`bash <file>`, not `./<file>` and never `sh <file>`.** The script is bash —
+  `[[ ]]`, `local`, `SECONDS` — so `sh` fails immediately on syntax. `chmod +x`
+  and `./setup-unraid.sh` also work, but the flash is vfat, where permission
+  bits are a mount-time fiction rather than a property of the file; invoking it
+  through `bash` sidesteps that question entirely and behaves the same on every
+  Unraid version.
+- **It is fetched over HTTPS from this repository at `main`.** If you would
+  rather pin the exact revision you reviewed, fetch by commit SHA instead — the
+  content at a SHA cannot change under you:
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/<commit-sha>/scripts/setup-unraid.sh \
+      -o /boot/config/plugins/filearr/setup-unraid.sh
+    ```
+
+Later invocations, all against that same copy:
+
+```bash
+bash /boot/config/plugins/filearr/setup-unraid.sh              # re-run to resume; finished work is skipped
+bash /boot/config/plugins/filearr/setup-unraid.sh --check      # verify only: PASS/FAIL per item
+bash /boot/config/plugins/filearr/setup-unraid.sh --summary    # re-print the handoff summary
+bash /boot/config/plugins/filearr/setup-unraid.sh --local-dir /path/to/filearr/unraid   # air-gapped: templates from a local checkout
+```
+
+`--reconfigure` re-asks the questions and `--force` rewrites templates for
+containers that already exist; `--help` lists the rest. Nothing regenerates a
+secret that already exists, ever.
+
+### What it does, and what it leaves to you
+
+It runs in four phases and is resumable at any point — re-running picks up where
+it stopped, and containers it has already verified are skipped.
+
+| Phase | What happens |
+|---|---|
+| 0 — preflight | A read-only PASS/WARN/FAIL table: Docker service and version, the preserve-networks setting, the cache pool, `br0`, whether your chosen fixed IPs already answer, who holds host port 80, and what a re-run would and would not touch. A FAIL stops it; a WARN asks. **Nothing is changed until this passes.** |
+| 1 — prepare | The questions (tier, topology, addresses, paths), then the Docker setting, the `filearr` network, every appdata directory with correct ownership, your secrets, the five filled-in templates, and the Caddy re-attach helper. |
+| 2 — walkthrough | One container at a time: *"Docker tab → Add Container → Template: `my-filearr-postgres` → Apply"*, then it waits, then it **probes** — `pg_isready` for Postgres, `/health` for Meilisearch, `/api/v1/health` for the app, `step ca health` for the CA, a TLS handshake for Caddy. The step-ca harvest runs inline here. `s` skips, `r` retries, `q` quits resumably. |
+| 3 — handoff | Addresses, paths, the DNS records table with your actual values, the CA fingerprint, the safeguarding block — then, behind an explicit prompt, your secrets in clear with each one's rotation rule. Re-printable with `--summary`. |
+
+Two things it does not do, and will not pretend to:
+
+- **The Apply clicks.** Unraid creates containers through dockerMan in the
+  webGUI. There is no supported CLI for it, and a script driving the GUI would
+  break on the next OS update. So the script prepares everything and tells you
+  precisely what to click, in order, verifying as it goes.
+- **The [DNS records](#dns-records).** They live on your LAN resolver, which is
+  not this box. The script prints the exact table for the addresses you chose.
+
+!!! note "Install order: step-ca comes before the app"
+    The scripted walkthrough applies `filearr-stepca` **before** `filearr`,
+    where the manual flow below has them the other way round. The reason is
+    that the app's CA Root Fingerprint and CA Provisioner JWK do not exist until
+    the CA has booted: with the CA first, the script writes both values into
+    `my-filearr.xml` before you ever open the app's Edit page, and the whole
+    re-Apply round trip disappears. Nothing in step-ca depends on the app — it
+    is a standalone CA that never calls out — so the reorder costs nothing. By
+    hand, either order works; you just fill the two fields in afterwards.
+
+Everything the script does is documented below, step by step. If you would
+rather do it yourself, or the box has no internet, read on.
+
+## Manual setup {#manual-setup}
+
+The rest of this page is the install by hand. It is also the reference for what
+the script did, and every trap it absorbs is still written up here with the
+verbatim error you would have seen — so a symptom you are searching for is
+findable whichever path you took.
+
 ## Pick a tier first
 
 The stack is modular. Decide how far you need to go *before* you install
@@ -1032,7 +1134,7 @@ precisely for that case.
 ## Optional: hardware-accelerated video thumbnails
 
 To use an Intel iGPU for video poster frames, add the render device and group to
-the **`filearr`** container's Extra Parameters (this used to go on the worker):
+the **`filearr`** container's Extra Parameters:
 
 ```text
 --device /dev/dri --group-add $(stat -c '%g' /dev/dri/renderD128)

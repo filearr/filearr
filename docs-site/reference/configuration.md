@@ -34,8 +34,8 @@ variables, and the Proxmox deploy writes each one into the container's `.env`
     `app` and `worker` must agree. The worker is what actually loads the semantic
     embedder and runs the content-sniff pass; the app only serves the flags to
     the console. The bundled compose file keeps both in sync automatically — on
-    Unraid it is a single `filearr` container (the worker was merged in on
-    2026-08-12), so there is only one place to set it.
+    Unraid it is a single `filearr` container running both processes, so there is
+    only one place to set it.
 
 **Not env vars:** OCR and RAG passage chunking are **per-library** toggles you
 flip in the console's library settings (their `FILEARR_OCR_*` /

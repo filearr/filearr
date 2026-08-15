@@ -122,6 +122,37 @@ console. Full runbook: `docs-site/agents.md`.
 
 ## One-time setup
 
+**The scripted path does all of this for you.** `scripts/setup-unraid.sh` runs
+on the Unraid box and handles the Docker setting, the network, the appdata
+directories and their ownership, the secrets, and all five templates with every
+field filled in — then walks you through the Apply clicks one container at a
+time, probing each for real readiness, and harvests the step-ca fingerprint,
+admin password and provisioner JWK inline. Run it in the Unraid terminal (the
+`>_` icon, or SSH — that shell is already root):
+
+```bash
+mkdir -p /boot/config/plugins/filearr
+curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/main/scripts/setup-unraid.sh \
+  -o /boot/config/plugins/filearr/setup-unraid.sh
+bash /boot/config/plugins/filearr/setup-unraid.sh
+```
+
+It downloads onto the **flash** deliberately: `/boot` survives reboots, so
+re-runs, saved answers and a `--check` months later all use the same copy. Use
+`bash <file>` rather than `./<file>` — the flash is vfat, where permission bits
+are a mount-time fiction — and never `sh <file>`, which fails on the first
+bashism. To pin the exact revision you reviewed, fetch by commit SHA instead of
+`main`. Later: re-run to resume, `--check` to validate, `--summary` to re-print
+the handoff, `--local-dir <checkout>/unraid` for an air-gapped box.
+
+It cannot do two things and does not pretend to: the per-container **Apply**
+click (Unraid creates containers through the webGUI; there is no supported CLI)
+and the **DNS records** (they live on your resolver, not this box). Full
+description: `docs-site/deployment/unraid.md#scripted-setup`.
+
+The rest of this section is the same setup by hand — the reference for what the
+script does, and the path for a box with no internet.
+
 1. **Pick a network topology first** — it decides what goes in both DSNs, the
    Meilisearch URL, both Caddy upstreams and the CA's own certificate, so
    changing it later is an edit to every container. Full comparison, worked field
@@ -213,7 +244,7 @@ console. Full runbook: `docs-site/agents.md`.
   up before relying on logins.
 - **iGPU thumbnails (optional):** to hardware-accelerate video poster-frames, add
   `--device /dev/dri --group-add $(stat -c '%g' /dev/dri/renderD128)` to the
-  **`filearr`** container's Extra Parameters (this used to go on the worker).
+  **`filearr`** container's Extra Parameters.
   Safe to skip — the pipeline falls back to software automatically.
 - Publishing to Community Applications later: submit via ca.unraid.net/submit
   (needs HTTPS PNG icon, support thread, overview — all present; the templates

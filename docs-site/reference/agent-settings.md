@@ -150,12 +150,9 @@ the CA URL, the bound certificate fingerprint, and **a copy of the central URL i
 enrolled against**. That copy is identity, not configuration, and it is not
 something you edit.
 
-Historically every daemon loop ran off that copy alone, which made a documented
-runbook step a no-op: repointing an agent at `agents.<domain>` via the sidecar,
-env or flag and restarting changed nothing — the sidecar said one host, the
-daemon logged the other (observed live 2026-08-08 during the mTLS migration).
-
-The rule now is:
+It is also not what the daemon runs off when you have configured something else —
+repointing an agent at `agents.<domain>` via the sidecar, env or flag and
+restarting it does take effect:
 
 !!! info "A configured central URL outranks the enrollment-time copy"
     On daemon start, the resolved `central_url` (flag > env > sidecar) is compared

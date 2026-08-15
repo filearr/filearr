@@ -925,7 +925,7 @@ Taxonomy** — a two-level tree derived from the file *extension*:
   `three-d-cad`, `development`, `archive`, `system`, `other`). Each category carries
   an `extractor` (`image`/`audio`/`video`/`document`/`model3d` or none) — the
   extraction pipeline it routes to. `file_category` is the authoritative coarse
-  bucket (it replaced the removed `media_type` enum in W8-B).
+  bucket.
 * **`file_group`** — the finer child (37 groups). It both **subdivides** its
   category (RAW vs. raster photos; lossy vs. lossless audio) and gives signal to the
   otherwise-opaque `other`/system files (archives, installers, source code, fonts,

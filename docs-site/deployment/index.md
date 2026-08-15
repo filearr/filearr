@@ -35,7 +35,7 @@ runbook.
 | `app` | `filearr` | REST API + SPA (port 8000 → 8484) | via Postgres |
 | `worker` | `filearr` | Procrastinate job worker (scan/extract/index/maintenance) | — |
 | `postgres` | `postgres:18.4` | Source of truth **and** job queue | **YES** |
-| `meilisearch` | `getmeili/meilisearch:v1.49.0` | Disposable search projection | No (rebuildable) |
+| `meilisearch` | `getmeili/meilisearch:v1.53.0` | Disposable search projection | No (rebuildable) |
 | `caddy` *(optional)* | built locally | TLS reverse proxy | No |
 | `step-ca` *(optional, `agents` profile)* | `smallstep/step-ca:0.30.2` | Agent certificate authority | volume only |
 | `watcher` *(optional)* | `filearr` | Local-disk filesystem watch mode | — |

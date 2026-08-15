@@ -221,12 +221,10 @@ precaches the UI and auto-updates itself. Two practical consequences:
   is picked up on the next visit and takes control immediately; until that
   reload the tab may still render the previous UI build. The footer's
   `build` stamp shows which build the page came from.
-- **Historical symptom** (fixed): opening `/api/docs` showed the search page
-  instead of the API reference. That was the pre-fix service worker answering
-  the navigation with the app shell. After upgrading, one reload installs the
-  corrected worker and `/api/docs` renders Swagger again. If a client is
-  somehow stuck, DevTools → Application → Service workers → *Unregister*, then
-  reload.
+- **If a tab still looks wrong after that reload** — a stale UI, or `/api/docs`
+  rendering the search page instead of the API reference — the old worker is
+  still in control on that client: DevTools → Application → Service workers →
+  *Unregister*, then reload.
 
 Each instance serves its own copy of this manual at `/docs/` and the Swagger
 assets for `/api/docs` from its own origin — neither needs internet access.
@@ -241,25 +239,18 @@ Task exception was never retrieved
 future: <Task finished name='process job …' … exception=AppNotOpen('App was not open. …')>
 ```
 
-**Root cause (fixed 2026-08-08).** Filearr's defer helpers wrapped every
-defer in `async with proc_app.open_async():`. In the API process that was
-correct — but the same helpers also run **inside worker tasks**, where the
-worker already owns an open Procrastinate app: there the enter was a no-op
-while the context **exit closed the worker's shared connection pool**
-(Procrastinate's close is unconditional, not reference-counted). Every
-*concurrently running* job then failed with `AppNotOpen` — printed lazily by
-asyncio whenever the failed task got garbage-collected, which is why the
-message appears amid otherwise-healthy log lines — until the next defer
-incidentally reopened the pool. Current builds route every such site through
-a guard that never closes a pool it did not open (regression-tested,
-including a sweep that fails if a raw `open_async()` context reappears), and
-the API process now opens its pool once for its lifetime instead of per
-call.
+**What it means.** Something closed the Procrastinate connection pool the
+worker was using, and every *concurrently running* job failed with
+`AppNotOpen` — printed lazily by asyncio whenever the failed task is
+garbage-collected, which is why the message appears amid otherwise-healthy log
+lines. This should not happen: every defer site routes through a guard that
+never closes a pool it did not open (regression-tested, including a sweep that
+fails if a raw `open_async()` context reappears), and the API process opens its
+pool once for its lifetime rather than per call.
 
-**Impact: none lasting, even on affected builds.** The interrupted jobs keep
-status `doing`; the reaper requeues them within its 5-minute tick (FIX-6).
-If you still see this on a current build, find what actually failed around
-it:
+**Impact: none lasting.** The interrupted jobs keep status `doing`; the reaper
+requeues them within its 5-minute tick. If you do see it, find what actually
+failed around it:
 
 ```bash
 docker inspect --format '{{.RestartCount}} {{.State.StartedAt}}' filearr-worker-1
@@ -294,12 +285,12 @@ SELECT task_name, status, attempts FROM procrastinate_jobs WHERE attempts >= 10;
 Healthy is at most **one** `scan_library` per library in `todo`/`doing`
 (also visible via `GET /api/v1/system/jobs`).
 
-**Fix.**
+**Fix.** Scan dedupe covers `todo`/`doing`/`aborting`, scans fire once per cron
+occurrence, and the reaper caps non-scan requeues and finalizes orphaned scan
+runs — so this state does not arise on its own. To clear rows a crash left
+behind:
 
-1. Deploy the current version (dedupe now covers `todo`/`doing`/`aborting`; scans
-   fire once per cron occurrence; the reaper caps non-scan requeues and finalizes
-   orphaned scan runs).
-2. Clean up rows the old code left (idempotent — or wait ~5 min for the reaper):
+1. Clean up the stuck rows (idempotent — or wait ~5 min for the reaper):
 
     ```sql
     UPDATE procrastinate_jobs SET status='failed'
@@ -312,8 +303,8 @@ Healthy is at most **one** `scan_library` per library in `todo`/`doing`
     WHERE status='doing' AND attempts >= 10;
     ```
 
-3. Force a reaper pass and confirm: `GET /api/v1/system/jobs/reap` (admin).
-4. Re-enable schedules (Admin → each library → Scan schedule, or `PATCH
+2. Force a reaper pass and confirm: `GET /api/v1/system/jobs/reap` (admin).
+3. Re-enable schedules (Admin → each library → Scan schedule, or `PATCH
    /api/v1/libraries/{id}` with `scan_cron`).
 
 **Tunables.** `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` (default 2880 = 48h —
@@ -428,19 +419,19 @@ architecture and compares its digest against the local image. The
 forever. It is not specific to Unraid — Watchtower and Portainer report the same
 phantom updates against attested images.
 
-**Fix.** Builds from 2026-08-11 onward publish with `provenance: false` and
-`sbom: false`, so each tag is a clean two-entry index. Build provenance is
-unaffected: it still ships via Sigstore keyless attestation (publicly logged in
-Rekor), which attaches as an OCI *referrer* rather than as an index entry, and is
-the stronger of the two —
+**Fix.** Filearr's own images publish with `provenance: false` and `sbom: false`,
+so each tag is a clean two-entry index and this comparison works. Build
+provenance is unaffected: it ships via Sigstore keyless attestation (publicly
+logged in Rekor), which attaches as an OCI *referrer* rather than as an index
+entry, and is the stronger of the two —
 
 ```bash
 gh attestation verify oci://ghcr.io/pwsh/filearr:latest -R pwsh/filearr
 ```
 
-You will see one *legitimate* update after this lands (dropping the attestation
-entries changes the index digest). Apply it once; the flag should stay quiet
-afterwards.
+If you build and push your own image, drop the attestation index entries the
+same way, or every update checker watching that tag reports a phantom update
+forever.
 
 ## The dashboard shows "unavailable" for a section {#stats-degraded}
 
@@ -468,18 +459,17 @@ confident `0`.
 docker compose logs app | grep 'stats: section'
 ```
 
-**Why it exists.** Before this was bounded, any single slow aggregate hung the
-whole endpoint indefinitely. On a ~1.09M-item instance `/api/v1/stats` connected
-instantly and then timed out past 15 s on every attempt — with `/health`,
-`/version` and `/search` all answering 200 — which failed the deploy's smoke gate
-while the stack was otherwise healthy and gave the operator nothing but
-`HTTP 000` to work with.
+**Why it exists.** Unbounded, a single slow aggregate hangs the whole endpoint:
+on a million-item catalogue `/api/v1/stats` connects instantly and then times out
+on every attempt while `/health`, `/version` and `/search` all answer 200 — which
+fails the deploy's smoke gate on an otherwise healthy stack and leaves you
+nothing but `HTTP 000` to work with.
 
 **If `semantic` is the degraded section.** The semantic-coverage counts are the
 one aggregate whose cost scales with how much text extraction you run: OCR and
 PDF text are stored in `items.metadata`, which pushes those JSONB values over
 Postgres' TOAST threshold, and a query that reads the value of every active row
-has to reconstruct each one. The counts are now written so the value read is
+has to reconstruct each one. The counts are written so the value read is
 confined to rows that already carry an embedding fingerprint (the existence test
 is answered from the GIN index instead), so this should stay fast; if it still
 degrades on your catalogue, `VACUUM ANALYZE items` first — a stale plan on a
@@ -738,9 +728,9 @@ the space went somewhere else — `docker system df -v` tells you whether it's
 the Postgres volume growing with your catalog (legitimate; grow the disk) or
 the build cache, and `du` catches everything outside Docker.
 
-**Prevent recurrence.** Deploys from 2026-08-08 on prune dangling images
-automatically after every build (alongside the existing BuildKit cache trim),
-so rebuild storms no longer accrete layers.
+**Prevent recurrence.** Deploys prune dangling images automatically after every
+build (alongside the BuildKit cache trim), so rebuild storms do not accrete
+layers.
 
 !!! tip "Proxmox web-console paste eats the first character"
     Pasting into the noVNC console frequently drops the leading keystroke —
@@ -750,8 +740,8 @@ so rebuild storms no longer accrete layers.
 
 ## Migration failures / Alembic state / stamping
 
-**Symptom.** After an upgrade or restore the app errors on schema mismatch, or a
-pre-Alembic database has no `alembic_version` table.
+**Symptom.** After an upgrade or a restore the app errors on a schema mismatch,
+or the restored database has no `alembic_version` table.
 
 **Diagnosis.**
 
@@ -762,8 +752,8 @@ docker compose exec -T postgres psql -U filearr -d filearr \
   -c "SELECT version_num FROM alembic_version;"
 ```
 
-**Fix.** `scripts/init_db.py` is idempotent and does the right thing in every case
-— it detects a pre-Alembic DB, **stamps the baseline**, then upgrades to head,
+**Fix.** `scripts/init_db.py` is idempotent and does the right thing in every
+case — it **stamps the baseline** where one is missing, upgrades to head,
 applies the procrastinate schema, and ensures the Meili index exists:
 
 ```bash
@@ -790,12 +780,13 @@ docker compose logs app | grep -i 42804                                   # conf
 
 **Cause.** The scope columns are real Postgres `ltree` columns (PG18 ships the
 `ltree` contrib), but if they are ORM-mapped as plain text the driver renders a
-`::VARCHAR` bind cast, and Postgres has no `varchar → ltree` assignment cast. This
-was invisible in tests where the test Postgres shipped no contrib.
+`::VARCHAR` bind cast, and Postgres has no `varchar → ltree` assignment cast. A
+test database without the contrib installed never sees it.
 
-**Fix.** Upgrade to the version whose ORM binds the parameter as *unknown* (no
-cast) and lets the server coerce it, with a text DDL fallback where the extension
-is absent. Nothing operator-side beyond deploying it. **General lesson:** any
+**Fix.** Nothing operator-side: the ORM binds these parameters as *unknown* (no
+cast) and lets the server coerce them, with a text DDL fallback where the
+extension is absent. A `42804` on an item write is a bug — report it with the
+failing payload. **General lesson:** any
 column backed by a Postgres **extension type** (`ltree`, `vector`, …) must not be
 mapped as a plain scalar, or the driver emits a cast the server rejects.
 
@@ -994,7 +985,8 @@ draining its outbox). Tune with `FILEARR_AGENT_OFFLINE_ALERT_SECONDS` /
 ## Search index drift → rebuild-index
 
 **Symptom.** Search results are missing items, stale, or (for scoped non-admin
-users after an RBAC upgrade) empty. Postgres and Meilisearch have diverged.
+users, right after path-scoped RBAC search is enabled) empty. Postgres and
+Meilisearch have diverged.
 
 **Diagnosis.** An hourly reconcile sweep detects divergence and never writes
 Postgres — check the Jobs page / worker logs for its results.
@@ -1118,16 +1110,16 @@ items appear in search and browse.
 
 ## Backup and restore {#backup-and-restore}
 
-This page used to say "what must be backed up: **Postgres only**". That is true
-about your *catalogue* and wrong about your *deployment*, in two ways — and one
-of them fails **silently**. Read the inventory before you trust a backup.
+"Back up Postgres" is true about your *catalogue* and incomplete about your
+*deployment*, in two ways — and one of them fails **silently**. Read the
+inventory before you trust a backup.
 
 ### State inventory — what exists, and what losing it costs {#state-inventory}
 
 | State | Where it lives | Backed up by | If you lose it |
 |---|---|---|---|
 | **Postgres** (`user_metadata`, tags, custom fields, saved searches, libraries/schedules, alert config + history, provenance/audit, extracted metadata, job queue) | `pgdata` volume | `scripts/backup.sh` (and the in-app backup) | **Everything you cannot re-derive from the files themselves.** This is the source of truth. |
-| **`FILEARR_SECRET_KEY`** | the deployment `.env` — deliberately **outside** Postgres | `env.backup` in the bundle | ⚠ **Silent loss inside a successful restore.** It is the AES-GCM envelope key for alert-channel secrets. A dump carries the ciphertext, not the key. Restore under a *different* key and everything reports success while every SMTP password, webhook HMAC secret and apprise URL becomes permanently undecryptable. You find out weeks later, from the alert that never arrived. Since 2026-08-12 the app records `sha256(key)[:16]` in the database and reports a mismatch loudly (see [below](#secret-key-mismatch)) — but the key itself is only ever recoverable from your backup. |
+| **`FILEARR_SECRET_KEY`** | the deployment `.env` — deliberately **outside** Postgres | `env.backup` in the bundle | ⚠ **Silent loss inside a successful restore.** It is the AES-GCM envelope key for alert-channel secrets. A dump carries the ciphertext, not the key. Restore under a *different* key and everything reports success while every SMTP password, webhook HMAC secret and apprise URL becomes permanently undecryptable. You find out weeks later, from the alert that never arrived. The app records `sha256(key)[:16]` in the database and reports a mismatch loudly (see [below](#secret-key-mismatch)) — but the key itself is only ever recoverable from your backup. |
 | **`POSTGRES_PASSWORD`** | `.env` | `env.backup` | The stack cannot connect to its own restored database until you set it to whatever the restored roles expect (or reset the role). |
 | **`MEILI_MASTER_KEY`** | `.env` | `env.backup` | Search is unreachable until it matches what the Meili volume was initialised with; simplest fix is to wipe Meili and rebuild the index. |
 | **`FILEARR_CA_PROVISIONER_JWK`** | `.env` only (never the committed compose file) | `env.backup` | Registration still succeeds but no agent can obtain a client certificate — the register response's `ca_ott` goes null. |

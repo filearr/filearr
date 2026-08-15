@@ -173,8 +173,8 @@ further down.
 
 ##### The installer does this for you {#agent-tools-autoinstall}
 
-**Since 2026-08-10 the install scripts fetch these by default**, so in the normal
-case there is nothing to do:
+**The install scripts fetch these by default**, so in the normal case there is
+nothing to do:
 
 ```bash
 # Linux / macOS — tools installed unless you pass -T
@@ -377,12 +377,8 @@ page's `read`, because it exposes filesystem paths from someone else's machine.
 **Within about 15 minutes, with no service restart.** The agent caches its tool
 lookups (a scan asks per file, so the cache is not optional), but each entry
 expires after 15 minutes, and the capability report is rebuilt on every poll.
-Install a tool machine-wide and the console reflects it by itself.
-
-This used to be untrue and it cost real time: the lookups were cached for the
-life of the process, so a tool installed after the agent started was invisible
-until someone happened to restart the service. If you are impatient, restarting
-the agent still works and is instant.
+Install a tool machine-wide and the console reflects it by itself. If you are
+impatient, restarting the agent works and is instant.
 
 Each tool also honours an explicit path override, which wins over `PATH`:
 `FILEARR_AGENT_FFMPEG_PATH`, `FILEARR_AGENT_FFPROBE_PATH`,
@@ -498,13 +494,12 @@ automatically after the switch. `-Name`, `-ConfigGroup` (repeatable — the
 [configuration groups](#two-groupings) the machine joins; Global is implicit)
 and `-TokenTtlMinutes` cover the rest of the mint surface.
 
-!!! warning "mTLS switch needs an agent build from 2026-08-08 or later"
-    Older daemons pinned the enrollment-time URL inside `state.json` and
-    ignored a changed sidecar/env/flag entirely. Current builds adopt the
-    configured URL at startup (the log shows *"central URL switched by
-    config"*). Running the script with `-MtlsUrl` against an older install
-    still works in **one run** — the binary updates first, and the new binary
-    reads the switched sidecar when the service starts.
+!!! note "How the URL switch takes effect"
+    The daemon adopts the configured central URL at startup, outranking the copy
+    `state.json` recorded at enrollment (the log shows *"central URL switched by
+    config"*). Switching the URL and updating the binary in the same run is fine
+    — the binary updates first, and the new binary reads the switched sidecar
+    when the service starts.
 
 Downloads always ride `agent-dist`, the deliberately-unauthenticated
 first-install surface, so updates never *require* a key — `-ApiKey` is sent
@@ -618,7 +613,7 @@ unreachable through a Docker port mapping). It stays read-only search and is
 **Global** group for the whole fleet, a higher-priority group for just these
 hosts) or it serves nothing. Self-update is off inside the
 container (`FILEARR_AGENT_SELF_UPDATE=false` in the image): updating means
-pulling a new image, and the agent no longer logs the unpinned-key warning.
+pulling a new image.
 
 ### Any other container host
 
@@ -664,8 +659,8 @@ binary; the data directory is pinned to `/config`.
 
 !!! tip "Poison files on network mounts"
     A corrupt or locked file on a FUSE/SMB/NFS mount can block reads
-    forever, which used to freeze a scan at the same file every run. Hashing
-    is now bounded per file by `FILEARR_AGENT_HASH_TIMEOUT_SECONDS`
+    forever, which would otherwise freeze a scan at the same file every run.
+    Hashing is bounded per file by `FILEARR_AGENT_HASH_TIMEOUT_SECONDS`
     (default `300`, `0` disables): past the budget the file is cataloged
     unhashed and a WARN in the agent log names the path so you can repair or
     exclude it.
@@ -726,20 +721,6 @@ have to know which half a field lands in. It matters in exactly two places:
     `PATCH`ing a group's `settings` or `policy` swaps that whole section for the
     body you send. Deep-merging on write as well would leave you unable to
     *unset* a key. Authoring is replace, resolution is layer.
-
-!!! info "One mechanism, since 2026-08-11"
-    Earlier releases had two independent groupings. A free-text
-    `agents.rollout_group` selected a whole-document policy written at one of
-    three scopes (`global`, `group:<name>`, `agent:<uuid>`) and doubled as the
-    binary-release canary cohort; a separate configuration group carried a
-    settings bundle. Scopes **replaced** rather than merged, so a narrower
-    document had to repeat every key it needed, and the two groupings were
-    routinely confused for each other. Both are gone. Existing documents were
-    migrated into groups on upgrade — each `group:<name>` scope became a group,
-    each `agent:<uuid>` document became a single-member `host-<hostname>` group,
-    and the old `global` document seeded Global — with version counters
-    restarting at 1, because whole-document history does not translate into
-    layered semantics.
 
 ### Worked example: desktops inventory, filers extract {#policy-group-example}
 
@@ -832,9 +813,8 @@ coordinates reach central (where they stay hidden unless the library sets
 above Global turns it on for them.
 
 !!! tip "State only what differs"
-    The old scope model forced a narrower document to repeat every key it
-    needed. Layering inverts that: a group should contain the keys that are
-    *true about that group and not about the fleet*. A group that repeats
+    A group should contain the keys that are *true about that group and not
+    about the fleet* — layering supplies the rest. A group that repeats
     Global's values still works, but it silently pins them — a later edit to
     Global will not reach its members, and nothing on screen says why.
 
@@ -976,7 +956,7 @@ The collectors this release ships descriptions for:
     and a stored name absent from the catalogue is preserved verbatim across an
     edit instead of being dropped.
 
-**`inventory.permissions`** (W7) — only takes effect when `"permissions"` is
+**`inventory.permissions`** — only takes effect when `"permissions"` is
 *also* named in `collectors`; an admin must both name the collector and configure
 it. Defaults make a first run highlight only explicit, non-baseline grants:
 
@@ -1067,13 +1047,12 @@ bodies are never written to the audit log.
     a version number), and a taxonomy edit. An agent re-applies on any ETag
     change; an unchanged document is a `304`.
 
-!!! info "Nothing changed on the wire for agents"
-    `GET /agents/{agent_id}/policy` still answers
+!!! info "What the policy endpoint returns"
+    `GET /agents/{agent_id}/policy` answers
     `{"scope": …, "version": …, "policy": {…}}` with the merged keys at the top
-    level and merged settings under `group`. `scope` is now the constant
-    `"groups"` (there is one resolution scheme, so the field carries no
-    information and exists only so old binaries keep parsing) and `version` is
-    the generation. Deployed agent binaries need no update.
+    level and merged settings under `group`. `scope` is the constant `"groups"`
+    (there is one resolution scheme, so the field carries no information) and
+    `version` is the generation.
 
 ## Phased rollouts {#phased-rollouts}
 
@@ -1197,9 +1176,8 @@ none; nothing breaks.
 
 The poll also carries the agent's **running version**, so the console stays
 current even for agents whose self-update subsystem is off — the container
-image disables it by design, and before this the update poll was the only
-version-confirmation channel, leaving container agents' console version
-frozen at whatever they enrolled with.
+image disables it by design, and the update poll is the only other
+version-confirmation channel.
 
 Next to it, a **transport badge** shows `mTLS` or `bearer` per agent. This is
 *central's* observation of which authentication path the agent's last
@@ -1231,10 +1209,10 @@ per-row actions), applied at the agent's next check-in (~1 min):
   already queued or running.
 - **re-extract** (`reextract`) — sweep the agent's existing index and re-emit
   its items with a fresh extraction result. See below; this is the one that
-  fills in metadata for files catalogued before extraction was possible.
+  fills in metadata for files catalogued before extraction was enabled.
 - **re-hash** (`rehash_sweep`) — sweep a size band of the agent's existing index
   and correct hashes computed by an older, defective hasher. See
-  [Migrating stale quick hashes](#agent-rehash) below. Not to be confused with
+  [Correcting stale quick hashes](#agent-rehash) below. Not to be confused with
   the internal `rehash_check` command, which verifies a *single* item on demand
   and writes nothing.
 
@@ -1288,37 +1266,31 @@ Once the metadata lands, the rest follows on its own: RAG chunking and content
 embeddings select on `body_text`, so the backfills pick those items up without
 any further action.
 
-### Migrating stale quick hashes (64-128 KiB band) {#agent-rehash}
+### Correcting stale quick hashes (64-128 KiB band) {#agent-rehash}
 
-**Who needs this: agents enrolled before 2026-07-18.** If your agent was
-installed after that date, its hashes were always computed correctly, this
-action will find nothing to do, and the console will keep saying `not run`
-forever — which is the right answer, not a warning.
+**What this is for.** Filearr computes a fast `quick_hash` for every file and
+uses it, together with the file's size, as the cheap "are these two files the
+same" signal behind duplicate detection and move detection. A file of 128 KiB or
+less is hashed in full; larger files are sampled at both ends. A stored hash that
+covers *less* of a file than that — one written by an older or defective hasher
+on another machine, for instance — collides between genuinely different files
+whose opening bytes match, which is extremely common for structured formats where
+those bytes are container boilerplate (JPEG and PNG headers, PDF preambles,
+office-document scaffolding). The symptom is **false duplicate detections**,
+concentrated in phone photos, artwork and small documents. This action re-reads a
+size band of an agent's index and corrects whatever it finds wrong.
 
-**What was wrong.** Filearr computes a fast `quick_hash` for every file and uses
-it, together with the file's size, as the cheap "are these two files the same"
-signal behind duplicate detection and move detection. Until 2026-07-18 that hash
-read the first 64 KiB of a file and — only for files larger than 128 KiB — also
-the last 64 KiB. For a file **between 64 KiB and 128 KiB** that meant the first
-64 KiB and nothing else: the rest of the file was never read. Two genuinely
-different files whose first 64 KiB happened to match therefore got the same
-hash. That is extremely common for structured formats, where the opening bytes
-are container boilerplate — JPEG and PNG headers, PDF preambles, office-document
-scaffolding — so phone photos, artwork and small documents were the worst
-affected. The result was **false duplicate detections**.
-
-The hasher itself was fixed on 2026-07-18: a file of 128 KiB or less is now
-hashed in full. That fix is forward-looking only.
-
-**Why the fix does not repair the files you already have.** An agent re-hashes a
-file when its size or its modification time changes — that is what "this file
-changed" means, and re-hashing everything on every scan would make routine scans
-enormously expensive. A photo sitting untouched in your library has not changed
-and never will, so no future scan will ever look at its bytes again, and its
-wrong hash stays wrong indefinitely. Central cannot repair it either: it does
-not hold the file (the agent does), and it keeps no record of *which* version of
-the hasher produced a given agent-owned value, so it cannot even tell the good
-rows from the bad ones. Only the agent can fix this, and only if you ask it to.
+**Why an ordinary scan cannot do it.** An agent re-hashes a file when its size or
+its modification time changes — that is what "this file changed" means, and
+re-hashing everything on every scan would make routine scans enormously
+expensive. A photo sitting untouched in your library has not changed and never
+will, so no future scan will ever look at its bytes again, and a wrong hash stays
+wrong indefinitely. Central cannot repair it either: it does not hold the file
+(the agent does), and it keeps no record of *which* hasher produced a given
+agent-owned value, so it cannot tell the good rows from the bad ones. Only the
+agent can fix this, and only if you ask it to. On an agent whose hashes are all
+correct the sweep finds nothing to do and the console keeps saying `not run` —
+which is the right answer, not a warning.
 
 **Running it.** On the Agents page, the agent's row has a **re-hash** action.
 Confirm the prompt — it names the cost — and the sweep starts at that agent's
@@ -1357,11 +1329,11 @@ machine while it runs. It is not free, and it is not instant.
 - **Repeating it is nearly free.** Once an agent has finished the band, asking
   again does nothing unless you change the band or tick force.
 
-**Changing the band.** The defaults — 65,537 to 131,072 bytes — are exactly the
-affected range and are the right choice for essentially everyone. A file of
-65,536 bytes or smaller was always hashed in full and was never wrong; a file
-above 131,072 bytes is sampled at both ends today just as it was before, so
-re-reading it would change nothing. The **details** panel exposes the band and a
+**Changing the band.** The defaults — 65,537 to 131,072 bytes — are the range
+worth re-reading and are the right choice for essentially everyone. A file of
+65,536 bytes or smaller is hashed in full by every hasher; a file above 131,072
+bytes is sampled at both ends by design, so re-reading it would change nothing.
+The **details** panel exposes the band and a
 **max files** bound for one deliberate exception: setting the floor to 1 runs a
 different job — giving small files an exact whole-file `content_hash` they never
 had. That is roughly ten times the reading for a different benefit, so it is
@@ -1706,8 +1678,9 @@ network-open link (`\\tower\media\Movies\…`). Each row shows:
   directory above the root, so you do not edit the wrong row.
 
 Malformed entries are listed above the table, verbatim, as skipped. A bad pair
-never fails a scan (share hints are best-effort by design), so before this
-listing existed a single typo meant one root quietly had no mapping forever.
+never fails a scan (share hints are best-effort by design), so that listing is
+the only symptom a typo produces — without it, one root would quietly have no
+mapping forever.
 
 Accepted location forms are `smb://host/share[/sub]`, `\\host\share[\sub]` and
 `nfs://host/export[/sub]`; a submitted value is validated with the same parser
