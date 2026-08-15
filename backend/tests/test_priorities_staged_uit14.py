@@ -29,7 +29,6 @@ import pytest
 
 procrastinate = pytest.importorskip("procrastinate")
 
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(scope="module")

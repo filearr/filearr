@@ -10,7 +10,7 @@ import pytest
 
 from .conftest import requires_ffmpeg
 
-pytestmark = [pytest.mark.asyncio, requires_ffmpeg]
+pytestmark = requires_ffmpeg
 
 
 @pytest.fixture(scope="module")

@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-pytestmark = pytest.mark.asyncio
 
 
 def _psycopg3(uri: str) -> str:

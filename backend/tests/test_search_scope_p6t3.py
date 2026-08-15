@@ -33,7 +33,6 @@ from filearr.search_scope import scope_filter_for_principal
 from filearr.tenant_tokens import scope_ancestors
 from tests.test_tenant_tokens_p6t3 import meili_eval
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 

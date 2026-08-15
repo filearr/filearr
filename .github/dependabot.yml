@@ -10,7 +10,7 @@
 # are NOT enabled here: this repo pins several dependencies against specific
 # advisories with human-verified justifications recorded in
 # backend/pyproject.toml (e.g. the pillow 11.x floor for CVE-2026-25990, the
-# authlib >=1.7.1 floor, the ldap3 check). Automated bumps there would fight
+# joserfc floor, the ldap3 check). Automated bumps there would fight
 # those decisions, so they stay manual until someone deliberately wires them up.
 version: 2
 updates:

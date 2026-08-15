@@ -10,12 +10,12 @@ auth path; every mechanism converges on a plain session cookie.
 
 Security posture:
 * **JOSE library: joserfc** (roadmap §26 migration, 2026-08-14). This module used
-  to drive Authlib's ``authlib.jose`` + ``authlib.oidc.core.CodeIDToken``;
-  ``authlib.jose`` is deprecated and REMOVED in Authlib 2.0, and Authlib 1.7
-  already delegated all JOSE crypto to joserfc — so the swap changed WHO enforces
-  the OIDC claims semantics, not the crypto. Authlib is now gone from the
-  dependency tree entirely; the ID-token claims validation that ``CodeIDToken``
-  used to perform is re-implemented, explicitly and citably, in
+  to drive Authlib's deprecated ``jose`` module together with its
+  ``oidc.core.CodeIDToken`` claims class; that module is REMOVED in Authlib 2.0,
+  and Authlib 1.7 already delegated all JOSE crypto to joserfc — so the swap
+  changed WHO enforces the OIDC claims semantics, not the crypto. Authlib is now
+  gone from the dependency tree entirely; the ID-token claims validation that
+  ``CodeIDToken`` used to perform is re-implemented, explicitly and citably, in
   :func:`_validate_id_token_claims` below.
 * **Signature algorithms are allow-listed to asymmetric families** (never
   ``none``, never HMAC) so the ``alg:none`` (GHSA-7wc2-qxgw-g8gg) and
@@ -81,7 +81,7 @@ ID_TOKEN_LEEWAY_SECONDS = 120
 # ID-token claims validation (OIDC Core 1.0 §3.1.3.7)                         #
 # --------------------------------------------------------------------------- #
 # Hand-rolled since the roadmap §26 migration (2026-08-14) replaced Authlib's
-# ``authlib.oidc.core.CodeIDToken`` — joserfc ships JWS/JWT primitives but no OIDC
+# ``CodeIDToken`` claims class — joserfc ships JWS/JWT primitives but no OIDC
 # claims layer. Everything below is deliberately explicit: this is the code a
 # security review reads, so every check names the spec clause it implements and
 # every failure path raises (never returns a flag), so a forgotten branch cannot
@@ -107,6 +107,10 @@ def _half_hash(value: str, alg: str) -> str | None:
         hash_alg = getattr(hashlib, f"sha{alg[2:]}", None)
     if hash_alg is None:
         return None
+    # "ASCII representation" is the spec's own wording; a non-ASCII value cannot be
+    # a conforming access token, and the resulting UnicodeEncodeError (a
+    # ValueError) is in the caller's funnel — i.e. it fails closed, not silently
+    # re-encoded.
     digest = hash_alg(value.encode("ascii", "strict")).digest()
     return _b64url(digest[: len(digest) // 2])
 
@@ -555,26 +559,33 @@ class OIDCProvider:
         nonce = credentials.get("nonce") or ""
         jwks = credentials.get("jwks") or {}
         algs = credentials.get("signing_algs") or ["RS256"]
-        jwt = JsonWebToken([a for a in algs if a in ALLOWED_SIGNING_ALGS] or ["RS256"])
-        claims_options = {
-            "iss": {"essential": True, "value": cfg.issuer},
-            "aud": {"essential": True, "value": cfg.client_id},
-        }
-        claims_params = {"nonce": nonce, "access_token": access_token}
+        # The alg allow-list is STRUCTURAL, not advisory: it is handed to the
+        # verifier itself, so a token signed with anything outside it (``none``,
+        # any HMAC family — the alg-confusion / alg:none bypass classes) fails at
+        # signature verification and never reaches the claims below. The ``or
+        # ["RS256"]`` keeps the mandatory-to-implement default when an IdP's
+        # advertised set intersects our allow-list to nothing.
+        algs = [a for a in algs if a in ALLOWED_SIGNING_ALGS] or ["RS256"]
         try:
-            claims = jwt.decode(
-                id_token,
-                jwks,
-                claims_cls=CodeIDToken,
-                claims_options=claims_options,
-                claims_params=claims_params,
+            # Signature + header verification (joserfc picks the JWKS key by
+            # ``kid``, and rejects any alg outside ``algorithms``).
+            token = jose_jwt.decode(id_token, KeySet.import_key_set(jwks), algorithms=algs)
+            claims = token.claims
+            # Claims semantics (OIDC Core §3.1.3.7) — see the heavily-annotated
+            # validator above. Raises on any failure; never returns a verdict.
+            _validate_id_token_claims(
+                claims,
+                token.header,
+                issuer=cfg.issuer,
+                client_id=cfg.client_id,
+                nonce=nonce,
+                access_token=access_token,
             )
-            claims.validate(leeway=120)
         except _JOSE_ERRORS as exc:
             raise OIDCError("invalid_id_token", f"{type(exc).__name__}: {exc}") from exc
-        # Defence-in-depth over Authlib's own at_hash check: when an access token
-        # was issued, REQUIRE the binding claim to be present (fail-closed) — an
-        # IdP that drops at_hash must not silently skip the binding.
+        # Defence-in-depth over the at_hash TAMPER check above: when an access
+        # token was issued, REQUIRE the binding claim to be present (fail-closed) —
+        # an IdP that drops at_hash must not silently skip the binding.
         if access_token and not claims.get("at_hash"):
             raise OIDCError("missing_at_hash", "access_token present without at_hash")
 

@@ -68,16 +68,22 @@ dependencies = [
     # low-entropy and needs a slow, memory-hard KDF — never the sha256-at-rest
     # pattern. MIT-licensed, ships a manylinux abi3 wheel (no compiler needed).
     "argon2-cffi==25.1.0",
-    # Phase 6 P6-T5 (OIDC SSO): Authlib as the OpenID-Connect relying party
-    # (authorization-code + PKCE, JWKS ID-token validation). BSD-3-Clause.
-    # R5 pin re-verified against the LIVE GitHub advisory list at implementation
-    # (2026-07-13): the newest advisory GHSA-w8p2-r796-3vmq (2026-06-08) is
-    # patched only in 1.6.10/1.7.1, so the floor moves UP from the brief's
-    # >=1.6.9 to >=1.7.1 (resolves to 1.7.2). Pulls joserfc (JOSE backend).
-    # <2: oidc.py imports authlib.jose, which 2.0 REMOVES (deprecated in favour
-    # of joserfc; 1.7 already delegates the crypto there). Lift only with the
-    # roadmap §26 migration — the ID-token validation path must move too.
-    "authlib>=1.7.1,<2",
+    # JOSE (JWS/JWK/JWT) primitives: the OIDC relying party's ID-token signature
+    # verification (filearr/oidc.py) and the step-ca one-time-token minting
+    # (filearr/agentsync.py). BSD-3-Clause.
+    #
+    # DIRECT dependency since the roadmap §26 migration (2026-08-14). It used to
+    # arrive transitively under Authlib (`>=1.7.1,<2`), which oidc.py drove via
+    # Authlib's deprecated `jose` module + its `CodeIDToken` claims class; Authlib
+    # 2.0 REMOVES that module, and Authlib 1.7 already delegated all JOSE crypto
+    # to joserfc, so the OIDC claims validation moved in-tree
+    # (oidc._validate_id_token_claims) and **Authlib was dropped entirely** — one
+    # fewer security-relevant dependency, no crypto change.
+    # Floor is Authlib 1.7.2's own requirement (`joserfc>=1.6.0`), so this cannot
+    # resolve to anything older than what we were already running; no upper bound
+    # (nothing here depends on joserfc internals — only jwt.encode/decode, KeySet
+    # and the public error taxonomy).
+    "joserfc>=1.6.0",
     # Phase 6 P6-T6 (LDAP/AD bind auth): ldap3 as the directory client. LGPL-v3
     # library-usage is AGPL-compatible. A DELIBERATE override of the research
     # doc's python-ldap preference (docs/ops/auth.md § "LDAP library choice"):

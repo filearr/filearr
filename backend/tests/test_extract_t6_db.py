@@ -9,7 +9,6 @@ import pytest
 
 pytest.importorskip("trimesh")
 
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(scope="module")

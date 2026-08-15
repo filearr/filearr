@@ -14,8 +14,6 @@ from filearr import updatecheck
 from filearr.config import get_settings
 from filearr.main import create_app
 
-pytestmark = pytest.mark.asyncio
-
 HEAD_SHA = "cb6cf05aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HEAD_DATE = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 

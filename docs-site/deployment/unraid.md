@@ -635,6 +635,25 @@ stop here unless you want TLS or the agent fleet.
 Only needed for `FILEARR_AGENT_AUTH_MODE=mtls-header` or `both`. This is the
 private certificate authority that issues each agent its own client certificate.
 
+**Before the first start**, fix the data directory's ownership from the Unraid
+terminal:
+
+```bash
+mkdir -p /mnt/cache/appdata/filearr-stepca
+chown -R 1000:1000 /mnt/cache/appdata/filearr-stepca
+```
+
+!!! warning "Skip the chown and the container fails at boot"
+    `/entrypoint.sh: line 56: /home/step/password: Permission denied` — the
+    image runs as user `step` (UID 1000) and has **no PUID/PGID support**,
+    while Unraid creates appdata directories as `nobody:users` (99:100). A
+    bind mount keeps the host's ownership (compose users never see this;
+    named volumes are chowned to the image user automatically). Do not work
+    around it with `--user 0:0` — running a CA as root to dodge a chown is
+    the wrong trade. One more Unraid trap: the unsafe **New Permissions**
+    tool (not *Docker Safe New Permissions*) resets appdata ownership and
+    re-breaks the CA the same way.
+
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | Data | required | `/mnt/cache/appdata/filearr-stepca` | **CA private key material.** |

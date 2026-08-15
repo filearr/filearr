@@ -30,7 +30,6 @@ SCAN_TASK = "filearr.tasks.scan.scan_library"
 
 procrastinate = pytest.importorskip("procrastinate")
 
-pytestmark = pytest.mark.asyncio
 
 
 # --------------------------------------------------------------------------- #

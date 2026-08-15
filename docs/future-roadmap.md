@@ -997,6 +997,15 @@ Still open in this area (not started, deliberately):
 
 ## 26. Migrate oidc.py off authlib.jose to joserfc (before Authlib 2.0)
 
+> **DONE 2026-08-14.** Authlib is **removed**, not merely bypassed: joserfc is now
+> a direct dependency (`joserfc>=1.6.0`) and `oidc.py` validates ID-token claims
+> in-tree (`_validate_id_token_claims`, OIDC Core §3.1.3.7, per-check comments).
+> Gated by `tests/test_oidc_p6t5.py` (42 tests), which grew azp and clock-leeway
+> cases first — those exposed that Authlib's `azp` check had been **wired dead**
+> here all along (`CodeIDToken.validate_azp` reads `params["client_id"]`, which
+> `oidc.py` never passed), so the migration closes a real gap rather than
+> reproducing one. The suppression-ordering dance and the `<2` pin are gone.
+
 Recorded 2026-08-14 after a deployed container surfaced the deprecation
 warning. Authlib's `jose` module is deprecated and REMOVED in 2.0; 1.7 already
 delegates its crypto to joserfc, so today's exposure is an import shim, not a

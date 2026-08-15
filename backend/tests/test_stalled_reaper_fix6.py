@@ -27,7 +27,6 @@ import pytest
 
 procrastinate = pytest.importorskip("procrastinate")
 
-pytestmark = pytest.mark.asyncio
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 

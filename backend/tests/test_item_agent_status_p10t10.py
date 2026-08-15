@@ -40,7 +40,6 @@ from filearr.models import (
 )
 from filearr.models import Item as ItemModel
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 

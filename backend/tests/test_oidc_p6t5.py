@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import time
-import warnings
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 from alembic.config import Config
+from joserfc import jwt as jose_jwt
+from joserfc.jwk import RSAKey
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -31,10 +33,6 @@ from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import Principal, PrincipalGroup, PrincipalGroupMember, User
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from authlib.jose import JsonWebKey, JsonWebToken
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 ISSUER = "https://idp.test"
@@ -48,11 +46,11 @@ def _psycopg3(uri: str) -> str:
 # --------------------------------------------------------------------------- #
 # Mock IdP: key, JWKS, token minting                                          #
 # --------------------------------------------------------------------------- #
-_KEY = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+_KEY = RSAKey.generate_key(2048)
 _KID = "mock-kid-1"
-_PUB = {**_KEY.as_dict(is_private=False), "kid": _KID}
+_PUB = {**_KEY.as_dict(private=False), "kid": _KID}
 _JWKS = {"keys": [_PUB]}
-_ATTACKER_KEY = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+_ATTACKER_KEY = RSAKey.generate_key(2048)
 
 
 def _at_hash(access_token: str, alg: str = "RS256") -> str:
@@ -91,8 +89,7 @@ def mint_id_token(
         payload["at_hash"] = at_hash
     if extra:
         payload.update(extra)
-    jwt = JsonWebToken(["RS256"])
-    return jwt.encode({"alg": "RS256", "kid": _KID}, payload, key).decode()
+    return jose_jwt.encode({"alg": "RS256", "kid": _KID}, payload, key)
 
 
 def _config(**overrides) -> oidc.OidcConfig:
@@ -196,14 +193,29 @@ def test_authenticate_missing_at_hash_with_access_token_rejected():
 
 
 def test_authenticate_alg_none_rejected():
-    # An unsigned ('none') token must never be accepted.
-    jwt_none = JsonWebToken(["none"])
+    # An unsigned ('none') token must never be accepted. Hand-assembled, because
+    # joserfc deliberately refuses to MINT one (no key material) — the attacker
+    # has no such scruples, so the decode side is what must say no.
     now = int(time.time())
-    tok = jwt_none.encode(
-        {"alg": "none"},
-        {"iss": ISSUER, "sub": "x", "aud": CLIENT_ID, "exp": now + 300, "iat": now, "nonce": "n1"},
-        key="",
-    ).decode()
+
+    def seg(d: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
+    tok = (
+        seg({"alg": "none", "typ": "JWT"})
+        + "."
+        + seg(
+            {
+                "iss": ISSUER,
+                "sub": "x",
+                "aud": CLIENT_ID,
+                "exp": now + 300,
+                "iat": now,
+                "nonce": "n1",
+            }
+        )
+        + "."
+    )
     p = oidc.OIDCProvider(_config())
     with pytest.raises(oidc.OIDCError):
         p.authenticate(_credentials(tok, nonce="n1", access_token=""))

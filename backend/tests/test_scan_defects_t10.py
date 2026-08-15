@@ -33,8 +33,6 @@ from filearr.models import Item, ItemStatus, Library, ScanRun
 
 from .conftest import psycopg3_uri
 
-pytestmark = pytest.mark.asyncio
-
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 

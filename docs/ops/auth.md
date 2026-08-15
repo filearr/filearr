@@ -273,13 +273,27 @@ out at the IdP. Close the browser or log out at the IdP directly if a full
 federated logout is required. (A best-effort RP-initiated logout can be added
 later if the ID token is stored alongside the session.)
 
-## Authlib version pin (R5)
+## JOSE library pin (was: Authlib R5)
 
-The Authlib floor was **re-verified against the live GitHub advisory list at
-implementation (2026-07-13)**. The newest advisory at that time
-(GHSA-w8p2-r796-3vmq, 2026-06-08) is patched only in 1.6.10/1.7.1, so the pin
-moved **up** from the brief's `>=1.6.9` to **`authlib>=1.7.1`** (resolves to
-1.7.2). Re-check the advisory list again on any future bump.
+**Authlib was removed on 2026-08-14** (roadmap §26). It had been pinned
+`>=1.7.1,<2` — the floor re-verified against the live GitHub advisory list at
+implementation (2026-07-13; GHSA-w8p2-r796-3vmq of 2026-06-08 is patched only in
+1.6.10/1.7.1), the ceiling because `oidc.py` drove Authlib's deprecated `jose`
+module, which 2.0 deletes.
+
+The relying party now depends only on **`joserfc>=1.6.0`** (the floor Authlib
+1.7.2 itself required, so this is not a downgrade). joserfc verifies the ID
+token's signature under the alg allow-list; the OIDC Core §3.1.3.7 claims
+semantics that Authlib's `CodeIDToken` used to apply — `iss`/`aud`/`azp`/
+`exp`/`iat`/`nbf`/`nonce`/`at_hash` — are enforced in-tree by
+`filearr.oidc._validate_id_token_claims`, one commented check per spec clause.
+Re-check the joserfc advisory list on any future bump.
+
+Note that the in-tree validator is **stricter than the code it replaced**: the
+Authlib path never passed `client_id` into `claims_params`, so
+`CodeIDToken.validate_azp` read `None` and both of its branches were dead. `azp`
+is now genuinely enforced (required when `aud` carries multiple values; must
+equal the client id whenever it is present at all).
 
 # LDAP / Active Directory sign-in (Phase 6, P6-T6)
 

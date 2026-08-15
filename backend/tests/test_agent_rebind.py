@@ -39,7 +39,6 @@ from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import Agent
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 

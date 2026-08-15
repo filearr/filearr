@@ -27,7 +27,6 @@ from filearr.models import Item, Library
 from filearr.tasks import sniff as sniff_mod
 from filearr.tasks.sniff import SNIFFED_KEY, resolve_group, sniff_extensionless
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 # A real minimal PDF header is enough for libmagic to say application/pdf.

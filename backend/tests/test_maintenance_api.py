@@ -23,8 +23,6 @@ from filearr.db import get_session
 from filearr.main import create_app
 from filearr.models import Base, MaintenanceSchedule
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture
 async def db(module_db, monkeypatch):

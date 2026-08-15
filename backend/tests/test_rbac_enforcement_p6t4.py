@@ -41,7 +41,6 @@ from filearr.models import (
     User,
 )
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 

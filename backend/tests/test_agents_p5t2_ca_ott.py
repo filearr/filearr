@@ -22,7 +22,6 @@ from pathlib import Path
 import httpx
 import pytest
 from alembic.config import Config
-from authlib.jose import JsonWebKey
 from joserfc import jwt as jose_jwt
 from joserfc.jwk import ECKey
 from sqlalchemy import text
@@ -43,7 +42,7 @@ PROVISIONER = "filearr-agents"
 # A throwaway provisioner keypair for the whole module: the PRIVATE JWK is what
 # central signs with (FILEARR_CA_PROVISIONER_JWK); the PUBLIC JWK is what a
 # step-ca stand-in (here, the test) verifies the OTT with.
-_PRIV = JsonWebKey.generate_key("EC", "P-256", is_private=True).as_dict(is_private=True)
+_PRIV = ECKey.generate_key("P-256").as_dict(private=True)
 PRIV_JWK_JSON = json.dumps(_PRIV)
 _PUB = {k: v for k, v in _PRIV.items() if k != "d"}
 PUB_KEY = ECKey.import_key(_PUB)

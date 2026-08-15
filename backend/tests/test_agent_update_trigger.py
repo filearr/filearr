@@ -32,7 +32,6 @@ from filearr.main import create_app
 from filearr.models import Agent, AgentConfigGroup, AgentConfigGroupVersion
 from tests.agentcfg_helpers import reset_config_groups
 
-pytestmark = pytest.mark.asyncio
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 DIST_VERSION = "main-1a2b3c4"

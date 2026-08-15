@@ -24,8 +24,6 @@ from filearr.logsink import DbLogSink
 from filearr.main import create_app
 from filearr.models import AppLog, Base
 
-pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture
 async def db(module_db, monkeypatch):

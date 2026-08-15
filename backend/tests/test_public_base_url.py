@@ -8,12 +8,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from filearr.config import get_settings
 from filearr.urls import public_base_url
-
-pytestmark = pytest.mark.asyncio
 
 
 def _req(headers: dict[str, str], base: str = "http://filearr.example.com/"):

@@ -73,7 +73,6 @@ async def test_retry_cap_for_lookups():
 # unavailable, like the sibling job-introspection tests.
 pytest.importorskip("procrastinate")
 
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(scope="module")

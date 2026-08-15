@@ -28,7 +28,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(scope="module")
