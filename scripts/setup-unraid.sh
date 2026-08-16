@@ -1380,6 +1380,18 @@ generate_templates() {
           info "kept Caddy profile '${_prev_profile}' from the previous template (setup.conf said '${CADDY_PROFILE}'; recorded)"
           CADDY_PROFILE="$_prev_profile"; save_conf
         fi
+        # Likewise the acme inputs: a box that answered 'internal' was never asked
+        # for them, so they were typed on the Edit page. Adopt them from the
+        # template into the answers/secrets when ours are empty (carry-over
+        # already keeps them in the template; this keeps --reconfigure and the
+        # handoff summary truthful).
+        if [[ -n "$_prev_tpl" ]]; then
+          local _pv
+          _pv="$(get_cfg "$_prev_tpl" 'Target="FILEARR_ACME_EMAIL"' 2>/dev/null || true)"
+          if [[ -z "$ACME_EMAIL" && -n "$_pv" ]]; then ACME_EMAIL="$(xml_unescape "$_pv")"; save_conf; info "recorded ACME email from the previous template"; fi
+          _pv="$(get_cfg "$_prev_tpl" 'Target="CLOUDFLARE_API_TOKEN"' 2>/dev/null || true)"
+          if [[ -z "$cftok" && -n "$_pv" ]]; then cftok="$(xml_unescape "$_pv")"; secret_put CLOUDFLARE_API_TOKEN "$cftok"; info "recorded Cloudflare token from the previous template (fingerprint $(fingerprint "$cftok"))"; fi
+        fi
         set_cfg "$f" 'Target="FILEARR_CADDY_PROFILE"' "$CADDY_PROFILE"
         set_cfg "$f" 'Name="Certificates"' "${APPDATA_CACHE}/filearr-caddy"
         set_cfg "$f" 'Name="Caddy State"' "${APPDATA_CACHE}/filearr-caddy-config"
