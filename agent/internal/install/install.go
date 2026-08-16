@@ -335,23 +335,51 @@ func AdoptData(src, dst string) (bool, error) {
 	return true, nil
 }
 
+// deferredBinaryRemover is the optional FS capability for removing a binary
+// that is currently executing (Windows). See OSFS.RemoveBinaryDeferred.
+type deferredBinaryRemover interface {
+	RemoveBinaryDeferred(path string) (parked string, err error)
+}
+
+var errNoDeferredRemove = errors.New("deferred binary removal not supported on this OS")
+
 // Uninstall stops + deregisters the service and removes the installed binary.
 // When purge is false the data/config/log directories are KEPT and returned so
 // the caller can report them; purge additionally removes them. Requires
 // elevation.
+//
+// The binary is very often the process running this command (Windows:
+// `"C:\Program Files\Filearr Agent\filearr-agent.exe" uninstall`), and the
+// stopped service may still be exiting; Windows refuses to unlink a running
+// image ("Access is denied" — live 2026-08-16). That case is handled by
+// moving the file aside and scheduling its deletion for the next reboot, and
+// it must NOT abort the purge: the whole point of `uninstall --purge` before a
+// re-enrol is that the identity in the data dir is gone.
 func (in *Installer) Uninstall(purge bool) (kept []string, err error) {
 	if in.IsAdmin == nil || !in.IsAdmin() {
 		return nil, ErrNeedAdmin
 	}
 	if st, serr := in.Service.Status(); serr == nil && st != StatusNotInstalled {
 		_ = in.Service.Stop()
+		in.waitStopped()
 		if err := in.Service.Uninstall(); err != nil {
 			return nil, fmt.Errorf("deregister service: %w", err)
 		}
 		in.vlog("service stopped + deregistered")
 	}
 	if err := in.FS.Remove(in.Layout.BinPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove binary %s: %w", in.Layout.BinPath, err)
+		dr, ok := in.FS.(deferredBinaryRemover)
+		if !ok {
+			return nil, fmt.Errorf("remove binary %s: %w", in.Layout.BinPath, err)
+		}
+		parked, derr := dr.RemoveBinaryDeferred(in.Layout.BinPath)
+		if derr != nil {
+			return nil, fmt.Errorf("remove binary %s: %w (and could not move it aside: %v)", in.Layout.BinPath, err, derr)
+		}
+		if parked != "" {
+			in.log().Info("binary is still running (this command, or the service finishing its exit); moved aside and scheduled for deletion at next reboot",
+				"parked", parked)
+		}
 	}
 	if purge {
 		for _, d := range []string{in.Layout.DataDir, in.Layout.LogDir, in.Layout.ConfigDir} {

@@ -1,24 +1,24 @@
 package install
 
 import (
-	"strings"
-	"path/filepath"
-	"time"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // mockController records lifecycle calls and returns a scripted status.
 type mockController struct {
-	status     Status
-	statusErr  error
+	status    Status
+	statusErr error
 	// postStartStatus, when non-zero, is what Start() sets instead of Running
 	// (models a service that dies right after a "successful" start).
 	postStartStatus Status
-	calls      []string
-	installErr error
-	startErr   error
+	calls           []string
+	installErr      error
+	startErr        error
 }
 
 func (m *mockController) record(op string) { m.calls = append(m.calls, op) }
@@ -44,7 +44,7 @@ func (m *mockController) Stop() error {
 	m.status = StatusStopped
 	return nil
 }
-func (m *mockController) Restart() error   { m.record("restart"); return nil }
+func (m *mockController) Restart() error { m.record("restart"); return nil }
 func (m *mockController) Status() (Status, error) {
 	m.record("status")
 	return m.status, m.statusErr
@@ -217,7 +217,9 @@ func TestUninstallKeepsDataByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCalls(t, ctrl.calls, []string{"status", "stop", "uninstall"})
+	// The extra status poll is waitStopped: the binary is only removable once
+	// the service process has actually exited.
+	assertCalls(t, ctrl.calls, []string{"status", "stop", "status", "uninstall"})
 	if !fs.removed["/usr/local/bin/filearr-agent"] {
 		t.Fatal("binary not removed")
 	}
@@ -383,4 +385,78 @@ func TestAdoptDataStampsSourceMarker(t *testing.T) {
 	if got := AdoptedTo(dst); got != "" {
 		t.Fatalf("AdoptedTo(dst) = %q, want empty", got)
 	}
+}
+
+// A fake FS whose Remove fails for the binary (Windows: the running image) but
+// that offers the deferred capability, as OSFS does on Windows.
+type runningBinaryFS struct {
+	*fakeFS
+	binPath string
+	parked  string
+}
+
+func (f *runningBinaryFS) Remove(path string) error {
+	if path == f.binPath {
+		return errors.New("Access is denied")
+	}
+	return f.fakeFS.Remove(path)
+}
+
+func (f *runningBinaryFS) RemoveBinaryDeferred(path string) (string, error) {
+	f.parked = path + ".uninstalled"
+	return f.parked, nil
+}
+
+func TestUninstallRunningBinaryIsParkedAndPurgeStillRuns(t *testing.T) {
+	lay := testLayout()
+	fs := &runningBinaryFS{fakeFS: newFakeFS(), binPath: lay.BinPath}
+	ctrl := &mockController{status: StatusStopped}
+	in := &Installer{
+		Layout: lay, FS: fs, Service: ctrl,
+		IsAdmin: func() bool { return true },
+	}
+	kept, err := in.Uninstall(true)
+	if err != nil {
+		t.Fatalf("uninstall must not fail when the binary is only parked: %v", err)
+	}
+	if fs.parked != lay.BinPath+".uninstalled" {
+		t.Fatalf("binary was not moved aside: parked=%q", fs.parked)
+	}
+	if len(kept) != 0 {
+		t.Fatalf("purge should keep nothing, got %v", kept)
+	}
+	for _, d := range []string{"/var/lib/filearr-agent", "/var/log/filearr-agent", "/etc/filearr-agent"} {
+		if !fs.removedA[d] {
+			t.Fatalf("purge skipped %s after the binary was parked", d)
+		}
+	}
+}
+
+func TestUninstallRunningBinaryWithoutDeferredSupportFails(t *testing.T) {
+	// The plain fakeFS has no RemoveBinaryDeferred: a Remove failure is fatal.
+	lay := testLayout()
+	base := newFakeFS()
+	fs := &failingRemoveFS{fakeFS: base, binPath: lay.BinPath}
+	in := &Installer{
+		Layout: lay, FS: fs, Service: &mockController{status: StatusStopped},
+		IsAdmin: func() bool { return true },
+	}
+	if _, err := in.Uninstall(true); err == nil {
+		t.Fatal("expected an error when the binary cannot be removed and cannot be parked")
+	}
+	if len(base.removedA) != 0 {
+		t.Fatal("purge must not run when uninstall aborts")
+	}
+}
+
+type failingRemoveFS struct {
+	*fakeFS
+	binPath string
+}
+
+func (f *failingRemoveFS) Remove(path string) error {
+	if path == f.binPath {
+		return errors.New("Access is denied")
+	}
+	return f.fakeFS.Remove(path)
 }
