@@ -12,6 +12,7 @@
   import { onMount } from "svelte";
   import {
     ApiError,
+    isAdminPrincipal,
     getTaxonomy,
     createTaxonomyCategory,
     updateTaxonomyCategory,
@@ -29,7 +30,7 @@
   let { me = null, authDisabled = false }: { me?: AuthPrincipal | null; authDisabled?: boolean } =
     $props();
   // Auth off (dev) => unrestricted API, so treat as admin; else require the role.
-  const isAdmin = $derived(authDisabled || (!!me && me.global_role === "admin"));
+  const isAdmin = $derived(authDisabled || isAdminPrincipal(me));
 
   let tree = $state<TaxonomyNode[]>([]);
   let version = $state<number | null>(null);

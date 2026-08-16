@@ -11,13 +11,13 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: c7d2e4a91b38 adds sessions.prev_session_hash/prev_valid_until
-# so a just-rotated session token stays valid for a short grace window (the SPA's
-# parallel requests were 401ing when one of them crossed the rotation boundary).
-# Its predecessor f3a9d5c81b62 adds `instance_meta` (BK-T1 key fingerprint).
+# HEAD ASSERTION: a1b2c3d4e5f6 turns roles into data (`roles` table + FK from
+# principals.global_role), adds the self-service profile columns, per-user
+# session-timeout overrides + preferences, and the `app_settings` override
+# table. Its predecessor c7d2e4a91b38 adds the session-rotation grace columns.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "c7d2e4a91b38"
+HEAD = "a1b2c3d4e5f6"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).

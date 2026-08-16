@@ -30,6 +30,7 @@ from filearr.api import (
     rbac,
     report_schedules,
     reports,
+    roles,
     saved_searches,
     scan_paths,
     scans,
@@ -47,18 +48,15 @@ v1_router.include_router(auth.router, tags=["auth"])
 v1_router.include_router(audit.router, tags=["audit"])
 v1_router.include_router(oidc.router, tags=["auth"])
 v1_router.include_router(rbac.router, tags=["rbac"])
+v1_router.include_router(roles.router, tags=["rbac"])
 v1_router.include_router(fs.router, prefix="/fs", tags=["fs"])
 v1_router.include_router(search.router, tags=["search"])
-v1_router.include_router(
-    saved_searches.router, prefix="/saved-searches", tags=["saved-searches"]
-)
+v1_router.include_router(saved_searches.router, prefix="/saved-searches", tags=["saved-searches"])
 v1_router.include_router(llm_keys.router, prefix="/llm-keys", tags=["llm-keys"])
 v1_router.include_router(items.router, prefix="/items", tags=["items"])
 v1_router.include_router(digests.router, prefix="/items", tags=["items"])
 v1_router.include_router(item_agent_status.router, prefix="/items", tags=["items"])
-v1_router.include_router(
-    custom_fields.router, prefix="/custom-fields", tags=["custom-fields"]
-)
+v1_router.include_router(custom_fields.router, prefix="/custom-fields", tags=["custom-fields"])
 v1_router.include_router(libraries.router, prefix="/libraries", tags=["libraries"])
 v1_router.include_router(presets.router, prefix="/presets", tags=["presets"])
 v1_router.include_router(
@@ -68,9 +66,7 @@ v1_router.include_router(scan_paths.router, prefix="/libraries", tags=["scan-pat
 v1_router.include_router(scans.router, prefix="/scans", tags=["scans"])
 v1_router.include_router(stats.router, prefix="/stats", tags=["stats"])
 v1_router.include_router(reports.router, prefix="/reports", tags=["reports"])
-v1_router.include_router(
-    custom_reports.router, prefix="/custom-reports", tags=["custom-reports"]
-)
+v1_router.include_router(custom_reports.router, prefix="/custom-reports", tags=["custom-reports"])
 v1_router.include_router(exports.router, prefix="/exports", tags=["exports"])
 v1_router.include_router(
     report_schedules.router, prefix="/report-schedules", tags=["report-schedules"]

@@ -13,8 +13,9 @@
   import HelpPage from "./lib/HelpPage.svelte";
   import AboutPage from "./lib/AboutPage.svelte";
   import LoginPage from "./lib/LoginPage.svelte";
+  import AccountPage from "./lib/AccountPage.svelte";
   import { getVersion, authStatus, authMe, authLogout, type AuthMode, type AuthPrincipal } from "./lib/api";
-  import { theme, applyTheme } from "./lib/theme.svelte";
+  import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./lib/osFormat.svelte";
   import type { FormatPref } from "./lib/osFormat";
   import { parseBrowseHash } from "./lib/routes";
@@ -22,7 +23,7 @@
   // UI-T9 — hash-based routing so a refresh keeps the current tab and
   // back/forward toggles between them. `#/search` (default), `#/admin`,
   // `#/jobs` (UI-T10 jobs dashboard).
-  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about";
+  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
@@ -35,6 +36,8 @@
     if (location.hash === "#/taxonomy") return { page: "taxonomy", browseLib: "", browsePath: "" };
     if (location.hash === "#/filter-builder") return { page: "filter-builder", browseLib: "", browsePath: "" };
     if (location.hash === "#/help") return { page: "help", browseLib: "", browsePath: "" };
+    // #/account — self-service profile/password/preferences (header badge link).
+    if (location.hash === "#/account") return { page: "account", browseLib: "", browsePath: "" };
     // #/about — the running build stack (versions of everything). Footer-linked
     // rather than a nav tab: it is a reference surface, not a daily workflow.
     if (location.hash === "#/about") return { page: "about", browseLib: "", browsePath: "" };
@@ -88,6 +91,9 @@
       authMode = st.mode;
       oidcEnabled = st.oidc_enabled;
       me = st.mode === "disabled" ? null : await authMe();
+      // Server-side preferences follow the person across browsers: they win
+      // over whatever this browser's localStorage remembers.
+      if (me?.preferences) applyServerPreferences(me.preferences);
     } catch {
       // If the probe fails (e.g. backend unreachable), fail OPEN to the app
       // rather than trapping the user behind a wall we cannot verify.
@@ -175,10 +181,11 @@
     </nav>
     <div class="grow"></div>
     {#if me}
-      <span class="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-        title={`${me.username} · ${me.global_role}`}>
-        {me.username}<span class="ml-1 text-slate-400">({me.global_role})</span>
-      </span>
+      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-white' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
+        href="#/account"
+        title={`${me.username} · ${me.global_role} — account settings`}>
+        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-white/70' : 'text-slate-400'}">({me.global_role})</span>
+      </a>
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
         onclick={doLogout}>Sign out</button>
     {/if}
@@ -220,6 +227,12 @@
     <HelpPage {sourceUrl} />
   {:else if page === "about"}
     <AboutPage />
+  {:else if page === "account"}
+    {#if me}
+      <AccountPage {me} onUpdated={(p) => (me = p)} />
+    {:else}
+      <p class="py-8 text-sm text-slate-500">Authentication is disabled on this deployment — there is no account to manage.</p>
+    {/if}
   {:else}
     <SearchPage />
   {/if}

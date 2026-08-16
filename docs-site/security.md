@@ -198,3 +198,79 @@ is `(library, relative path)`, so re-appearance re-attaches. See
   `jti`, is recorded.
 - **`FILEARR_SECRET_KEY` is never auto-rotated** — rotating it would orphan
   already-encrypted channel secrets.
+
+## Roles
+
+A **role** is the coarse permission bundle attached to every user (and to
+federated role mapping). Filearr ships three **builtin** roles — `admin`,
+`user`, `viewer` — and lets an admin define custom ones in **Admin → Roles**.
+Each role carries two things:
+
+- **API scopes** — `read`, `write`, `admin`. The server normalises them:
+  `write` implies `read`, and `admin` implies everything. A role that has the
+  **admin scope bypasses path grants entirely** (the RBAC ceiling and grants
+  are not consulted); this is shown as a "bypasses path grants" badge.
+- **Ceiling actions** — the *maximum* set of RBAC actions (search metadata,
+  download, edit, …) that a path grant may hand a member of this role. Path
+  grants only ever **narrow** a user within the ceiling; they never widen it.
+  A `viewer` with a "download" grant on a folder still cannot download if
+  "download" is outside the viewer ceiling.
+
+Custom roles are created from scratch or **cloned** from an existing role
+(scopes and ceiling copied, then edited). Role names are stable slugs
+(`[a-z0-9][a-z0-9_-]{1,31}`); the display name and description are free text.
+Guardrails: builtin roles cannot be deleted, a role that is still assigned to
+users cannot be deleted (reassign them first), and the builtin `admin` role can
+never lose its admin scope — so you cannot lock yourself out by editing it.
+
+The **Compare roles** view shows a matrix of every scope and action against
+every role, plus who currently holds each role, so you can pick the least
+privileged role that still has every ✓ a person needs.
+
+!!! warning "A role change signs the user out"
+    Changing a user's role revokes all of that user's sessions immediately;
+    they sign back in with the new permissions. This is deliberate — a session
+    never carries stale authority.
+
+## Session timeouts
+
+Interactive sessions have two independent limits:
+
+- **Idle (inactivity) timeout** — a session that makes no request for this many
+  hours expires. Every request extends the window.
+- **Absolute lifetime (TTL)** — a hard cap measured from sign-in, regardless of
+  activity.
+
+Both are resolved with the precedence **user > global > env**:
+
+1. **Env defaults** — `FILEARR_SESSION_INACTIVITY_HOURS` and
+   `FILEARR_SESSION_TTL_HOURS` (7 days idle / 30 days absolute out of the box).
+2. **Global runtime override** — **Admin → Sessions → Session timeouts
+   (global)**. Set in hours (decimals allowed, within the server's min/max);
+   *Reset to default* (or saving `0`) clears the override back to env. No
+   restart needed.
+3. **Per-user override** — **Admin → Users → …** on a user row. Blank or `0`
+   clears the override so the global/env value applies again.
+
+Idle-timeout changes take effect **live** for existing sessions (their idle
+window is re-evaluated on the next request). Absolute-lifetime changes apply to
+**new** sessions only — an already-issued session keeps the cap it was created
+with. Every user can see the values that apply to them on the Account page.
+
+## Your account
+
+The **Account** page (top-right menu) is self-service for the signed-in user:
+
+- **Profile** — display name and contact details (email, phone). Local
+  accounts can also change their **username**; federated accounts get their
+  identity from the provider.
+- **Password** — local accounts change their password here (current password
+  required). A password change **signs you out everywhere**: every other
+  session is revoked, so a leaked old credential cannot keep a session alive.
+- **Appearance** — theme and layout preferences are stored server-side with
+  your account, so they follow you across browsers and devices instead of
+  living in one browser's local storage.
+- **Sessions & timeouts** — the idle and absolute timeouts in effect for you,
+  labelled with where each value comes from (env default, global override, or
+  a per-user override set by an admin), plus your active sessions with
+  per-session revoke and *Log out everywhere*.

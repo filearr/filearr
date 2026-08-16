@@ -13,12 +13,14 @@
   import DeleteLibraryDialog from "./DeleteLibraryDialog.svelte";
   import CustomFieldsPanel from "./CustomFieldsPanel.svelte";
   import RbacPanel from "./RbacPanel.svelte";
+  import RolesPanel from "./RolesPanel.svelte";
+  import LibraryDiagnoseModal from "./LibraryDiagnoseModal.svelte";
   import UsersPanel from "./UsersPanel.svelte";
   import SessionsPanel from "./SessionsPanel.svelte";
   import AuditPanel from "./AuditPanel.svelte";
   import LlmKeysPanel from "./LlmKeysPanel.svelte";
   import { gotoBrowse } from "./routes";
-  import type { AuthPrincipal } from "./api";
+  import { isAdminPrincipal, type AuthPrincipal } from "./api";
 
   // P6-T11/T12: the current session principal (null when auth is disabled).
   // Gates the admin-only panels (Users, Audit) and the admin session controls.
@@ -28,7 +30,7 @@
   // panels stay session-gated — they are meaningless with auth off.
   let { me = null, authDisabled = false }: { me?: AuthPrincipal | null; authDisabled?: boolean } =
     $props();
-  const isAdmin = $derived(!!me && me.global_role === "admin");
+  const isAdmin = $derived(isAdminPrincipal(me));
   // P5-T1: the distributed-agent fleet panel is opt-in (FILEARR_AGENTS_ENABLED).
 
   let libraries = $state<Library[]>([]);
@@ -169,6 +171,8 @@
   // carries one button instead of a half-copy of the edit form (and every option
   // Edit has, Add has — the inline form had drifted to a subset).
   let adding = $state(false);
+  // Library diagnosis dialog (2026-08-16): "why is this library red?".
+  let diagnosing = $state<Library | null>(null);
   // OPS-T7: deploy mount map — the add dialog previews the auto share_prefix a
   // new library root would inherit (a placeholder/hint, not a stored value).
   let shareMap = $state<ShareMapEntry[]>([]);
@@ -854,6 +858,10 @@
                   class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
                   onclick={() => (editing = lib)}>Edit</button>
                 <button
+                  class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                  title="Why is this library failing? Probe the path, read the last scans, errors, jobs and logs"
+                  onclick={() => (diagnosing = lib)}>Diagnose</button>
+                <button
                   class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
                   onclick={() => (deleting = lib)}>Delete</button>
                 <button
@@ -985,6 +993,10 @@
                     class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
                     onclick={() => (editing = lib)}>Edit</button>
                   <button
+                    class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                    title="Why is this library failing? Probe the path, read the last scans, errors, jobs and logs"
+                    onclick={() => (diagnosing = lib)}>Diagnose</button>
+                  <button
                     class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
                     onclick={() => (deleting = lib)}>Delete</button>
                 </div>
@@ -1022,6 +1034,7 @@
 
   <CustomFieldsPanel {libraries} />
 
+  {#if isAdmin}<RolesPanel />{/if}
   <RbacPanel />
 
   <LlmKeysPanel />
@@ -1124,6 +1137,10 @@
     onDeleted={afterDelete}
     onClose={() => (deleting = null)}
   />
+{/if}
+
+{#if diagnosing}
+  <LibraryDiagnoseModal library={diagnosing} onClose={() => (diagnosing = null)} />
 {/if}
 
 {#if adding}

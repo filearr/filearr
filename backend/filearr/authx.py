@@ -96,17 +96,18 @@ def needs_rehash(encoded_hash: str) -> bool:
 # satisfies so a logged-in user transparently passes ``require_scope`` without
 # needing an API key (brief §2.2 coexistence table). ADMIN → all; USER →
 # write+read; VIEWER → read only.
-_ROLE_SCOPES: dict[str, frozenset[str]] = {
-    "admin": frozenset({"admin", "write", "read"}),
-    "user": frozenset({"write", "read"}),
-    "viewer": frozenset({"read"}),
-}
+# The scope table now lives on the role definitions (``filearr.roles``): the
+# builtins ship admin={admin,write,read}, user={write,read}, viewer={read}, an
+# operator may edit them or add custom roles, and an unknown name resolves to
+# NO scopes (fail closed).
 
 
 def scopes_for_role(role: str) -> frozenset[str]:
     """The API scopes a principal with global ``role`` satisfies. Unknown roles
     map to the empty set (fail closed)."""
-    return _ROLE_SCOPES.get(role, frozenset())
+    from filearr import roles as _roles
+
+    return _roles.get(role).scopes
 
 
 # --- Session tokens (P6-T1, Postgres-backed, research §1.3 / §2.3) ----------
@@ -163,16 +164,26 @@ async def create_session(
     creation); ``last_seen_at`` starts the 7d inactivity window. Only the sha256
     of the token is persisted; the returned raw value is set as the HttpOnly +
     SameSite=Strict (+ Secure over https) cookie by the caller."""
-    settings = get_settings()
+    from filearr import app_settings
+
     tok = mint_session_token()
     now = datetime.now(UTC)
+    # Absolute lifetime is FIXED at creation: the per-user override (or the
+    # runtime global, or the env default) in force right now. Changing the
+    # setting later affects new sessions; the idle window is evaluated live.
+    principal = await session.get(Principal, principal_id)
+    eff = await app_settings.effective_session_timeouts(
+        session,
+        user_inactivity_hours=getattr(principal, "session_inactivity_hours", None),
+        user_ttl_hours=getattr(principal, "session_ttl_hours", None),
+    )
     row = SessionRow(
         principal_id=principal_id,
         session_hash=tok.session_hash,
         created_at=now,
         last_seen_at=now,
         rotated_at=now,
-        expires_absolute=now + timedelta(hours=settings.session_ttl_hours),
+        expires_absolute=now + timedelta(hours=eff.ttl_hours),
         ip_address=ip_address,
         user_agent=user_agent,
     )
@@ -218,7 +229,18 @@ async def validate_session(
     if now >= _aware(row.expires_absolute):
         await session.delete(row)
         return None
-    if now - _aware(row.last_seen_at) > timedelta(hours=settings.session_inactivity_hours):
+    # Idle window: the owner's per-user override, else the runtime global,
+    # else the env default — evaluated live so an admin change applies to
+    # every existing session on its next request.
+    from filearr import app_settings
+
+    owner = await session.get(Principal, row.principal_id)
+    eff = await app_settings.effective_session_timeouts(
+        session,
+        user_inactivity_hours=getattr(owner, "session_inactivity_hours", None),
+        user_ttl_hours=getattr(owner, "session_ttl_hours", None),
+    )
+    if now - _aware(row.last_seen_at) > timedelta(hours=eff.inactivity_hours):
         await session.delete(row)
         return None
     rotated: SessionToken | None = None

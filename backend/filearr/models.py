@@ -1238,22 +1238,78 @@ class Principal(Base):
         CheckConstraint(
             "kind IN ('user','service_account')", name="principals_kind_valid"
         ),
-        CheckConstraint(
-            "global_role IN ('admin','user','viewer')",
-            name="principals_global_role_valid",
-        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
     )
     kind: Mapped[str] = mapped_column(Text)  # 'user' | 'service_account'
-    global_role: Mapped[str] = mapped_column(Text, server_default=text("'viewer'"))
+    # A role NAME (FK to roles.name since 2026-08-16 — builtins admin/user/
+    # viewer plus operator-defined ones; ON UPDATE CASCADE so a rename follows,
+    # ON DELETE RESTRICT so a role in use cannot be dropped).
+    global_role: Mapped[str] = mapped_column(
+        ForeignKey("roles.name", onupdate="CASCADE", ondelete="RESTRICT"),
+        server_default=text("'viewer'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
     disabled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Per-user session-timeout overrides (hours). NULL = the global setting
+    # (``app_settings`` override, else the FILEARR_SESSION_* env). Lets an
+    # operator give a kiosk account a short idle timeout or a service desk a
+    # long one without changing the deployment default.
+    session_inactivity_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_ttl_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Self-service preferences (theme mode/accent, share-path format, ...): a
+    # free-form JSON object the account page owns. Server-side so they follow
+    # the person across browsers; the SPA seeds its localStorage from it.
+    preferences: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+
+
+class RoleDef(Base):
+    """A global role definition (2026-08-16). ``name`` is the value stored on
+    ``principals.global_role``. The three builtins are seeded by the migration
+    and cannot be deleted (API + ``builtin`` flag); their ``scopes`` /
+    ``ceiling_actions`` ARE editable, with the guard that builtin ``admin`` must
+    keep the ``admin`` scope. ``scopes`` are the coarse API scopes
+    (read/write/admin) and ``ceiling_actions`` the RBAC action ceiling — see
+    ``filearr.rbac.Role`` for what each means to the engine."""
+
+    __tablename__ = "roles"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    builtin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    ceiling_actions: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class AppSetting(Base):
+    """Runtime-editable settings that override an env default (2026-08-16).
+    Generic key/value (JSONB) so the next admin-tunable knob costs no
+    migration; every reader goes through ``filearr.app_settings`` which owns
+    the key vocabulary, validation and the env fallback. First keys: the
+    session inactivity / absolute timeouts."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("principals.id", ondelete="SET NULL"), nullable=True
     )
 
 
@@ -1298,6 +1354,10 @@ class User(Base):
     )
     username: Mapped[str] = mapped_column(Text)
     email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Self-service profile (2026-08-16): what other people see, and how to
+    # reach the person. Both optional; display_name falls back to username.
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     auth_provider: Mapped[str] = mapped_column(Text, server_default=text("'local'"))
     # P6-T5: federated subject + its issuing IdP. NULL for local accounts. The

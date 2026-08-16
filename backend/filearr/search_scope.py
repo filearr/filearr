@@ -38,11 +38,8 @@ async def load_principal_grants(
     consume. An unknown role maps to VIEWER (fail-closed)."""
     principal = await session.get(Principal, principal_id)
     if principal is None:
-        return rbac.Role.VIEWER, []
-    try:
-        role = rbac.Role(principal.global_role)
-    except ValueError:
-        role = rbac.Role.VIEWER
+        return rbac.role_from_name(None), []
+    role = rbac.role_from_name(principal.global_role)
     group_ids = (
         (
             await session.execute(

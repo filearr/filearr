@@ -530,6 +530,31 @@ async def browse_tree(
 
 
 @router.get(
+    "/{library_id}/diagnose",
+    dependencies=[Depends(require_scope("write"))],
+)
+async def library_diagnose(
+    library_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """The "why is this library red?" report (2026-08-16): ordered VERDICTS
+    (severity, cause, evidence, what to do, doc anchor) built from a bounded
+    root-path probe, the recent scan runs, the extraction-error breakdown, the
+    library's failed jobs, the owning agent's status and matching log lines.
+    Read-only and best-effort: a probe that fails becomes a verdict. Write scope
+    because it reveals container paths, mount details and log excerpts.
+    See docs-site/troubleshooting/library-failures.md."""
+    from filearr import diagnose
+
+    lib = (
+        await session.execute(select(Library).where(Library.id == library_id))
+    ).scalar_one_or_none()
+    if lib is None:
+        raise HTTPException(404, "Library not found")
+    return await diagnose.diagnose_library(session, lib)
+
+
+@router.get(
     "/{library_id}/errors",
     dependencies=[Depends(require_scope("read"))],
 )

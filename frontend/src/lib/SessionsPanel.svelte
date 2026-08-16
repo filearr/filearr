@@ -3,7 +3,8 @@
   import {
     listMySessions, revokeMySession, revokeAllMySessions,
     listUsers, listUserSessions, revokeUserSessions,
-    friendlyError, type AuthPrincipal, type AuthSession,
+    getSessionSettings, patchSessionSettings,
+    friendlyError, type AuthPrincipal, type AuthSession, type SessionSettings,
   } from "./api";
 
   // P6-T11 session management. Every signed-in user sees + revokes their OWN
@@ -19,6 +20,54 @@
   let users = $state<AuthPrincipal[]>([]);
   let selected = $state("");
   let theirs = $state<AuthSession[]>([]);
+
+  // admin: global session-timeout settings (runtime override of the env
+  // defaults; 0 clears back to env). Per-user overrides live in UsersPanel.
+  let ss = $state<SessionSettings | null>(null);
+  let ssIdle = $state("");
+  let ssTtl = $state("");
+  let ssSaved = $state(false);
+
+  async function refreshSettings() {
+    try {
+      ss = await getSessionSettings();
+      ssIdle = String(ss.inactivity_hours);
+      ssTtl = String(ss.ttl_hours);
+    } catch (e) {
+      error = friendlyError(e);
+    }
+  }
+  function sourceLabel(src: "env" | "global"): string {
+    return src === "env" ? "from env default" : "set here";
+  }
+  async function saveSettings(e: Event) {
+    e.preventDefault();
+    error = ""; ssSaved = false;
+    const idle = Number(ssIdle), ttl = Number(ssTtl);
+    if (!Number.isFinite(idle) || !Number.isFinite(ttl)) { error = "Timeouts must be numbers of hours."; return; }
+    // Send only what changed: re-sending an untouched env value would turn it
+    // into a "global" override equal to the env default (harmless but noisy).
+    const patch: { inactivity_hours?: number; ttl_hours?: number } = {};
+    if (ss && idle !== ss.inactivity_hours) patch.inactivity_hours = idle;
+    if (ss && ttl !== ss.ttl_hours) patch.ttl_hours = ttl;
+    if (!Object.keys(patch).length) { ssSaved = true; return; }
+    try {
+      ss = await patchSessionSettings(patch);
+      ssIdle = String(ss.inactivity_hours); ssTtl = String(ss.ttl_hours);
+      ssSaved = true;
+    } catch (err) {
+      error = friendlyError(err, "save");
+    }
+  }
+  async function resetSetting(which: "inactivity_hours" | "ttl_hours") {
+    error = ""; ssSaved = false;
+    try {
+      ss = await patchSessionSettings({ [which]: 0 });
+      ssIdle = String(ss.inactivity_hours); ssTtl = String(ss.ttl_hours);
+    } catch (err) {
+      error = friendlyError(err, "save");
+    }
+  }
 
   async function refreshMine() {
     error = "";
@@ -49,7 +98,7 @@
 
   onMount(() => {
     refreshMine();
-    if (isAdmin) refreshUsers();
+    if (isAdmin) { refreshUsers(); refreshSettings(); }
   });
 
   async function revokeOne(id: string) {
@@ -128,6 +177,52 @@
 
   {#if isAdmin}
     <div class="mt-6 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      <h3 class="text-sm font-semibold">Session timeouts (global)</h3>
+      <p class="text-xs text-slate-500">
+        Runtime override of the env defaults. Idle changes apply live to existing
+        sessions; the absolute lifetime applies to new sessions. Per-user overrides
+        live in the Users panel and win over these.
+      </p>
+      {#if ss}
+        <form onsubmit={saveSettings} class="mt-2 flex flex-wrap items-end gap-3">
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="text-xs text-slate-500">Idle timeout (hours)</span>
+            <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+              type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssIdle} />
+            <span class="text-xs text-slate-400">
+              currently: {ss.inactivity_hours} h — {sourceLabel(ss.inactivity_source)}
+              {#if ss.inactivity_source !== "env"}(env default {ss.env_inactivity_hours} h){/if}
+            </span>
+            <button type="button" class="self-start text-xs text-slate-500 underline disabled:opacity-40"
+              disabled={ss.inactivity_source === "env"}
+              onclick={() => resetSetting("inactivity_hours")}>Reset to default</button>
+          </label>
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="text-xs text-slate-500">Absolute lifetime (hours)</span>
+            <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+              type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssTtl} />
+            <span class="text-xs text-slate-400">
+              currently: {ss.ttl_hours} h — {sourceLabel(ss.ttl_source)}
+              {#if ss.ttl_source !== "env"}(env default {ss.env_ttl_hours} h){/if}
+            </span>
+            <button type="button" class="self-start text-xs text-slate-500 underline disabled:opacity-40"
+              disabled={ss.ttl_source === "env"}
+              onclick={() => resetSetting("ttl_hours")}>Reset to default</button>
+          </label>
+          <div class="flex items-center gap-2 pb-6">
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">Save</button>
+            {#if ssSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
+          </div>
+          <p class="basis-full text-xs text-slate-400">
+            Allowed range {ss.min_hours}–{ss.max_hours} h; 0 clears back to the env default.
+          </p>
+        </form>
+      {:else}
+        <p class="mt-2 text-xs text-slate-400">Loading…</p>
+      {/if}
+    </div>
+
+    <div class="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
       <h3 class="text-sm font-semibold">Admin: force sign-out a user</h3>
       <div class="mt-2 flex flex-wrap items-center gap-2">
         <select class="rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"

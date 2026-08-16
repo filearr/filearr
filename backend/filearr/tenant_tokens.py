@@ -298,7 +298,7 @@ def rbac_filter_for(
     :class:`CompilationRefused` (→ the API maps it to 422 "consolidate grants")
     when the grant set is too complex to express under ``ceiling``: REFUSE, never
     silently widen or narrow."""
-    if role is Role.ADMIN:
+    if role.bypass:
         return None
     return compile_scope_filter(
         grants,

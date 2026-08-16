@@ -415,7 +415,7 @@ async def _require_thumb_scope(
 
         if "read" not in authx.scopes_for_role(principal.global_role):
             raise HTTPException(403, "Scope 'read' required")
-        if principal.global_role == rbac.Role.ADMIN.value:
+        if rbac.role_from_name(principal.global_role).bypass:
             return PermissionContext(unrestricted=True, action="search_metadata")
         role, grants = await grant_cache.load_grants(request, session, principal.id)
         use_ltree = await rbac_sql.path_scope_uses_ltree(session)

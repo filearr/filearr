@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    listUsers, createUser, updateUser, deleteUser,
-    friendlyError, type AuthPrincipal,
+    listUsers, createUser, updateUser, deleteUser, listRoles,
+    friendlyError, type AuthPrincipal, type RoleDef,
   } from "./api";
 
   // P6-T12 user management (admin). Lists local + federated accounts with a
@@ -11,12 +11,22 @@
   // reset action is hidden for them.
   let error = $state("");
   let users = $state<AuthPrincipal[]>([]);
+  // Roles come from the server (builtins + operator-defined) — never hard-code.
+  let roles = $state<RoleDef[]>([]);
 
   // create form
   let nuName = $state("");
   let nuPass = $state("");
-  let nuRole = $state<"admin" | "user" | "viewer">("user");
+  let nuRole = $state("user");
   let nuEmail = $state("");
+
+  // per-user details drawer (profile + session-timeout overrides)
+  let openFor = $state<string | null>(null);
+  let dDisplay = $state("");
+  let dPhone = $state("");
+  let dIdle = $state("");
+  let dTtl = $state("");
+  let dSaved = $state(false);
 
   // password reset
   let resetFor = $state<string | null>(null);
@@ -29,8 +39,52 @@
     } catch (e) {
       error = friendlyError(e);
     }
+    try {
+      roles = await listRoles();
+    } catch {
+      roles = [];
+    }
+    if (roles.length && !roles.some((r) => r.name === nuRole)) nuRole = roles[0].name;
   }
   onMount(refresh);
+
+  function openDetails(u: AuthPrincipal) {
+    if (openFor === u.id) { openFor = null; return; }
+    openFor = u.id;
+    dSaved = false;
+    dDisplay = u.display_name ?? "";
+    dPhone = u.phone ?? "";
+    dIdle = u.session_inactivity_hours == null ? "" : String(u.session_inactivity_hours);
+    dTtl = u.session_ttl_hours == null ? "" : String(u.session_ttl_hours);
+  }
+
+  /** Blank or 0 -> 0 (clears the override); otherwise the parsed hours. */
+  function hoursOrClear(v: string): number | null {
+    const t = v.trim();
+    if (t === "") return 0;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  async function saveDetails(u: AuthPrincipal, e: Event) {
+    e.preventDefault();
+    error = "";
+    const idle = hoursOrClear(dIdle);
+    const ttl = hoursOrClear(dTtl);
+    if (idle === null || ttl === null) { error = "Timeouts must be numbers of hours (0 or blank clears)."; return; }
+    try {
+      await updateUser(u.id, {
+        display_name: dDisplay.trim(),
+        phone: dPhone.trim(),
+        session_inactivity_hours: idle,
+        session_ttl_hours: ttl,
+      });
+      dSaved = true;
+      await refresh();
+    } catch (err) {
+      error = friendlyError(err, "save");
+    }
+  }
 
   async function addUser(e: Event) {
     e.preventDefault();
@@ -42,14 +96,15 @@
         global_role: nuRole,
         email: nuEmail.trim() || null,
       });
-      nuName = ""; nuPass = ""; nuEmail = ""; nuRole = "user";
+      nuName = ""; nuPass = ""; nuEmail = "";
+      nuRole = roles.some((r) => r.name === "user") ? "user" : (roles[0]?.name ?? "user");
       await refresh();
     } catch (e) {
       error = friendlyError(e);
     }
   }
 
-  async function setRole(u: AuthPrincipal, role: "admin" | "user" | "viewer") {
+  async function setRole(u: AuthPrincipal, role: string) {
     error = "";
     try {
       await updateUser(u.id, { global_role: role });
@@ -98,8 +153,9 @@
 <section class="mt-8">
   <h2 class="text-lg font-semibold">Users</h2>
   <p class="text-xs text-slate-500">
-    Local and federated accounts. Roles: admin (full) · user (read+write) · viewer
-    (read). Federated accounts sign in through their identity provider.
+    Local and federated accounts. Roles are defined in the Roles panel; changing a
+    user's role signs them out everywhere. Federated accounts sign in through
+    their identity provider.
   </p>
 
   {#if error}
@@ -121,8 +177,13 @@
         {#each users as u (u.id)}
           <tr>
             <td class="py-2 pr-3">
-              <span class="font-medium">{u.username}</span>
-              {#if u.email}<span class="ml-1 text-xs text-slate-400">{u.email}</span>{/if}
+              {#if u.display_name}
+                <span class="font-medium">{u.display_name}</span>
+                <div class="text-xs text-slate-400">{u.username}{#if u.email} · {u.email}{/if}</div>
+              {:else}
+                <span class="font-medium">{u.username}</span>
+                {#if u.email}<span class="ml-1 text-xs text-slate-400">{u.email}</span>{/if}
+              {/if}
             </td>
             <td class="py-2 pr-3">
               <span class="rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800">
@@ -138,10 +199,13 @@
               <select
                 class="rounded border border-slate-300 bg-transparent px-1 py-0.5 text-sm dark:border-slate-700"
                 value={u.global_role}
-                onchange={(e) => setRole(u, (e.currentTarget as HTMLSelectElement).value as any)}>
-                <option value="admin">admin</option>
-                <option value="user">user</option>
-                <option value="viewer">viewer</option>
+                onchange={(e) => setRole(u, (e.currentTarget as HTMLSelectElement).value)}>
+                {#each roles as r (r.name)}
+                  <option value={r.name}>{r.display_name || r.name}</option>
+                {/each}
+                {#if !roles.some((r) => r.name === u.global_role)}
+                  <option value={u.global_role}>{u.global_role}</option>
+                {/if}
               </select>
             </td>
             <td class="py-2 pr-3">
@@ -152,7 +216,9 @@
               {/if}
             </td>
             <td class="py-2 pr-3 text-right">
-              <button class="text-xs text-slate-500 underline" onclick={() => toggleDisabled(u)}>
+              <button class="text-xs text-slate-500 underline" title="Profile and session-timeout overrides"
+                onclick={() => openDetails(u)}>{openFor === u.id ? "close" : "…"}</button>
+              <button class="ml-2 text-xs text-slate-500 underline" onclick={() => toggleDisabled(u)}>
                 {u.disabled ? "enable" : "disable"}
               </button>
               {#if !u.auth_provider || u.auth_provider === "local"}
@@ -177,6 +243,44 @@
               {/if}
             </td>
           </tr>
+          {#if openFor === u.id}
+            <tr class="bg-slate-50 dark:bg-slate-900/40">
+              <td colspan="5" class="p-3">
+                <form onsubmit={(e) => saveDetails(u, e)} class="flex flex-wrap items-end gap-2">
+                  <label class="flex flex-col gap-1 text-sm">
+                    <span class="text-xs text-slate-500">Display name</span>
+                    <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      bind:value={dDisplay} />
+                  </label>
+                  <label class="flex flex-col gap-1 text-sm">
+                    <span class="text-xs text-slate-500">Phone</span>
+                    <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      bind:value={dPhone} />
+                  </label>
+                  <label class="flex flex-col gap-1 text-sm">
+                    <span class="text-xs text-slate-500">Idle timeout (h)</span>
+                    <input class="w-28 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      type="number" min="0" step="any" placeholder="global" bind:value={dIdle} />
+                  </label>
+                  <label class="flex flex-col gap-1 text-sm">
+                    <span class="text-xs text-slate-500">Absolute lifetime (h)</span>
+                    <input class="w-28 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
+                      type="number" min="0" step="any" placeholder="global" bind:value={dTtl} />
+                  </label>
+                  <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">Save</button>
+                  {#if dSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
+                  <p class="basis-full text-xs text-slate-500">
+                    Timeouts override the global setting for this user only — blank or 0
+                    clears the override (uses global). Idle changes apply live; the absolute
+                    lifetime applies to new sessions.
+                    {#if u.auth_provider && u.auth_provider !== "local"}
+                      Federated account: display name may be re-synced by the identity provider.
+                    {/if}
+                  </p>
+                </form>
+              </td>
+            </tr>
+          {/if}
         {/each}
         {#if users.length === 0}
           <tr><td colspan="5" class="py-3 text-slate-400">No users yet.</td></tr>
@@ -205,9 +309,11 @@
       <span class="text-xs text-slate-500">Role</span>
       <select class="rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
         bind:value={nuRole}>
-        <option value="admin">admin</option>
-        <option value="user">user</option>
-        <option value="viewer">viewer</option>
+        {#each roles as r (r.name)}
+          <option value={r.name}>{r.display_name || r.name}</option>
+        {:else}
+          <option value="user">user</option>
+        {/each}
       </select>
     </label>
     <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white"

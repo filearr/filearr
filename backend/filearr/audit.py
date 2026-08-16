@@ -47,6 +47,11 @@ GROUP_CREATED = "group_created"
 GROUP_DELETED = "group_deleted"
 GROUP_MEMBERSHIP_CHANGED = "group_membership_changed"
 SESSION_REVOKED = "session_revoked"
+PROFILE_UPDATED = "profile_updated"
+SESSION_SETTINGS_CHANGED = "session_settings_changed"
+ROLE_CREATED = "role_created"
+ROLE_UPDATED = "role_updated"
+ROLE_DELETED = "role_deleted"
 SEARCH = "search"
 # P11-T10 report export artifact download (data-exfiltration-shaped; audited
 # unconditionally, mirroring the transfer download carve-out).

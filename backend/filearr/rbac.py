@@ -43,10 +43,9 @@ No ``models.py`` change, no migration, no runtime wiring lands in this pass.
 
 from __future__ import annotations
 
-import enum
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 # --- Action vocabulary (brief §2.3) ----------------------------------------
@@ -67,37 +66,90 @@ ACTIONS: frozenset[str] = frozenset(
 )
 
 
-class Role(str, enum.Enum):
-    """Global role — the coarse first RBAC layer (brief §2.3). Mixed-in ``str``
-    for the same serialization reasons as ``models.py``'s enums."""
+@dataclass(frozen=True)
+class Role:
+    """A global role — the coarse first RBAC layer (brief §2.3).
 
-    ADMIN = "admin"
-    USER = "user"
-    VIEWER = "viewer"
+    Since 2026-08-16 roles are DATA, not an enum: the three builtins below are
+    seeded into the ``roles`` table (undeletable; their permissions editable) and
+    operators may add custom roles. Each role carries the two things the engine
+    needs: ``ceiling`` — the maximum action set any path grant may hand it (a
+    grant clamps to this, never widens it) — and ``bypass`` — whether it
+    short-circuits path evaluation entirely (the builtin ``admin``; also any role
+    given the ``admin`` coarse scope, since that scope already unlocks every
+    admin endpoint). ``scopes`` are the coarse API scopes (read/write/admin) that
+    ``security.require_scope`` checks.
 
+    Resolve a role by NAME with :func:`role_from_name`, which consults the
+    process registry (``filearr.roles``) and falls back to the builtins; an
+    unknown name resolves to a role with NO scopes and an EMPTY ceiling (fail
+    closed). Instances hash/compare by name, so ``ROLE_CEILINGS[Role.ADMIN]``
+    and ``role == Role.USER`` keep working."""
+
+    name: str
+    ceiling: frozenset[str] = field(default_factory=frozenset)
+    scopes: frozenset[str] = field(default_factory=frozenset)
+    bypass: bool = False
+
+    # Backwards compatibility with the enum this replaced.
+    @property
+    def value(self) -> str:
+        return self.name
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Role):
+            return self.name == other.name
+        if isinstance(other, str):
+            return self.name == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+_USER_CEILING = frozenset(
+    {
+        "search_metadata",
+        "search_content",
+        "download",
+        "upload",
+        "modify",
+        "edit_metadata",
+        "manage_alerts",
+    }
+)
+# Viewer is read-only: it may see metadata/content but perform no mutation
+# and no download. A viewer can NEVER be handed `modify`/`download` via a
+# path grant — the ceiling clamps it to nothing (brief §2.5 step 1 test).
+_VIEWER_CEILING = frozenset({"search_metadata", "search_content"})
+
+#: The builtin roles with their SHIPPED permissions: the migration's seed values
+#: and the fallback when the ``roles`` table has not been loaded. The live
+#: definitions (an operator may edit a builtin's permissions) come from
+#: ``filearr.roles``.
+Role.ADMIN = Role("admin", ACTIONS, frozenset({"admin", "write", "read"}), True)  # type: ignore[attr-defined]
+Role.USER = Role("user", _USER_CEILING, frozenset({"write", "read"}), False)  # type: ignore[attr-defined]
+Role.VIEWER = Role("viewer", _VIEWER_CEILING, frozenset({"read"}), False)  # type: ignore[attr-defined]
+BUILTIN_ROLES: tuple[Role, ...] = (Role.ADMIN, Role.USER, Role.VIEWER)  # type: ignore[attr-defined]
 
 #: Per-role *ceiling*: the maximum set of actions a principal with that global
 #: role may ever be granted on any path. A path grant is clamped to this — it can
 #: narrow, never widen (brief §2.5 step 1). ``admin`` is unbounded (all actions)
-#: and additionally short-circuits path evaluation entirely.
-ROLE_CEILINGS: dict[Role, frozenset[str]] = {
-    Role.ADMIN: ACTIONS,
-    Role.USER: frozenset(
-        {
-            "search_metadata",
-            "search_content",
-            "download",
-            "upload",
-            "modify",
-            "edit_metadata",
-            "manage_alerts",
-        }
-    ),
-    # Viewer is read-only: it may see metadata/content but perform no mutation
-    # and no download. A viewer can NEVER be handed `modify`/`download` via a
-    # path grant — the ceiling clamps it to nothing (brief §2.5 step 1 test).
-    Role.VIEWER: frozenset({"search_metadata", "search_content"}),
-}
+#: and additionally short-circuits path evaluation entirely. Kept as a mapping
+#: of the BUILTIN defaults (scaffold tests + docs); the engine reads
+#: ``role.ceiling`` so custom/edited roles work the same way.
+ROLE_CEILINGS: dict[Role, frozenset[str]] = {r: r.ceiling for r in BUILTIN_ROLES}
+
+
+def role_from_name(name: str | None) -> Role:
+    """Resolve a role by name: the live registry (``filearr.roles``) first, the
+    builtin defaults second, and an EMPTY fail-closed role for anything else."""
+    from filearr import roles as _roles
+
+    return _roles.get(name)
 
 
 # --- ltree path encoding (brief §2.4, Architect ruling R1) ------------------
@@ -356,10 +408,10 @@ def evaluate(
        present it wins over any allow (step 5, AWS-style).
     5. **Default deny** — no matching grant → deny for non-admins (step 6).
     """
-    if role is Role.ADMIN:
+    if role.bypass:
         return Decision(True, "admin_bypass")
 
-    if action not in ROLE_CEILINGS.get(role, frozenset()):
+    if action not in role.ceiling:
         # Action exceeds the role ceiling — no grant can rescue it.
         return Decision(False, "ceiling_clamped")
 

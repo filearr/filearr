@@ -133,11 +133,11 @@ def scope_where_clause(
     Same construction the deny-aware Meili filter uses
     (``tenant_tokens.compile_scope_filter``), transposed from the document's
     ancestor-array membership to the item's single ``path_scope`` value."""
-    if role is rbac.Role.ADMIN:
+    if role.bypass:
         return None
     # Ceiling clamp (evaluate step 2): an action outside the role ceiling can
     # never be granted, so no row matches — even if a group grant carried it.
-    if action not in rbac.ROLE_CEILINGS.get(role, frozenset()):
+    if action not in role.ceiling:
         return false()
 
     allow = {g.path for g in grants if g.action == action and g.allow}

@@ -43,7 +43,17 @@ from filearr.security import (
 
 router = APIRouter()
 
-GlobalRole = Literal["admin", "user", "viewer"]
+# Roles are data since 2026-08-16 (builtin admin/user/viewer + custom); a role
+# name is validated against the live registry at the endpoint, not a Literal.
+GlobalRole = str
+
+
+def _validate_role_name(name: str) -> str:
+    from filearr import roles as roles_registry
+
+    if not name or name not in {r.name for r in roles_registry.all_roles()}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown role '{name}'")
+    return name
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +100,49 @@ class UserPatchIn(BaseModel):
     disabled: bool | None = None
     email: str | None = None
     password: str | None = Field(default=None, min_length=8)
+    display_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=64)
+    # Per-user session-timeout overrides in hours. Omitted = leave alone; the
+    # explicit sentinel 0 = clear the override (back to the global setting).
+    session_inactivity_hours: float | None = Field(default=None, ge=0, le=24 * 365)
+    session_ttl_hours: float | None = Field(default=None, ge=0, le=24 * 365)
+
+
+class ProfileIn(BaseModel):
+    """Self-service profile edit (the account page). Username changes are for
+    LOCAL accounts only — a federated username is the IdP's, not ours."""
+
+    username: str | None = Field(default=None, min_length=1, max_length=64)
+    display_name: str | None = Field(default=None, max_length=120)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=64)
+
+
+class SessionSettingsOut(BaseModel):
+    """The global session timeouts: effective value, where it comes from
+    (``env`` | ``global``), and the env defaults for the reset hint."""
+
+    inactivity_hours: float
+    ttl_hours: float
+    inactivity_source: str
+    ttl_source: str
+    env_inactivity_hours: float
+    env_ttl_hours: float
+    min_hours: float
+    max_hours: float
+
+
+class SessionSettingsIn(BaseModel):
+    # None = leave alone; 0 = clear the override (back to env).
+    inactivity_hours: float | None = Field(default=None, ge=0, le=24 * 365)
+    ttl_hours: float | None = Field(default=None, ge=0, le=24 * 365)
+
+
+class MySessionTimeoutsOut(BaseModel):
+    inactivity_hours: float
+    ttl_hours: float
+    inactivity_source: str  # env | global | user
+    ttl_source: str
 
 
 class PrincipalOut(BaseModel):
@@ -103,6 +156,17 @@ class PrincipalOut(BaseModel):
     # UI can badge federated accounts, and 'kind' distinguishes a human user from
     # a (future) service_account row.
     auth_provider: str = "local"
+    # Self-service profile + preferences (2026-08-16).
+    display_name: str | None = None
+    phone: str | None = None
+    preferences: dict = Field(default_factory=dict)
+    # Per-user session-timeout overrides (None = global setting applies).
+    session_inactivity_hours: float | None = None
+    session_ttl_hours: float | None = None
+    # The coarse API scopes this principal's role grants (read/write/admin) —
+    # what the SPA should gate admin surfaces on, since a CUSTOM role may carry
+    # the admin scope without being named "admin".
+    scopes: list[str] = Field(default_factory=list)
 
 
 class LoginOut(BaseModel):
@@ -124,6 +188,12 @@ def _principal_out(principal: Principal, user: User) -> PrincipalOut:
         kind=principal.kind,
         disabled=principal.disabled_at is not None,
         auth_provider=user.auth_provider,
+        display_name=user.display_name,
+        phone=user.phone,
+        preferences=dict(principal.preferences or {}),
+        session_inactivity_hours=principal.session_inactivity_hours,
+        session_ttl_hours=principal.session_ttl_hours,
+        scopes=sorted(authx.scopes_for_role(principal.global_role)),
     )
 
 
@@ -406,6 +476,189 @@ async def change_password(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _override_hours(v: float) -> int | None:
+    from filearr import app_settings
+
+    if v == 0:
+        return None
+    if not (app_settings.MIN_HOURS <= v <= app_settings.MAX_HOURS):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"timeout must be between {app_settings.MIN_HOURS:.3f} and "
+            f"{app_settings.MAX_HOURS} hours (0 clears)",
+        )
+    return int(round(v))
+
+
+# --------------------------------------------------------------------------- #
+# Self-service account: profile, preferences, effective timeouts               #
+# --------------------------------------------------------------------------- #
+@router.patch("/auth/me", response_model=PrincipalOut)
+async def patch_me(
+    payload: ProfileIn,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+    session: AsyncSession = Depends(get_session),
+) -> PrincipalOut:
+    """Edit your own profile. ``username`` only for LOCAL accounts (federated
+    usernames belong to the IdP); it is normalised to lowercase and must stay
+    unique. Never touches role/disabled/password (those are the admin patch and
+    the password endpoint respectively)."""
+    user = await _load_user(session, principal.id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    changed: dict[str, object] = {}
+    if payload.username is not None:
+        normalized = payload.username.strip().lower()
+        if normalized != user.username:
+            if user.auth_provider != "local":
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    "This account signs in through an identity provider; "
+                    "its username cannot be changed here",
+                )
+            clash = (
+                await session.execute(select(User).where(User.username == normalized))
+            ).scalar_one_or_none()
+            if clash is not None:
+                raise HTTPException(status.HTTP_409_CONFLICT, f"User '{normalized}' already exists")
+            changed["username"] = {"from": user.username, "to": normalized}
+            user.username = normalized
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip() or None
+        changed["display_name"] = user.display_name
+    if payload.email is not None:
+        user.email = payload.email.strip() or None
+        changed["email"] = bool(user.email)
+    if payload.phone is not None:
+        user.phone = payload.phone.strip() or None
+        changed["phone"] = bool(user.phone)
+    await session.commit()
+    if changed:
+        await audit.emit(
+            audit.PROFILE_UPDATED,
+            request=request,
+            principal_id=principal.id,
+            details={"target": str(principal.id), "changed": changed},
+        )
+    return _principal_out(principal, user)
+
+
+_PREFS_MAX_BYTES = 8192
+
+
+@router.put("/auth/me/preferences", response_model=PrincipalOut)
+async def put_my_preferences(
+    payload: dict,
+    principal: Principal = Depends(current_principal),
+    session: AsyncSession = Depends(get_session),
+) -> PrincipalOut:
+    """Replace your preferences object (theme defaults etc.). Free-form JSON,
+    size-capped; the SPA owns the key vocabulary."""
+    import json as _json
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "preferences must be an object")
+    if len(_json.dumps(payload)) > _PREFS_MAX_BYTES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "preferences too large")
+    user = await _load_user(session, principal.id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    principal.preferences = payload
+    await session.commit()
+    return _principal_out(principal, user)
+
+
+@router.get("/auth/me/session-timeouts", response_model=MySessionTimeoutsOut)
+async def my_session_timeouts(
+    principal: Principal = Depends(current_principal),
+    session: AsyncSession = Depends(get_session),
+) -> MySessionTimeoutsOut:
+    """The idle/absolute timeouts that apply to YOUR sessions and where each
+    comes from (env default, the global runtime setting, or a per-user override)."""
+    from filearr import app_settings
+
+    eff = await app_settings.effective_session_timeouts(
+        session,
+        user_inactivity_hours=principal.session_inactivity_hours,
+        user_ttl_hours=principal.session_ttl_hours,
+    )
+    return MySessionTimeoutsOut(
+        inactivity_hours=eff.inactivity_hours,
+        ttl_hours=eff.ttl_hours,
+        inactivity_source=eff.inactivity_source,
+        ttl_source=eff.ttl_source,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Global session-timeout settings (admin, runtime — no restart)               #
+# --------------------------------------------------------------------------- #
+async def _session_settings_out(session: AsyncSession) -> SessionSettingsOut:
+    from filearr import app_settings
+
+    g = await app_settings.global_session_timeouts(session)
+    s = get_settings()
+    return SessionSettingsOut(
+        inactivity_hours=g.inactivity_hours,
+        ttl_hours=g.ttl_hours,
+        inactivity_source=g.inactivity_source,
+        ttl_source=g.ttl_source,
+        env_inactivity_hours=float(s.session_inactivity_hours),
+        env_ttl_hours=float(s.session_ttl_hours),
+        min_hours=app_settings.MIN_HOURS,
+        max_hours=app_settings.MAX_HOURS,
+    )
+
+
+@router.get(
+    "/auth/settings/session",
+    response_model=SessionSettingsOut,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_session_settings(
+    session: AsyncSession = Depends(get_session),
+) -> SessionSettingsOut:
+    return await _session_settings_out(session)
+
+
+@router.patch(
+    "/auth/settings/session",
+    response_model=SessionSettingsOut,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def patch_session_settings(
+    payload: SessionSettingsIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> SessionSettingsOut:
+    """Set the deployment-wide idle / absolute session timeouts at runtime.
+    Applies to every session on its next request (idle) and to sessions created
+    from now on (absolute). 0 clears an override back to the env default."""
+    from filearr import app_settings
+
+    actor = audit.actor_id(request)
+    changed: dict[str, object] = {}
+    for key, v in (
+        (app_settings.KEY_SESSION_INACTIVITY_HOURS, payload.inactivity_hours),
+        (app_settings.KEY_SESSION_TTL_HOURS, payload.ttl_hours),
+    ):
+        if v is None:
+            continue
+        val = None if v == 0 else _override_hours(v)
+        await app_settings.set_value(session, key, val, updated_by=actor)
+        changed[key] = val
+    await session.commit()
+    if changed:
+        await audit.emit(
+            audit.SESSION_SETTINGS_CHANGED,
+            request=request,
+            principal_id=actor,
+            details=changed,
+        )
+    return await _session_settings_out(session)
+
+
 # --------------------------------------------------------------------------- #
 # Admin user management                                                        #
 # --------------------------------------------------------------------------- #
@@ -438,7 +691,8 @@ async def create_user(
     existing = await session.execute(select(User).where(User.username == normalized))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"User '{normalized}' already exists")
-    principal = Principal(kind="user", global_role=payload.global_role)
+    role_name = _validate_role_name(payload.global_role)
+    principal = Principal(kind="user", global_role=role_name)
     session.add(principal)
     await session.flush()
     user = User(
@@ -478,8 +732,8 @@ async def patch_user(
     role_changed_to: str | None = None
     disabled_changed_to: bool | None = None
     if payload.global_role is not None and payload.global_role != principal.global_role:
-        principal.global_role = payload.global_role
-        role_changed_to = payload.global_role
+        principal.global_role = _validate_role_name(payload.global_role)
+        role_changed_to = principal.global_role
         privilege_change = True
     if payload.disabled is not None:
         from datetime import UTC, datetime
@@ -491,6 +745,15 @@ async def patch_user(
             privilege_change = True
     if payload.email is not None:
         user.email = payload.email
+    if payload.display_name is not None:
+        user.display_name = payload.display_name.strip() or None
+    if payload.phone is not None:
+        user.phone = payload.phone.strip() or None
+    # 0 clears an override (NULL = global); anything else must sit in the band.
+    if payload.session_inactivity_hours is not None:
+        principal.session_inactivity_hours = _override_hours(payload.session_inactivity_hours)
+    if payload.session_ttl_hours is not None:
+        principal.session_ttl_hours = _override_hours(payload.session_ttl_hours)
     if payload.password is not None:
         user.password_hash = authx.hash_password(payload.password)
         privilege_change = True

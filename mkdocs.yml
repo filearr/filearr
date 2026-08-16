@@ -85,6 +85,8 @@ nav:
   - Security: security.md
   - Data collected & how: data-collection.md
   - Operations & recovery: operations.md
+  - Troubleshooting:
+      - Library failures: troubleshooting/library-failures.md
   - Reference:
       - Configuration: reference/configuration.md
       - Agent settings: reference/agent-settings.md

@@ -26,6 +26,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit, grant_cache, rbac
+from filearr import roles as roles_registry
 from filearr.db import get_session
 from filearr.models import (
     Library,
@@ -206,10 +207,7 @@ async def _resolve_principal_grants(
     principal = await session.get(Principal, principal_id)
     if principal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Principal not found")
-    try:
-        role = rbac.Role(principal.global_role)
-    except ValueError:
-        role = rbac.Role.VIEWER  # unknown role -> most restrictive (fail closed)
+    role = rbac.role_from_name(principal.global_role)  # unknown -> empty (fail closed)
     group_ids = (
         await session.execute(
             select(PrincipalGroupMember.group_id).where(
@@ -247,7 +245,7 @@ async def list_actions() -> dict:
     action picker and the client-side ceiling hint)."""
     return {
         "actions": sorted(rbac.ACTIONS),
-        "role_ceilings": {r.value: sorted(a) for r, a in rbac.ROLE_CEILINGS.items()},
+        "role_ceilings": {r.name: sorted(r.ceiling) for r in roles_registry.all_roles()},
     }
 
 
@@ -527,11 +525,8 @@ async def create_grant(
         principal = await session.get(Principal, payload.subject_id)
         if principal is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Principal subject not found")
-        try:
-            role = rbac.Role(principal.global_role)
-        except ValueError:
-            role = rbac.Role.VIEWER
-        if payload.action not in rbac.ROLE_CEILINGS.get(role, frozenset()):
+        role = rbac.role_from_name(principal.global_role)
+        if payload.action not in role.ceiling:
             raise HTTPException(
                 422,
                 f"Role '{role.value}' cannot be granted '{payload.action}' "

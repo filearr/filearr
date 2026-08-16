@@ -937,6 +937,46 @@ export interface FailedJobPage {
 export const libraryErrors = (id: string, limit = 50, offset = 0) =>
   request<LibraryErrors>(`/libraries/${id}/errors?limit=${limit}&offset=${offset}`);
 
+/** Library diagnosis report (2026-08-16): ordered verdicts + raw sections.
+ *  Write scope. See docs-site/troubleshooting/library-failures.md. */
+export interface LibraryVerdict {
+  severity: "error" | "warn" | "info" | "ok";
+  code: string;
+  title: string;
+  detail: string;
+  actions: string[];
+  evidence: Record<string, unknown>;
+  doc: string;
+}
+export interface LibraryDiagnosis {
+  generated_at: string;
+  docs_url: string;
+  library: {
+    id: string; name: string; root_path: string; enabled: boolean; watch_mode: boolean;
+    scan_cron: string | null; hash_policy: string; source_agent_id: string | null;
+    native_prefix: string | null; share_prefix: string | null;
+  };
+  verdicts: LibraryVerdict[];
+  path: Record<string, unknown> & {
+    root_path: string; exists?: boolean | null; is_dir?: boolean | null; readable?: boolean | null;
+    listing_ms?: number | null; entries_seen?: number; sample?: { name: string; dir: boolean }[];
+    error?: string | null; network?: boolean | null; fstype?: string | null; empty?: boolean | null;
+    timeout?: boolean; skipped?: string;
+  };
+  scans: {
+    id: string; status: string; started_at: string | null; finished_at: string | null;
+    duration_s: number | null; rel_path: string | null; error: string | null;
+    stats: Record<string, unknown>;
+  }[];
+  extract_errors: { count: number; by_kind: Record<string, number>; top_messages: { message: string; count: number }[] };
+  failed_jobs: { id: string; task: string; queue: string; attempts: number | null; scheduled_at: string | null; error: string | null }[];
+  agent: Record<string, unknown> | null;
+  logs: { ts: string | null; source: string; level: string; logger: string; message: string }[];
+  context: Record<string, unknown>;
+}
+export const diagnoseLibrary = (id: string) =>
+  request<LibraryDiagnosis>(`/libraries/${id}/diagnose`);
+
 /** Clear stored extraction errors for a library and re-defer extraction for the
  *  affected items (plus any never-hashed items). Returns the number requeued. */
 export const retryExtracts = (id: string) =>
@@ -2158,12 +2198,112 @@ export interface AuthPrincipal {
   id: string;
   username: string;
   email: string | null;
-  global_role: "admin" | "user" | "viewer";
+  /** A role NAME: the builtins admin/user/viewer or an operator-defined role. */
+  global_role: string;
   kind: string;
   disabled: boolean;
   // P6-T10/T12: identity source ('local'|'ldap'|'saml'|'oidc'). Older payloads
   // may omit it (defaults 'local' server-side).
   auth_provider?: string;
+  // Self-service profile + preferences (2026-08-16).
+  display_name?: string | null;
+  phone?: string | null;
+  preferences?: Record<string, unknown>;
+  // Per-user session-timeout overrides in hours (null = global applies).
+  session_inactivity_hours?: number | null;
+  session_ttl_hours?: number | null;
+  /** Coarse API scopes the role grants; gate admin UI on `scopes.includes("admin")`. */
+  scopes?: string[];
+}
+
+/** True when the principal's role carries the admin scope (works for custom
+ *  roles too — never test `global_role === "admin"` in the UI). */
+export const isAdminPrincipal = (me: AuthPrincipal | null | undefined): boolean =>
+  !!me && (me.scopes ? me.scopes.includes("admin") : me.global_role === "admin");
+
+// --- Account (self-service) --------------------------------------------------
+export interface ProfilePatch {
+  username?: string;
+  display_name?: string;
+  email?: string;
+  phone?: string;
+}
+export const patchMyProfile = (body: ProfilePatch) =>
+  request<AuthPrincipal>("/auth/me", { method: "PATCH", body: JSON.stringify(body) });
+export const putMyPreferences = (prefs: Record<string, unknown>) =>
+  request<AuthPrincipal>("/auth/me/preferences", { method: "PUT", body: JSON.stringify(prefs) });
+export const changeMyPassword = (current_password: string, new_password: string) =>
+  request<unknown>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password, new_password }),
+  });
+export interface MySessionTimeouts {
+  inactivity_hours: number;
+  ttl_hours: number;
+  inactivity_source: "env" | "global" | "user";
+  ttl_source: "env" | "global" | "user";
+}
+export const mySessionTimeouts = () => request<MySessionTimeouts>("/auth/me/session-timeouts");
+
+// --- Global session-timeout settings (admin, runtime) -------------------------
+export interface SessionSettings {
+  inactivity_hours: number;
+  ttl_hours: number;
+  inactivity_source: "env" | "global";
+  ttl_source: "env" | "global";
+  env_inactivity_hours: number;
+  env_ttl_hours: number;
+  min_hours: number;
+  max_hours: number;
+}
+export const getSessionSettings = () => request<SessionSettings>("/auth/settings/session");
+/** 0 clears an override back to the env default; omit a field to leave it. */
+export const patchSessionSettings = (body: { inactivity_hours?: number; ttl_hours?: number }) =>
+  request<SessionSettings>("/auth/settings/session", { method: "PATCH", body: JSON.stringify(body) });
+
+// --- Roles (data since 2026-08-16) -------------------------------------------
+export interface RoleDef {
+  name: string;
+  display_name: string;
+  description: string;
+  builtin: boolean;
+  scopes: string[];
+  ceiling_actions: string[];
+  bypass: boolean;
+  users: number;
+  updated_at?: string | null;
+}
+export interface RoleCompare {
+  scopes: string[];
+  actions: string[];
+  action_help: Record<string, string>;
+  scope_help: Record<string, string>;
+  roles: RoleDef[];
+  /** role name -> { "scope:<s>" | "action:<a>" -> boolean } */
+  matrix: Record<string, Record<string, boolean>>;
+  users_by_role: Record<string, string[]>;
+}
+export const listRoles = () => request<RoleDef[]>("/rbac/roles");
+export const compareRoles = () => request<RoleCompare>("/rbac/roles/compare");
+export const createRole = (body: {
+  name: string;
+  display_name: string;
+  description?: string;
+  scopes?: string[];
+  ceiling_actions?: string[];
+  clone_from?: string;
+}) => request<RoleDef>("/rbac/roles", { method: "POST", body: JSON.stringify(body) });
+export const patchRole = (
+  name: string,
+  body: { display_name?: string; description?: string; scopes?: string[]; ceiling_actions?: string[] },
+) => request<RoleDef>(`/rbac/roles/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify(body) });
+export async function deleteRole(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/rbac/roles/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
 }
 
 export interface LoginResult {
@@ -2436,17 +2576,23 @@ export async function downloadCustomReport(
 export const createUser = (body: {
   username: string;
   password: string;
-  global_role?: "admin" | "user" | "viewer";
+  /** A role name (builtin or custom — see listRoles). */
+  global_role?: string;
   email?: string | null;
 }) => request<AuthPrincipal>("/auth/users", { method: "POST", body: JSON.stringify(body) });
 
 export const updateUser = (
   id: string,
   patch: Partial<{
-    global_role: "admin" | "user" | "viewer";
+    global_role: string;
     disabled: boolean;
     email: string | null;
     password: string;
+    display_name: string;
+    phone: string;
+    /** Hours; 0 clears the per-user override back to the global setting. */
+    session_inactivity_hours: number;
+    session_ttl_hours: number;
   }>,
 ) => request<AuthPrincipal>(`/auth/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 

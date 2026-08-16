@@ -124,6 +124,11 @@ async def resolve_session_principal(
     validated = await authx.validate_session(session, raw)
     if validated is None:
         return None
+    # Roles are data: make sure the registry the synchronous role resolvers
+    # read is fresh before anything maps this principal's role to scopes.
+    from filearr import roles as roles_registry
+
+    await roles_registry.ensure_loaded(session)
     principal = await session.get(Principal, validated.principal_id)
     if principal is None or principal.disabled_at is not None:
         return None
@@ -352,11 +357,9 @@ class PermissionContext:
         the action exceeds the role ceiling OR the principal holds no allow grant
         for it (the per-row ``sql_clause(action=...)`` still scopes which rows the
         capable principal actually receives)."""
-        from filearr import rbac
-
         if self.unrestricted:
             return
-        if action not in rbac.ROLE_CEILINGS.get(self.role, frozenset()):
+        if self.role is None or action not in self.role.ceiling:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 f"Action '{action}' is not permitted for your role",
@@ -379,8 +382,13 @@ class PermissionContext:
         if self.unrestricted:
             return None
         role = self.role
+        # The worker that runs the job has no HTTP request and may not have the
+        # roles registry loaded, and a custom role's ceiling can change later:
+        # snapshot the ceiling/bypass the request was authorised under too.
         return {
             "role": role.value if hasattr(role, "value") else str(role),
+            "ceiling": sorted(role.ceiling) if hasattr(role, "ceiling") else [],
+            "bypass": bool(getattr(role, "bypass", False)),
             "use_ltree": self.use_ltree,
             "grants": [
                 {"path": g.path, "action": g.action, "allow": g.allow}
@@ -461,7 +469,7 @@ def require_permission(action: str, *, coarse: str | None = None):
                     status.HTTP_403_FORBIDDEN, f"Scope '{coarse_scope}' required"
                 )
             request.state.actor = f"principal:{principal.id}"
-            if principal.global_role == rbac.Role.ADMIN.value:
+            if rbac.role_from_name(principal.global_role).bypass:
                 await session.commit()
                 return PermissionContext(
                     unrestricted=True, action=action, principal=principal
