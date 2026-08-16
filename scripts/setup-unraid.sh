@@ -1044,19 +1044,33 @@ create_filearr_network() {
 create_appdata_dirs() {
   step "appdata directories and ownership (TRAP 4)"
 
-  # Pool-backed, FUSE-free paths for everything that keeps a database.
+  # Ownership is set ONLY when this script creates the directory (empty). A
+  # directory that already has content belongs to whatever runs in it -- the
+  # postgres image chowns its data to uid 999 at first start -- and a re-run's
+  # blanket chown -R 99:100 pulled the files out from under a RUNNING server
+  # (live 2026-08-16: 'could not open file "global/pg_filenode.map":
+  # Permission denied', every app connection failed). Same rule for the rest.
   local d
+  _own_if_new() {  # DIR UID:GID LABEL
+    if [[ ! -d "$1" ]]; then
+      mkdir -p "$1"; chown -R "$2" "$1" 2>/dev/null || true
+      info "$1  (created, $3)"
+    elif [[ -z "$(ls -A "$1" 2>/dev/null)" ]]; then
+      chown -R "$2" "$1" 2>/dev/null || true
+      info "$1  (empty, $3)"
+    else
+      info "$1  (exists with content -- ownership left to its container: $(stat -c '%u:%g' "$1" 2>/dev/null))"
+    fi
+  }
+  # Pool-backed, FUSE-free paths for everything that keeps a database.
   for d in "${APPDATA_CACHE}/filearr-postgres" "${APPDATA_CACHE}/filearr-meilisearch"; do
-    mkdir -p "$d"; chown -R 99:100 "$d" 2>/dev/null || true
-    info "$d  (99:100 nobody:users)"
+    _own_if_new "$d" 99:100 "99:100 nobody:users"
   done
-  mkdir -p "${APPDATA_USER}/filearr"; chown -R 99:100 "${APPDATA_USER}/filearr" 2>/dev/null || true
-  info "${APPDATA_USER}/filearr  (99:100 — /config is lock-insensitive, FUSE is fine here)"
+  _own_if_new "${APPDATA_USER}/filearr" 99:100 "99:100 — /config is lock-insensitive, FUSE is fine here"
 
   if [[ "$TIER" == "full" ]]; then
     for d in "${APPDATA_CACHE}/filearr-caddy" "${APPDATA_CACHE}/filearr-caddy-config"; do
-      mkdir -p "$d"; chown -R 99:100 "$d" 2>/dev/null || true
-      info "$d  (99:100)"
+      _own_if_new "$d" 99:100 "99:100"
     done
 
     # THE chown. The step-ca image runs as user `step`, UID 1000, and has NO
@@ -1067,6 +1081,10 @@ create_appdata_dirs() {
     #     /entrypoint.sh: line 56: /home/step/password: Permission denied
     # Do NOT "fix" it with --user 0:0: running a CA as root to dodge a chown is
     # the wrong trade. (live 2026-08-14)
+    # step-ca is the exception where a re-run SHOULD fix ownership: nothing
+    # else ever legitimately owns that tree, and Unraid's New Permissions tool
+    # is known to break it (below). 1000:1000 is what the container itself
+    # expects, so re-applying it is safe while it runs.
     mkdir -p "${APPDATA_CACHE}/filearr-stepca"
     chown -R 1000:1000 "${APPDATA_CACHE}/filearr-stepca"
     info "${APPDATA_CACHE}/filearr-stepca  (1000:1000 step — REQUIRED before first start)"
