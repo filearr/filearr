@@ -2236,6 +2236,9 @@ Run it in the Unraid terminal (web terminal icon, or SSH) as root:
   --force          regenerate templates even for containers that already exist
   --local-dir DIR  take templates from a local checkout's unraid/ (air-gapped)
   --phase N        run exactly phase 0|1|2|3 and stop
+  --harvest-ca     redo only the step-ca harvest (root fingerprint, provisioner
+                   JWK -> secrets.env + the filearr template); then re-Apply
+                   filearr. For a CA that was verified on an earlier run.
   --yes            assume yes to WARN confirmations (never to the Docker cycle)
   --version, --help
 
@@ -2261,6 +2264,7 @@ while [[ $# -gt 0 ]]; do
     --yes|-y)      ASSUME_YES=1 ;;
     --local-dir)   shift; LOCAL_DIR="${1:-}"; [[ -d "$LOCAL_DIR" ]] || die "--local-dir: '$LOCAL_DIR' is not a directory" ;;
     --phase)       shift; PHASE_ONLY="${1:-}" ;;
+    --harvest-ca)  MODE="harvest-ca" ;;
     --help|-h)     usage ;;
     --version)     echo "setup-unraid.sh ${VERSION}"; exit 0 ;;
     *)             die "unknown option: $1 (try --help)" ;;
@@ -2288,6 +2292,18 @@ SEMANTIC="${SEMANTIC:-false}"; AGENTS="${AGENTS:-false}"; CONTENT_SNIFF="${CONTE
 THUMB_BUDGET_GB="${THUMB_BUDGET_GB:-5}"; UPDATE_CHECK="${UPDATE_CHECK:-false}"
 
 if [[ "$MODE" == "check" ]]; then check_mode; fi
+if [[ "$MODE" == "harvest-ca" ]]; then
+  # The walkthrough skips an already-verified CA, so this is the way back into
+  # the harvest after a fix (2026-08-16: the JWK extractor had polluted the
+  # stored key; the CA itself was fine).
+  [[ "$TIER" == "full" ]] || die "--harvest-ca: this deployment is the simple tier (no step-ca)"
+  container_exists filearr-stepca || die "--harvest-ca: no filearr-stepca container on this box"
+  harvest_ca
+  echo
+  info "Now make the app pick the values up: Docker tab -> filearr -> Edit -> Apply."
+  info "Then mint a NEW enrollment token in the console before re-running an agent install."
+  exit 0
+fi
 if [[ "$MODE" == "summary" ]]; then
   [[ -f "$CONF" ]] || die "no saved answers at $CONF — run the script normally first"
   summary_part_one
