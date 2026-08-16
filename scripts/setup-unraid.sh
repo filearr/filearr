@@ -433,6 +433,33 @@ add_elem_before_close() {
 }
 
 # get_cfg FILE MATCH — read a Config value back (used by --check).
+xml_unescape() {
+  printf '%s' "$1" | sed -e 's/&quot;/"/g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g'
+}
+
+# carry_over_configs OLD NEW: copy the value of every <Config> the OLD template
+# has into the freshly fetched NEW one (matched by Name+Target). Regeneration is
+# then "pristine + everything the operator had + the script's managed values on
+# top" instead of "pristine + the script's values", so a knob the script does
+# not own (worker concurrency, retention, PUID/PGID, ports, MEILI_*, ...) that
+# was tuned on the Edit page survives --force. Fields NEW adds are left at their
+# upstream defaults; fields OLD had that NEW dropped are gone (they no longer
+# exist upstream). Values are unescaped from OLD and re-escaped by set_cfg.
+carry_over_configs() {
+  local old="$1" new="$2" line name target match oldv n=0
+  while IFS= read -r line; do
+    name="$(sed -n 's/.*<Config Name="\([^"]*\)" Target="\([^"]*\)".*/\1/p' <<<"$line")"
+    target="$(sed -n 's/.*<Config Name="\([^"]*\)" Target="\([^"]*\)".*/\2/p' <<<"$line")"
+    [[ -n "$name" ]] || continue
+    match="Name=\"${name}\" Target=\"${target}\""
+    grep -qF -- "<Config ${match}" "$old" || continue
+    oldv="$(get_cfg "$old" "$match")"
+    set_cfg "$new" "$match" "$(xml_unescape "$oldv")"
+    n=$((n+1))
+  done < <(grep -F '<Config ' "$new")
+  info "carried ${n} field value(s) over from the previous template"
+}
+
 get_cfg() {
   local file="$1" match="$2"
   awk -v m="$match" '
@@ -1257,7 +1284,12 @@ generate_templates() {
       [[ "$_changed" == 1 ]] && save_conf
     fi
     if [[ -f "$f" ]] && container_exists "$name"; then regenerated="${regenerated} ${name}"; fi
+    # Keep the previous template so its values survive the pristine fetch; the
+    # script's own set_cfg calls below then override the fields it manages.
+    local _prev_tpl=""
+    if [[ -f "$f" ]]; then _prev_tpl="$(mktemp)"; cp "$f" "$_prev_tpl"; fi
     fetch_template "$name" "$f"
+    if [[ -n "$_prev_tpl" ]]; then carry_over_configs "$_prev_tpl" "$f"; rm -f "$_prev_tpl"; fi
     apply_network "$f" "$name"
 
     case "$name" in
@@ -1366,9 +1398,9 @@ generate_templates() {
     echo
     warn "REGENERATED templates for containers that already exist:${regenerated}"
     warn "A template edit is NOT live until you re-Apply: Docker tab -> <name> ->"
-    warn "Edit -> Apply, for each of the above. Anything you had changed by hand on"
-    warn "those Edit pages (other than Agent Auth Mode) has been reset to the"
-    warn "script's values -- re-do such edits before you Apply."
+    warn "Edit -> Apply, for each of the above. Values you had set by hand on those"
+    warn "Edit pages were carried over; fields this script manages (paths, DSNs,"
+    warn "secrets, network, TLS/CA settings) were re-derived from your answers."
   fi
   info "These are the my-*.xml files Unraid itself writes on Apply, so there is"
   info "no pristine duplicate to delete afterwards — the trap where two templates"
@@ -2290,8 +2322,8 @@ Run it in the Unraid terminal (web terminal icon, or SSH) as root:
   --summary        re-print the handoff summary (secrets stay behind a prompt)
   --reconfigure    re-ask the wizard (existing secrets are always kept)
   --force          regenerate templates even for containers that already exist
-                   (secrets, CA values and Agent Auth Mode are carried over; other
-                   hand edits on the Edit pages are reset; re-Apply afterwards)
+                   (values from the previous templates are carried over; fields the
+                   script manages are re-derived from your answers; re-Apply after)
   --local-dir DIR  take templates from a local checkout's unraid/ (air-gapped)
   --phase N        run exactly phase 0|1|2|3 and stop
   --harvest-ca     redo only the step-ca harvest (root fingerprint, provisioner
