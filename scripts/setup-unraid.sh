@@ -274,6 +274,9 @@ EOF
 }
 
 load_conf() { [[ -f "$CONF" ]] && source "$CONF" || true; }
+# conf_has KEY -> 0 when setup.conf holds an explicit answer for KEY. Tells a
+# "never asked" (older conf) apart from "answered with the default".
+conf_has() { [[ -f "$CONF" ]] && grep -q "^$1=" "$CONF"; }
 
 # --------------------------------------------------------------------------- #
 # Secrets                                                                      #
@@ -1233,6 +1236,26 @@ generate_templates() {
     local prev_auth_mode=""
     [[ -f "$f" ]] && prev_auth_mode="$(get_cfg "$f" 'Target="FILEARR_AGENT_AUTH_MODE"' 2>/dev/null || true)"
     case "$prev_auth_mode" in fingerprint|both|mtls-header) ;; *) prev_auth_mode="" ;; esac
+    # Same rule for the wizard's FEATURES: an answer that setup.conf does not
+    # hold (the question was added after this box answered the wizard) must
+    # not fall back to the default over a value the operator set on the Edit
+    # page. Carry the existing template's value forward AND record it as the
+    # answer, so the next run is consistent (live 2026-08-16: semantic search,
+    # content sniffing, update check and thumbnail budget were all reset).
+    if [[ "$name" == "filearr" && -f "$f" ]]; then
+      local _k _t _v _changed=0
+      for _k in SEMANTIC:FILEARR_SEMANTIC_ENABLED CONTENT_SNIFF:FILEARR_CONTENT_SNIFF_ENABLED \
+                UPDATE_CHECK:FILEARR_UPDATE_CHECK_AUTO THUMB_BUDGET_GB:FILEARR_THUMBNAIL_BUDGET_GB \
+                AGENTS:FILEARR_AGENTS_ENABLED; do
+        _t="${_k#*:}"; _k="${_k%%:*}"
+        conf_has "$_k" && continue
+        _v="$(get_cfg "$f" "Target=\"${_t}\"" 2>/dev/null || true)"
+        [[ -n "$_v" ]] || continue
+        printf -v "$_k" '%s' "$_v"; _changed=1
+        info "kept ${_t}=${_v} from the previous template (not in ${CONF##*/}; recorded there now)"
+      done
+      [[ "$_changed" == 1 ]] && save_conf
+    fi
     if [[ -f "$f" ]] && container_exists "$name"; then regenerated="${regenerated} ${name}"; fi
     fetch_template "$name" "$f"
     apply_network "$f" "$name"
