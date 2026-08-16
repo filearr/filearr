@@ -1289,7 +1289,7 @@ generate_templates() {
     local _prev_tpl=""
     if [[ -f "$f" ]]; then _prev_tpl="$(mktemp)"; cp "$f" "$_prev_tpl"; fi
     fetch_template "$name" "$f"
-    if [[ -n "$_prev_tpl" ]]; then carry_over_configs "$_prev_tpl" "$f"; rm -f "$_prev_tpl"; fi
+    [[ -n "$_prev_tpl" ]] && carry_over_configs "$_prev_tpl" "$f"
     apply_network "$f" "$name"
 
     case "$name" in
@@ -1369,6 +1369,17 @@ generate_templates() {
         set_cfg "$f" 'Target="DOCKER_STEPCA_INIT_DNS_NAMES"' "$dns"
         ;;
       filearr-caddy)
+        # The profile is documented as "start on internal, switch to acme on the
+        # Edit page once the proxy is proven" -- so the Edit page owns it after
+        # setup. A regeneration must adopt what the template says (and record
+        # it as the answer), not re-derive the stale first answer (live
+        # 2026-08-16: --force put an acme deployment back on internal).
+        local _prev_profile=""
+        [[ -n "$_prev_tpl" ]] && _prev_profile="$(get_cfg "$_prev_tpl" 'Target="FILEARR_CADDY_PROFILE"' 2>/dev/null || true)"
+        if [[ "$_prev_profile" =~ ^(internal|acme)$ && "$_prev_profile" != "$CADDY_PROFILE" ]]; then
+          info "kept Caddy profile '${_prev_profile}' from the previous template (setup.conf said '${CADDY_PROFILE}'; recorded)"
+          CADDY_PROFILE="$_prev_profile"; save_conf
+        fi
         set_cfg "$f" 'Target="FILEARR_CADDY_PROFILE"' "$CADDY_PROFILE"
         set_cfg "$f" 'Name="Certificates"' "${APPDATA_CACHE}/filearr-caddy"
         set_cfg "$f" 'Name="Caddy State"' "${APPDATA_CACHE}/filearr-caddy-config"
@@ -1390,6 +1401,7 @@ generate_templates() {
         fi
         ;;
     esac
+    [[ -n "$_prev_tpl" ]] && rm -f "$_prev_tpl"
     info "wrote my-${name}.xml"
   done
 
