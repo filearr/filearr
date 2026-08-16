@@ -707,12 +707,13 @@ wizard() {
   echo
 
   echo "  TIER — how far this deployment goes."
-  echo "    simple  filearr + postgres + meilisearch. Agents authenticate by"
-  echo "            certificate fingerprint. Needs nothing but this box."
+  echo "    simple  filearr + postgres + meilisearch. Search and catalog on this"
+  echo "            box only — NO remote agents (every agent needs a certificate"
+  echo "            from step-ca, which the simple tier does not run)."
   echo "    full    the three above + step-ca + caddy: real TLS, a wildcard"
-  echo "            certificate, and the mTLS agent plane. Needs a domain whose"
-  echo "            DNS is at Cloudflare, a spare LAN IP, and a LAN resolver you"
-  echo "            can add records to."
+  echo "            certificate, and the agent plane (fingerprint or mTLS auth)."
+  echo "            Needs a domain whose DNS is at Cloudflare, a spare LAN IP,"
+  echo "            and a LAN resolver you can add records to."
   while :; do
     ask "tier (simple/full)" "${TIER:-simple}"
     case "$REPLY" in simple|full) TIER="$REPLY"; break ;; *) echo "  answer 'simple' or 'full'" ;; esac
@@ -860,11 +861,11 @@ wizard() {
     echo "  Distributed agents: ON — the full tier exists for the agent fleet."
     AGENTS=true
   else
-    echo "  Distributed agents: remote scan agents on other machines, enrolling"
-    echo "  against this instance and authenticating by certificate fingerprint."
-    echo "  Off = the agent API 404s and the Agents page is hidden. Turn on only"
-    echo "  if you will actually install an agent somewhere else."
-    ask_bool "enable distributed agents" "${AGENTS:-false}"; AGENTS="$REPLY"
+    echo "  Distributed agents: OFF — every agent enrols by fetching a client"
+    echo "  certificate from step-ca, which the simple tier does not run; the"
+    echo "  Agents page would only ever show failed enrolments. Choose the full"
+    echo "  tier (--reconfigure) when you want agents on other machines."
+    AGENTS=false
   fi
   echo
   echo "  Content sniffing: an ON-DEMAND maintenance action (nothing runs by"

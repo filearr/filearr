@@ -12,12 +12,14 @@ Runs against the migrated pgserver Postgres (mirrors test_agent_commands's harne
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
 import httpx
 import pytest
 from alembic.config import Config
+from joserfc.jwk import ECKey
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -62,6 +64,11 @@ async def db_maker(pg_uri):
     await engine.dispose()
 
 
+# Register refuses (503, token kept) unless central can mint a step-ca OTT, so
+# every client fixture supplies a throwaway provisioner key + CA URL.
+_TEST_PROVISIONER_JWK = json.dumps(ECKey.generate_key("P-256").as_dict(private=True))
+
+
 @pytest.fixture
 async def client(db_maker, monkeypatch):
     monkeypatch.setattr(db_mod, "SessionLocal", maker := db_maker)
@@ -69,6 +76,8 @@ async def client(db_maker, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "auth_enabled", False)
     monkeypatch.setattr(settings, "agents_enabled", True)
+    monkeypatch.setattr(settings, "ca_provisioner_jwk", _TEST_PROVISIONER_JWK)
+    monkeypatch.setattr(settings, "ca_url", "https://ca.filearr.lan:9000")
     app = create_app()
 
     async def _s():
@@ -85,9 +94,7 @@ async def client(db_maker, monkeypatch):
 async def _seed_agent(maker, *, hostname="nas"):
     fp = "FP:" + uuid.uuid4().hex
     async with maker() as s:
-        agent = Agent(
-            name=hostname, hostname=hostname, platform="linux", cert_fingerprint=fp
-        )
+        agent = Agent(name=hostname, hostname=hostname, platform="linux", cert_fingerprint=fp)
         s.add(agent)
         await s.commit()
         return agent.id, fp
@@ -218,8 +225,7 @@ async def test_create_get_list_group(client):
     assert [g["name"] for g in lst] == ["Global", "workstations"]
 
     assert any(
-        d["name"] == "workstations"
-        for d in await _events(maker, "agent_config_group_created")
+        d["name"] == "workstations" for d in await _events(maker, "agent_config_group_created")
     )
 
 
@@ -253,9 +259,7 @@ async def test_create_invalid_settings_or_policy_422(client):
 async def test_oversize_policy_413(client):
     c, _, settings = client
     big = {"blob": "x" * (settings.agent_policy_max_bytes + 100)}
-    r = await c.post(
-        "/api/v1/agents/config-groups", json={"name": "huge", "policy": big}
-    )
+    r = await c.post("/api/v1/agents/config-groups", json={"name": "huge", "policy": big})
     assert r.status_code == 413
 
 
@@ -301,9 +305,7 @@ async def test_update_invalid_settings_422_and_leaves_version_alone(client):
         f"/api/v1/agents/config-groups/{g['id']}", json={"settings": {"log_level": "loud"}}
     )
     assert bad.status_code == 422
-    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()[
-        "current_version"
-    ] == 1
+    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()["current_version"] == 1
 
 
 async def test_history_keyset_and_cap(client):
@@ -316,25 +318,17 @@ async def test_history_keyset_and_cap(client):
         )
     hist = (await c.get(f"/api/v1/agents/config-groups/{g['id']}/history")).json()
     assert [h["version"] for h in hist] == [4, 3, 2, 1]
-    limited = (
-        await c.get(f"/api/v1/agents/config-groups/{g['id']}/history?limit=1")
-    ).json()
+    limited = (await c.get(f"/api/v1/agents/config-groups/{g['id']}/history?limit=1")).json()
     assert [h["version"] for h in limited] == [4]
-    before = (
-        await c.get(f"/api/v1/agents/config-groups/{g['id']}/history?before=3")
-    ).json()
+    before = (await c.get(f"/api/v1/agents/config-groups/{g['id']}/history?before=3")).json()
     assert [h["version"] for h in before] == [2, 1]
 
 
 async def test_rollback_copies_forward(client):
     c, maker, _ = client
     g = await make_group(c, "g", policy={"watch_mode": True})
-    await c.patch(
-        f"/api/v1/agents/config-groups/{g['id']}", json={"policy": {"watch_mode": False}}
-    )
-    r = await c.post(
-        f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 1}
-    )
+    await c.patch(f"/api/v1/agents/config-groups/{g['id']}", json={"policy": {"watch_mode": False}})
+    r = await c.post(f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 1})
     assert r.status_code == 200
     # forward-only: the restored document lands as a NEW version 3
     assert r.json()["current_version"] == 3
@@ -343,17 +337,14 @@ async def test_rollback_copies_forward(client):
     assert [h["version"] for h in hist] == [3, 2, 1]
     assert "rollback" in hist[0]["note"]
     assert any(
-        e.get("rollback_of") == 1
-        for e in await _events(maker, "agent_config_version_published")
+        e.get("rollback_of") == 1 for e in await _events(maker, "agent_config_version_published")
     )
 
 
 async def test_rollback_unknown_version_404(client):
     c, _, _ = client
     g = await make_group(c, "g")
-    r = await c.post(
-        f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 99}
-    )
+    r = await c.post(f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 99})
     assert r.status_code == 404
 
 
@@ -362,18 +353,14 @@ async def test_delete_group_removes_membership(client):
     g = await make_group(c, "g")
     agent_id, _ = await _seed_agent(maker)
     assert (await join(c, agent_id, [g["id"]])).status_code == 200
-    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()[
-        "member_count"
-    ] == 1
+    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()["member_count"] == 1
 
     d = await c.delete(f"/api/v1/agents/config-groups/{g['id']}")
     assert d.status_code == 204
     # Membership cascaded; the agent still resolves Global.
     eff = await effective(c, agent_id)
     assert [grp["name"] for grp in eff["groups"]] == ["Global"]
-    assert any(
-        e["members_reset"] == 1 for e in await _events(maker, "agent_config_group_deleted")
-    )
+    assert any(e["members_reset"] == 1 for e in await _events(maker, "agent_config_group_deleted"))
 
 
 # --------------------------------------------------------------------------- #
@@ -457,9 +444,7 @@ async def test_layered_merge_last_priority_wins_per_key(client):
     agent_id, _ = await _seed_agent(maker)
     await set_global(c, policy={"watch_mode": True, "poll_interval_seconds": 300})
     low = await make_group(c, "low", priority=100, policy={"watch_mode": False})
-    high = await make_group(
-        c, "high", priority=900, policy={"poll_interval_seconds": 600}
-    )
+    high = await make_group(c, "high", priority=900, policy={"poll_interval_seconds": 600})
     await join(c, agent_id, [high["id"], low["id"]])
 
     eff = await effective(c, agent_id)
@@ -500,12 +485,8 @@ async def test_layered_merge_sections_are_independent(client):
 async def test_layered_merge_nested_objects_replace_wholesale(client):
     c, maker, _ = client
     agent_id, _ = await _seed_agent(maker)
-    await set_global(
-        c, settings={"inventory": {"enabled": True, "collectors": ["stat", "owner"]}}
-    )
-    g = await make_group(
-        c, "narrow", priority=400, settings={"inventory": {"enabled": True}}
-    )
+    await set_global(c, settings={"inventory": {"enabled": True, "collectors": ["stat", "owner"]}})
+    g = await make_group(c, "narrow", priority=400, settings={"inventory": {"enabled": True}})
     await join(c, agent_id, [g["id"]])
     eff = await effective(c, agent_id)
     # Documented: shallow merge at the top of each section — the nested object is
@@ -539,9 +520,7 @@ async def test_effective_config_reports_generation_and_hash(client):
 
 async def test_effective_config_unknown_agent_404(client):
     c, _, _ = client
-    assert (
-        await c.get(f"/api/v1/agents/{uuid.uuid4()}/effective-config")
-    ).status_code == 404
+    assert (await c.get(f"/api/v1/agents/{uuid.uuid4()}/effective-config")).status_code == 404
 
 
 # --------------------------------------------------------------------------- #
@@ -565,8 +544,7 @@ async def test_publish_with_rollout_holds_current_version(client):
     assert body["active_rollout"]["status"] == "scheduled"
     assert body["active_rollout"]["current_tier"] == -1
     assert any(
-        e["target_version"] == 2
-        for e in await _events(maker, "agent_config_rollout_created")
+        e["target_version"] == 2 for e in await _events(maker, "agent_config_rollout_created")
     )
 
 
@@ -591,8 +569,14 @@ async def test_second_live_rollout_409(client):
         [],
         [{"percent": 50}],  # last is not 100
         [{"percent": 50}, {"percent": 20}, {"percent": 100}],  # not ascending
-        [{"percent": 1}, {"percent": 2}, {"percent": 3}, {"percent": 4},
-         {"percent": 5}, {"percent": 100}],  # six tiers
+        [
+            {"percent": 1},
+            {"percent": 2},
+            {"percent": 3},
+            {"percent": 4},
+            {"percent": 5},
+            {"percent": 100},
+        ],  # six tiers
         [{"percent": 100, "delay_minutes": -5}],
         [{"percent": 0}, {"percent": 100}],
     ],
@@ -632,13 +616,9 @@ async def test_rollout_list_cancel_and_fallback(client):
     cancelled = await c.post(f"/api/v1/agents/config-rollouts/{rid}/cancel")
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
     # current_version never moved, so members stay on the old document.
-    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()[
-        "current_version"
-    ] == 1
+    assert (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()["current_version"] == 1
     assert (await c.get("/api/v1/agents/config-rollouts")).json() == []
-    assert (
-        await c.post(f"/api/v1/agents/config-rollouts/{rid}/cancel")
-    ).status_code == 409
+    assert (await c.post(f"/api/v1/agents/config-rollouts/{rid}/cancel")).status_code == 409
     assert await _events(maker, "agent_config_rollout_cancelled")
 
 
@@ -651,9 +631,7 @@ async def test_promote_requires_running(client):
     )
     rid = (await c.get("/api/v1/agents/config-rollouts")).json()[0]["id"]
     # still `scheduled` (the worker tick has not run) -> promote is a 409
-    assert (
-        await c.post(f"/api/v1/agents/config-rollouts/{rid}/promote")
-    ).status_code == 409
+    assert (await c.post(f"/api/v1/agents/config-rollouts/{rid}/promote")).status_code == 409
 
 
 async def test_rollback_cancels_a_live_rollout(client):
@@ -663,9 +641,7 @@ async def test_rollback_cancels_a_live_rollout(client):
         f"/api/v1/agents/config-groups/{g['id']}",
         json={"policy": {"watch_mode": True}, "rollout": {"tiers": [{"percent": 100}]}},
     )
-    r = await c.post(
-        f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 1}
-    )
+    r = await c.post(f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 1})
     assert r.status_code == 200
     assert (await c.get("/api/v1/agents/config-rollouts")).json() == []
 
@@ -830,6 +806,4 @@ async def test_feature_gate_404_when_disabled(client, monkeypatch):
     monkeypatch.setattr(settings, "agents_enabled", False)
     assert (await c.get("/api/v1/agents/config-groups")).status_code == 404
     assert (await c.get("/api/v1/agents/config-rollouts")).status_code == 404
-    assert (
-        await c.get(f"/api/v1/agents/{agent_id}/effective-config")
-    ).status_code == 404
+    assert (await c.get(f"/api/v1/agents/{agent_id}/effective-config")).status_code == 404

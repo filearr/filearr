@@ -8,6 +8,7 @@ Runs against the migrated pgserver Postgres (mirrors test_rbac_p6t2's harness).
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 from alembic.config import Config
+from joserfc.jwk import ECKey
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -31,6 +33,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 def _psycopg3(uri: str) -> str:
     return uri.replace("postgresql://", "postgresql+psycopg://", 1)
+
+
+# Register refuses (503, token kept) unless central can mint a step-ca OTT, so
+# every client fixture supplies a throwaway provisioner key + CA URL.
+_TEST_PROVISIONER_JWK = json.dumps(ECKey.generate_key("P-256").as_dict(private=True))
 
 
 @pytest.fixture
@@ -56,6 +63,7 @@ async def client(db_maker, monkeypatch):
     # below by re-enabling auth). Feature flag ON for the functional tests.
     monkeypatch.setattr(settings, "auth_enabled", False)
     monkeypatch.setattr(settings, "agents_enabled", True)
+    monkeypatch.setattr(settings, "ca_provisioner_jwk", _TEST_PROVISIONER_JWK)
     monkeypatch.setattr(settings, "ca_url", "https://ca.filearr.lan:9000")
     monkeypatch.setattr(settings, "ca_fingerprint", "deadbeef")
     app = create_app()
@@ -89,9 +97,7 @@ async def test_migration_round_trip(db_maker):
 
         # tables + columns exist; the raw token is NOT stored anywhere.
         got = (
-            await s.execute(
-                text("SELECT config_group_names FROM enrollment_tokens LIMIT 1")
-            )
+            await s.execute(text("SELECT config_group_names FROM enrollment_tokens LIMIT 1"))
         ).scalar_one()
         assert got == ["filers"]
         cnt = (
@@ -122,9 +128,7 @@ async def test_migration_round_trip(db_maker):
 # --------------------------------------------------------------------------- #
 async def test_mint_token_shows_once_and_hashes_at_rest(client):
     c, maker, _ = client
-    r = await c.post(
-        "/api/v1/agents/enrollment-tokens", json={"config_group_names": ["filers"]}
-    )
+    r = await c.post("/api/v1/agents/enrollment-tokens", json={"config_group_names": ["filers"]})
     assert r.status_code == 201, r.text
     body = r.json()
     raw = body["token"]
@@ -338,8 +342,7 @@ async def test_host_tool_minimums_endpoint(client):
 # --------------------------------------------------------------------------- #
 # Fleet summary (W6-D4 status header)                                          #
 # --------------------------------------------------------------------------- #
-async def _seed_agent(maker, *, name, cert_fingerprint=None, last_seen_at=None,
-                      revoked_at=None):
+async def _seed_agent(maker, *, name, cert_fingerprint=None, last_seen_at=None, revoked_at=None):
     async with maker() as s:
         s.add(
             Agent(
@@ -358,7 +361,11 @@ async def test_fleet_summary_empty_all_zero(client):
     c, _, _ = client
     s = (await c.get("/api/v1/agents/summary")).json()
     assert s == {
-        "total": 0, "connected": 0, "disconnected": 0, "pending": 0, "revoked": 0,
+        "total": 0,
+        "connected": 0,
+        "disconnected": 0,
+        "pending": 0,
+        "revoked": 0,
     }
 
 
@@ -370,7 +377,9 @@ async def test_fleet_summary_counts_lifecycle_and_liveness(client):
     await _seed_agent(maker, name="conn", cert_fingerprint="fpc", last_seen_at=now)
     # disconnected: active but stale last_seen.
     await _seed_agent(
-        maker, name="stale", cert_fingerprint="fps",
+        maker,
+        name="stale",
+        cert_fingerprint="fps",
         last_seen_at=now - timedelta(hours=1),
     )
     # disconnected: active, never seen.
@@ -379,12 +388,20 @@ async def test_fleet_summary_counts_lifecycle_and_liveness(client):
     await _seed_agent(maker, name="pend", last_seen_at=now)
     # revoked: wins over an active cert + fresh last_seen.
     await _seed_agent(
-        maker, name="rev", cert_fingerprint="fpr", last_seen_at=now, revoked_at=now,
+        maker,
+        name="rev",
+        cert_fingerprint="fpr",
+        last_seen_at=now,
+        revoked_at=now,
     )
 
     s = (await c.get("/api/v1/agents/summary")).json()
     assert s == {
-        "total": 5, "connected": 1, "disconnected": 2, "pending": 1, "revoked": 1,
+        "total": 5,
+        "connected": 1,
+        "disconnected": 2,
+        "pending": 1,
+        "revoked": 1,
     }
 
 
@@ -394,11 +411,15 @@ async def test_fleet_summary_respects_online_threshold(client):
     now = datetime.now(UTC)
     thresh = settings.agent_online_threshold_seconds
     await _seed_agent(
-        maker, name="justin", cert_fingerprint="fp1",
+        maker,
+        name="justin",
+        cert_fingerprint="fp1",
         last_seen_at=now - timedelta(seconds=thresh - 30),
     )
     await _seed_agent(
-        maker, name="justout", cert_fingerprint="fp2",
+        maker,
+        name="justout",
+        cert_fingerprint="fp2",
         last_seen_at=now - timedelta(seconds=thresh + 30),
     )
     s = (await c.get("/api/v1/agents/summary")).json()
@@ -469,9 +490,7 @@ async def test_consumed_token_delete_requires_force(client):
     )
     # consumed: plain delete refuses, force deletes
     assert (await c.delete(f"/api/v1/agents/enrollment-tokens/{th}")).status_code == 409
-    assert (
-        await c.delete(f"/api/v1/agents/enrollment-tokens/{th}?force=true")
-    ).status_code == 204
+    assert (await c.delete(f"/api/v1/agents/enrollment-tokens/{th}?force=true")).status_code == 204
     assert (await c.get("/api/v1/agents/enrollment-tokens")).json() == []
 
 
@@ -490,9 +509,7 @@ async def test_audit_events_emitted(client):
     await c.delete(f"/api/v1/agents/{aid}")
 
     async with maker() as s:
-        rows = (
-            await s.execute(text("SELECT event_type FROM security_events"))
-        ).scalars().all()
+        rows = (await s.execute(text("SELECT event_type FROM security_events"))).scalars().all()
     assert "agent_token_minted" in rows
     assert "agent_registered" in rows
     assert "agent_revoked" in rows
@@ -505,9 +522,7 @@ async def test_feature_gate_404_when_disabled(client, monkeypatch):
     c, _, settings = client
     monkeypatch.setattr(settings, "agents_enabled", False)
     assert (await c.get("/api/v1/agents")).status_code == 404
-    assert (
-        await c.post("/api/v1/agents/enrollment-tokens", json={})
-    ).status_code == 404
+    assert (await c.post("/api/v1/agents/enrollment-tokens", json={})).status_code == 404
     assert (
         await c.post(
             "/api/v1/agents/register",
@@ -524,6 +539,8 @@ async def test_admin_scope_required(db_maker, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "agents_enabled", True)
+    monkeypatch.setattr(settings, "ca_provisioner_jwk", _TEST_PROVISIONER_JWK)
+    monkeypatch.setattr(settings, "ca_url", "https://ca.filearr.lan:9000")
     app = create_app()
 
     async def _s():
@@ -534,9 +551,7 @@ async def test_admin_scope_required(db_maker, monkeypatch):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         assert (await c.get("/api/v1/agents")).status_code == 401
-        assert (
-            await c.post("/api/v1/agents/enrollment-tokens", json={})
-        ).status_code == 401
+        assert (await c.post("/api/v1/agents/enrollment-tokens", json={})).status_code == 401
         # agent plane: not API-key gated (token is the credential) -> 401 for a
         # bad token, NOT 401 for missing bearer. A garbage token => 401 unknown.
         reg = await c.post(
@@ -553,13 +568,10 @@ async def test_list_agents_paginates(client):
     capped at 200, offset never goes negative."""
     c, _, _ = client
     for i in range(5):
-        raw = (await c.post("/api/v1/agents/enrollment-tokens", json={})).json()[
-            "token"
-        ]
+        raw = (await c.post("/api/v1/agents/enrollment-tokens", json={})).json()["token"]
         r = await c.post(
             "/api/v1/agents/register",
-            json={"token": raw, "hostname": f"h{i}", "platform": "linux",
-                  "name": f"agent-{i}"},
+            json={"token": raw, "hostname": f"h{i}", "platform": "linux", "name": f"agent-{i}"},
         )
         assert r.status_code == 201, r.text
 
@@ -615,8 +627,12 @@ async def test_purge_with_delete_libraries_cascades(client, monkeypatch):
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, path="/agent/root/a.mkv", rel_path="a.mkv",
-            filename="a.mkv", size=1, mtime=datetime.now(UTC),
+            library_id=lib.id,
+            path="/agent/root/a.mkv",
+            rel_path="a.mkv",
+            filename="a.mkv",
+            size=1,
+            mtime=datetime.now(UTC),
             source_agent_id=uuid.UUID(aid),
         )
         s.add(item)

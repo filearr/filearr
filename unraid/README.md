@@ -14,7 +14,7 @@ need all of them — pick a tier, then install that tier's templates **in order*
 | 1 | `filearr-postgres.xml` | `postgres:18.4` | Source of truth + job queue — **back this up** |
 | 2 | `filearr-meilisearch.xml` | `getmeili/meilisearch:v1.53.0` | Disposable, rebuildable search index |
 | 3 | `filearr.xml` | `ghcr.io/pwsh/filearr` | Web UI + API **and** the background worker (port 8484) |
-| 4 | `filearr-stepca.xml` | `smallstep/step-ca:0.30.2` | Private CA for agent client certificates — only for `mtls-header` |
+| 4 | `filearr-stepca.xml` | `smallstep/step-ca:0.30.2` | Private CA that issues every agent's client certificate — **required for any agent**, in both `fingerprint` and `mtls-header` auth modes |
 | 5 | `filearr-caddy.xml` | `ghcr.io/pwsh/filearr-caddy` | TLS reverse proxy + the mTLS agent plane |
 | — | `filearr-agent.xml` | `ghcr.io/pwsh/filearr-agent` | Standalone inventory agent — independent install, needs only a central URL + enrollment token |
 

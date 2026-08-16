@@ -29,6 +29,7 @@ info.
 from __future__ import annotations
 
 import base64
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -46,6 +47,7 @@ from filearr.search import delete_docs
 from filearr.security import require_scope
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -511,10 +513,10 @@ async def list_tokens(
 ) -> list[TokenOut]:
     now = datetime.now(UTC)
     rows = (
-        await session.execute(
-            select(EnrollmentToken).order_by(EnrollmentToken.created_at.desc())
-        )
-    ).scalars().all()
+        (await session.execute(select(EnrollmentToken).order_by(EnrollmentToken.created_at.desc())))
+        .scalars()
+        .all()
+    )
     return [_token_out(r, now) for r in rows]
 
 
@@ -543,9 +545,7 @@ async def revoke_token(
             "token already consumed; delete with ?force=true to clean it up",
         )
     consumed_by = str(row.consumed_by) if row.consumed_by else None
-    await session.execute(
-        delete(EnrollmentToken).where(EnrollmentToken.token_hash == token_hash)
-    )
+    await session.execute(delete(EnrollmentToken).where(EnrollmentToken.token_hash == token_hash))
     await session.commit()
     await audit.emit(
         audit.AGENT_TOKEN_REVOKED,
@@ -572,7 +572,23 @@ async def register(
     """R3: consume the enrollment token, assign the authoritative server-side
     ``agent_id``, and return it plus CA bootstrap info. The agent is created
     PENDING (no cert yet); it then CSRs against step-ca with the returned id in
-    its CN/SAN and binds the fingerprint via ``/certificate``."""
+    its CN/SAN and binds the fingerprint via ``/certificate``.
+
+    Refuses with 503 BEFORE consuming the token when central cannot mint the
+    step-ca OTT (provisioner JWK / CA URL unset or malformed): the agent cannot
+    finish enrolment without one, and the token is single-use -- consuming it
+    only to return a null ``ca_ott`` cost the operator a fresh token per
+    attempt. Not audited as a rejected enrolment (nothing about the token was
+    checked); the misconfiguration is logged once per request instead."""
+    settings = get_settings()
+    unavailable = agentsync.ca_ott_unavailable_reason(settings)
+    if unavailable is not None:
+        _log.error("agent register refused (enrollment token NOT consumed): %s", unavailable)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{unavailable} The enrollment token was NOT consumed and stays valid "
+            "until it expires.",
+        )
     try:
         agent, raw_secret, config_group_warning = await agentsync.register_agent(
             session,
@@ -593,7 +609,6 @@ async def register(
         )
         raise _enrollment_http(err) from err
     await session.commit()
-    settings = get_settings()
     await audit.emit(
         audit.AGENT_REGISTERED,
         request=request,
@@ -604,9 +619,10 @@ async def register(
             "platform": agent.platform,
         },
     )
-    # Mint the scoped step-ca OTT (fail-safe: null when the provisioner JWK is
-    # unset/malformed — registration already succeeded). Audit the mint by jti
-    # only; the token itself never touches the log.
+    # Mint the scoped step-ca OTT. Readiness was checked above, so a null here
+    # is a genuine signing failure (logged by try_mint_ca_ott); the response
+    # schema keeps ca_ott nullable for that case. Audit the mint by jti only;
+    # the token itself never touches the log.
     ca_ott, jti = agentsync.try_mint_ca_ott(agent.id, settings)
     if ca_ott is not None:
         await audit.emit(
@@ -692,9 +708,7 @@ async def rebind_certificate(
     try:
         sig = base64.b64decode(body.signature, validate=True)
     except Exception as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "signature is not valid base64"
-        ) from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "signature is not valid base64") from exc
     try:
         root = await agentcert.get_ca_root(settings)
         fingerprint = agentcert.verify_rebind(
@@ -804,9 +818,7 @@ async def agent_fleet_summary(
     was last seen within ``agent_online_threshold_seconds``; otherwise (older, or
     never seen) DISCONNECTED."""
     settings = get_settings()
-    cutoff = datetime.now(UTC) - timedelta(
-        seconds=settings.agent_online_threshold_seconds
-    )
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.agent_online_threshold_seconds)
     # Lifecycle predicates.
     is_revoked = Agent.revoked_at.is_not(None)
     is_pending = Agent.revoked_at.is_(None) & Agent.cert_fingerprint.is_(None)
@@ -820,10 +832,7 @@ async def agent_fleet_summary(
                 func.count().filter(is_pending).label("pending"),
                 func.count().filter(is_active & is_fresh).label("connected"),
                 func.count()
-                .filter(
-                    is_active
-                    & or_(Agent.last_seen_at.is_(None), Agent.last_seen_at < cutoff)
-                )
+                .filter(is_active & or_(Agent.last_seen_at.is_(None), Agent.last_seen_at < cutoff))
                 .label("disconnected"),
             )
         )
@@ -977,16 +986,11 @@ async def list_agents(
     dedicated one-query ``/agents/summary``."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    total = (
-        await session.execute(select(func.count()).select_from(Agent))
-    ).scalar_one()
+    total = (await session.execute(select(func.count()).select_from(Agent))).scalar_one()
     rows = (
         (
             await session.execute(
-                select(Agent)
-                .order_by(Agent.created_at.desc())
-                .limit(limit)
-                .offset(offset)
+                select(Agent).order_by(Agent.created_at.desc()).limit(limit).offset(offset)
             )
         )
         .scalars()
@@ -1002,9 +1006,7 @@ async def list_agents(
     settings = get_settings()
     releases = list(
         (
-            await session.execute(
-                select(AgentRelease).order_by(AgentRelease.created_at.desc())
-            )
+            await session.execute(select(AgentRelease).order_by(AgentRelease.created_at.desc()))
         ).scalars()
     )
     pending_ids = {
@@ -1024,9 +1026,9 @@ async def list_agents(
     if rows:
         for aid, gid in (
             await session.execute(
-                select(
-                    AgentConfigGroupMember.agent_id, AgentConfigGroupMember.group_id
-                ).where(AgentConfigGroupMember.agent_id.in_([a.id for a in rows]))
+                select(AgentConfigGroupMember.agent_id, AgentConfigGroupMember.group_id).where(
+                    AgentConfigGroupMember.agent_id.in_([a.id for a in rows])
+                )
             )
         ).all():
             memberships.setdefault(aid, []).append(gid)
@@ -1084,10 +1086,10 @@ async def revoke_agent(
         removed_item_ids: list[str] = []
         if delete_libraries:
             libs = (
-                await session.execute(
-                    select(Library).where(Library.source_agent_id == agent_id)
-                )
-            ).scalars().all()
+                (await session.execute(select(Library).where(Library.source_agent_id == agent_id)))
+                .scalars()
+                .all()
+            )
             if libs:
                 running = (
                     await session.execute(
@@ -1109,33 +1111,25 @@ async def revoke_agent(
                 removed_item_ids.extend(
                     str(i)
                     for i in (
-                        await session.execute(
-                            select(Item.id).where(Item.library_id.in_(lib_ids))
-                        )
+                        await session.execute(select(Item.id).where(Item.library_id.in_(lib_ids)))
                     ).scalars()
                 )
                 # Core DELETE (not session.delete): the ORM would try to NULL
                 # the children's FKs; the DB's ON DELETE CASCADE is the
                 # authority here, exactly like the library DELETE endpoint.
-                await session.execute(
-                    delete(Library).where(Library.id.in_(lib_ids))
-                )
+                await session.execute(delete(Library).where(Library.id.in_(lib_ids)))
                 deleted_libraries = len(libs)
                 await session.flush()
         lib_count = (
             await session.execute(
-                select(func.count()).select_from(Library).where(
-                    Library.source_agent_id == agent_id
-                )
+                select(func.count()).select_from(Library).where(Library.source_agent_id == agent_id)
             )
         ).scalar_one()
         # items.source_agent_id carries no FK (provenance column) — guard in code
         # so a purge can never leave dangling ownership references.
         item_count = (
             await session.execute(
-                select(func.count()).select_from(Item).where(
-                    Item.source_agent_id == agent_id
-                )
+                select(func.count()).select_from(Item).where(Item.source_agent_id == agent_id)
             )
         ).scalar_one()
         if lib_count or item_count:

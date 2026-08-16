@@ -68,11 +68,14 @@ type Result struct {
 // agent (expired leaf); they cannot resume a failed FIRST enroll — no
 // state.json exists yet for reissue to preserve.
 var ErrCAOTTUnavailable = errors.New(
-	"central registered the agent but returned a null ca_ott — its CA provisioner JWK " +
-		"(FILEARR_CA_PROVISIONER_JWK) is unset or malformed (see docs/ops/agents.md §7.2; " +
-		"Proxmox deploys: rerun deploy-proxmox.sh and watch the [agents] lines). " +
-		"The enrollment token was consumed by registration: after fixing the JWK, mint a " +
-		"NEW token and re-run enroll; the orphaned pending agent can be revoked in Admin → Agents")
+	"central registered the agent but returned a null ca_ott — it could not sign a step-ca " +
+		"one-time token, usually because FILEARR_CA_PROVISIONER_JWK (the provisioner's " +
+		"decrypted private JWK) or FILEARR_CA_URL is unset/malformed on the filearr app " +
+		"container. Fix it there and restart the app (Unraid: filearr -> Edit; the setup " +
+		"script's --check reports the JWK field; Proxmox: rerun deploy-proxmox.sh and watch " +
+		"the [agents] lines; see docs/ops/agents.md §7.2). The enrollment token was consumed " +
+		"by registration: mint a NEW token and re-run enroll; the orphaned pending agent can " +
+		"be revoked in Admin → Agents")
 
 // Enroll executes the full handshake and returns once the cert is persisted and
 // bound. It is safe to retry: register consumes a single-use token, so a retry

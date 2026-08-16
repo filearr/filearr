@@ -180,28 +180,58 @@ async def test_register_returns_verifiable_ca_ott(client):
     assert claims["aud"] == f"{CA_URL}/1.0/sign"
 
 
-async def test_register_ca_ott_null_when_jwk_absent(client):
+async def _register_expect_503(c, raw, hostname):
+    r = await c.post(
+        "/api/v1/agents/register",
+        json={"token": raw, "hostname": hostname, "platform": "linux"},
+    )
+    assert r.status_code == 503, r.text
+    return r.json()["detail"]
+
+
+async def test_register_refused_and_token_kept_when_jwk_absent(client):
+    """The agent cannot finish enrolment without a ca_ott, so central refuses
+    BEFORE consuming the single-use token (the pre-agent 'null ca_ott' ruling
+    burned a token per attempt) and names the exact setting to fix."""
     c, _, settings = client
     import pytest as _pt
 
+    raw = await _mint_token(c)
     with _pt.MonkeyPatch.context() as m:
         m.setattr(settings, "ca_provisioner_jwk", None)
-        out = await _register(c, hostname="nojwk")
-    # register still 201 (asserted in _register); ca_ott is null.
-    assert out["ca_ott"] is None
-    # bootstrap info still present (agent can pin the CA once a key is plumbed).
-    assert out["ca"]["url"] == CA_URL
+        detail = await _register_expect_503(c, raw, "nojwk")
+    assert "FILEARR_CA_PROVISIONER_JWK" in detail and "unset" in detail
+    assert "NOT consumed" in detail
+    # Same token now succeeds once the JWK is back — it was not consumed.
+    r = await c.post(
+        "/api/v1/agents/register",
+        json={"token": raw, "hostname": "nojwk", "platform": "linux"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["ca_ott"]
 
 
-async def test_register_ca_ott_null_when_jwk_malformed(client):
+async def test_register_refused_when_jwk_malformed(client):
     c, _, settings = client
     import pytest as _pt
 
     for bad in ("not-json{", json.dumps({"kty": "RSA", "n": "a", "e": "b", "d": "c"})):
+        raw = await _mint_token(c)
         with _pt.MonkeyPatch.context() as m:
             m.setattr(settings, "ca_provisioner_jwk", bad)
-            out = await _register(c, hostname="badjwk")
-        assert out["ca_ott"] is None  # fail-safe: register succeeds, ca_ott null
+            detail = await _register_expect_503(c, raw, "badjwk")
+        assert "malformed" in detail
+
+
+async def test_register_refused_when_ca_url_unset(client):
+    c, _, settings = client
+    import pytest as _pt
+
+    raw = await _mint_token(c)
+    with _pt.MonkeyPatch.context() as m:
+        m.setattr(settings, "ca_url", "")
+        detail = await _register_expect_503(c, raw, "nocaurl")
+    assert "FILEARR_CA_URL" in detail
 
 
 async def test_ott_and_token_never_logged_in_audit(client):
@@ -209,9 +239,7 @@ async def test_ott_and_token_never_logged_in_audit(client):
     out = await _register(c)
     token = out["ca_ott"]
     async with maker() as s:
-        rows = (
-            await s.execute(text("SELECT event_type, details FROM security_events"))
-        ).all()
+        rows = (await s.execute(text("SELECT event_type, details FROM security_events"))).all()
     types = [r[0] for r in rows]
     assert "agent_ca_ott_minted" in types
     minted = [r[1] for r in rows if r[0] == "agent_ca_ott_minted"]

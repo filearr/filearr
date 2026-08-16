@@ -200,11 +200,7 @@ def _derive_archive_members(merged: dict[str, Any]) -> None:
     members = archive.get("members")
     if not isinstance(members, list) or not members:
         return
-    names = [
-        str(m.get("name"))
-        for m in members
-        if isinstance(m, dict) and m.get("name")
-    ]
+    names = [str(m.get("name")) for m in members if isinstance(m, dict) and m.get("name")]
     if not names:
         return
     from filearr.config import get_settings
@@ -498,9 +494,7 @@ def _manifest_blob(rows: Any) -> bytes:
             "quick_hash": quick_hash,
             "content_hash": content_hash,
         }
-        for (rel_path, size, mtime_us, quick_hash, content_hash) in sorted(
-            rows, key=lambda t: t[0]
-        )
+        for (rel_path, size, mtime_us, quick_hash, content_hash) in sorted(rows, key=lambda t: t[0])
     ]
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return blob.encode("utf-8")
@@ -520,8 +514,7 @@ def manifest_digest(rows: list[ManifestRow]) -> str:
     """
     return hashlib.sha256(
         _manifest_blob(
-            (r.rel_path, r.size, mtime_to_us(r.mtime), r.quick_hash, r.content_hash)
-            for r in rows
+            (r.rel_path, r.size, mtime_to_us(r.mtime), r.quick_hash, r.content_hash) for r in rows
         )
     ).hexdigest()
 
@@ -560,9 +553,7 @@ def hash_enrollment_token(raw: str) -> str:
     return _sha256_hex(raw)
 
 
-def classify_token(
-    *, consumed_at: Any, expires_at: Any, now: Any
-) -> str | None:
+def classify_token(*, consumed_at: Any, expires_at: Any, now: Any) -> str | None:
     """Pure single-use/TTL verdict for an ``enrollment_tokens`` row. Returns a
     rejection reason (``consumed`` / ``expired``) or ``None`` when the token is
     still redeemable. ``consumed`` is checked before ``expired`` so a replay of
@@ -669,9 +660,7 @@ async def register_agent(
     if verdict is not None:
         raise EnrollmentError(verdict, f"enrollment token {verdict}")
 
-    wanted: list[str] = [
-        n for n in (row.config_group_names or []) if isinstance(n, str) and n
-    ]
+    wanted: list[str] = [n for n in (row.config_group_names or []) if isinstance(n, str) and n]
     if config_group and config_group not in wanted:
         wanted.append(config_group)
 
@@ -679,9 +668,7 @@ async def register_agent(
     unknown: list[str] = []
     for want in wanted:
         grp = (
-            await session.execute(
-                select(AgentConfigGroup).where(AgentConfigGroup.name == want)
-            )
+            await session.execute(select(AgentConfigGroup).where(AgentConfigGroup.name == want))
         ).scalar_one_or_none()
         if grp is None:
             unknown.append(want)
@@ -844,14 +831,11 @@ def load_provisioner_jwk(raw_jwk: str | None) -> dict | None:
         )
         return None
     if not isinstance(data, dict):
-        _log.error(
-            "FILEARR_CA_PROVISIONER_JWK must be a JSON object -- ca_ott minting disabled"
-        )
+        _log.error("FILEARR_CA_PROVISIONER_JWK must be a JSON object -- ca_ott minting disabled")
         return None
     if data.get("kty") != "EC" or data.get("crv") != "P-256":
         _log.error(
-            "FILEARR_CA_PROVISIONER_JWK must be an EC P-256 (ES256) key -- "
-            "ca_ott minting disabled"
+            "FILEARR_CA_PROVISIONER_JWK must be an EC P-256 (ES256) key -- ca_ott minting disabled"
         )
         return None
     if not all(data.get(k) for k in ("x", "y", "d")):
@@ -904,6 +888,38 @@ def mint_ca_ott(
     except Exception as exc:  # noqa: BLE001 - normalise any joserfc signing error
         raise CaOttError("OTT signing failed") from exc
     return token, jti
+
+
+def ca_ott_unavailable_reason(settings: Any) -> str | None:
+    """Why central could NOT mint a ``ca_ott`` right now, or ``None`` when it can.
+
+    Used by the register endpoint to refuse BEFORE the single-use enrollment
+    token is consumed: the agent has no path forward without an OTT (it needs a
+    step-ca certificate to authenticate at all), so handing back a null
+    ``ca_ott`` after burning the token -- the original "fail-safe" ruling from
+    when the agent did not exist yet -- was the worst outcome for the operator
+    (live 2026-08-16: every enrolment against a fresh Unraid central failed and
+    each attempt cost a new token). The strings are operator-facing and name the
+    exact setting, deployment-neutrally."""
+    if load_provisioner_jwk(settings.ca_provisioner_jwk) is None:
+        if not (settings.ca_provisioner_jwk or "").strip():
+            return (
+                "central cannot issue agent certificates: FILEARR_CA_PROVISIONER_JWK is "
+                "unset on the filearr app container (the step-ca provisioner's decrypted "
+                "private JWK). Fill it in and restart the app, then mint a new token."
+            )
+        return (
+            "central cannot issue agent certificates: FILEARR_CA_PROVISIONER_JWK is set "
+            "but malformed (expected the provisioner's decrypted EC P-256 private JWK as "
+            "a JSON object). Fix it and restart the app, then mint a new token."
+        )
+    if not settings.ca_url:
+        return (
+            "central cannot issue agent certificates: FILEARR_CA_URL is unset on the "
+            "filearr app container (the step-ca URL agents bootstrap against). Set it "
+            "and restart the app, then mint a new token."
+        )
+    return None
 
 
 def try_mint_ca_ott(agent_id: Any, settings: Any) -> tuple[str | None, str | None]:
@@ -1082,9 +1098,7 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
     for lib_id, paths in want.items():
         rows = (
             await session.execute(
-                select(Item).where(
-                    Item.library_id == lib_id, Item.rel_path.in_(paths)
-                )
+                select(Item).where(Item.library_id == lib_id, Item.rel_path.in_(paths))
             )
         ).scalars()
         for it in rows:
@@ -1100,9 +1114,7 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
         library = lib_cache[ev.library_ref]
         key = (library.id, ev.rel_path)
         row = existing.get(key)
-        mtime = (
-            datetime.fromtimestamp(ev.mtime, tz=UTC) if ev.mtime is not None else now
-        )
+        mtime = datetime.fromtimestamp(ev.mtime, tz=UTC) if ev.mtime is not None else now
         # Agent-side extraction (additive; None on older agents). Oversize is
         # dropped, never fatal: the identity half of the event must still apply.
         extracted = ev.extracted
@@ -1176,9 +1188,7 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
             if extracted is not None:
                 # Assign a NEW dict: metadata_ is a plain JSONB dict column with no
                 # mutation tracking, so an in-place update would not be flushed.
-                row.metadata_ = merge_extracted_metadata(
-                    row.metadata_, extracted, now=now
-                )
+                row.metadata_ = merge_extracted_metadata(row.metadata_, extracted, now=now)
         await session.flush()  # assign id
         item_id_by_rel[ev.rel_path] = row.id
         touched_ids.append(str(row.id))
@@ -1282,9 +1292,7 @@ async def _agent_library(session: Any, agent: Any, library_ref: str) -> Any | No
     ).scalar_one_or_none()
 
 
-async def compute_central_digest(
-    session: Any, agent: Any, library_ref: str
-) -> tuple[str, int]:
+async def compute_central_digest(session: Any, agent: Any, library_ref: str) -> tuple[str, int]:
     """The server's manifest digest + row_count over its OWN projection for
     (agent, library_ref): the ``status='active'`` items of the library the agent
     root maps to (ruling 1 — ``missing``/``trashed`` are excluded). An unknown
@@ -1302,9 +1310,7 @@ async def compute_central_digest(
 
     rows = (
         await session.execute(
-            select(
-                Item.rel_path, Item.size, Item.mtime, Item.quick_hash, Item.content_hash
-            ).where(
+            select(Item.rel_path, Item.size, Item.mtime, Item.quick_hash, Item.content_hash).where(
                 Item.library_id == library.id,
                 Item.status == ItemStatus.active,
             )
@@ -1387,9 +1393,7 @@ async def reconcile_start(
 
     await _sweep_expired_sessions(session, now, ttl_seconds)
 
-    central_digest, central_count = await compute_central_digest(
-        session, agent, library_ref
-    )
+    central_digest, central_count = await compute_central_digest(session, agent, library_ref)
     agent.last_seen_at = now
 
     if central_digest == digest and central_count == row_count:
@@ -1399,9 +1403,7 @@ async def reconcile_start(
         if rebuilt:
             agent.last_contiguous_seq_no = 0
         await session.execute(
-            delete(AgentReconcileSession).where(
-                AgentReconcileSession.agent_id == agent.id
-            )
+            delete(AgentReconcileSession).where(AgentReconcileSession.agent_id == agent.id)
         )
         await session.commit()
         return {"status": "match"}
@@ -1409,9 +1411,7 @@ async def reconcile_start(
     # Mismatch (or unknown/renamed root): one live session per agent — drop any
     # prior unfinished one first (the unique(agent_id) guarantees at most one).
     await session.execute(
-        delete(AgentReconcileSession).where(
-            AgentReconcileSession.agent_id == agent.id
-        )
+        delete(AgentReconcileSession).where(AgentReconcileSession.agent_id == agent.id)
     )
     row = AgentReconcileSession(
         agent_id=agent.id, library_ref=library_ref, started_at=now, staged_rows=0
@@ -1466,9 +1466,9 @@ async def reconcile_stage_rows(
         )
     staged = (
         await session.execute(
-            select(func.count()).select_from(AgentReconcileStaging).where(
-                AgentReconcileStaging.session_id == row.id
-            )
+            select(func.count())
+            .select_from(AgentReconcileStaging)
+            .where(AgentReconcileStaging.session_id == row.id)
         )
     ).scalar_one()
     await session.execute(
@@ -1528,17 +1528,18 @@ async def reconcile_finish(
     tax = await taxonomy.load(session)
 
     staged = (
-        await session.execute(
-            select(AgentReconcileStaging).where(
-                AgentReconcileStaging.session_id == sess.id
+        (
+            await session.execute(
+                select(AgentReconcileStaging).where(AgentReconcileStaging.session_id == sess.id)
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     staged_digest = hashlib.sha256(
         _manifest_blob(
-            (s.rel_path, s.size, s.mtime_us, s.quick_hash, s.content_hash)
-            for s in staged
+            (s.rel_path, s.size, s.mtime_us, s.quick_hash, s.content_hash) for s in staged
         )
     ).hexdigest()
     if len(staged) != row_count or staged_digest != digest:
@@ -1548,16 +1549,12 @@ async def reconcile_finish(
 
     # Materialize (or reuse) the central library for this root. A brand-new /
     # renamed root reconciles into existence here (ruling 1 note).
-    library, _created = await _provision_agent_library(
-        session, agent, sess.library_ref, now
-    )
+    library, _created = await _provision_agent_library(session, agent, sess.library_ref, now)
 
     central = {
         it.rel_path: it
         for it in (
-            await session.execute(
-                select(Item).where(Item.library_id == library.id)
-            )
+            await session.execute(select(Item).where(Item.library_id == library.id))
         ).scalars()
     }
     agent_paths = {s.rel_path for s in staged}
@@ -1678,9 +1675,7 @@ async def reconcile_finish(
 
 from datetime import timedelta  # noqa: E402 (grouped with the P10 additions)
 
-CommandState = Literal[
-    "pending", "picked_up", "done", "failed", "expired", "cancelled"
-]
+CommandState = Literal["pending", "picked_up", "done", "failed", "expired", "cancelled"]
 CommandEvent = Literal[
     "deliver",  # agent poll picked it up: pending -> picked_up
     "ack",  # in-flight lease heartbeat (slow command): picked_up -> picked_up
@@ -1724,9 +1719,7 @@ def command_state_machine(current: CommandState, event: CommandEvent) -> Command
     try:
         return _COMMAND_TRANSITIONS[(current, event)]
     except KeyError:
-        raise ValueError(
-            f"invalid agent-command transition: {current!r} --{event!r}-->"
-        ) from None
+        raise ValueError(f"invalid agent-command transition: {current!r} --{event!r}-->") from None
 
 
 def command_is_terminal(state: str) -> bool:
@@ -1791,23 +1784,27 @@ async def run_agent_command_sweep(
 
     lease_cutoff = now - timedelta(seconds=lease_seconds)
     rows = (
-        await session.execute(
-            select(AgentCommand)
-            .where(
-                AgentCommand.status.in_(("pending", "picked_up")),
-                or_(
-                    AgentCommand.expires_at <= now,
-                    and_(
-                        AgentCommand.status == "picked_up",
-                        AgentCommand.picked_up_at <= lease_cutoff,
+        (
+            await session.execute(
+                select(AgentCommand)
+                .where(
+                    AgentCommand.status.in_(("pending", "picked_up")),
+                    or_(
+                        AgentCommand.expires_at <= now,
+                        and_(
+                            AgentCommand.status == "picked_up",
+                            AgentCommand.picked_up_at <= lease_cutoff,
+                        ),
                     ),
-                ),
+                )
+                .order_by(AgentCommand.expires_at.asc())
+                .limit(limit)
+                .with_for_update(skip_locked=True)
             )
-            .order_by(AgentCommand.expires_at.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     counts = {"expired": 0, "redelivered": 0, "exhausted": 0}
     for cmd in rows:
