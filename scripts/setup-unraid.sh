@@ -1217,13 +1217,23 @@ generate_templates() {
   cftok="$(secret_get CLOUDFLARE_API_TOKEN)"
 
   local order; order="$([[ "$TIER" == "full" ]] && echo "$APPLY_ORDER_FULL" || echo "$APPLY_ORDER_SIMPLE")"
-  local name f
+  local name f regenerated=""
   for name in $order; do
     f="${TEMPLATE_DIR}/my-${name}.xml"
     if ! should_generate "$name"; then
       info "my-${name}.xml: SKIPPED — container '${name}' exists (use --force to overwrite)"
       continue
     fi
+    # Regenerating over an existing template (--force) starts from the pristine
+    # upstream copy, so anything the operator changed on the Edit page is lost.
+    # Carry over the one field the operator is EXPECTED to flip by hand after
+    # setup -- Agent Auth Mode (fingerprint -> both -> mtls-header) -- rather
+    # than silently resetting a hardened deployment to the interim mode (live
+    # 2026-08-16: --force to pick up a new field also undid the mtls cutover).
+    local prev_auth_mode=""
+    [[ -f "$f" ]] && prev_auth_mode="$(get_cfg "$f" 'Target="FILEARR_AGENT_AUTH_MODE"' 2>/dev/null || true)"
+    case "$prev_auth_mode" in fingerprint|both|mtls-header) ;; *) prev_auth_mode="" ;; esac
+    if [[ -f "$f" ]] && container_exists "$name"; then regenerated="${regenerated} ${name}"; fi
     fetch_template "$name" "$f"
     apply_network "$f" "$name"
 
@@ -1260,7 +1270,9 @@ generate_templates() {
         set_cfg "$f" 'Name="Postgres Data (disk monitor)"' "${APPDATA_CACHE}/filearr-postgres"
         if [[ "$TIER" == "full" ]]; then
           set_cfg "$f" 'Target="FILEARR_AGENTS_ENABLED"' "true"
-          set_cfg "$f" 'Target="FILEARR_AGENT_AUTH_MODE"' "fingerprint"
+          set_cfg "$f" 'Target="FILEARR_AGENT_AUTH_MODE"' "${prev_auth_mode:-fingerprint}"
+          [[ -n "$prev_auth_mode" && "$prev_auth_mode" != fingerprint ]] \
+            && info "kept Agent Auth Mode '${prev_auth_mode}' from the previous template"
           set_cfg "$f" 'Target="FILEARR_PROXY_SHARED_SECRET"' "$proxysec"
           set_cfg "$f" 'Target="FILEARR_CA_PROVISIONER"' "filearr-agents"
           # CA URL stays a NAME in both topologies: it is what agents bootstrap
@@ -1327,6 +1339,14 @@ generate_templates() {
   done
 
   echo
+  if [[ -n "$regenerated" ]]; then
+    echo
+    warn "REGENERATED templates for containers that already exist:${regenerated}"
+    warn "A template edit is NOT live until you re-Apply: Docker tab -> <name> ->"
+    warn "Edit -> Apply, for each of the above. Anything you had changed by hand on"
+    warn "those Edit pages (other than Agent Auth Mode) has been reset to the"
+    warn "script's values -- re-do such edits before you Apply."
+  fi
   info "These are the my-*.xml files Unraid itself writes on Apply, so there is"
   info "no pristine duplicate to delete afterwards — the trap where two templates"
   info "claim one container name and the Edit page loads the DEFAULTS does not"
@@ -2247,6 +2267,8 @@ Run it in the Unraid terminal (web terminal icon, or SSH) as root:
   --summary        re-print the handoff summary (secrets stay behind a prompt)
   --reconfigure    re-ask the wizard (existing secrets are always kept)
   --force          regenerate templates even for containers that already exist
+                   (secrets, CA values and Agent Auth Mode are carried over; other
+                   hand edits on the Edit pages are reset; re-Apply afterwards)
   --local-dir DIR  take templates from a local checkout's unraid/ (air-gapped)
   --phase N        run exactly phase 0|1|2|3 and stop
   --harvest-ca     redo only the step-ca harvest (root fingerprint, provisioner
