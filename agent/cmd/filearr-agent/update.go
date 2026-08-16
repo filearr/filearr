@@ -20,9 +20,9 @@ const envUpdatePollInterval = "FILEARR_AGENT_UPDATE_POLL_INTERVAL" // Go duratio
 // envSelfUpdate turns the whole self-update subsystem off ("false"/"0"). The
 // container image sets this: an image is immutable by design (update = pull a
 // new image), and an unpinned build's fail-closed refusal is CORRECT there —
-// but its every-boot WARN reads like a fault. Off means no boot check, no
+// but its every-boot notice reads like a fault. Off means no boot check, no
 // poll loop, and one quiet INFO instead. Default (unset/true): historic
-// behaviour, including the deliberate loud warn on unpinned binaries.
+// behaviour; the unpinned-key notice is INFO too (see newUpdater).
 const envSelfUpdate = "FILEARR_AGENT_SELF_UPDATE"
 
 // selfUpdateDisabled reports an explicit opt-out (unparseable values keep the
@@ -46,8 +46,11 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 	pubs, err := update.PinnedKeys()
 	if err != nil {
 		// Unpinned builds still update via central's unsigned dist channel
-		// (authenticated TLS + sha256); only SIGNED releases need the pin.
-		log.Warn("agent updater: no pinned signing key; signed releases will be refused, the central dist channel still applies (build with -ldflags -X ...update.PublicKeyBase64=<key>[,<next-key>] to pin)", "err", err)
+		// (authenticated TLS + sha256); only SIGNED releases need the pin. INFO,
+		// not WARN: every agent installed from central's agent-dist bake is
+		// unpinned by design and updates fine, so a WARN read as "something is
+		// wrong" on every default install (operator feedback 2026-08-16).
+		log.Info("agent updater: no pinned signing key; signed releases will be refused, the central dist channel still applies (build with -ldflags -X ...update.PublicKeyBase64=<key>[,<next-key>] to pin)", "err", err)
 	}
 	return update.New(update.Config{
 		BaseURL:        centralURL,
