@@ -184,6 +184,19 @@ ask() {
   else read -r -p "  $p: " REPLY; fi
 }
 
+# ask_bool PROMPT DEFAULT(true|false)  -> REPLY = true|false (re-asks on junk)
+ask_bool() {
+  local p="$1" d="$2"
+  while :; do
+    ask "$p (yes/no)" "$([[ "$d" == true ]] && echo yes || echo no)"
+    case "${REPLY,,}" in
+      y|yes|true|1)  REPLY=true;  return 0 ;;
+      n|no|false|0)  REPLY=false; return 0 ;;
+      *) echo "  answer yes or no" ;;
+    esac
+  done
+}
+
 # confirm PROMPT [default-yes]  -> 0 on yes
 confirm() {
   local p="$1" dflt="${2:-n}" ans
@@ -248,6 +261,11 @@ IP_APP=${IP_APP}
 IP_STEPCA=${IP_STEPCA}
 IP_CADDY=${IP_CADDY}
 CADDY_PROFILE=${CADDY_PROFILE}
+SEMANTIC=${SEMANTIC}
+AGENTS=${AGENTS}
+CONTENT_SNIFF=${CONTENT_SNIFF}
+THUMB_BUDGET_GB=${THUMB_BUDGET_GB}
+UPDATE_CHECK=${UPDATE_CHECK}
 TLS_DOMAIN=${TLS_DOMAIN}
 ACME_EMAIL=${ACME_EMAIL}
 EOF
@@ -826,6 +844,54 @@ wizard() {
   ask "postgres user" "${PG_USER:-filearr}"; PG_USER="$REPLY"
   ask "postgres database" "${PG_DB:-filearr}"; PG_DB="$REPLY"
 
+  echo
+  echo "  FEATURES. Every one of these is a plain environment variable on the"
+  echo "  filearr container, so any answer here can be flipped later from its"
+  echo "  Edit page. The defaults are the zero-cost ones."
+  echo
+  echo "  Semantic search: hybrid keyword + meaning search. The worker downloads"
+  echo "  a small ONNX embedding model (bge-small, ~130 MB) on first use and"
+  echo "  embeds every item in the background on CPU — a one-off pass that is"
+  echo "  slow on a large catalog and adds a little to each later scan. Off = no"
+  echo "  model, no embedding, zero cost."
+  ask_bool "enable semantic search" "${SEMANTIC:-false}"; SEMANTIC="$REPLY"
+  echo
+  if [[ "$TIER" == "full" ]]; then
+    echo "  Distributed agents: ON — the full tier exists for the agent fleet."
+    AGENTS=true
+  else
+    echo "  Distributed agents: remote scan agents on other machines, enrolling"
+    echo "  against this instance and authenticating by certificate fingerprint."
+    echo "  Off = the agent API 404s and the Agents page is hidden. Turn on only"
+    echo "  if you will actually install an agent somewhere else."
+    ask_bool "enable distributed agents" "${AGENTS:-false}"; AGENTS="$REPLY"
+  fi
+  echo
+  echo "  Content sniffing: an ON-DEMAND maintenance action (nothing runs by"
+  echo "  itself) that reads a 64 KiB prefix of extensionless files and"
+  echo "  reclassifies them by libmagic MIME type. Reading thousands of files"
+  echo "  over SMB is a deliberate act, so this only enables the button."
+  ask_bool "enable content sniffing" "${CONTENT_SNIFF:-false}"; CONTENT_SNIFF="$REPLY"
+  echo
+  echo "  Thumbnail cache budget, in GiB, under ${APPDATA_USER}/filearr/thumbnails."
+  echo "  ADVISORY: over budget you get a log line and an amber note on the Jobs"
+  echo "  page — nothing is deleted, and per-file caps (20 KB grid / 60 KB"
+  echo "  preview) are the hard guard. Rule of thumb, ~80% of items thumbnailable:"
+  echo "    grid tier alone (always generated)     ~12 KB/item  ->  1 GB per 100k items"
+  echo "    grid + preview (preview is lazy, on view) ~57 KB/item ->  5 GB per 100k items"
+  echo "  So 5 GB fits ~100k items comfortably; a 1M-item catalog with heavy"
+  echo "  browsing wants 40-50 GB. 0 disables the advisory."
+  while :; do
+    ask "thumbnail cache budget (GiB)" "${THUMB_BUDGET_GB:-5}"
+    [[ "$REPLY" =~ ^[0-9]+([.][0-9]+)?$ ]] && { THUMB_BUDGET_GB="$REPLY"; break; }
+    echo "  a number, e.g. 5 or 20"
+  done
+  echo
+  echo "  Auto update check: lets the Jobs-page Updates card refresh its GitHub"
+  echo "  release cache by itself. This is the ONLY automatic outbound call the"
+  echo "  product ever makes; off = you press the check button yourself."
+  ask_bool "enable automatic update check" "${UPDATE_CHECK:-false}"; UPDATE_CHECK="$REPLY"
+
   CADDY_PROFILE="${CADDY_PROFILE:-internal}"
   TLS_DOMAIN="${TLS_DOMAIN:-}"; ACME_EMAIL="${ACME_EMAIL:-}"
   if [[ "$TIER" == "full" ]]; then
@@ -1183,6 +1249,12 @@ generate_templates() {
         set_cfg "$f" 'Target="FILEARR_MEILI_MASTER_KEY"' "$meilikey"
         set_cfg "$f" 'Target="FILEARR_SECRET_KEY"' "$seckey"
         set_cfg "$f" 'Target="TZ"' "$TZ_"
+        # FEATURES answered in the wizard (full tier forces agents on below).
+        set_cfg "$f" 'Target="FILEARR_SEMANTIC_ENABLED"'      "$SEMANTIC"
+        set_cfg "$f" 'Target="FILEARR_AGENTS_ENABLED"'        "$AGENTS"
+        set_cfg "$f" 'Target="FILEARR_CONTENT_SNIFF_ENABLED"' "$CONTENT_SNIFF"
+        set_cfg "$f" 'Target="FILEARR_THUMBNAIL_BUDGET_GB"'   "$THUMB_BUDGET_GB"
+        set_cfg "$f" 'Target="FILEARR_UPDATE_CHECK_AUTO"'     "$UPDATE_CHECK"
         # The disk-monitor read-only view must point at postgres's REAL data path.
         set_cfg "$f" 'Name="Postgres Data (disk monitor)"' "${APPDATA_CACHE}/filearr-postgres"
         if [[ "$TIER" == "full" ]]; then
@@ -1761,6 +1833,8 @@ summary_part_one() {
 
   echo
   echo "  TOPOLOGY: ${TOPOLOGY}   TIER: ${TIER}   LAN bridge: ${BRIDGE_IF}"
+  echo "  FEATURES: semantic=${SEMANTIC}  agents=${AGENTS}  content-sniff=${CONTENT_SNIFF}"
+  echo "            thumbnail-budget=${THUMB_BUDGET_GB}GiB  auto-update-check=${UPDATE_CHECK}"
   if [[ "$TOPOLOGY" == "B" || -n "${IP_CADDY:-}" ]]; then
     echo "  ADDRESSES"
     [[ -n "${IP_POSTGRES:-}" ]] && printf '    %-22s %-16s %s\n' "filearr-postgres" "$IP_POSTGRES" "5432"
@@ -2201,6 +2275,8 @@ TZ_="${TZ_:-Etc/UTC}"; PG_USER="${PG_USER:-filearr}"; PG_DB="${PG_DB:-filearr}"
 IP_POSTGRES="${IP_POSTGRES:-}"; IP_MEILI="${IP_MEILI:-}"; IP_APP="${IP_APP:-}"
 IP_STEPCA="${IP_STEPCA:-}"; IP_CADDY="${IP_CADDY:-}"
 CADDY_PROFILE="${CADDY_PROFILE:-internal}"; TLS_DOMAIN="${TLS_DOMAIN:-}"; ACME_EMAIL="${ACME_EMAIL:-}"
+SEMANTIC="${SEMANTIC:-false}"; AGENTS="${AGENTS:-false}"; CONTENT_SNIFF="${CONTENT_SNIFF:-false}"
+THUMB_BUDGET_GB="${THUMB_BUDGET_GB:-5}"; UPDATE_CHECK="${UPDATE_CHECK:-false}"
 
 if [[ "$MODE" == "check" ]]; then check_mode; fi
 if [[ "$MODE" == "summary" ]]; then
