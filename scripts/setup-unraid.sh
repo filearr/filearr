@@ -1275,6 +1275,15 @@ generate_templates() {
           # mtls-header cutover needs no per-agent repoint.
           [[ -n "$TLS_DOMAIN" ]] && set_cfg "$f" 'Target="FILEARR_AGENT_PLANE_URL"' "https://agents.${TLS_DOMAIN}"
           [[ -n "$TLS_DOMAIN" ]] && set_cfg "$f" 'Target="FILEARR_PUBLIC_BASE_URL"' "https://filearr.${TLS_DOMAIN}"
+          # A REGENERATION (--force) after the CA harvest already ran must not
+          # lose what the harvest filled in: re-apply the CA fingerprint and the
+          # provisioner JWK from state/secrets (live 2026-08-16: --force --phase 1
+          # to pick up a new template field silently dropped the JWK, and every
+          # enrolment was then refused with 'FILEARR_CA_PROVISIONER_JWK is unset').
+          local _cafp _cajwk
+          _cafp="$(state_get CA_FINGERPRINT)"; _cajwk="$(secret_get FILEARR_CA_PROVISIONER_JWK)"
+          [[ "$_cajwk" == '{'*'"d"'*'}' ]] || _cajwk=""
+          [[ -n "$_cafp$_cajwk" ]] && patch_app_template_with_ca "$_cafp" "$_cajwk"
         fi
         ;;
       filearr-stepca)
