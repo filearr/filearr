@@ -423,6 +423,7 @@ _upsert() { grep -v \"^\$1=\" .env > .env._t 2>/dev/null || true; echo \"\$1=\$2
 _upsert FILEARR_AGENTS_ENABLED true
 _upsert FILEARR_CA_URL '${ca_url}'
 _upsert FILEARR_CA_PROVISIONER filearr-agents
+$( [[ -n "${TLS_DOMAIN:-}" ]] && echo "_upsert FILEARR_AGENT_PLANE_URL 'https://agents.${TLS_DOMAIN}'" )
 
 # step-ca must be answering before we can pin/extract anything.
 for i in \$(seq 1 30); do

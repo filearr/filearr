@@ -144,6 +144,10 @@ class RegisterOut(BaseModel):
     # but cannot fetch a cert until the operator plumbs the key (re-issue via
     # POST /agents/{id}/ca-ott once configured).
     ca_ott: str | None = None
+    #: Where the agent should point its daemon AFTER this handshake: the mTLS
+    #: agent-plane host (FILEARR_AGENT_PLANE_URL), or null to keep using the
+    #: URL it enrolled through. The bind step below still uses the enrol URL.
+    agent_plane_url: str | None = None
     # Null on success; a human-readable string when one of the requested config
     # group names did not resolve (the agent enrolled without that group).
     config_group_warning: str | None = None
@@ -636,6 +640,7 @@ async def register(
         enroll_secret=raw_secret,
         ca=_ca_bootstrap(settings),
         ca_ott=ca_ott,
+        agent_plane_url=(settings.agent_plane_url or "").strip().rstrip("/") or None,
         config_group_warning=config_group_warning,
     )
 

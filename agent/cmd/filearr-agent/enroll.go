@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
@@ -73,6 +74,9 @@ func runEnroll(args []string) error {
 
 	fmt.Printf("enrolled: agent_id=%s status=active\n", res.AgentID)
 	fmt.Printf("cert_fingerprint=%s\n", res.CertFingerprint)
+	if res.CentralURL != "" && strings.TrimRight(res.CentralURL, "/") != strings.TrimRight(cfg.CentralURL, "/") {
+		fmt.Printf("agent_plane=%s (central directed the daemon here; enrolled via %s)\n", res.CentralURL, cfg.CentralURL)
+	}
 	fmt.Printf("data_dir=%s\n", cfg.DataDir)
 	return nil
 }

@@ -236,6 +236,18 @@ through `_authenticate_agent`. Three modes:
 `https://agents.<domain>` (the Go client presents its enrolled cert
 automatically) → set `mtls-header`. Full runbook in `docs/ops/tls.md`.
 
+**New agents on an mtls-header central (2026-08-16):** enrolment cannot go
+through `agents.<domain>` — that site *requires* a client certificate and the
+agent does not have one until step-ca has signed it — so the install one-liner
+always bootstraps via the console URL. Set **`FILEARR_AGENT_PLANE_URL`**
+(`https://agents.<domain>`; the Unraid and Proxmox deployers set it) and the
+register response carries it as `agent_plane_url`: the agent persists it as
+its daemon central (`state.json` `central_url`, with the console URL kept in
+`enroll_url`), so it lands on the mTLS plane from its first start with no
+per-agent repoint. A sidecar/env `central_url` that still names the console
+URL (the install script writes exactly that) is treated as the bootstrap
+value, not an operator repoint; a URL differing from both still wins.
+
 **Tunables** (`FILEARR_AGENT_COMMAND_*`): `TTL_SECONDS` (default 3600, "hours not
 minutes"; per-kind defaults are P10-T7), `TTL_MAX_SECONDS` (enqueue override
 clamp), `LEASE_SECONDS` (unacked-delivery redelivery window, default 300),

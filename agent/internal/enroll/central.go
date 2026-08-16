@@ -66,6 +66,10 @@ type RegisterResponse struct {
 	EnrollSecret string      `json:"enroll_secret"`
 	CA           CABootstrap `json:"ca"`
 	CaOTT        *string     `json:"ca_ott"`
+	// AgentPlaneURL is where central wants the DAEMON to talk after enrolment
+	// (its mTLS agent-plane host, e.g. https://agents.<domain>); nil/empty from
+	// an older central or a fingerprint-mode deployment => keep the enrol URL.
+	AgentPlaneURL *string `json:"agent_plane_url"`
 }
 
 // BindRequest mirrors backend CertBindIn.

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -40,7 +41,23 @@ func runInstall(args []string) error {
 	}
 
 	sc := activeSidecar()
-	svcCfg := install.ServiceConfig(eff, sc.Path, runtime.GOOS)
+	// The service must be registered with the DURABLE, ABSOLUTE sidecar path
+	// (the OS config dir), never the relative download-dir file the operator
+	// pointed --config at: a service resolves a relative path against ITS cwd
+	// (System32 on Windows) and silently runs without the sidecar.
+	sidecarPath := sc.Path
+	if sc.Path != "" {
+		if p, ierr := sc.InstallTo(eff.ConfigPath); ierr != nil {
+			newLogger().Warn("could not place the sidecar in the config dir; the service will read the original path",
+				"src", sc.Path, "dst", eff.ConfigPath, "err", ierr)
+			if abs, aerr := filepath.Abs(sc.Path); aerr == nil {
+				sidecarPath = abs
+			}
+		} else if p != "" {
+			sidecarPath = p
+		}
+	}
+	svcCfg := install.ServiceConfig(eff, sidecarPath, runtime.GOOS)
 	ctrl, err := install.NewController(install.NoopProgram{}, svcCfg)
 	if err != nil {
 		return err
@@ -71,8 +88,12 @@ func runInstall(args []string) error {
 		}
 		ctx, cancel := signalContext()
 		defer cancel()
-		if _, err := enroller.Enroll(ctx); err != nil {
+		res, err := enroller.Enroll(ctx)
+		if err != nil {
 			return err
+		}
+		if res.CentralURL != "" && strings.TrimRight(res.CentralURL, "/") != strings.TrimRight(central, "/") {
+			newLogger().Info("central directed the daemon to its agent-plane host", "agent_plane", res.CentralURL, "enrolled_via", central)
 		}
 		// One-shot token contract also applies to install-time enroll: erase the
 		// spent token from the sidecar it came from.
@@ -110,7 +131,7 @@ func runInstall(args []string) error {
 		fmt.Printf("  adopted: existing enrollment + local index moved in from %s\n", defaultDataDir())
 	}
 	fmt.Printf("  logs   : %s\n", eff.LogDir)
-	fmt.Printf("  config : %s\n", eff.ConfigPath)
+	fmt.Printf("  config : %s\n", sidecarPath)
 	// Roadmap §20: optional-dependency check, WARN not fail — image/audio/STL
 	// thumbnails work without ffmpeg; only video poster-frames need it. The same
 	// probe rides the capability advertisement so central's fleet console can

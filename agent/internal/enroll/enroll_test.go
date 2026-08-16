@@ -63,6 +63,46 @@ func TestEnrollHappyPath(t *testing.T) {
 	if id.State.AgentID != res.AgentID || id.State.CAURL != ca.URL {
 		t.Fatalf("state sidecar mismatch: %+v", id.State)
 	}
+	// No agent_plane_url from central: the daemon stays on the enrol URL.
+	if id.State.CentralURL != mc.URL() || id.State.EnrollURL != mc.URL() || res.CentralURL != mc.URL() {
+		t.Fatalf("central/enrol url: state=%+v res=%q want %q", id.State, res.CentralURL, mc.URL())
+	}
+}
+
+// TestEnrollAdoptsAgentPlaneURL: central (mtls-header deployment) hands back
+// agent_plane_url at register; the persisted daemon central is that host, the
+// enrol host is remembered separately, and the bind still went to the enrol
+// host (the plane host would have demanded a client cert we did not yet hold
+// during register/sign, and the mock only serves the enrol URL anyway).
+func TestEnrollAdoptsAgentPlaneURL(t *testing.T) {
+	ca := newTestCA(t, defaultCAParams())
+	mc := newMockCentral(t, ca)
+	mc.agentPlaneURL = "https://agents.example.test/"
+	tok := "fae_" + randToken()
+	mc.addToken(tok)
+
+	store := NewCertStore(t.TempDir())
+	e := &Enroller{
+		Central: NewCentralClient(mc.URL()), Store: store, Token: tok,
+		Hostname: "h", Platform: "linux", Name: "n",
+	}
+	res, err := e.Enroll(context.Background())
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if res.CentralURL != "https://agents.example.test" {
+		t.Fatalf("result central %q", res.CentralURL)
+	}
+	if mc.LastBindFingerprint != res.CertFingerprint {
+		t.Fatal("bind did not reach the enrol host")
+	}
+	id, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.State.CentralURL != "https://agents.example.test" || id.State.EnrollURL != mc.URL() {
+		t.Fatalf("state: %+v", id.State)
+	}
 }
 
 // TestEnrollNullOTTActionableError: central returns ca_ott == null (its

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 
 	"github.com/smallstep/certificates/api"
 	"github.com/smallstep/certificates/ca"
@@ -57,6 +58,9 @@ type Result struct {
 	AgentID         string
 	CertFingerprint string
 	Leaf            *x509.Certificate
+	// CentralURL is what the daemon will use: the server-directed agent-plane
+	// URL when central sent one, else the URL enrolment went through.
+	CentralURL string
 }
 
 // ErrCAOTTUnavailable is returned when central registered the agent but could
@@ -144,7 +148,15 @@ func (e *Enroller) Enroll(ctx context.Context) (*Result, error) {
 		roots = append(roots, c.Certificate)
 	}
 
-	// (4) Persist key + cert + roots + state atomically.
+	// (4) Persist key + cert + roots + state atomically. The daemon's central is
+	// the agent-plane URL when central handed one out (mtls-header deployments:
+	// the console host refuses the bearer path, and the mTLS host could not have
+	// taken this cert-less client for the register/sign steps above), else the
+	// URL we enrolled through. Step (5) below still binds via the enrol URL.
+	daemonCentral := strings.TrimRight(e.Central.BaseURL, "/")
+	if reg.AgentPlaneURL != nil && strings.TrimSpace(*reg.AgentPlaneURL) != "" {
+		daemonCentral = strings.TrimRight(strings.TrimSpace(*reg.AgentPlaneURL), "/")
+	}
 	if err := e.Store.SaveIdentity(Identity{
 		Key:   key,
 		Leaf:  leaf,
@@ -152,7 +164,8 @@ func (e *Enroller) Enroll(ctx context.Context) (*Result, error) {
 		Roots: roots,
 		State: State{
 			AgentID:      reg.AgentID,
-			CentralURL:   e.Central.BaseURL,
+			CentralURL:   daemonCentral,
+			EnrollURL:    strings.TrimRight(e.Central.BaseURL, "/"),
 			CAURL:        reg.CA.URL,
 			CARootSHA256: reg.CA.Fingerprint,
 		},
@@ -173,6 +186,7 @@ func (e *Enroller) Enroll(ctx context.Context) (*Result, error) {
 		AgentID:         reg.AgentID,
 		CertFingerprint: fp,
 		Leaf:            leaf,
+		CentralURL:      daemonCentral,
 	}, nil
 }
 

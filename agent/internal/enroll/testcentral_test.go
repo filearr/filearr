@@ -23,6 +23,8 @@ type mockCentral struct {
 	agents map[string]*mockAgent
 	// nilOTT forces the ca_ott-null fail-safe path.
 	nilOTT bool
+	// agentPlaneURL, when set, rides the register response as agent_plane_url.
+	agentPlaneURL string
 
 	// captured for assertions.
 	LastBindFingerprint string
@@ -109,6 +111,10 @@ func (mc *mockCentral) handleRegister(w http.ResponseWriter, r *http.Request) {
 			CertTTLHours: 48,
 		},
 		CaOTT: ott,
+	}
+	if mc.agentPlaneURL != "" {
+		u := mc.agentPlaneURL
+		resp.AgentPlaneURL = &u
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

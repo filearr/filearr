@@ -52,6 +52,28 @@ func TestAdoptConfiguredCentralURL(t *testing.T) {
 		}
 	})
 
+	t.Run("config still naming the ENROL url does not undo a server-directed plane url", func(t *testing.T) {
+		store := enroll.NewCertStore(t.TempDir())
+		id := newID()
+		id.State.CentralURL = "https://agents.example.com"
+		id.State.EnrollURL = "https://filearr.example.com"
+		adoptConfiguredCentralURL(&config{CentralURL: "https://filearr.example.com/"}, store, id, log)
+		if id.State.CentralURL != "https://agents.example.com" {
+			t.Fatalf("bootstrap url in the sidecar must not override the plane url: %q", id.State.CentralURL)
+		}
+	})
+
+	t.Run("a config differing from both enrol and plane url is operator intent", func(t *testing.T) {
+		store := enroll.NewCertStore(t.TempDir())
+		id := newID()
+		id.State.CentralURL = "https://agents.example.com"
+		id.State.EnrollURL = "https://filearr.example.com"
+		adoptConfiguredCentralURL(&config{CentralURL: "https://other.example.com"}, store, id, log)
+		if id.State.CentralURL != "https://other.example.com" {
+			t.Fatalf("operator repoint must win: %q", id.State.CentralURL)
+		}
+	})
+
 	t.Run("empty config leaves enrollment URL", func(t *testing.T) {
 		store := enroll.NewCertStore(t.TempDir())
 		id := newID()

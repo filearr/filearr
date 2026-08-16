@@ -63,9 +63,9 @@ class Settings(BaseSettings):
     # https (honouring X-Forwarded-Proto from the Caddy TLS front — set uvicorn
     # --proxy-headers so request scheme is trustworthy behind the proxy).
     session_cookie_name: str = "filearr_session"
-    session_ttl_hours: int = 720          # 30d absolute lifetime (hard cap)
-    session_inactivity_hours: int = 168   # 7d idle window (sliding, per request)
-    session_rotation_minutes: int = 10    # opaque-token rotation cadence
+    session_ttl_hours: int = 720  # 30d absolute lifetime (hard cap)
+    session_inactivity_hours: int = 168  # 7d idle window (sliding, per request)
+    session_rotation_minutes: int = 10  # opaque-token rotation cadence
     # Grace window during which the PREVIOUS token (the one just rotated away)
     # still resolves. The SPA fires requests in parallel (a mutation followed by
     # a fan-out refresh, SSE reconnects, polls); the first to cross the rotation
@@ -101,9 +101,9 @@ class Settings(BaseSettings):
     # 2-min window / 5-min lock. Set FILEARR_AUTH_RATELIMIT_ENABLED=false to
     # disable entirely (the limiter becomes a byte-for-byte no-op).
     auth_ratelimit_enabled: bool = True
-    auth_ratelimit_max_attempts: int = 3       # failures within the window → lock
-    auth_ratelimit_window_seconds: int = 120   # 2-min find window
-    auth_ratelimit_lock_seconds: int = 300     # 5-min lockout
+    auth_ratelimit_max_attempts: int = 3  # failures within the window → lock
+    auth_ratelimit_window_seconds: int = 120  # 2-min find window
+    auth_ratelimit_lock_seconds: int = 300  # 5-min lockout
     # When TRUE, the client IP is read from the LEFTMOST X-Forwarded-For entry
     # (the Caddy TLS sidecar sets it). Leave FALSE unless a trusted proxy is in
     # front — otherwise a client could spoof the header to evade the per-IP
@@ -119,8 +119,8 @@ class Settings(BaseSettings):
     # purged after a shorter window; every other (higher-value) event is kept
     # longer. NOTE: distinct from ``audit_retention_days`` above (that governs the
     # ItemVersion metadata-change audit; a different table + trust model).
-    security_audit_retention_days: int = 365          # non-failure events
-    security_audit_failure_retention_days: int = 90   # login_failure events
+    security_audit_retention_days: int = 365  # non-failure events
+    security_audit_failure_retention_days: int = 90  # login_failure events
 
     # --- Phase 6 P6-T5: OIDC / OpenID Connect SSO (Authlib RP) ---------------
     # Env-only provider config (no admin UI for providers — the issuer/secret are
@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     # (GHSA-w8p2-r796-3vmq, 2026-06-08) is patched only in 1.6.10/1.7.1, so the
     # floor moved UP from the brief's >=1.6.9 to **>=1.7.1**.
     oidc_enabled: bool = False
-    oidc_issuer: str | None = None            # e.g. https://auth.example.com/
+    oidc_issuer: str | None = None  # e.g. https://auth.example.com/
     oidc_client_id: str | None = None
     oidc_client_secret: str | None = None
     oidc_scopes: str = "openid profile email"  # space-separated; must include openid
@@ -149,8 +149,8 @@ class Settings(BaseSettings):
     # wins). ``oidc_default_role`` is applied when no mapping matches; set it EMPTY
     # to REFUSE unmapped users (fail-closed — no silent viewer access).
     oidc_role_claim: str | None = None
-    oidc_role_map: str = ""                     # "claimval:role,claimval:role"
-    oidc_default_role: str = "viewer"           # "" => refuse unmapped (fail-closed)
+    oidc_role_map: str = ""  # "claimval:role,claimval:role"
+    oidc_default_role: str = "viewer"  # "" => refuse unmapped (fail-closed)
     # JIT provisioning: create a local ``users`` row (password_hash NULL — SSO-only)
     # on first login. Username from ``oidc_username_claim`` (falls back to the email
     # local-part, then sub) with a numeric collision suffix. Disable to require the
@@ -176,8 +176,8 @@ class Settings(BaseSettings):
     # operator-trusted, but bound the blast radius regardless): per-request timeout,
     # a hard response-size cap, and a discovery/JWKS cache TTL.
     oidc_http_timeout_s: float = 10.0
-    oidc_discovery_max_bytes: int = 1_048_576   # 1 MiB cap on discovery + JWKS
-    oidc_metadata_cache_seconds: int = 3600     # discovery/JWKS cache TTL
+    oidc_discovery_max_bytes: int = 1_048_576  # 1 MiB cap on discovery + JWKS
+    oidc_metadata_cache_seconds: int = 3600  # discovery/JWKS cache TTL
 
     # --- Phase 6 P6-T6: LDAP / Active Directory bind auth (ldap3) -------------
     # Env-only provider config (like OIDC). With ``ldap_enabled=false`` (default)
@@ -192,12 +192,12 @@ class Settings(BaseSettings):
     # off unless the operator sets ``ldap_allow_plaintext=true`` (logged loudly).
     # Plaintext is never silent.
     ldap_enabled: bool = False
-    ldap_server: str | None = None            # ldaps://dc.example.com or ldap://...
-    ldap_start_tls: bool = True               # upgrade ldap:// via StartTLS
-    ldap_allow_plaintext: bool = False        # escape hatch: ldap:// w/o TLS (warns)
-    ldap_tls_verify: bool = True              # verify the server cert (default on)
+    ldap_server: str | None = None  # ldaps://dc.example.com or ldap://...
+    ldap_start_tls: bool = True  # upgrade ldap:// via StartTLS
+    ldap_allow_plaintext: bool = False  # escape hatch: ldap:// w/o TLS (warns)
+    ldap_tls_verify: bool = True  # verify the server cert (default on)
     ldap_tls_ca_cert_file: str | None = None  # optional CA bundle for the server cert
-    ldap_timeout: int = 10                    # connect + receive timeout (seconds)
+    ldap_timeout: int = 10  # connect + receive timeout (seconds)
     # Service account used to search for the user DN and read group membership.
     # Leave both empty for an anonymous search bind (only if the server allows it).
     ldap_bind_dn: str | None = None
@@ -212,8 +212,8 @@ class Settings(BaseSettings):
     # ({username} is LDAP-filter-escaped — injection-safe), then bind as the found
     # DN with the presented password.
     ldap_user_base: str | None = None
-    ldap_user_filter: str = "(uid={username})"          # AD: (sAMAccountName={username})
-    ldap_attr_username: str = "uid"                      # AD: sAMAccountName
+    ldap_user_filter: str = "(uid={username})"  # AD: (sAMAccountName={username})
+    ldap_attr_username: str = "uid"  # AD: sAMAccountName
     ldap_attr_email: str = "mail"
     # Stable external subject attribute. PREFER an immutable operational attribute
     # (OpenLDAP ``entryUUID`` / AD ``objectGUID``) over the DN, which changes when
@@ -228,13 +228,13 @@ class Settings(BaseSettings):
     ldap_use_memberof: bool = False
     ldap_attr_memberof: str = "memberOf"
     ldap_group_base: str | None = None
-    ldap_group_filter: str = "(member={user_dn})"       # AD: (member={user_dn})
+    ldap_group_filter: str = "(member={user_dn})"  # AD: (member={user_dn})
     # Role map: group-DN => Filearr global role. Group DNs contain commas, so pairs
     # are ';'-separated and the DN/role delimiter is '=>':
     #   "cn=admins,ou=groups,dc=ex,dc=com=>admin;cn=staff,...=>user"
     # DNs are matched case-insensitively. Highest-privilege match wins.
     ldap_role_map: str = ""
-    ldap_default_role: str = ""               # "" => REFUSE unmapped (fail-closed)
+    ldap_default_role: str = ""  # "" => REFUSE unmapped (fail-closed)
     # Auto-provision a local users row (password_hash NULL — SSO-only) on first
     # successful bind. Disable to require the account to pre-exist.
     ldap_auto_provision: bool = True
@@ -426,9 +426,9 @@ class Settings(BaseSettings):
     # deleted by the daily ``purge_app_logs`` maintenance task, plus a hard
     # row cap as a log-storm backstop.
     log_db_enabled: bool = True
-    log_db_level: str = "INFO"           # threshold for filearr.* loggers
-    log_retention_days: int = 7          # FILEARR_LOG_RETENTION_DAYS
-    log_max_rows: int = 200_000          # storm backstop (purge trims to this)
+    log_db_level: str = "INFO"  # threshold for filearr.* loggers
+    log_retention_days: int = 7  # FILEARR_LOG_RETENTION_DAYS
+    log_max_rows: int = 200_000  # storm backstop (purge trims to this)
 
     # --- Update check (console "Check for updates") ------------------------
     # Contacts GitHub — and nothing else — to compare the running build + the
@@ -640,13 +640,13 @@ class Settings(BaseSettings):
     # caller's habitual items. Purely additive — disable to restore
     # pre-personalization ordering (rows stop being written AND read).
     frecency_enabled: bool = True
-    ocr_enabled: bool = False                 # global default OFF (R4)
+    ocr_enabled: bool = False  # global default OFF (R4)
     ocr_min_text_chars: int = 100
-    ocr_max_pages: int = 10                    # scanned-PDF page ceiling (rasterise+OCR)
-    ocr_max_pixels: int = 40_000_000          # per-image pixel ceiling (~40 MP)
-    ocr_timeout_s: float = 120.0              # per-subprocess wall clock
-    ocr_max_chars: int = 100_000              # cap on OCR text stored in metadata_
-    ocr_dpi: int = 200                        # pdftoppm rasterisation DPI
+    ocr_max_pages: int = 10  # scanned-PDF page ceiling (rasterise+OCR)
+    ocr_max_pixels: int = 40_000_000  # per-image pixel ceiling (~40 MP)
+    ocr_timeout_s: float = 120.0  # per-subprocess wall clock
+    ocr_max_chars: int = 100_000  # cap on OCR text stored in metadata_
+    ocr_dpi: int = 200  # pdftoppm rasterisation DPI
     ocr_lang: str = "eng"
     ocr_tesseract_path: str = "tesseract"
     ocr_pdftoppm_path: str = "pdftoppm"
@@ -662,7 +662,7 @@ class Settings(BaseSettings):
     gps_expose_default: bool = False
     exiftool_path: str = "exiftool"
     exif_timeout_s: float = 30.0
-    exif_max_output_bytes: int = 8_388_608    # 8 MiB cap on exiftool JSON
+    exif_max_output_bytes: int = 8_388_608  # 8 MiB cap on exiftool JSON
 
     # --- P3-T5: document body-text extraction (search snippets/highlighting) --
     # Two distinct caps (both documented so the difference is explicit):
@@ -910,10 +910,10 @@ class Settings(BaseSettings):
     # absolute-GB floor and a percent-of-total floor. Neither alone is safe across
     # deploy sizes (5 GB is trivial on a 40 GB LXC rootfs but ample on a 4 TB NAS;
     # 2% is huge on a 4 TB volume but nothing on a 40 GB one).
-    disk_min_free_gb: float = 5.0      # CRITICAL when free < this (absolute floor)
-    disk_warn_free_gb: float = 20.0    # WARN when free < this (absolute floor)
-    disk_crit_pct_free: float = 2.0    # CRITICAL when free% < this (percent floor)
-    disk_warn_pct_free: float = 10.0   # WARN when free% < this (percent floor)
+    disk_min_free_gb: float = 5.0  # CRITICAL when free < this (absolute floor)
+    disk_warn_free_gb: float = 20.0  # WARN when free < this (absolute floor)
+    disk_crit_pct_free: float = 2.0  # CRITICAL when free% < this (percent floor)
+    disk_warn_pct_free: float = 10.0  # WARN when free% < this (percent floor)
     # Explicit override of the monitored paths (JSON list). Empty => derived
     # defaults: {config_dir}/thumbnails, the tmp dir, and disk_pg_path if set.
     disk_watch_paths: list[str] = []
@@ -951,7 +951,7 @@ class Settings(BaseSettings):
     # purges expired artifacts (row retained, ``purged_at`` set) and flips a
     # crashed ``running`` export to ``failed`` (invariant-7 reconcile). The sync
     # run endpoints stay for interactive use (bounded by ``MAX_LIMIT``).
-    export_dir: str | None = None          # None => {config_dir}/exports
+    export_dir: str | None = None  # None => {config_dir}/exports
     # Cheap advisory ceiling for the sync-vs-async decision the UI/clients make;
     # the sync endpoints themselves still hard-cap at reports.MAX_LIMIT.
     export_sync_max_rows: int = 10_000
@@ -997,9 +997,19 @@ class Settings(BaseSettings):
     # CA root and drive the CSR/cert flow (P5-T2). Empty until an operator stands
     # up the CA (docs/ops/agents.md). NEVER a secret — the root fingerprint is
     # public pinning material, not a credential.
-    ca_url: str = ""                       # e.g. https://ca.filearr.lan:9000
-    ca_fingerprint: str = ""               # step-ca root fingerprint (pin)
-    ca_provisioner: str = "filearr-agents" # JWK/ACME provisioner name for agents
+    ca_url: str = ""  # e.g. https://ca.filearr.lan:9000
+    # The base URL agents should talk to AFTER enrolment -- the Caddy mTLS
+    # agent-plane site (https://agents.<domain>). Enrolment itself cannot go
+    # there (that site demands a client certificate the agent does not have
+    # yet), so agents bootstrap via the console URL and, when this is set, the
+    # register response hands them this URL to persist as their central. Makes
+    # `agent_auth_mode=mtls-header` work for a fresh agent with no manual
+    # repoint (live 2026-08-16: enrolled agents sat on filearr.<domain> getting
+    # 401 "proxy authentication required"). Unset => agents stay on the URL
+    # they enrolled through (fingerprint-mode deployments need nothing else).
+    agent_plane_url: str = ""  # e.g. https://agents.filearr.lan
+    ca_fingerprint: str = ""  # step-ca root fingerprint (pin)
+    ca_provisioner: str = "filearr-agents"  # JWK/ACME provisioner name for agents
     # Advisory agent client-cert lifetime (hours), surfaced in bootstrap info.
     # 24-72h range (research §1.3): short blast-radius for a stolen cert, long
     # enough that a brief central outage does not strand agents. Default 48h.
@@ -1216,9 +1226,7 @@ class Settings(BaseSettings):
         allowed = {"fingerprint", "mtls-header", "both"}
         val = (v or "").strip().lower()
         if val not in allowed:
-            raise ValueError(
-                f"FILEARR_AGENT_AUTH_MODE must be one of {sorted(allowed)}, got {v!r}"
-            )
+            raise ValueError(f"FILEARR_AGENT_AUTH_MODE must be one of {sorted(allowed)}, got {v!r}")
         return val
 
     @field_validator("database_url")
@@ -1258,10 +1266,7 @@ class Settings(BaseSettings):
         Gates the ``/auth/status`` flag and the login/callback endpoints so a
         half-configured provider fails closed (endpoints 404) rather than 500."""
         return bool(
-            self.auth_enabled
-            and self.oidc_enabled
-            and self.oidc_issuer
-            and self.oidc_client_id
+            self.auth_enabled and self.oidc_enabled and self.oidc_issuer and self.oidc_client_id
         )
 
     @property

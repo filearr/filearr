@@ -26,8 +26,16 @@ const (
 // binary upgrade loads it unchanged (the key is simply dropped on the next
 // write).
 type State struct {
-	AgentID      string `json:"agent_id"`
-	CentralURL   string `json:"central_url"`
+	AgentID string `json:"agent_id"`
+	// CentralURL is what the daemon talks to. It starts as the URL enrolment
+	// went through, unless central handed back an agent_plane_url (its mTLS
+	// agent-plane host), in which case that wins from the first daemon start.
+	CentralURL string `json:"central_url"`
+	// EnrollURL is the URL enrolment actually went through (the console host),
+	// kept so a sidecar/env that still names it -- the install one-liner writes
+	// it there -- is recognised as "not repointed" rather than overriding a
+	// server-directed CentralURL. Empty on pre-2026-08 state files.
+	EnrollURL    string `json:"enroll_url,omitempty"`
 	CAURL        string `json:"ca_url"`
 	CARootSHA256 string `json:"ca_root_sha256"`
 }

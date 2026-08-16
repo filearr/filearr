@@ -88,9 +88,9 @@ func setupRuntime(command string, args []string) {
 	// (a) resolve the sidecar. --config on the command line wins over the env,
 	// which DefaultResolver applies when the flag is absent.
 	explicit, _ := scanFlagValue(args, "config")
-	sc, err := sidecar.DefaultResolver(explicit).Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "filearr-agent: sidecar config: %v (continuing with env/defaults)\n", err)
+	sc, sidecarErr := sidecar.DefaultResolver(explicit).Load()
+	if sidecarErr != nil {
+		fmt.Fprintf(os.Stderr, "filearr-agent: sidecar config: %v (continuing with env/defaults)\n", sidecarErr)
 		sc = &sidecar.Config{}
 	}
 
@@ -152,6 +152,14 @@ func setupRuntime(command string, args []string) {
 	resolvedLogDir = logDir
 	runtimeMu.Unlock()
 
+	// A service has no stderr, so the stderr line above is invisible exactly
+	// where this matters most: say it in the log file too (live 2026-08-16 --
+	// a relative --config on the service meant every sidecar setting was
+	// silently ignored and nothing recorded why).
+	if sidecarErr != nil {
+		logger.Warn("sidecar config could not be loaded; running on env/defaults ONLY (central_url, ffmpeg_path, log settings from the sidecar are NOT applied)",
+			"config", explicit, "err", sidecarErr)
+	}
 	agentlog.Verbose(logger, "runtime configured",
 		"command", command, "log_level", levelName, "log_dir", logDir, "sidecar", sc.Path)
 }

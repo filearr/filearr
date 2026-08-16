@@ -210,6 +210,58 @@ func (c *Config) ConsumeToken(now time.Time) error {
 	return c.save(c.Path)
 }
 
+// InstallTo writes a durable copy of this sidecar at dst (the OS config path,
+// e.g. %ProgramData%\Filearr Agent\filearr-agent.json) WITHOUT the enrollment
+// token, and returns the absolute path to register the service with. The file
+// an operator runs `install --config filearr-agent.json` against sits in the
+// download directory and is named RELATIVELY: registering that path on the
+// service meant a Windows service (cwd System32) never found it, silently ran
+// on env/defaults, and every sidecar setting -- central_url above all -- was
+// ignored (live 2026-08-16: agent stayed on filearr.<domain> after the sidecar
+// said agents.<domain>). If this config already IS the file at dst, nothing is
+// written. The token stays only in the source, where ConsumeToken scrubs it.
+func (c *Config) InstallTo(dst string) (string, error) {
+	abs, err := filepath.Abs(dst)
+	if err != nil {
+		return "", err
+	}
+	if c.Path != "" {
+		if src, err := filepath.Abs(c.Path); err == nil && sameFile(src, abs) {
+			return abs, nil
+		}
+	}
+	raw := make(map[string]json.RawMessage, len(c.raw))
+	for k, v := range c.raw {
+		if k == keyEnrollmentToken || k == keyTokenConsumedAt {
+			continue
+		}
+		raw[k] = v
+	}
+	if len(raw) == 0 && c.Path == "" {
+		return "", nil // no sidecar at all: nothing to install
+	}
+	buf, err := marshalStable(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(abs, buf, 0o600); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+func sameFile(a, b string) bool {
+	if a == b {
+		return true
+	}
+	sa, err1 := os.Stat(a)
+	sb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
+}
+
 // save rewrites the sidecar from the preserved raw key set, applying the two
 // token fields, then atomically replaces the file at 0600.
 func (c *Config) save(path string) error {

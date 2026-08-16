@@ -1270,6 +1270,10 @@ generate_templates() {
           # in during the step-ca step of the walkthrough, before you ever open
           # this container's Edit page.
           [[ -n "$TLS_DOMAIN" ]] && set_cfg "$f" 'Target="FILEARR_CA_URL"' "https://ca.${TLS_DOMAIN}"
+          # Agents bootstrap via filearr.<domain> (the mTLS site cannot take a
+          # cert-less client) and are then handed this to run on -- so the
+          # mtls-header cutover needs no per-agent repoint.
+          [[ -n "$TLS_DOMAIN" ]] && set_cfg "$f" 'Target="FILEARR_AGENT_PLANE_URL"' "https://agents.${TLS_DOMAIN}"
           [[ -n "$TLS_DOMAIN" ]] && set_cfg "$f" 'Target="FILEARR_PUBLIC_BASE_URL"' "https://filearr.${TLS_DOMAIN}"
         fi
         ;;

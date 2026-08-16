@@ -138,6 +138,15 @@ func adoptConfiguredCentralURL(cfg *config, store *enroll.CertStore, id *enroll.
 	if configured == "" || configured == strings.TrimRight(id.State.CentralURL, "/") {
 		return
 	}
+	// The install one-liner writes the CONSOLE url into the sidecar, and central
+	// may have redirected this agent to its mTLS agent-plane host at enrolment
+	// (state.central_url != state.enroll_url). A sidecar/env still naming the
+	// enrol url is the bootstrap value, not an operator repoint -- honouring it
+	// would drag the agent back onto the host that refuses it. Only a url that
+	// differs from BOTH is operator intent.
+	if enrol := strings.TrimRight(id.State.EnrollURL, "/"); enrol != "" && configured == enrol {
+		return
+	}
 	old := id.State.CentralURL
 	id.State.CentralURL = configured
 	if err := store.SaveState(id.State); err != nil {

@@ -350,3 +350,18 @@ async def test_reissue_admin_scope_required(db_maker, monkeypatch):
         r = await c.post(f"/api/v1/agents/{uuid.uuid4()}/ca-ott")
         assert r.status_code == 401  # no admin bearer
     app.dependency_overrides.clear()
+
+
+async def test_register_hands_out_agent_plane_url_when_configured(client):
+    """A fresh agent bootstraps through the console URL (the mTLS site cannot
+    take a cert-less client) and is then told where the agent plane lives, so
+    mtls-header deployments need no manual repoint per agent."""
+    c, _, settings = client
+    import pytest as _pt
+
+    out = await _register(c, hostname="noplane")
+    assert out["agent_plane_url"] is None
+    with _pt.MonkeyPatch.context() as m:
+        m.setattr(settings, "agent_plane_url", "https://agents.filearr.lan/")
+        out = await _register(c, hostname="plane")
+    assert out["agent_plane_url"] == "https://agents.filearr.lan"
