@@ -582,8 +582,16 @@ preflight() {
     || warnr "user share path" "$(dirname "$user_parent") missing"
 
   if [[ -n "${MEDIA_PATH:-}" ]]; then
-    [[ -d "$MEDIA_PATH" ]] && pass "media path" "$MEDIA_PATH" \
-      || warnr "media path" "$MEDIA_PATH does not exist yet"
+    # The wizard validates this at answer time (re-asks, or records an explicit
+    # use-anyway decision) - so a missing dir here is a FAIL only once phase 1
+    # is done: the share vanished, or the use-anyway one was never created and
+    # a first scan would index nothing.
+    if [[ -d "$MEDIA_PATH" ]]; then pass "media path" "$MEDIA_PATH"
+    elif state_done PHASE1; then
+      failr "media path" "$MEDIA_PATH no longer exists - a scan would find nothing"
+    else
+      note "media path" "$MEDIA_PATH (use-anyway choice - create it before the first scan)"
+    fi
   fi
 
   [[ -d "$TEMPLATE_DIR" ]] || mkdir -p "$TEMPLATE_DIR" 2>/dev/null || true
@@ -591,17 +599,19 @@ preflight() {
     || failr "templates-user writable" "$TEMPLATE_DIR"
 
   step "networking"
-  # br0 is needed by Caddy in BOTH topologies (trap 3) and by everything under
-  # topology B. On a box with bridging disabled Unraid names the interface eth0.
-  local br="${BRIDGE_IF:-br0}"
-  if network_exists "$br"; then
-    pass "docker network '$br'" "present"
+  # The LAN network is CHOSEN in the wizard from the networks Docker actually
+  # has, so the preflight's job is only to confirm the choice still exists
+  # (it can vanish if the operator reworks Settings -> Docker between runs).
+  # Before the wizard has run there is nothing to validate — that is not a
+  # warning, it is simply the next step.
+  if [[ -z "${BRIDGE_IF:-}" ]]; then
+    note "LAN network" "not chosen yet — the wizard picks from this box's macvlan/ipvlan networks"
+  elif network_exists "$BRIDGE_IF"; then
+    pass "docker network '$BRIDGE_IF'" "present"
   else
-    warnr "docker network '$br'" "not found"
+    failr "docker network '$BRIDGE_IF'" "chosen earlier but no longer exists — re-run with --reconfigure"
     info  "  Available Docker networks:"
     docker network ls --format '    - {{.Name}} ({{.Driver}})' 2>/dev/null | sed 's/^/  /' || true
-    info  "  On a box with bridging disabled the interface is 'eth0', not 'br0'."
-    info  "  Re-run with --reconfigure to choose a different one."
   fi
 
   if [[ "${TOPOLOGY:-A}" == "A" ]]; then
@@ -711,8 +721,48 @@ wizard() {
   echo "  bridge-type network its 80/443 mappings publish to the HOST address,"
   echo "  and the Unraid webGUI already holds host port 80 — Apply then fails"
   echo "  with 'address already in use'. (live 2026-08-14)"
-  ask "LAN bridge interface name (br0, or eth0 with bridging disabled)" "${BRIDGE_IF:-br0}"
-  BRIDGE_IF="$REPLY"
+  # Enumerate the box's REAL candidates instead of assuming br0 exists. On a
+  # box with bridging disabled the LAN-attached Docker networks are macvlan/
+  # ipvlan networks named after the interface (eth1, eth1.42 for VLANs, ...);
+  # the operator should pick from that list, not guess a name a warning later
+  # rejects. (Live feedback 2026-08-15: br0-not-found landed as a WARN with the
+  # valid choices printed underneath it — the choices belong in the prompt.)
+  local _lan_nets
+  _lan_nets=$(docker network ls --filter driver=macvlan --filter driver=ipvlan       --format '{{.Name}}' 2>/dev/null | sort)
+  if [[ -n "$_lan_nets" ]]; then
+    echo "  LAN-attached Docker networks on this box:"
+    local _i=0 _names=()
+    while IFS= read -r _n; do
+      _i=$((_i+1)); _names+=("$_n")
+      local _sub
+      _sub=$(docker network inspect "$_n" --format         '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)
+      printf '    %d) %s  %s
+' "$_i" "$_n" "${_sub:+(subnet ${_sub% })}"
+    done <<<"$_lan_nets"
+    local _def="${BRIDGE_IF:-${_names[0]}}"
+    # A stored answer that no longer exists must not silently win the default.
+    grep -qw -- "$_def" <<<"$_lan_nets" || _def="${_names[0]}"
+    while :; do
+      ask "LAN network for container IPs (number or name)" "$_def"
+      if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= _i )); then
+        BRIDGE_IF="${_names[REPLY-1]}"; break
+      elif grep -qw -- "$REPLY" <<<"$_lan_nets"; then
+        BRIDGE_IF="$REPLY"; break
+      else
+        echo "  pick one of the listed networks (number or exact name)"
+      fi
+    done
+  else
+    # No macvlan/ipvlan network exists at all — nothing to pick from. This is
+    # the one genuinely manual prerequisite: Unraid creates these from
+    # Settings -> Docker when bridging/VLANs are configured.
+    echo "  No LAN-attached (macvlan/ipvlan) Docker network exists on this box."
+    echo "  Create one first: Settings -> Docker -> enable an interface for"
+    echo "  custom networks (br0 with bridging, ethN without), then re-run."
+    ask "or type a network name to use anyway (blank to abort)" ""
+    [[ -z "$REPLY" ]] && die "no LAN network chosen"
+    BRIDGE_IF="$REPLY"
+  fi
 
   if [[ "$TIER" == "full" || "$TOPOLOGY" == "B" ]]; then
     echo
@@ -755,7 +805,20 @@ wizard() {
   done
   APPDATA_CACHE="$REPLY"
   ask "user-share appdata root (for filearr /config)" "${APPDATA_USER:-/mnt/user/appdata}"; APPDATA_USER="$REPLY"
-  ask "media root to mount READ-ONLY into filearr" "${MEDIA_PATH:-/mnt/user/data/media}"; MEDIA_PATH="$REPLY"
+  # Offer the box's real shares instead of a guessed default the preflight
+  # would only warn about later. A nonexistent answer re-asks; "use anyway"
+  # stays possible for a share created later, but it is a decision, not a slip.
+  if [[ -d /mnt/user ]]; then
+    echo "  Shares on this box:  $(ls -d /mnt/user/*/ 2>/dev/null | sed 's|/mnt/user/||;s|/$||' | tr '
+' ' ')"
+  fi
+  while :; do
+    ask "media root to mount READ-ONLY into filearr" "${MEDIA_PATH:-/mnt/user/data/media}"
+    if [[ -d "$REPLY" ]]; then MEDIA_PATH="$REPLY"; break; fi
+    if confirm "  $REPLY does not exist — use it anyway (create the share before scanning)?" n; then
+      MEDIA_PATH="$REPLY"; break
+    fi
+  done
 
   echo
   ask "host port for the filearr web UI (ignored under topology B)" "${WEBUI_PORT:-8484}"; WEBUI_PORT="$REPLY"
