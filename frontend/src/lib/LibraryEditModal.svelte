@@ -6,11 +6,16 @@
   // controls (presets + extension groups) that previously lived in the Admin
   // expander. Edits collect into a local draft and PATCH once on Save; a 422 body
   // surfaces inline. All dynamic strings render as text (no {@html}).
+  //
+  // The SAME modal also CREATES a library (`library === null`): the old inline
+  // "Add library" form on the Admin page exposed only a subset of these fields
+  // and cluttered the page; one dialog with one field set means an option that
+  // exists on Edit also exists on Add, and the page shows a single button.
   import { untrack } from "svelte";
   import {
-    updateLibrary,
+    createLibrary, resolveShareHint, updateLibrary,
     type ExtensionGroup, type HashPolicy, type Library, type Preset, type PresetsResponse,
-    type TaxonomyNode,
+    type ShareMapEntry, type TaxonomyNode,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -24,15 +29,24 @@
     library,
     presetsMeta,
     taxonomyTree,
+    shareMap = [],
     onSaved,
     onClose,
   }: {
-    library: Library;
+    /** The library to edit, or null to create a new one. */
+    library: Library | null;
     presetsMeta: PresetsResponse;
     taxonomyTree: TaxonomyNode[];
+    /** OPS-T7 deploy mount map — previews the auto share location a NEW root
+     *  would inherit (create mode only; an existing library carries its own). */
+    shareMap?: ShareMapEntry[];
     onSaved: () => void;
     onClose: () => void;
   } = $props();
+
+  // Mode is fixed for the modal's lifetime (AdminPage mounts a fresh instance per
+  // target), so capturing it once is intended — same reasoning as `seed` below.
+  const creating = untrack(() => library === null);
 
   const ALL_TYPES = [
     "video", "audio", "audiobook", "sample", "image", "model3d", "document", "spreadsheet",
@@ -44,27 +58,49 @@
   // is the intended behaviour — `untrack` makes that explicit and keeps the draft
   // fields from re-binding to the prop (silences state_referenced_locally). Globs
   // edit as newline-joined text.
-  const seed = untrack(() => ({
-    name: library.name,
-    rootPath: library.root_path,
-    nativePrefix: library.native_prefix ?? "",
-    sharePrefix: library.share_prefix ?? "",
-    enabled: library.enabled,
-    enabledCategories: [...(library.enabled_categories ?? [])],
-    enabledGroups: [...(library.enabled_groups ?? [])],
-    includeGlobs: (library.include_globs ?? []).join("\n"),
-    excludeGlobs: (library.exclude_globs ?? []).join("\n"),
-    scanCron: library.scan_cron ?? "",
-    watchMode: library.watch_mode,
-    hashPolicy: library.hash_policy,
-    hashCeiling: library.hash_full_max_bytes != null ? String(library.hash_full_max_bytes) : "",
-    presets: [...(library.enabled_presets ?? [])],
-    groups: [...(library.enabled_extension_groups ?? [])],
-    ocrEnabled: library.ocr_enabled,
-    chunkingEnabled: library.chunking_enabled,
-    exposeGps: library.expose_gps,
-    countPrunedFiles: library.count_pruned_files,
-  }));
+  const seed = untrack(() => library === null
+    ? {
+        name: "",
+        rootPath: "/data/media/",
+        nativePrefix: "",
+        sharePrefix: "",
+        enabled: true,
+        enabledCategories: [] as string[],
+        enabledGroups: [] as string[],
+        includeGlobs: "",
+        excludeGlobs: "",
+        scanCron: "",
+        watchMode: false,
+        hashPolicy: "auto" as HashPolicy,
+        hashCeiling: "",
+        presets: [] as string[],
+        groups: [] as string[],
+        ocrEnabled: false,
+        chunkingEnabled: false,
+        exposeGps: false,
+        countPrunedFiles: false,
+      }
+    : {
+        name: library.name,
+        rootPath: library.root_path,
+        nativePrefix: library.native_prefix ?? "",
+        sharePrefix: library.share_prefix ?? "",
+        enabled: library.enabled,
+        enabledCategories: [...(library.enabled_categories ?? [])],
+        enabledGroups: [...(library.enabled_groups ?? [])],
+        includeGlobs: (library.include_globs ?? []).join("\n"),
+        excludeGlobs: (library.exclude_globs ?? []).join("\n"),
+        scanCron: library.scan_cron ?? "",
+        watchMode: library.watch_mode,
+        hashPolicy: library.hash_policy,
+        hashCeiling: library.hash_full_max_bytes != null ? String(library.hash_full_max_bytes) : "",
+        presets: [...(library.enabled_presets ?? [])],
+        groups: [...(library.enabled_extension_groups ?? [])],
+        ocrEnabled: library.ocr_enabled,
+        chunkingEnabled: library.chunking_enabled,
+        exposeGps: library.expose_gps,
+        countPrunedFiles: library.count_pruned_files,
+      });
 
   let name = $state(seed.name);
   let rootPath = $state(seed.rootPath);
@@ -73,13 +109,23 @@
   // UI-T15: the auto (mount-map) network location rendered in the viewer's OS
   // spelling (smb:// vs UNC), following the header format selector.
   const autoShareText = $derived(
-    library.share_prefix_source === "mount-map"
+    library?.share_prefix_source === "mount-map"
       ? formatShare(
           shareLocation(library.share_prefix_effective, library.share_unc_effective),
           shareFormat.pref,
           detectedPlatform,
         )
       : null,
+  );
+  // Create mode: the auto share the typed root WOULD inherit from the mount map
+  // (a hint, not a stored value). Edit mode reads the library's own effective one.
+  const detectedShare = $derived(
+    creating && rootPath.trim() ? resolveShareHint(shareMap, rootPath.trim()) : null,
+  );
+  const autoShareHint = $derived(
+    creating ? detectedShare?.share_url ?? null
+    : library?.share_prefix_source === "mount-map" ? library.share_prefix_effective ?? null
+    : null,
   );
   let enabled = $state(seed.enabled);
   // W8: taxonomy type-gating (replaces the old flat `types`). Distinct from the
@@ -114,9 +160,9 @@
   // agent extracts locally and ships `body_text`/`ocr_text` on its replication
   // events, and `chunk_missing` selects purely on that text plus this flag. It
   // must stay operator-settable or agent items could never be chunked.
-  const agentOwned = $derived(library.source_agent_id != null);
+  const agentOwned = $derived(library?.source_agent_id != null);
 
-  const rootChanged = $derived(rootPath !== library.root_path);
+  const rootChanged = $derived(library !== null && rootPath !== library.root_path);
 
   // Mirrors presets.resolve_effective_presets: a default-on bundle is active
   // unless a `-name` opt-out sentinel is present; others only when listed.
@@ -150,6 +196,30 @@
     busy = true;
     error = "";
     try {
+      if (library === null) {
+        await createLibrary({
+          name: name.trim(),
+          root_path: rootPath.trim(),
+          native_prefix: nativePrefix.trim() ? nativePrefix.trim() : null,
+          share_prefix: sharePrefix.trim() ? sharePrefix.trim() : null,
+          enabled_categories: enabledCategories.length ? enabledCategories : undefined,
+          enabled_groups: enabledGroups.length ? enabledGroups : undefined,
+          include_globs: linesToArray(includeGlobs),
+          exclude_globs: linesToArray(excludeGlobs),
+          scan_cron: scanCron.trim() ? scanCron.trim() : null,
+          watch_mode: watchMode,
+          hash_policy: hashPolicy,
+          hash_full_max_bytes: hashCeiling.trim() ? Number(hashCeiling) : null,
+          enabled_presets: presets,
+          enabled_extension_groups: groups,
+          ocr_enabled: ocrEnabled,
+          chunking_enabled: chunkingEnabled,
+          expose_gps: exposeGps,
+          count_pruned_files: countPrunedFiles,
+        });
+        onSaved();
+        return;
+      }
       await updateLibrary(library.id, {
         name,
         root_path: rootPath,
@@ -200,10 +270,10 @@
     class="relative z-10 mx-auto mt-12 mb-8 w-full max-w-2xl rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900"
     role="dialog"
     aria-modal="true"
-    aria-label="Edit library"
+    aria-label={creating ? "Add library" : "Edit library"}
   >
     <div class="flex items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
-      <h3 class="text-base font-semibold">Edit library</h3>
+      <h3 class="text-base font-semibold">{creating ? "Add library" : "Edit library"}</h3>
       <span class="grow"></span>
       <button
         class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
@@ -221,7 +291,7 @@
             Name <Help text={HELP.name} label="name" />
           </label>
           <input class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-            bind:value={name} />
+            placeholder="Name" bind:value={name} required />
 
           <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
             Root path <Help text={HELP.root_path} label="root path" />
@@ -229,7 +299,7 @@
           <div>
             <div class="flex gap-2">
               <input class="grow rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-                bind:value={rootPath} />
+                placeholder="Root path (e.g. /data/media/media)" bind:value={rootPath} required />
               <button type="button"
                 class="rounded-lg border border-slate-300 px-3 py-2 text-xs dark:border-slate-700"
                 onclick={() => (showPicker = true)}>Browse…</button>
@@ -253,25 +323,27 @@
             Share location <Help text={HELP.share_prefix} label="share location" />
           </label>
           <input class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-            placeholder={library.share_prefix_source === "mount-map" && library.share_prefix_effective
-              ? `auto from mount: ${library.share_prefix_effective}`
+            placeholder={autoShareHint
+              ? `auto from mount: ${autoShareHint}`
               : "(optional) e.g. \\tower\media, smb://tower/media, /Volumes/media"}
             bind:value={sharePrefix} />
-          {#if library.share_prefix_source === "mount-map" && library.share_prefix_effective && !sharePrefix.trim()}
+          {#if autoShareHint && !sharePrefix.trim()}
             <p class="text-xs text-slate-500">
               Auto-detected from the deploy mount map:
-              <span class="font-mono text-[var(--accent)]">{library.share_prefix_effective}</span>.
+              <span class="font-mono text-[var(--accent)]">{autoShareHint}</span>.
               Leave blank to use it, or type a value to override.
             </p>
           {/if}
 
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Enabled <Help text={HELP.enabled} label="enabled" />
-          </label>
-          <label class="inline-flex items-center gap-2">
-            <input type="checkbox" bind:checked={enabled} />
-            <span class="text-slate-500">library participates in scheduled scans</span>
-          </label>
+          {#if !creating}
+            <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
+              Enabled <Help text={HELP.enabled} label="enabled" />
+            </label>
+            <label class="inline-flex items-center gap-2">
+              <input type="checkbox" bind:checked={enabled} />
+              <span class="text-slate-500">library participates in scheduled scans</span>
+            </label>
+          {/if}
         </div>
       </section>
 
@@ -477,7 +549,9 @@
       <button class="rounded-lg border border-slate-300 px-4 py-2 text-sm dark:border-slate-700"
         onclick={onClose}>Cancel</button>
       <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
-        disabled={busy} onclick={save}>{busy ? "Saving…" : "Save changes"}</button>
+        disabled={busy || (creating && (!name.trim() || !rootPath.trim()))} onclick={save}>
+        {#if creating}{busy ? "Adding…" : "Add library"}{:else}{busy ? "Saving…" : "Save changes"}{/if}
+      </button>
     </div>
   </div>
 </div>

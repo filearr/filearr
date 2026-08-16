@@ -36,7 +36,7 @@ from typing import Protocol, runtime_checkable
 
 from argon2 import PasswordHasher
 from argon2.exceptions import Argon2Error, InvalidHashError, VerifyMismatchError
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.config import get_settings
@@ -195,13 +195,26 @@ async def validate_session(
     channel on the hash comparison."""
     settings = get_settings()
     token_hash = hash_session_token(raw_token)
+    now = datetime.now(UTC)
+    # Current hash, OR the just-rotated-away hash inside its grace window: the
+    # SPA's parallel requests all carry whatever cookie they were sent with, and
+    # only the first one across the rotation boundary sees the new value.
     result = await session.execute(
-        select(SessionRow).where(SessionRow.session_hash == token_hash)
+        select(SessionRow).where(
+            or_(
+                SessionRow.session_hash == token_hash,
+                and_(
+                    SessionRow.prev_session_hash == token_hash,
+                    SessionRow.prev_valid_until.is_not(None),
+                    SessionRow.prev_valid_until > now,
+                ),
+            )
+        )
     )
     row = result.scalar_one_or_none()
     if row is None:
         return None
-    now = datetime.now(UTC)
+    via_previous = row.session_hash != token_hash
     if now >= _aware(row.expires_absolute):
         await session.delete(row)
         return None
@@ -209,8 +222,15 @@ async def validate_session(
         await session.delete(row)
         return None
     rotated: SessionToken | None = None
-    if now - _aware(row.rotated_at) >= timedelta(minutes=settings.session_rotation_minutes):
+    # A request that arrived on the previous token never rotates again: the row
+    # already has its fresh hash and exactly one response (the rotating one) is
+    # carrying the new cookie to the browser.
+    if not via_previous and now - _aware(row.rotated_at) >= timedelta(
+        minutes=settings.session_rotation_minutes
+    ):
         tok = mint_session_token()
+        row.prev_session_hash = row.session_hash
+        row.prev_valid_until = now + timedelta(seconds=settings.session_rotation_grace_seconds)
         row.session_hash = tok.session_hash
         row.rotated_at = now
         rotated = tok

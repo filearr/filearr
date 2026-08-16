@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 720          # 30d absolute lifetime (hard cap)
     session_inactivity_hours: int = 168   # 7d idle window (sliding, per request)
     session_rotation_minutes: int = 10    # opaque-token rotation cadence
+    # Grace window during which the PREVIOUS token (the one just rotated away)
+    # still resolves. The SPA fires requests in parallel (a mutation followed by
+    # a fan-out refresh, SSE reconnects, polls); the first to cross the rotation
+    # boundary re-keys the row, and every sibling already in flight still carries
+    # the old cookie. Without a grace window those siblings 401 -- observed live
+    # 2026-08-15 as "Missing bearer token" while adding a second library. A
+    # previous token seen inside the window resolves the session but never
+    # rotates again, so exactly one fresh cookie is issued per boundary.
+    session_rotation_grace_seconds: int = 60
     # P6-T5 (OIDC SSO): the session-cookie SameSite policy. **Changed from the
     # P6-T1 default of ``strict`` to ``lax`` as a DELIBERATE P6-T5 ruling.** An
     # OIDC callback is a top-level *cross-site* navigation (the browser arrives

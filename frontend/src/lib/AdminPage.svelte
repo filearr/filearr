@@ -1,22 +1,15 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import {
-    cancelScan, clearFailedJobs, createLibrary, forceClearScan, stopScan, failedJobs, libraryErrors,
-    listLibraries, listPresets, listScans, listShareMap, resolveShareHint,
+    cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
+    listLibraries, listPresets, listScans, listShareMap,
     retryExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     libraryStats,
     type FailedJob, type FailingItem, type Library, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
   } from "./api";
-  import TaxonomySelector from "./TaxonomySelector.svelte";
-  import { HELP } from "./help";
-  import Help from "./Help.svelte";
-  import { formatShare, shareLocation } from "./osFormat";
-  import { shareFormat, detectedPlatform } from "./osFormat.svelte";
-  import FolderPicker from "./FolderPicker.svelte";
   import LibraryEditModal from "./LibraryEditModal.svelte";
-  import ScheduleField from "./ScheduleField.svelte";
   import DeleteLibraryDialog from "./DeleteLibraryDialog.svelte";
   import CustomFieldsPanel from "./CustomFieldsPanel.svelte";
   import RbacPanel from "./RbacPanel.svelte";
@@ -172,39 +165,17 @@
     }
   }
 
-  // create form
-  let newName = $state("");
-  let newPath = $state("/data/media/");
-  let newNativePrefix = $state("");
-  let newSharePrefix = $state("");
-  // OPS-T7: deploy mount map — used to preview the auto share_prefix a new
-  // library root would inherit (a placeholder/hint, not a stored value).
+  // Add library: the SAME modal as Edit, opened with library=null, so the page
+  // carries one button instead of a half-copy of the edit form (and every option
+  // Edit has, Add has — the inline form had drifted to a subset).
+  let adding = $state(false);
+  // OPS-T7: deploy mount map — the add dialog previews the auto share_prefix a
+  // new library root would inherit (a placeholder/hint, not a stored value).
   let shareMap = $state<ShareMapEntry[]>([]);
-  const detectedShare = $derived(
-    newPath.trim() ? resolveShareHint(shareMap, newPath.trim()) : null,
-  );
-  // UI-T15: the detected auto share in the viewer's OS spelling (smb:// vs UNC).
-  const detectedShareText = $derived(
-    detectedShare
-      ? formatShare(
-          shareLocation(detectedShare.share_url, detectedShare.unc ?? null),
-          shareFormat.pref,
-          detectedPlatform,
-        ) ?? detectedShare.share_url
-      : null,
-  );
-  let showAddPicker = $state(false);
   // W8: the file taxonomy tree (category -> group -> extensions) drives both the
   // add-library gating selector and (passed down) the edit modal's. Fetched once
   // on mount; an empty tree (service offline) degrades to "all types".
   let taxonomyTree = $state<TaxonomyNode[]>([]);
-  let newCategories = $state<string[]>([]);
-  let newGroups = $state<string[]>([]);
-  let newCron = $state("");
-  let newWatch = $state(false);
-  const HASH_POLICIES = ["auto", "full", "quick_only"] as const;
-  let newHashPolicy = $state<import("./api").HashPolicy>("auto");
-  let newHashCeiling = $state("");
 
   // Live scan progress, keyed by scan id, delivered over SSE. Merged over the
   // scan rows so the table shows batch counter + files/s ticking in real time.
@@ -486,34 +457,10 @@
     void pollUntilStarted(lib.id);
   }
 
-  async function addLibrary(e: Event) {
-    e.preventDefault();
-    try {
-      await createLibrary({
-        name: newName,
-        root_path: newPath,
-        native_prefix: newNativePrefix.trim() || null,
-        share_prefix: newSharePrefix.trim() || null,
-        enabled_categories: newCategories.length ? newCategories : undefined,
-        enabled_groups: newGroups.length ? newGroups : undefined,
-        scan_cron: newCron.trim() || null,
-        watch_mode: newWatch,
-        hash_policy: newHashPolicy,
-        hash_full_max_bytes: newHashCeiling.trim() ? Number(newHashCeiling) : null,
-      });
-      newName = "";
-      newNativePrefix = "";
-      newSharePrefix = "";
-      newCategories = [];
-      newGroups = [];
-      newCron = "";
-      newWatch = false;
-      newHashPolicy = "auto";
-      newHashCeiling = "";
-      await refresh();
-    } catch (err) {
-      error = String(err);
-    }
+  // After a successful add, close the dialog and reconcile.
+  function afterAdd() {
+    adding = false;
+    refresh();
   }
 
   function fmtStats(s: ScanRun | undefined): string {
@@ -1068,73 +1015,10 @@
     </div>
   {/if}
 
-  <h2 class="mt-8 text-lg font-semibold">Add library</h2>
-  <form class="mt-3 flex max-w-xl flex-col gap-3" onsubmit={addLibrary}>
-    <label class="flex items-center gap-1 text-xs text-slate-500">Name <Help text={HELP.name} label="name" /></label>
-    <input class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-      placeholder="Name" bind:value={newName} required />
-
-    <label class="flex items-center gap-1 text-xs text-slate-500">Root path <Help text={HELP.root_path} label="root path" /></label>
-    <div class="-mt-2 flex gap-2">
-      <input class="grow rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-        placeholder="Root path (e.g. /data/media/media)" bind:value={newPath} required />
-      <button type="button" class="rounded-lg border border-slate-300 px-3 py-2 text-xs dark:border-slate-700"
-        onclick={() => (showAddPicker = true)}>Browse…</button>
-    </div>
-
-    <label class="flex items-center gap-1 text-xs text-slate-500">Native prefix <Help text={HELP.native_prefix} label="native prefix" /></label>
-    <input class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-      placeholder="(optional) source-system prefix, e.g. /mnt/user/media" bind:value={newNativePrefix} />
-
-    <label class="flex items-center gap-1 text-xs text-slate-500">Share location <Help text={HELP.share_prefix} label="share location" /></label>
-    <input class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-      placeholder={detectedShare
-        ? `auto from mount: ${detectedShare.share_url}`
-        : "(optional) e.g. \\tower\media, smb://tower/media, /Volumes/media"}
-      bind:value={newSharePrefix} />
-    {#if detectedShare && !newSharePrefix.trim()}
-      <p class="-mt-1 text-xs text-slate-500">
-        Auto-detected from the deploy mount map:
-        <span class="font-mono text-[var(--accent)]">{detectedShare.share_url}</span>.
-        Leave blank to use it, or type a value to override.
-      </p>
-    {/if}
-
-    <label class="flex items-center gap-1 text-xs text-slate-500">File types <Help text={HELP.media_types} label="file types" /></label>
-    <div class="-mt-2">
-      <TaxonomySelector tree={taxonomyTree} bind:categories={newCategories} bind:groups={newGroups} />
-    </div>
-
-    <div class="flex flex-col gap-2">
-      <label class="flex items-center gap-1 text-xs text-slate-500">Schedule <Help text={HELP.scan_cron} label="scan schedule" /></label>
-      <ScheduleField value={newCron || null} onChange={(c) => (newCron = c ?? "")} />
-      <label class="mt-1 inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={newWatch} />
-        watch mode <Help text={HELP.watch_mode} label="watch mode" />
-      </label>
-    </div>
-
-    <div class="flex flex-wrap items-center gap-3">
-      <label class="inline-flex items-center gap-2 text-sm">
-        hashing <Help text={HELP.hash_policy} label="hash policy" />
-        <select class="rounded-lg border border-slate-300 bg-transparent px-2 py-2 dark:border-slate-700"
-          bind:value={newHashPolicy}>
-          {#each HASH_POLICIES as hp}
-            <option value={hp}>{hp === "quick_only" ? "quick only" : hp}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="flex items-center gap-1 text-xs text-slate-500">ceiling <Help text={HELP.hash_ceiling} label="hash ceiling" /></label>
-      <input class="w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-        type="number" min="1"
-        placeholder="full-hash byte ceiling (blank = global)"
-        bind:value={newHashCeiling} />
-    </div>
-    <p class="-mt-1 text-xs text-slate-500">
-      auto: network mounts (SMB/NFS) skip full content hashing; local paths hash in full.
-    </p>
-    <button class="self-start rounded-lg bg-[var(--accent)] px-4 py-2 text-white">Add library</button>
-  </form>
+  <div class="mt-6">
+    <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-white"
+      onclick={() => (adding = true)}>Add library…</button>
+  </div>
 
   <CustomFieldsPanel {libraries} />
 
@@ -1242,11 +1126,14 @@
   />
 {/if}
 
-{#if showAddPicker}
-  <FolderPicker
-    initial={newPath}
-    onPick={(p) => { newPath = p; showAddPicker = false; }}
-    onClose={() => (showAddPicker = false)}
+{#if adding}
+  <LibraryEditModal
+    library={null}
+    {presetsMeta}
+    {taxonomyTree}
+    {shareMap}
+    onSaved={afterAdd}
+    onClose={() => (adding = false)}
   />
 {/if}
 

@@ -232,13 +232,27 @@ async def test_session_rotation_reissues_token(db_maker):
     assert v is not None
     assert v.rotated is not None
     assert v.rotated.raw != tok.raw
-    # Old token no longer resolves; new one does.
+    # The OLD token still resolves inside the grace window (a sibling request
+    # already in flight with the old cookie), but must NOT rotate again -- one
+    # fresh cookie per boundary. The new token resolves too.
     async with db_maker() as s:
-        assert await authx.validate_session(s, tok.raw) is None
+        v_old = await authx.validate_session(s, tok.raw)
+        await s.commit()
+    assert v_old is not None and v_old.principal_id == pid
+    assert v_old.rotated is None
     async with db_maker() as s:
         v2 = await authx.validate_session(s, v.rotated.raw)
         await s.commit()
     assert v2 is not None and v2.principal_id == pid
+    # Once the grace window lapses the old token is dead.
+    async with db_maker() as s:
+        await s.execute(
+            text("UPDATE sessions SET prev_valid_until = :t"),
+            {"t": datetime.now(UTC) - timedelta(seconds=1)},
+        )
+        await s.commit()
+    async with db_maker() as s:
+        assert await authx.validate_session(s, tok.raw) is None
 
 
 async def test_session_revoke_is_immediate(db_maker):

@@ -1339,6 +1339,7 @@ class Session(Base):
     __table_args__ = (
         Index("ix_sessions_principal", "principal_id"),
         Index("ix_sessions_expiry", "last_seen_at", "expires_absolute"),
+        Index("ix_sessions_prev_hash", "prev_session_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1348,6 +1349,14 @@ class Session(Base):
         ForeignKey("principals.id", ondelete="CASCADE"), nullable=False
     )
     session_hash: Mapped[str] = mapped_column(Text, unique=True)  # sha256 hex, never raw
+    # The hash the row carried BEFORE its last rotation, honoured until
+    # ``prev_valid_until`` so requests already in flight with the old cookie do
+    # not 401 (settings.session_rotation_grace_seconds). Cleared on the next
+    # rotation; NULL on a never-rotated row.
+    prev_session_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prev_valid_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

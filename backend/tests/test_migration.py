@@ -11,14 +11,13 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION: f3a9d5c81b62 adds `instance_meta`, the BK-T1 key/value table
-# that carries sha256(FILEARR_SECRET_KEY)[:16] INSIDE the database so a restore
-# under a different key is caught at boot instead of weeks later, by an alert
-# that quietly stopped sending. Its predecessor d4f1a7c93e60 widens the
-# agent_commands kind CHECK for QH-T6's `rehash_sweep`.
+# HEAD ASSERTION: c7d2e4a91b38 adds sessions.prev_session_hash/prev_valid_until
+# so a just-rotated session token stays valid for a short grace window (the SPA's
+# parallel requests were 401ing when one of them crossed the rotation boundary).
+# Its predecessor f3a9d5c81b62 adds `instance_meta` (BK-T1 key fingerprint).
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "f3a9d5c81b62"
+HEAD = "c7d2e4a91b38"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).
