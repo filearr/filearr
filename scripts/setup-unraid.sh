@@ -630,7 +630,7 @@ preflight() {
     note "host port 80" "no listener found (unusual — the webGUI normally holds it)"
   fi
   info "  Caddy never binds the host's 80/443: it gets its own LAN address on"
-  info "  ${br}, which is why this is information and not a problem."
+  info "  ${BRIDGE_IF:-the LAN network the wizard picks}, which is why this is information and not a problem."
 
   step "address plan"
   local ip
@@ -2188,7 +2188,10 @@ load_conf
 
 # Defaults for everything the wizard may not have set yet, so `set -u` never
 # fires before the first run has answered anything.
-TIER="${TIER:-simple}"; TOPOLOGY="${TOPOLOGY:-A}"; BRIDGE_IF="${BRIDGE_IF:-br0}"
+# BRIDGE_IF deliberately has NO default: the wizard picks it from the networks
+# Docker actually has, and preflight treats "empty" as "not chosen yet" rather
+# than validating a guess (a box with no br0 must not FAIL before it is asked).
+TIER="${TIER:-simple}"; TOPOLOGY="${TOPOLOGY:-A}"; BRIDGE_IF="${BRIDGE_IF:-}"
 APPDATA_CACHE="${APPDATA_CACHE:-/mnt/cache/appdata}"; APPDATA_USER="${APPDATA_USER:-/mnt/user/appdata}"
 MEDIA_PATH="${MEDIA_PATH:-/mnt/user/data/media}"; WEBUI_PORT="${WEBUI_PORT:-8484}"
 TZ_="${TZ_:-Etc/UTC}"; PG_USER="${PG_USER:-filearr}"; PG_DB="${PG_DB:-filearr}"
