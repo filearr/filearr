@@ -1628,6 +1628,11 @@ ca_password_file() {
 # and the plaintext is captured on stdout. There is nothing on the host to own.
 extract_provisioner_jwk() {
   local prov="filearr-agents"
+  # STDOUT IS THE RETURN VALUE (the caller captures it as the JWK), so every
+  # diagnostic in here goes to stderr. Live 2026-08-16: the "decrypted with"
+  # info line was captured INTO the JWK, the template got
+  # "  provisioner JWK decrypted with /home/step/secrets/password{...}", and
+  # central rejected it as malformed — every enrolment failed on a null ca_ott.
 
   # The encrypted key is published by the CA's own provisioner list (serving the
   # JWE publicly is by design — that is how `step ca token` works client-side;
@@ -1637,7 +1642,7 @@ extract_provisioner_jwk() {
   local listing enc=""
   listing="$(docker exec filearr-stepca sh -c \
     'step ca provisioner list --ca-url https://localhost:9000 --root /home/step/certs/root_ca.crt' 2>/dev/null || true)"
-  [[ -n "$listing" ]] || { warn "the CA served no provisioner list — is it healthy?"; return 1; }
+  [[ -n "$listing" ]] || { warn "the CA served no provisioner list — is it healthy?" >&2; return 1; }
 
   # No jq on Unraid. Flatten the array to one object per line (the provisioner
   # objects nest "key"/"claims" objects, but a nested `},{` pair cannot occur in
@@ -1654,7 +1659,7 @@ extract_provisioner_jwk() {
     # provisioner, rather than failing on a formatting difference.
     enc="$(printf '%s' "$listing" | grep -o '"encryptedKey"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
   fi
-  [[ -n "$enc" ]] || { warn "no JWK provisioner named '${prov}' in the CA's list"; return 1; }
+  [[ -n "$enc" ]] || { warn "no JWK provisioner named '${prov}' in the CA's list" >&2; return 1; }
 
   local pwf jwk=""
   for pwf in /home/step/secrets/admin_password /home/step/secrets/password; do
@@ -1667,15 +1672,15 @@ extract_provisioner_jwk() {
     # else is a wrong password, which step reports as garbage rather than an
     # error we can rely on.
     if [[ "$jwk" == '{'*'"d"'*'}' ]]; then
-      info "provisioner JWK decrypted with ${pwf}"
+      info "provisioner JWK decrypted with ${pwf}" >&2
       printf '%s' "$jwk"
       return 0
     fi
     jwk=""
   done
-  warn "JWK decrypt failed with every password file the CA holds."
-  warn "Without it, agent registration still succeeds but ca_ott comes back null"
-  warn "and enrolment cannot finish. See the Unraid guide, step 4."
+  warn "JWK decrypt failed with every password file the CA holds." >&2
+  warn "Without it central cannot sign agent certificates and refuses every" >&2
+  warn "enrolment. See the Unraid guide, step 4." >&2
   return 1
 }
 
@@ -1751,6 +1756,9 @@ harvest_ca() {
 
   local jwk=""
   jwk="$(extract_provisioner_jwk || true)"
+  # Belt and braces: only a JSON object with a private "d" member is a JWK.
+  # Anything else (a stray diagnostic, an empty string) must never be stored.
+  [[ "$jwk" == '{'*'"d"'*'}' ]] || jwk=""
   if [[ -n "$jwk" ]]; then
     info "provisioner private JWK extracted (fingerprint $(fingerprint "$jwk")) — not printed here"
     # Keep it with the other secrets so a rebuild does not need the CA to be up.
@@ -1766,8 +1774,8 @@ harvest_ca() {
   if [[ -z "$jwk" ]]; then
     echo
     warn "*******************************************************************"
-    warn "** CA Provisioner JWK IS STILL EMPTY. Agent registration will    **"
-    warn "** succeed and every enrolment will then fail on a null ca_ott.  **"
+    warn "** CA Provisioner JWK IS STILL EMPTY. Central cannot sign agent  **"
+    warn "** certificates, so it will refuse every enrolment (503).        **"
     warn "** Re-run this script to retry the extraction automatically.     **"
     warn "*******************************************************************"
   fi
