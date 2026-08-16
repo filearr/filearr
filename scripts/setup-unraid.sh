@@ -1362,7 +1362,10 @@ probe_description() {
 # What the operator has to click, per container, in words that match the UI.
 apply_instructions() {
   local name="$1"
-  echo "    Docker tab -> ADD CONTAINER -> Template: my-${name} -> APPLY"
+  # The dropdown shows user templates by NAME under "User templates" — the
+  # on-disk my- prefix is not displayed, so telling the operator to look for
+  # my-<name> sends them hunting for something that is not there.
+  echo "    Docker tab -> ADD CONTAINER -> Template: ${name} (under 'User templates') -> APPLY"
   echo "    Every field is already filled in. Nothing to type."
   case "$name" in
     filearr-postgres)
