@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import select
 
 from filearr.config import get_settings
-from filearr.db import SessionLocal
+from filearr.db import SessionLocal, scalars_where_in
 from filearr.models import Item, ItemStatus, Library
 from filearr.retrying import MEILI_RETRY
 from filearr.search import (
@@ -41,9 +41,7 @@ async def _expose_gps_map(session, items: list[Item]) -> dict:
 )
 async def sync_items(item_ids: list[str]) -> None:
     async with SessionLocal() as session:
-        items = (
-            (await session.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
-        )
+        items = await scalars_where_in(session, select(Item), Item.id, item_ids)
         expose = await _expose_gps_map(session, items)
         # P6-T3: parents' path_scope so sidecars inherit their RBAC scope.
         pscope = await parent_scope_map(session, items)

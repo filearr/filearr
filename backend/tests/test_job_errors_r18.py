@@ -121,12 +121,15 @@ async def test_middleware_success_passthrough_and_recorder_never_raises(
 
 
 def test_traceback_capping_keeps_tail():
+    """Both ends survive: the head (root cause of a chained exception) and the
+    tail (the final raise site). See test_scan_bind_param_cap for the chain."""
     try:
         raise RuntimeError("tail" * 5000)
     except RuntimeError as exc:
         text_ = joberrors._format_traceback(exc)
-    assert len(text_) <= joberrors.TRACEBACK_MAX_CHARS + 20
-    assert text_.startswith("… (truncated)")
+    assert len(text_) <= joberrors.TRACEBACK_MAX_CHARS + 40
+    assert text_.startswith("Traceback (most recent call last)")  # head kept
+    assert "… (truncated) …" in text_
     assert text_.rstrip().endswith("tail")  # the raise site (tail) is kept
 
 

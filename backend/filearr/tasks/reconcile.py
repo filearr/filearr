@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select, text
 
 from filearr.config import get_settings
-from filearr.db import SessionLocal
+from filearr.db import SessionLocal, scalars_where_in
 from filearr.models import Item, ItemStatus
 from filearr.search import (
     build_doc,
@@ -159,9 +159,7 @@ async def _reindex_missing(ids: list[str]) -> int:
     if not ids:
         return 0
     async with SessionLocal() as session:
-        rows = (
-            (await session.execute(select(Item).where(Item.id.in_(ids)))).scalars().all()
-        )
+        rows = await scalars_where_in(session, select(Item), Item.id, ids)
         # P6-T3: parents' path_scope so sidecars inherit their RBAC scope.
         pscope = await parent_scope_map(session, rows)
     # P4-T6: project facetable/sortable custom fields (loaded once per repair).

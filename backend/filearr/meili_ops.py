@@ -805,9 +805,18 @@ async def rebuild_via_swap(*, wait_s: float | None = None) -> int:
                     )
                 res = await c.wait_for_task(uid, timeout_in_ms=remaining_ms)
                 if res.status != "succeeded":
+                    # Carry Meili's own error (code + message) into ours: the
+                    # bare status told an operator nothing (live 2026-08-16:
+                    # "shadow task 2562 finished 'failed'" — why? unknown).
+                    err = getattr(res, "error", None)
+                    detail = ""
+                    if isinstance(err, dict):
+                        detail = f": {err.get('code', '')} {err.get('message', '')}".rstrip()
+                    elif err:
+                        detail = f": {err}"
                     raise RuntimeError(
                         f"rebuild_via_swap: shadow task {uid} finished "
-                        f"{res.status!r}, not 'succeeded' — aborting before swap"
+                        f"{res.status!r}, not 'succeeded' — aborting before swap{detail}"
                     )
         except BaseException:
             # PRE-SWAP failure: the live index was never touched. Best-effort drop

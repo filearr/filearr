@@ -45,8 +45,14 @@ TRACEBACK_MAX_CHARS = 8_000
 def _format_traceback(exc: BaseException) -> str:
     text = "".join(tb_mod.format_exception(type(exc), exc, exc.__traceback__))
     if len(text) > TRACEBACK_MAX_CHARS:
-        # Keep the TAIL — the raise site and cause chain live at the end.
-        text = "… (truncated)\n" + text[-TRACEBACK_MAX_CHARS:]
+        # Keep BOTH ends. The tail holds the final raise site, but with a
+        # chained exception ("During handling of the above exception ...")
+        # the ROOT CAUSE is printed FIRST — tail-only truncation threw away
+        # exactly the line that mattered (live 2026-08-16: a scan's real
+        # error, a >65,535-bind-param SELECT, was cut; only the crash-handler's
+        # MissingGreenlet survived). Half the budget each.
+        half = TRACEBACK_MAX_CHARS // 2
+        text = text[:half] + "\n… (truncated) …\n" + text[-half:]
     return text
 
 

@@ -19,7 +19,7 @@ from filearr import rbac, taxonomy
 from filearr.alerts import pipeline
 from filearr.alerts.rules import FileEvent
 from filearr.config import get_settings
-from filearr.db import SessionLocal
+from filearr.db import SessionLocal, scalars_where_in
 from filearr.errors import sanitize_error
 from filearr.hashpolicy import resolve_hash_policy
 from filearr.models import (
@@ -345,6 +345,15 @@ async def scan_library(
         except Exception as exc:
             # a crashed scan must never stay 'running' forever
             await session.rollback()
+            # rollback() EXPIRES every instance in the session (whenever a
+            # transaction was open, i.e. always after real work), and an expired
+            # attribute read on an AsyncSession is a synchronous lazy load ->
+            # MissingGreenlet. Reading ``run.stats`` here used to crash the
+            # handler itself, masking the real error and leaving the run
+            # 'running' until the orphan reconciler (live 2026-08-16, two
+            # scans). Reload both rows explicitly before touching them.
+            await session.refresh(run)
+            await session.refresh(library)
             run.status = "failed"
             run.finished_at = datetime.now(UTC)
             # T11: retain the exception message on the failed run (sanitized +
@@ -726,13 +735,8 @@ async def _scan_body(
         ]
         moved_out: list = []
         if candidates and new_item_ids:
-            new_items = list(
-                (
-                    await session.execute(
-                        select(Item).where(Item.id.in_(new_item_ids))
-                    )
-                ).scalars()
-            )
+            # Chunked: a big first scan has >65,535 new ids (PG bind-param cap).
+            new_items = await scalars_where_in(session, select(Item), Item.id, new_item_ids)
             move_stats = await detect_moves(
                 session,
                 candidates,
@@ -793,12 +797,8 @@ async def _scan_body(
         ):
             # Re-select by id: rows the intra pass deleted are gone; the rest
             # come back as the same identity-mapped instances.
-            remaining_new = list(
-                (
-                    await session.execute(
-                        select(Item).where(Item.id.in_(new_item_ids))
-                    )
-                ).scalars()
+            remaining_new = await scalars_where_in(
+                session, select(Item), Item.id, new_item_ids
             )
             if remaining_new:
                 cross_stats, cross_survivors = await detect_cross_library_moves(

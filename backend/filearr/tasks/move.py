@@ -52,6 +52,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from filearr import rbac
+from filearr.db import scalars_where_in
 from filearr.models import Item, ItemStatus, Library
 from filearr.tasks.extract import full_hash, mid_hash, quick_hash
 
@@ -368,22 +369,20 @@ async def detect_cross_library_moves(
     if not hashed:
         return stats, []
 
-    tombs = (
-        (
-            await session.execute(
-                select(Item)
-                .join(Library, Item.library_id == Library.id)
-                .where(
-                    Item.library_id != library_id,
-                    Item.status == ItemStatus.missing,
-                    Item.quick_hash.in_({n.quick_hash for n in hashed}),
-                    Item.sidecar_of.is_(None),
-                    Library.source_agent_id.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    # Chunked over the hash set: ``hashed`` is every unmatched NEW row of the
+    # scan, >65,535 on a big first scan (Postgres bind-parameter cap).
+    tombs = await scalars_where_in(
+        session,
+        select(Item)
+        .join(Library, Item.library_id == Library.id)
+        .where(
+            Item.library_id != library_id,
+            Item.status == ItemStatus.missing,
+            Item.sidecar_of.is_(None),
+            Library.source_agent_id.is_(None),
+        ),
+        Item.quick_hash,
+        {n.quick_hash for n in hashed},
     )
     if not tombs:
         return stats, []
