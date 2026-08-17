@@ -19,6 +19,7 @@
   import SessionsPanel from "./SessionsPanel.svelte";
   import AuditPanel from "./AuditPanel.svelte";
   import LlmKeysPanel from "./LlmKeysPanel.svelte";
+  import ApiKeysPanel from "./ApiKeysPanel.svelte";
   import { gotoBrowse } from "./routes";
   import { isAdminPrincipal, type AuthPrincipal } from "./api";
 
@@ -1038,6 +1039,7 @@
   <RbacPanel />
 
   <LlmKeysPanel />
+  {#if isAdmin}<ApiKeysPanel />{/if}
 
   {#if isAdmin}
     <UsersPanel />

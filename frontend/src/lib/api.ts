@@ -3620,3 +3620,48 @@ export async function revokeLlmKey(id: string): Promise<void> {
   });
   if (!res.ok) throw new ApiError(res.status, await res.text());
 }
+
+// --- Ordinary API keys (read / write / admin Bearer tokens; admin-minted) ---
+export type ApiKeyScope = "read" | "write" | "admin";
+
+export interface ApiKeyRow {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: ApiKeyScope[];
+  expires_at: string | null;
+  expired: boolean;
+  last_used_at: string | null;
+  created_at: string | null;
+  /** present ONLY in the mint response — shown once. */
+  key?: string;
+}
+
+export interface ApiKeyScopeInfo {
+  name: ApiKeyScope;
+  description: string;
+}
+
+export function listApiKeyScopes(): Promise<{ scopes: ApiKeyScopeInfo[] }> {
+  return request("/api-keys/scopes");
+}
+
+export function listApiKeys(): Promise<{ keys: ApiKeyRow[] }> {
+  return request("/api-keys");
+}
+
+export function mintApiKey(body: {
+  name: string;
+  scopes: ApiKeyScope[];
+  expires_days?: number | null;
+}): Promise<ApiKeyRow> {
+  return request("/api-keys", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function revokeApiKey(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api-keys/${id}`, {
+    method: "DELETE",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}

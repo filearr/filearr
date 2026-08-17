@@ -17,6 +17,15 @@ Filearr supports two credential carriers, side by side:
     Authorization: Bearer <api-key>
     ```
 
+    Admins create and revoke them under **Admin → API keys** (name, scopes,
+    optional expiry in days). The key material is shown exactly once at
+    creation. Revoking is immediate — the next request with that key gets 401.
+    Every mint/revoke lands in the audit log (`API_KEY_MINTED` /
+    `API_KEY_REVOKED`). The REST equivalents are `GET/POST /api/v1/api-keys`
+    and `DELETE /api/v1/api-keys/{id}` (admin scope). LLM access keys are a
+    separate family (Admin → LLM access keys): they carry a facade role and are
+    pinned to `read` on the main API.
+
 - **Interactive sessions.** Postgres-backed, opaque session cookies (not
   stateless JWTs — so revocation is O(1): delete the row). The cookie is
   `HttpOnly` and `SameSite` (lax by default, so OIDC callbacks work while

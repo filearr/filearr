@@ -12,6 +12,7 @@ from filearr.api import (
     agent_updates,
     agents,
     alerts,
+    api_keys,
     audit,
     auth,
     custom_fields,
@@ -53,6 +54,7 @@ v1_router.include_router(fs.router, prefix="/fs", tags=["fs"])
 v1_router.include_router(search.router, tags=["search"])
 v1_router.include_router(saved_searches.router, prefix="/saved-searches", tags=["saved-searches"])
 v1_router.include_router(llm_keys.router, prefix="/llm-keys", tags=["llm-keys"])
+v1_router.include_router(api_keys.router, prefix="/api-keys", tags=["api-keys"])
 v1_router.include_router(items.router, prefix="/items", tags=["items"])
 v1_router.include_router(digests.router, prefix="/items", tags=["items"])
 v1_router.include_router(item_agent_status.router, prefix="/items", tags=["items"])
