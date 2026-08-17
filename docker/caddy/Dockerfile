@@ -14,8 +14,16 @@
 #   caddy                        v2.11.4   (matches the runtime base image below)
 #   github.com/caddy-dns/cloudflare  v0.2.4   (proxy.golang.org @latest 2026-07-17)
 #   github.com/mholt/caddy-l4        v0.1.2   (proxy.golang.org @latest 2026-07-17)
-FROM caddy:2.11.4-builder AS builder
-RUN xcaddy build v2.11.4 \
+# The builder stage runs on the BUILD host's architecture and cross-compiles
+# for the target: caddy is pure Go, so GOOS/GOARCH is all xcaddy needs. Without
+# --platform=$BUILDPLATFORM the arm64 half of the multi-arch build ran the whole
+# Go compile under QEMU user emulation and its layer never cache-hit -- 17-18
+# minutes on EVERY push (measured 2026-08-16: "#19 [linux/arm64 builder 2/2]
+# RUN xcaddy build ... DONE 1056.5s"), the single longest job in build.yml.
+FROM --platform=$BUILDPLATFORM caddy:2.11.4-builder AS builder
+ARG TARGETOS
+ARG TARGETARCH
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" xcaddy build v2.11.4 \
     --with github.com/caddy-dns/cloudflare@v0.2.4 \
     --with github.com/mholt/caddy-l4@v0.1.2
 

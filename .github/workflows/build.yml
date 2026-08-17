@@ -33,9 +33,14 @@ permissions:
 
 jobs:
   ci:
-    # Runs the entire CI workflow (all five jobs) at this commit. Job-level
-    # permissions here cap what the called workflow's GITHUB_TOKEN can do.
+    # Runs the CI workflow's gate jobs at this commit. Job-level permissions
+    # here cap what the called workflow's GITHUB_TOKEN can do.
     uses: ./.github/workflows/ci.yml
+    with:
+      # The three image jobs below build (and push) the same Dockerfiles; the
+      # gate's no-push validation build would only repeat them on the critical
+      # path (they `needs: ci`, so they waited on it -- ~9 min per push).
+      build_images: false
     permissions:
       contents: read
 

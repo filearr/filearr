@@ -27,6 +27,17 @@ on:
   # CI through that call, so a separate `push: main` trigger here would just
   # run everything twice per push.
   workflow_call:
+    inputs:
+      build_images:
+        # build.yml passes false: it builds + pushes the same three images
+        # itself right after this gate, so the no-push validation build here
+        # would only duplicate them ON THE CRITICAL PATH (build.yml's image
+        # jobs `needs: ci`, i.e. wait for this job too -- ~9 min per push,
+        # measured 2026-08-16). Pull requests keep the default (true).
+        description: Run the no-push docker image validation job
+        type: boolean
+        required: false
+        default: true
 
 # Cancel superseded runs on the same ref to save runner minutes.
 concurrency:
@@ -219,6 +230,9 @@ jobs:
     # frontend, agent, and migration drift. (`agent` was missing here until
     # 2026-07-20: a broken Go agent did not block the image build.)
     needs: [backend, frontend, agent, alembic-check]
+    # `inputs.build_images` is empty (not false) on pull_request events, so
+    # compare against false explicitly.
+    if: ${{ inputs.build_images != false }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

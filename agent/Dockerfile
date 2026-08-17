@@ -17,7 +17,14 @@
 # Build (from the repo root; agent/VERSION is the canonical version):
 #   docker build -t filearr-agent --build-arg VERSION="$(cat agent/VERSION)" ./agent
 
-FROM golang:1.26-alpine AS build
+# Build stage runs on the BUILD host's arch and cross-compiles (CGO is off, so
+# GOOS/GOARCH is all Go needs). Without --platform=$BUILDPLATFORM the arm64
+# half of the multi-arch CI build compiled under QEMU emulation, ~10 minutes
+# per push (measured 2026-08-16). Same shape as the root Dockerfile's agentdist
+# stage.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -33,7 +40,7 @@ ARG UPDATE_PUBLIC_KEY=""
 # simultaneously — live report 2026-08-07). Build date lives in the OCI image
 # labels (docker inspect), not the version string.
 RUN V="${VERSION}"; case "$V" in *@*) V="${V%%@*}-$(echo "${V#*@}" | cut -c1-7)";; esac; \
-    CGO_ENABLED=0 go build -trimpath \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath \
     -ldflags "-s -w -X \"main.Version=${V}\" -X github.com/filearr/filearr/agent/internal/update.PublicKeyBase64=${UPDATE_PUBLIC_KEY}" \
     -o /out/filearr-agent ./cmd/filearr-agent
 
