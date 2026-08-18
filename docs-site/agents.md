@@ -911,7 +911,7 @@ top-level keys** (422) — a typo can never silently no-op.
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | unset | Intended agent log level. **Not enforced yet** — see below. |
-| `scan_selections` | list of selections (max 100) | unset | The folder sets the agent should walk. **Not enforced yet.** |
+| `scan_selections` | list of selections (max 100) | unset | The folder sets the agent should walk. **Drives the agent's scan roots** (agent ≥ 2026-08-18): on every policy poll the agent expands the enabled selections with its shared path-spec engine and rewrites its `scan.json` root list from the result — the local roots editor is locked (`managed_by_central`) while a group manages roots. A bare Windows drive (`D:`) is normalised to the drive root `D:\`. Zero resolved roots is logged as a warning and nothing is scanned. |
 | `inventory` | object | unset | Inventory-collector configuration. **Not enforced yet.** |
 | `scan_schedule_cron` | 5-field cron (agent-local time) | unset | Scan schedule for the group's members. |
 | `web_ui_enabled` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
@@ -987,14 +987,14 @@ distinguishable from "configured, all off". (`permissions` itself has no checkbo
 until an agent advertises it; name it with **+ add another**.)
 
 !!! warning "Stored and delivered, but not acted on yet"
-    `log_level`, `scan_selections` and everything under `inventory` are
-    validated, versioned, and pushed to the agent, but **no shipped agent build
-    reads them yet** — the collectors and the selection-driven scan are agent-side
-    scaffold, and the agent's log level still comes only from its sidecar config,
-    `FILEARR_AGENT_LOG_LEVEL`, or the `-log-level` flag. The console marks these
-    fields with a *not enforced yet* chip. Authoring them now is safe and
-    forward-looking; it changes nothing on the fleet today. `scan_schedule_cron`
-    and the three local-access gates **are** live.
+    `log_level` and everything under `inventory` are validated, versioned, and
+    pushed to the agent, but **no shipped agent build reads them yet** — the
+    collectors are agent-side scaffold, and the agent's log level still comes
+    only from its sidecar config, `FILEARR_AGENT_LOG_LEVEL`, or the `-log-level`
+    flag. The console marks these fields with a *not enforced yet* chip.
+    Authoring them now is safe and forward-looking. `scan_selections` (agent ≥
+    2026-08-18), `scan_schedule_cron` and the three local-access gates **are**
+    live.
 
 
 ### Versions, history and rollback {#config-versions}

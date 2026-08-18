@@ -299,3 +299,16 @@ func TestOSHostProfilesSmoke(t *testing.T) {
 	}
 	_ = h.Profiles()
 }
+
+// A bare Windows drive ("D:") is drive-RELATIVE; the expander must normalise it
+// to the drive root (live 2026-08-18: a `d:` selection yielded no usable root).
+func TestExpandBareVolumeBecomesRoot(t *testing.T) {
+	if filepath.VolumeName(`D:\x`) == "" {
+		t.Skip("volume names only exist on Windows")
+	}
+	e := &Expander{}
+	res := e.Expand([]string{"d:"})
+	if len(res.Roots) != 1 || res.Roots[0] != `d:\` {
+		t.Fatalf("bare drive not normalised: %+v", res)
+	}
+}

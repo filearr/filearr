@@ -78,11 +78,16 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 		Logger:  newLogger(),
 	})
 	poller := agentcfg.NewPoller(agentcfg.PollerConfig{
-		Client:     newPolicyClient(certStore, centralURL, agentID, httpClient),
-		Cache:      agentcfg.NewETagCache(dataDir),
-		Applier:    &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger())},
-		Logger:     newLogger(),
-		AfterFetch: taxonomyRefreshHook(taxCache, taxClient, newLogger()),
+		Client:  newPolicyClient(certStore, centralURL, agentID, httpClient),
+		Cache:   agentcfg.NewETagCache(dataDir),
+		Applier: &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger())},
+		Logger:  newLogger(),
+		AfterFetch: chainAfterFetch(
+			taxonomyRefreshHook(taxCache, taxClient, newLogger()),
+			// scan_selections -> scan.json on every successful poll, so a root
+			// changed on central is live before the next scheduled scan.
+			func(_ context.Context, _ agentcfg.PolicyDoc) { applyCentralScanRoots(dataDir, newLogger()) },
+		),
 	})
 	done := make(chan struct{})
 	go func() {
@@ -92,6 +97,17 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 		}
 	}()
 	return done
+}
+
+// chainAfterFetch runs several AfterFetch hooks in order (nil entries skipped).
+func chainAfterFetch(hooks ...func(context.Context, agentcfg.PolicyDoc)) func(context.Context, agentcfg.PolicyDoc) {
+	return func(ctx context.Context, doc agentcfg.PolicyDoc) {
+		for _, h := range hooks {
+			if h != nil {
+				h(ctx, doc)
+			}
+		}
+	}
 }
 
 // taxonomyRefreshHook returns a poller AfterFetch callback that version-gates a

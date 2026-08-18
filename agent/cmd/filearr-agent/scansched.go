@@ -18,10 +18,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -200,8 +202,32 @@ func runScanChild(ctx context.Context, cfg *config) error {
 		args = append(args, "-log-level", cfg.LogLevel)
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	return cmd.Run()
+	// Keep the child's last stderr lines: "exit status 1" alone told the
+	// operator nothing (live 2026-08-18 -- the reason, "no roots configured",
+	// lived only in the child's own log file).
+	var tail tailBuffer
+	cmd.Stderr = &tail
+	err = cmd.Run()
+	if err != nil {
+		if t := strings.TrimSpace(tail.String()); t != "" {
+			return fmt.Errorf("%w: %s", err, t)
+		}
+	}
+	return err
 }
+
+// tailBuffer keeps the last ~2 KiB written to it.
+type tailBuffer struct{ b []byte }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > 2048 {
+		t.b = t.b[len(t.b)-2048:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.b) }
 
 // runScanScheduler is the loop body (child runner injected for tests).
 func runScanScheduler(

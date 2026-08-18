@@ -115,12 +115,16 @@ func runScan(args []string) error {
 		return err
 	}
 
+	// Central scan_selections (config group policy) DERIVE the roots: refresh
+	// scan.json from the cached policy first, so a scan always runs against the
+	// current fleet configuration (an explicit -root still merges on top).
+	applyCentralScanRoots(cfg.DataDir, newLogger())
 	sc, err := loadOrInitScanConfig(cfg.DataDir, roots)
 	if err != nil {
 		return err
 	}
 	if len(sc.Roots) == 0 {
-		return fmt.Errorf("no roots configured (pass -root or add them to %s)", filepath.Join(cfg.DataDir, scanConfigName))
+		return fmt.Errorf("no roots configured (pass -root, add them in the agent's web UI, or set scan selections in the agent's config group on central; file: %s)", filepath.Join(cfg.DataDir, scanConfigName))
 	}
 
 	// Central policy (P5-T6) overlays scan.json: for the keys it sets, policy WINS
@@ -385,6 +389,37 @@ func loadOrInitScanConfig(dataDir string, roots []string) (scanConfig, error) {
 		}
 	}
 	return sc, nil
+}
+
+// setCentralScanRoots REPLACES scan.json's root list with the centrally derived
+// one (other scan.json fields untouched). Returns whether the list changed. A
+// no-op write is skipped so a policy poll every few minutes never churns the
+// file (the daemon and the scan child read it from different processes).
+func setCentralScanRoots(dataDir string, roots []string) (bool, error) {
+	path := filepath.Join(dataDir, scanConfigName)
+	var sc scanConfig
+	if buf, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(buf, &sc); err != nil {
+			return false, fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	want := mergeAbs(nil, roots)
+	if len(want) == len(sc.Roots) {
+		same := true
+		for i := range want {
+			if want[i] != sc.Roots[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return false, nil
+		}
+	}
+	sc.Roots = want
+	return true, writeScanConfig(path, sc)
 }
 
 // mergeAbs unions existing roots with new (absolutised) ones, order-preserving.

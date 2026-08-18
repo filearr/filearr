@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -87,10 +88,9 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// W6-D3 consumption seam: resolve the group scan_selections policy into the
-		// effective scan-root set once at startup (logged + persisted), WITHOUT
-		// starting a scan — proves the policy vocabulary resolves end-to-end.
-		consumeScanRootSeam(envOr(envDataDir, defaultDataDir()))
+		// Resolve the group scan_selections policy into the effective scan roots
+		// once at startup (and again after every policy fetch — see policy.go).
+		applyCentralScanRoots(envOr(envDataDir, defaultDataDir()), newLogger())
 		// Run only returns on ctx cancellation (a poll failure backs off, never
 		// exits); a non-cancel error is logged but must not crash the daemon.
 		if err := poller.Run(ctx); err != nil && ctx.Err() == nil {
@@ -258,36 +258,55 @@ func agentHealthProvider(idx *index.Store, dataDir string, startedAt time.Time, 
 	}
 }
 
-// consumeScanRootSeam reads the cached group policy, expands its scan_selections
-// into the effective scan-root set via the SHARED pathspec engine, and LOGS +
-// PERSISTS the result to <dataDir>/inventory/scan-roots.json. It deliberately does
-// NOT start a scan (W6-D3): auto-start from a group policy is a follow-up that must
-// coordinate with the scan scheduler/cancellation path. Best-effort throughout — a
-// missing cache or unwritable dir is logged at debug and never fatal.
-func consumeScanRootSeam(dataDir string) {
-	log := newLogger()
+// applyCentralScanRoots is the policy->roots consumption path. It reads the
+// cached group policy, expands its scan_selections into the effective scan-root
+// set via the SHARED pathspec engine, persists the resolved set to
+// <dataDir>/inventory/scan-roots.json (diagnostics), and -- when at least one
+// enabled selection exists -- WRITES those roots into scan.json so the scan
+// command, the scheduler and the local web UI all see them. Until 2026-08-18
+// this was a "seam only": the roots were logged and persisted but scan.json was
+// never touched, so a fleet whose roots were configured centrally scanned
+// nothing (live: XENON, `d:` selection, "no roots configured" every 2 h) while
+// the local roots editor refused edits as managed_by_central. Returns the roots
+// and whether central manages them. Best-effort throughout: a missing cache or
+// unwritable dir is logged and never fatal.
+func applyCentralScanRoots(dataDir string, log *slog.Logger) (roots []string, managed bool) {
 	doc, ok, err := agentcfg.NewETagCache(dataDir).Load()
 	if err != nil || !ok {
-		return // no cached policy yet; nothing to consume
+		return nil, false // no cached policy yet; nothing to consume
 	}
 	res := inventory.ExpandScanSelections(pathspec.OSHost(), doc.Policy)
 	if res.SelectionsCount == 0 {
-		return // no group scan_selections configured
+		return nil, false // no group scan_selections configured -> local roots rule
 	}
-	log.Info("group scan_selections resolved (seam only — no scan started)",
-		"selections", res.SelectionsCount, "roots", len(res.Roots), "truncated", res.Truncated)
 	dir := filepath.Join(dataDir, "inventory")
-	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
-		agentlog.Verbose(log, "scan-root seam: cannot create dir", "err", mkErr)
-		return
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr == nil {
+		if blob, mErr := json.MarshalIndent(res, "", "  "); mErr == nil {
+			if wErr := os.WriteFile(filepath.Join(dir, "scan-roots.json"), blob, 0o644); wErr != nil {
+				agentlog.Verbose(log, "scan-roots: cannot persist resolution", "err", wErr)
+			}
+		}
 	}
-	blob, mErr := json.MarshalIndent(res, "", "  ")
-	if mErr != nil {
-		return
+	for spec, msg := range res.Errors {
+		log.Warn("scan_selections: spec could not be expanded", "spec", spec, "err", msg)
 	}
-	if wErr := os.WriteFile(filepath.Join(dir, "scan-roots.json"), blob, 0o644); wErr != nil {
-		agentlog.Verbose(log, "scan-root seam: cannot persist", "err", wErr)
+	changed, werr := setCentralScanRoots(dataDir, res.Roots)
+	if werr != nil {
+		log.Error("scan_selections: could not write scan roots", "err", werr)
+		return res.Roots, true
 	}
+	if changed {
+		log.Info("scan roots derived from central scan_selections",
+			"selections", res.SelectionsCount, "roots", res.Roots, "truncated", res.Truncated)
+	} else {
+		agentlog.Verbose(log, "scan roots from central scan_selections unchanged",
+			"selections", res.SelectionsCount, "roots", len(res.Roots))
+	}
+	if len(res.Roots) == 0 {
+		log.Warn("scan_selections resolved to ZERO roots -- nothing will be scanned until a selection expands to an existing path",
+			"selections", res.SelectionsCount, "errors", len(res.Errors))
+	}
+	return res.Roots, true
 }
 
 // uploadRateProvider returns the per-agent staging-upload rate cap (bytes/sec, 0

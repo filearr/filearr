@@ -123,6 +123,13 @@ func (e *Expander) expandOne(spec string) ([]string, error) {
 	// Convert POSIX-style separators to native so a lenient spec globs correctly
 	// on either OS, then clean.
 	native := filepath.Clean(filepath.FromSlash(expanded))
+	// A bare Windows drive ("D:") is DRIVE-RELATIVE in Go/Win32 (it means "the
+	// current directory on D:"), not the drive root -- an operator who types
+	// `D:` in a scan selection means `D:\`. Normalise so the root is absolute
+	// and stable (live 2026-08-18: `d:` produced no usable scan root).
+	if vol := filepath.VolumeName(native); vol != "" && vol == native {
+		native += string(filepath.Separator)
+	}
 	if !hasGlobMeta(native) {
 		return []string{native}, nil
 	}

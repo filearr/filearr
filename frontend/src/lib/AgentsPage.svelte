@@ -3232,7 +3232,8 @@ ${detail}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">Scan selections</span>
-            {@render notEnforced("Central validates, stores and delivers these, and the agent can expand them into scan roots — but no shipped build starts a scan from them yet. The agent's scan roots still come from its sidecar/CLI configuration.")}
+            <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+              title="Agents on this group derive their scan roots from these selections: every policy poll rewrites the agent's scan.json root list (its local roots editor is locked while a group manages roots). A bare Windows drive such as D: means the drive root. Agent build 2026-08-18 or newer.">drives scan roots</span>
             <div class="grow"></div>
             <button class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700"
               onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</button>
