@@ -372,14 +372,24 @@ async def _confirmed_count(session: AsyncSession, version: str) -> int:
 # has NO defined ordering: for those, "differs from current" is the only
 # meaningful update signal (string equality means "the exact current build").
 _CLEAN_VERSION = re.compile(r"^[vV]?\d+(\.\d+)*([-+].*)?$")
+#: Pre-release part of a CI build stamp ("1.5.0-a8396e8"): a short git sha, which
+#: carries NO ordering. Mirrors the Go ``update.shaStampRe``.
+_SHA_STAMP = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 def _should_offer(candidate: str, current: str) -> bool:
     """Mirror of the Go ``update.ShouldApply``: semver ordering when both sides
-    are clean release tags, plain inequality otherwise."""
+    are clean release tags, plain inequality otherwise -- and plain inequality
+    too when the release parts are equal and either side is sha-stamped
+    (live 2026-08-18: 1.5.0-a8396e8 was 'older' than 1.5.0-fe31b85, so the new
+    central build was never offered)."""
     if not current:
         return True
     if _CLEAN_VERSION.match(candidate) and _CLEAN_VERSION.match(current):
+        cr, cp = _split_version(candidate)
+        rr, rp = _split_version(current)
+        if _compare_release(cr, rr) == 0 and (_SHA_STAMP.match(cp) or _SHA_STAMP.match(rp)):
+            return candidate != current
         return _version_newer(candidate, current)
     return candidate != current
 

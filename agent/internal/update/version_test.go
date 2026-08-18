@@ -49,6 +49,14 @@ func TestShouldApply(t *testing.T) {
 		{"1.4.0", "1.5.0", false},
 		{"v1.4.0", "1.4.0", false},
 		{"1.4.0-rc1", "1.4.0", false},
+		// sha-stamped CI builds (agent/VERSION + sha7): same release -> plain
+		// inequality, whichever way the hex happens to sort (live 2026-08-18)
+		{"1.5.0-a8396e8", "1.5.0-fe31b85", true},
+		{"1.5.0-fe31b85", "1.5.0-a8396e8", true},
+		{"1.5.0-a8396e8", "1.5.0-a8396e8", false},
+		{"1.5.1-0000000", "1.5.0-fe31b85", true},  // release still orders
+		{"1.5.0-fe31b85", "1.5.1-0000000", false}, // never downgrade a release
+		{"1.5.0", "1.5.0-a8396e8", true},          // clean tag over a stamp of the same release
 		// decorated builds: plain inequality (track the exact central build)
 		{"main-1a2b3c4", "main-0000000", true},
 		{"main-1a2b3c4", "main-1a2b3c4", false},

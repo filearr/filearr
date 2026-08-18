@@ -301,3 +301,19 @@ async def test_admin_gated_when_auth_enabled(client, monkeypatch):
     # No credentials -> 401/403 (admin scope required), never 201.
     r = await c.post("/api/v1/agent-releases", json=m)
     assert r.status_code in (401, 403)
+
+
+def test_should_offer_sha_stamped_builds_use_inequality():
+    """Mirror of Go update.ShouldApply: same release + sha stamp -> 'differs'
+    (the hex has no ordering; live 2026-08-18 the newer central build sorted
+    'older' and was never offered). Release parts still order."""
+    from filearr.api.agent_updates import _should_offer
+
+    assert _should_offer("1.5.0-a8396e8", "1.5.0-fe31b85") is True
+    assert _should_offer("1.5.0-fe31b85", "1.5.0-a8396e8") is True
+    assert _should_offer("1.5.0-a8396e8", "1.5.0-a8396e8") is False
+    assert _should_offer("1.5.1-0000000", "1.5.0-fe31b85") is True
+    assert _should_offer("1.5.0-fe31b85", "1.5.1-0000000") is False
+    assert _should_offer("1.5.0", "1.5.0-a8396e8") is True
+    assert _should_offer("1.4.0", "1.5.0") is False
+    assert _should_offer("main-1a2b3c4", "main-0000000") is True

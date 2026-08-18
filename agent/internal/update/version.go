@@ -57,6 +57,14 @@ func IsNewer(candidate, current string) bool {
 // components have no defined ordering.
 var cleanVersionRe = regexp.MustCompile(`^[vV]?\d+(\.\d+)*([-+].*)?$`)
 
+// shaStampRe matches the pre-release part of a CI build stamp: "1.5.0-a8396e8"
+// (agent/VERSION + short git sha, the shape every build path emits since
+// 2026-08-07). Such a stamp LOOKS like semver but the sha carries no ordering:
+// comparing "1.5.0-a8396e8" against "1.5.0-fe31b85" as pre-releases said the
+// newer build was OLDER ('a' < 'f') and it was never offered/applied (live
+// 2026-08-18: an agent stayed on the previous central build).
+var shaStampRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+
 // ShouldApply decides whether an offered manifest version should replace the
 // running one. Clean release tags on BOTH sides use semver ordering (never
 // downgrade); any decorated build (branch-sha stamps) falls back to plain
@@ -68,6 +76,15 @@ func ShouldApply(candidate, current string) bool {
 		return false
 	}
 	if cleanVersionRe.MatchString(candidate) && cleanVersionRe.MatchString(current) {
+		cr, cp := splitVersion(candidate)
+		rr, rp := splitVersion(current)
+		// Same release, sha-stamped on either side: the sha has no ordering,
+		// so "differs" is the contract (track the exact published build).
+		// A different RELEASE still orders (1.5.1-<sha> > 1.5.0-<sha>, and a
+		// clean 1.5.0 never regresses to a 1.4.x stamp).
+		if compareRelease(cr, rr) == 0 && (shaStampRe.MatchString(cp) || shaStampRe.MatchString(rp)) {
+			return candidate != current
+		}
 		return IsNewer(candidate, current)
 	}
 	return candidate != current
