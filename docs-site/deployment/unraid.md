@@ -68,7 +68,10 @@ bash /boot/config/plugins/filearr/setup-unraid.sh --local-dir /path/to/filearr/u
 
 `--reconfigure` re-asks the questions and `--force` rewrites templates for
 containers that already exist; `--help` lists the rest. Nothing regenerates a
-secret that already exists, ever.
+secret that already exists, ever. A plain re-run on an existing install keeps
+your templates but **merges in any fields upstream has added since** (at their
+defaults — open the container's Edit page and Apply to pick them up), so you
+never need `--force` just to get a new knob.
 
 ### What it does, and what it leaves to you
 

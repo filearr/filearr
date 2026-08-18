@@ -1223,6 +1223,42 @@ fetch_template() {
   grep -q '</Container>' "$dest" || die "${name}.xml looks truncated"
 }
 
+# merge_new_configs NAME FILE: fetch the pristine upstream template and append
+# every <Config> it has that FILE lacks (matched by Name+Target, the same key
+# carry_over_configs uses) just before </Container>. Nothing existing is
+# touched. New fields land at their upstream defaults; the operator fills them
+# on the Edit page (or, for wizard-owned ones, via --reconfigure). Prints what
+# it added so the run is truthful about the "skipped" template.
+merge_new_configs() {
+  local name="$1" file="$2" pristine line key added=0 names=""
+  pristine="$(mktemp)"
+  if ! fetch_template "$name" "$pristine" 2>/dev/null; then
+    rm -f "$pristine"
+    info "my-${name}.xml: kept as-is (container '${name}' exists; could not fetch upstream to check for new fields)"
+    return 0
+  fi
+  local tmp; tmp="$(mktemp)"
+  while IFS= read -r line; do
+    key="$(sed -n 's/.*<Config \(Name="[^"]*" Target="[^"]*"\).*/\1/p' <<<"$line")"
+    [[ -n "$key" ]] || continue
+    grep -qF -- "<Config ${key}" "$file" && continue
+    printf '%s\n' "$line" >> "$tmp"
+    added=$((added+1))
+    names="${names} $(sed -n 's/.*<Config Name="\([^"]*\)".*/\1/p' <<<"$line")"
+  done < <(grep -F '<Config ' "$pristine")
+  if [[ "$added" -gt 0 ]]; then
+    local out; out="$(mktemp)"
+    awk -v ins="$tmp" '
+      index($0, "</Container>") > 0 && !done { while ((getline l < ins) > 0) print l; close(ins); done=1 }
+      { print }' "$file" > "$out"
+    cat "$out" > "$file"; rm -f "$out"
+    info "my-${name}.xml: kept (container '${name}' exists) — added ${added} new upstream field(s):${names}. Open the container's Edit page and Apply to pick them up."
+  else
+    info "my-${name}.xml: kept as-is — container '${name}' exists and no new upstream fields (use --force to regenerate)"
+  fi
+  rm -f "$tmp" "$pristine"
+}
+
 # Should this container's template be (re)generated? No, if the container
 # already exists — Unraid rewrote my-<name>.xml on Apply and it now holds the
 # operator's own edits. --force overrides.
@@ -1288,7 +1324,21 @@ generate_templates() {
   for name in $order; do
     f="${TEMPLATE_DIR}/my-${name}.xml"
     if ! should_generate "$name"; then
-      info "my-${name}.xml: SKIPPED — container '${name}' exists (use --force to overwrite)"
+      # The container exists, so my-<name>.xml holds the operator's own edits
+      # and is NOT regenerated. But upstream may have ADDED fields since (live
+      # 2026-08-17: HF_TOKEN never reached an existing install without
+      # --force, which is the wrong tool for "pick up one new field"). Merge
+      # only the <Config> entries the existing template lacks -- values,
+      # ordering and everything else untouched -- so the Edit page shows the
+      # new knob at its upstream default after the next Apply.
+      if [[ -f "$f" ]]; then
+        merge_new_configs "$name" "$f"
+        # A wizard-owned secret answered since (--reconfigure) fills its
+        # freshly merged field; blank stays blank (anonymous download).
+        if [[ "$name" == "filearr" && -n "$hftok" ]]; then set_cfg "$f" 'Target="HF_TOKEN"' "$hftok"; fi
+      else
+        info "my-${name}.xml: SKIPPED — container '${name}' exists (use --force to overwrite)"
+      fi
       continue
     fi
     # Regenerating over an existing template (--force) starts from the pristine
