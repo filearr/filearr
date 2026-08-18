@@ -2342,6 +2342,10 @@ ${detail}
                     class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
                     title={`A newer agent build exists (${a.update_target}). This agent runs in a container, which updates by pulling the new agent image on its host — central never swaps binaries inside a container.`}
                     >newer image available</span>
+                {:else if a.update_available && a.update_hold}
+                  <span
+                    class="ml-1 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    title={`${a.update_target} is available but this agent's policy holds it: ${a.update_hold}. The update action still applies it immediately (the click is the authorization).`}>update held</span>
                 {:else if a.update_available}
                   <span
                     class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
@@ -3347,6 +3351,13 @@ ${detail}
                             class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
                             title={fieldTitle(f)}
                             placeholder="0 3 * * *"
+                            value={dialog.policyForm[f.key].value}
+                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                        {:else if f.kind === "text"}
+                          <input
+                            class="mt-1 block w-80 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+                            title={fieldTitle(f)}
+                            placeholder={f.placeholder ?? ""}
                             value={dialog.policyForm[f.key].value}
                             oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
                         {:else if f.kind === "presets"}

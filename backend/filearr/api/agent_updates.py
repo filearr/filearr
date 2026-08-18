@@ -49,7 +49,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agent_config, audit
+from filearr import agent_config, audit, update_gate
 from filearr.api import agent_dist
 from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
@@ -536,8 +536,12 @@ async def get_update_manifest(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     effective = await agent_config.resolve_effective_config(session, agent)
-    auto = effective.document.get("auto_update")
-    if auto is False and not await _pending_self_update(session, agent_id):
+    # auto_update (whether) + update_not_before / update_window (when): all
+    # three are the same server-side gate, all bypassed by an operator's
+    # queued self_update (the click is the authorization).
+    if update_gate.hold_reason(effective.document) and not await _pending_self_update(
+        session, agent_id
+    ):
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     releases = (

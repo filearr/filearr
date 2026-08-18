@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { textShapeError } from "../src/lib/agentPolicyDoc.ts";
 import {
   EDITABLE_POLICY_KEYS,
   POLICY_FIELDS,
@@ -431,3 +432,21 @@ test("cronShapeError catches the obvious typos, accepts 5 fields", () => {
 // policy scopes with per-key layering across configuration groups. The merge
 // order, tie-break and provenance rules that took their place are pinned in
 // configGroups.node.test.ts.
+
+// --- update_window / update_not_before (2026-08-18) -------------------------
+test("text policy keys: shape checks and round-trip", () => {
+  assert.equal(textShapeError("update_window", "sat,sun 02:00-05:00"), null);
+  assert.equal(textShapeError("update_window", "* 01:00-04:00 America/Chicago"), null);
+  assert.equal(textShapeError("update_window", "mon-fri 22:00-04:00"), null);
+  assert.match(textShapeError("update_window", "weekend 02:00-05:00") ?? "", /unknown day/);
+  assert.match(textShapeError("update_window", "sat 25:00-05:00") ?? "", /out of range/);
+  assert.match(textShapeError("update_window", "sat 02:00-02:00") ?? "", /same minute/);
+  assert.match(textShapeError("update_window", "") ?? "", /required/);
+  assert.equal(textShapeError("update_not_before", "2026-08-23T02:00"), null);
+  assert.match(textShapeError("update_not_before", "next tuesday") ?? "", /ISO-8601/);
+  const form = formFromDoc({ update_window: "sat,sun 02:00-05:00", update_not_before: "2026-08-23T02:00" });
+  assert.equal(form.update_window.set, true);
+  const doc = buildPolicyDoc(form);
+  assert.equal(doc.update_window, "sat,sun 02:00-05:00");
+  assert.equal(doc.update_not_before, "2026-08-23T02:00");
+});

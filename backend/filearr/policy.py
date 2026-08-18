@@ -129,6 +129,14 @@ class PolicyModel(BaseModel):
     # key and nothing else. An operator-triggered self_update command bypasses
     # the gate entirely (the click IS the authorization).
     auto_update: bool | None = None
+    #: WHEN central offers updates (2026-08-18), layered on ``auto_update``:
+    #: ``update_window`` = "<days> HH:MM-HH:MM [IANA zone]" (only inside the
+    #: window; zone absent = central local); ``update_not_before`` = ISO-8601
+    #: datetime (nothing offered before it; "release now" = unset). Both are
+    #: enforced server-side on the manifest poll and bypassed by the operator's
+    #: per-agent update action. Pure evaluation lives in filearr.update_gate.
+    update_window: str | None = None
+    update_not_before: str | None = None
 
     # --- agent-side content extraction (2026-08-09 parity pass) -------------
     # archive/docs/agent-parity-design.md §"Policy keys". The agent runs the
@@ -197,6 +205,32 @@ class PolicyModel(BaseModel):
             except InvalidCronError as exc:
                 raise ValueError(f"invalid scan_cron: {exc}") from exc
         return v
+
+    @field_validator("update_window")
+    @classmethod
+    def _valid_update_window(cls, v: str | None) -> str | None:
+        if v is not None and v.strip():
+            from filearr.update_gate import parse_update_window
+
+            try:
+                parse_update_window(v)
+            except ValueError as exc:
+                raise ValueError(f"invalid update_window: {exc}") from exc
+            return v.strip()
+        return None if v is not None and not v.strip() else v
+
+    @field_validator("update_not_before")
+    @classmethod
+    def _valid_update_not_before(cls, v: str | None) -> str | None:
+        if v is not None and v.strip():
+            from filearr.update_gate import parse_not_before
+
+            try:
+                parse_not_before(v)
+            except ValueError as exc:
+                raise ValueError(f"invalid update_not_before: {exc}") from exc
+            return v.strip()
+        return None if v is not None and not v.strip() else v
 
     @field_validator("presets")
     @classmethod

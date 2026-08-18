@@ -39,6 +39,8 @@ export interface AgentPolicyDoc {
   scan_on_start?: boolean;
   upload_rate_bytes_per_sec?: number;
   auto_update?: boolean;
+  update_window?: string;
+  update_not_before?: string;
   extract_enabled?: boolean;
   extract_body_text?: boolean;
   extract_ocr?: boolean;
@@ -98,7 +100,7 @@ export const POLICY_SECTIONS: { id: PolicySection; label: string; blurb: string 
   { id: "updates", label: "Updates", blurb: "Self-update offers." },
 ];
 
-export type PolicyFieldKind = "bool" | "int" | "lines" | "cron" | "presets";
+export type PolicyFieldKind = "bool" | "int" | "lines" | "cron" | "presets" | "text";
 
 /** Who actually acts on a key TODAY — surfaced honestly in the UI so an
  *  operator never believes a stored setting is doing something it isn't. */
@@ -116,6 +118,8 @@ export interface PolicyFieldSpec {
   /** What happens when the key is absent from the winning document. */
   fallback: string;
   enforcedBy: EnforcedBy;
+  /** For kind "text": input placeholder. */
+  placeholder?: string;
 }
 
 export const POLICY_FIELDS: PolicyFieldSpec[] = [
@@ -362,6 +366,26 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     fallback: "on",
     enforcedBy: "central",
   },
+  {
+    key: "update_window",
+    label: "Update window",
+    kind: "text",
+    section: "updates",
+    hint: "WHEN central offers updates: '<days> HH:MM-HH:MM [zone]'. Days = * or a list/range of mon..sun (the day the window STARTS; an end before the start wraps past midnight). Zone = IANA name; absent = the central server's local time zone. Enforced by CENTRAL on the poll; the per-agent update action bypasses it. Example: sat,sun 02:00-05:00",
+    fallback: "any time",
+    enforcedBy: "central",
+    placeholder: "sat,sun 02:00-05:00 America/Chicago",
+  },
+  {
+    key: "update_not_before",
+    label: "Hold updates until",
+    kind: "text",
+    section: "updates",
+    hint: "ISO-8601 date-time before which central offers nothing (naive = the central server's local time). 'Release now' = switch this back to Inherit or set a past time. Enforced by CENTRAL; the per-agent update action bypasses it. Example: 2026-08-23T02:00",
+    fallback: "no hold",
+    enforcedBy: "central",
+    placeholder: "2026-08-23T02:00",
+  },
 ];
 
 /** Keys the form renders as editable fields. */
@@ -427,6 +451,7 @@ export function formFromDoc(doc: AgentPolicyDoc | null | undefined): PolicyFormS
           form[f.key] = { set: true, value: String(raw) };
         break;
       case "cron":
+      case "text":
         if (typeof raw === "string") form[f.key] = { set: true, value: raw };
         break;
       case "lines":
@@ -507,6 +532,7 @@ export function buildPolicyDoc(
         doc[f.key] = Number(state.value);
         break;
       case "cron":
+      case "text":
         doc[f.key] = state.value.trim();
         break;
       case "lines":
@@ -542,6 +568,34 @@ export const MAX_PATH_SCOPE_PREDICATES = 1000;
 
 /** Per-key error messages for the fields currently set. `knownPresets` (from
  *  GET /presets) enables the preset-name check; omit it to skip that check. */
+/** Client-side shape check for the text policy keys (the server re-validates
+ *  and is authoritative — this only catches obvious typos before a round trip). */
+export function textShapeError(key: string, raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return "a value is required (or switch the field to Inherit)";
+  if (key === "update_window") {
+    const m = /^(\*|[a-z,\-]+)\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})(?:\s+\S+)?$/i.exec(v);
+    if (!m) return "expected '<days> HH:MM-HH:MM [zone]', e.g. sat,sun 02:00-05:00";
+    const days = m[1].toLowerCase();
+    if (days !== "*") {
+      const ok = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+      for (const part of days.split(",")) {
+        for (const d of part.split("-")) if (!ok.includes(d)) return `unknown day '${d}' (mon..sun or *)`;
+      }
+    }
+    for (const [h, mi] of [[m[2], m[3]], [m[4], m[5]]]) {
+      if (Number(h) > 23 || Number(mi) > 59) return `time out of range ${h}:${mi}`;
+    }
+    if (`${m[2]}:${m[3]}` === `${m[4]}:${m[5]}`) return "start and end are the same minute";
+    return null;
+  }
+  if (key === "update_not_before") {
+    if (Number.isNaN(Date.parse(v))) return "not an ISO-8601 date-time (e.g. 2026-08-23T02:00)";
+    return null;
+  }
+  return null;
+}
+
 export function validatePolicyForm(
   form: PolicyFormState,
   opts: { knownPresets?: readonly string[] } = {},
@@ -565,6 +619,9 @@ export function validatePolicyForm(
       else if (f.max !== undefined && n > f.max) errors[f.key] = `must be ≤ ${f.max}`;
     } else if (f.kind === "cron") {
       const err = cronShapeError(state.value);
+      if (err) errors[f.key] = err;
+    } else if (f.kind === "text") {
+      const err = textShapeError(f.key, state.value);
       if (err) errors[f.key] = err;
     } else if (f.kind === "presets") {
       const known = opts.knownPresets;

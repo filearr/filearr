@@ -212,6 +212,10 @@ class AgentOut(BaseModel):
     # makes an update available, and whether a self_update command is already
     # in flight. Drives the console's badge + per-agent update button.
     update_available: bool = False
+    #: Why central is currently NOT offering that update on the agent's own poll
+    #: (auto_update off / update_not_before / outside update_window), or None.
+    #: The per-agent update action still works -- it bypasses the gate.
+    update_hold: str | None = None
     update_target: str | None = None
     update_pending: bool = False
 
@@ -1005,6 +1009,7 @@ async def list_agents(
     # offered" resolution per row (releases are read once inside; the page is
     # <=200 rows) + one grouped query for in-flight self_update commands.
     # Deferred import: agent_updates imports require_agents_enabled from here.
+    from filearr import agent_config, update_gate
     from filearr.api.agent_updates import resolve_update_target
     from filearr.models import AgentCommand, AgentConfigGroupMember, AgentRelease
 
@@ -1047,6 +1052,11 @@ async def list_agents(
             out.update_target = target
             out.update_available = target is not None
             out.update_pending = a.id in pending_ids
+            if target is not None and not out.update_pending:
+                # Same evaluation the manifest poll applies (filearr.update_gate),
+                # so the badge tells the truth about WHY nothing is happening.
+                eff = await agent_config.resolve_effective_config(session, a)
+                out.update_hold = update_gate.hold_reason(eff.document)
         items.append(out)
     return AgentPage(items=items, total=total, limit=limit, offset=offset)
 

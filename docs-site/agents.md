@@ -1508,6 +1508,8 @@ actually acts on the value.
 | `local_roots_control` | bool | **off** | agent | Lets the agent's own web UI add/remove **its** scan roots. Still refused when the agent's config group derives roots from `scan_selections`. |
 | `read_only` | bool | true | agent | **Always `true`.** The local surface is read-only by invariant; a `false` is rejected with a 422 rather than normalised. Not editable in the console. This is about the **catalog** and is unaffected by the three `local_*_control` keys, which delegate agent self-administration only. |
 | `auto_update` | bool | on | **central** | Whether central *offers* an update on this agent's update-manifest poll (the poll answers `204` when off), so it gates every agent build uniformly — including old ones. An operator-triggered update from the agents table bypasses it: the click *is* the authorization. |
+| `update_window` | string | any time | **central** | *When* central offers updates: `<days> HH:MM-HH:MM [zone]`, e.g. `sat,sun 02:00-05:00` or `* 01:00-04:00 America/Chicago`. Days: `*` or a list/range of `mon..sun` (the day the window **starts**; an end before the start wraps past midnight). Zone: IANA name; absent = the central server's local zone. Outside the window the poll answers `204`. Bypassed by the per-agent update action. |
+| `update_not_before` | string | no hold | **central** | ISO-8601 date-time (naive = central-local) before which the poll answers `204` — "release at 02:00 tonight". **Release now** = set the key back to *Inherit* (or a past time). Bypassed by the per-agent update action. |
 
 Two more keys appear in a delivered document but are **not operator-settable**:
 
@@ -1727,13 +1729,26 @@ re-sign a manifest, so a compromised central cannot push a wrongly-signed binary
 
 **Every uploaded release is generally visible** once all its artifacts are
 present — there is no separate staging step to promote through. What controls
-who actually takes it is the `auto_update` key in a
-[configuration group](#two-groupings): leave it on where you want the fleet to
-follow releases, set it `false` in a group whose members should hold, and use
-the per-agent **update** action (which bypasses the gate — the click is the
-authorization) to bring machines forward one at a time. Phased tiers currently
-cover configuration, not binaries; attaching releases to the same tier engine is
-a roadmap item.
+who actually takes it, and when, are three keys in a
+[configuration group](#two-groupings), all enforced by central on the poll and
+all bypassed by the per-agent **update** action (the click is the
+authorization):
+
+- `auto_update` — *whether*: leave it on where the fleet should follow releases,
+  `false` in a group whose members should hold indefinitely.
+- `update_window` — *when*: e.g. `sat,sun 02:00-05:00` (central-local unless a
+  zone is given). Agents in the group only take updates inside the window; the
+  6-hourly update poll that lands inside it applies the update. Container
+  agents are unaffected (they update by image pull).
+- `update_not_before` — *not until*: an ISO-8601 date-time. Stage a release
+  ahead of time, set the group to `2026-08-23T02:00`, and the fleet moves at
+  02:00 that night on its next poll; **release now** by switching the key back to
+  *Inherit*.
+
+The Agents page shows **update held** (with the reason on hover) for a machine
+whose policy is holding an available update, so a quiet fleet is visibly
+*held*, not *up to date*. Phased tiers currently cover configuration, not
+binaries; attaching releases to the same tier engine is a roadmap item.
 
 **Rollback is automatic:** a newly swapped binary is on trial — it writes a boot
 counter and runs a 60-second health window on each launch. On pass it clears the
@@ -1764,7 +1779,9 @@ for the fleet to follow it**:
   the `auto_update` key (absent = on). Set it `false` in the **Global** group
   and `true` in a higher-priority group holding the machines you want to move
   first. Layering is per key, so that single key is all either group needs to
-  state — nothing else about their configuration changes.
+  state — nothing else about their configuration changes. `update_window` and
+  `update_not_before` (above) add *when* to that *whether* — the same
+  server-side gate, the same per-agent override.
 - **Console badge + button:** the Agents page shows **"update available"**
   next to any agent whose version differs from what central would offer, with
   an **update** action that queues the update for the agent's next check-in

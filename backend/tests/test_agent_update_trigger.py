@@ -111,10 +111,10 @@ async def _set_global_policy(maker, policy: dict):
             )
         ).scalars().one()
         group.policy = policy
-        group.current_version = 2
+        group.current_version = (group.current_version or 1) + 1
         s.add(
             AgentConfigGroupVersion(
-                group_id=group.id, version=2, settings={}, policy=policy
+                group_id=group.id, version=group.current_version, settings={}, policy=policy
             )
         )
         await s.commit()
@@ -317,3 +317,61 @@ async def test_container_agent_trigger_409_but_list_still_flags(client):
     assert row["update_target"] == DIST_VERSION
     assert row["update_pending"] is False
     assert row["capabilities"]["container"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Scheduled / held updates (2026-08-18): update_window + update_not_before      #
+# --------------------------------------------------------------------------- #
+async def test_update_not_before_holds_then_click_bypasses(client):
+    c, maker, _ = client
+    await _set_global_policy(maker, {"update_not_before": "2999-01-01T00:00:00Z"})
+    aid, fp = await _seed_agent(maker, version="main-0000000")
+    assert (await _poll(c, aid, fp, "main-0000000")).status_code == 204
+    r = await c.get("/api/v1/agents")
+    me = next(a for a in r.json()["items"] if a["id"] == str(aid))
+    assert me["update_available"] is True
+    assert "held until" in (me["update_hold"] or "")
+    # the operator's click is the authorization
+    assert (await c.post(f"/api/v1/agents/{aid}/self-update")).status_code == 201
+    r = await _poll(c, aid, fp, "main-0000000")
+    assert r.status_code == 200 and r.json()["version"] == DIST_VERSION
+
+
+async def test_update_window_outside_holds_inside_offers(client, monkeypatch):
+    c, maker, _ = client
+    # A window that is certainly closed now vs certainly open now, without
+    # depending on the wall clock: pick the current local weekday and hour.
+    from datetime import datetime
+
+    now = datetime.now().astimezone()
+    days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    today = days[now.weekday()]
+    other = days[(now.weekday() + 3) % 7]
+    aid, fp = await _seed_agent(maker, version="main-0000000")
+    await _set_global_policy(maker, {"update_window": f"{other} 00:00-23:59"})
+    assert (await _poll(c, aid, fp, "main-0000000")).status_code == 204
+    r = await c.get("/api/v1/agents")
+    me = next(a for a in r.json()["items"] if a["id"] == str(aid))
+    assert "outside the update window" in (me["update_hold"] or "")
+    await _set_global_policy(maker, {"update_window": f"{today} 00:00-23:59"})
+    assert (await _poll(c, aid, fp, "main-0000000")).status_code == 200
+
+
+async def test_update_gate_keys_validated_on_group_save(client):
+    c, maker, _ = client
+    r = await c.post(
+        "/api/v1/agents/config-groups",
+        json={"name": "held-fleet", "policy": {"update_window": "sometime soon"}},
+    )
+    assert r.status_code == 422, r.text
+    r = await c.post(
+        "/api/v1/agents/config-groups",
+        json={"name": "held-fleet", "policy": {"update_not_before": "later"}},
+    )
+    assert r.status_code == 422, r.text
+    r = await c.post(
+        "/api/v1/agents/config-groups",
+        json={"name": "held-fleet", "policy": {"update_window": "sat,sun 02:00-05:00",
+                                               "update_not_before": "2026-09-01T02:00"}},
+    )
+    assert r.status_code == 201, r.text

@@ -2858,6 +2858,9 @@ export interface AgentOut {
   update_available: boolean;
   update_target: string | null;
   update_pending: boolean;
+  /** Why central is not offering the update on the agent's own poll right now
+   *  (auto_update off / update_not_before / outside update_window); null = not held. */
+  update_hold?: string | null;
 }
 
 /** Paginated registered-agents listing — a fleet can reach hundreds or
