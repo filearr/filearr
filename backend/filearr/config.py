@@ -525,9 +525,14 @@ class Settings(BaseSettings):
     #     longer than ``job_stall_seconds`` is stalled regardless of heartbeat (an
     #     extract should never take an hour). scan_library is EXEMPT from the age
     #     net — a legitimate full-library walk can run long; it is reaped only via
-    #     the heartbeat net when its worker truly dies.
+    #     the heartbeat net when its worker truly dies -- as are the other
+    #     whole-catalog jobs listed in
+    #     ``worker.AGE_NET_EXEMPT_TASKS`` (nightly_reconcile, rebuild_index,
+    #     ...): a full shadow rebuild of a million-item catalog runs for hours
+    #     while perfectly healthy. ``job_stall_age_exempt_tasks`` adds more.
     job_stall_heartbeat_seconds: int = 30
     job_stall_seconds: int = 3600
+    job_stall_age_exempt_tasks: list[str] = []
 
     # --- FIX-15 (ScanRuns stuck in 'stopping'/'running') --------------------
     # The graceful-stop transition (``stopping`` -> ``stopped``) only happens

@@ -103,7 +103,8 @@ model and the source `config.py` for every field.
 | `FILEARR_WORKER_QUEUES` | *(all)* | Comma-separated queues a worker serves. |
 | `FILEARR_JOB_HISTORY_RETENTION_DAYS` | `14` | Purge terminal job rows older than this. |
 | `FILEARR_JOB_STALL_HEARTBEAT_SECONDS` | `30` | Heartbeat net for stalled jobs. |
-| `FILEARR_JOB_STALL_SECONDS` | `3600` | Age net for non-scan doing jobs. |
+| `FILEARR_JOB_STALL_SECONDS` | `3600` | Age net: a per-file/index/alert job still `doing` after this long is reaped even if its worker is alive. Whole-catalog jobs (`scan_library`, `nightly_reconcile`, `rebuild_index`, `reproject_library`, `rebuild_chunks_index`, `embed_missing`, `chunk_missing`, `backup_now`, `compact_meili`, `content_sniff`, `rehash_small_files`) are exempt — they legitimately run for hours and are reaped only by the heartbeat net. |
+| `FILEARR_JOB_STALL_AGE_EXEMPT_TASKS` | `[]` | Extra task names (JSON list) to exempt from the age net. |
 | `FILEARR_REAP_MAX_ATTEMPTS` | `10` | Requeue budget for a stalled non-scan job before it is failed. |
 | `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` | `2880` | Furthest-back missed cron a recovery tick fires (48h). |
 | `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` | `600` | Grace before finalizing an orphaned scan run. |

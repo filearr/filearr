@@ -204,6 +204,34 @@ async def test_scan_library_exempt_from_age_net(proc_app_pg):
         assert _status(conn, jid) == "doing"
 
 
+async def test_whole_catalog_jobs_exempt_from_age_net(proc_app_pg, monkeypatch):
+    """nightly_reconcile (a multi-hour shadow rebuild) with a LIVE worker is NOT
+    reaped by the age net (live 2026-08-17: it was, and a second copy ran
+    concurrently). Extra names come from settings.job_stall_age_exempt_tasks."""
+    from filearr.config import get_settings
+    from filearr.worker import reap_stalled_jobs_now
+
+    monkeypatch.setattr(get_settings(), "job_stall_age_exempt_tasks", ["custom.slow_task"])
+    with _conn(proc_app_pg) as conn:
+        wid = _insert_worker(conn, seconds_ago=2)  # alive
+        j1 = _insert_job(
+            conn, task="filearr.worker.nightly_reconcile", queue="maintenance", worker_id=wid
+        )
+        _insert_started(conn, j1, seconds_ago=7200)
+        j2 = _insert_job(conn, task="custom.slow_task", queue="maintenance", worker_id=wid)
+        _insert_started(conn, j2, seconds_ago=7200)
+        j3 = _insert_job(conn, task=EXTRACT_TASK, worker_id=wid)  # control: still reaped
+        _insert_started(conn, j3, seconds_ago=7200)
+
+    counts = await reap_stalled_jobs_now()
+
+    assert counts["reaped"] == 1
+    with _conn(proc_app_pg) as conn:
+        assert _status(conn, j1) == "doing"
+        assert _status(conn, j2) == "doing"
+        assert _status(conn, j3) == "todo"
+
+
 # --------------------------------------------------------------------------- #
 # retry semantics + lock finding                                              #
 # --------------------------------------------------------------------------- #

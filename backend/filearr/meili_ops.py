@@ -735,8 +735,17 @@ async def rebuild_via_swap(*, wait_s: float | None = None) -> int:
     async with client() as c:
         # Defensive: a within-the-same-second retry could reuse the name; drop any
         # leftover partial before (re)creating so create_index cannot collide.
-        await c.delete_index_if_exists(shadow_name)
-        shadow = await c.create_index(shadow_name, primary_key="id")
+        # Both waits are bounded by OUR budget, not the SDK's 100 s default: a
+        # busy Meili (e.g. the reconcile sweep ingesting a large backlog) can
+        # queue even an index-create task for minutes, and the SDK default
+        # raised MeilisearchTimeoutError before the rebuild had done anything
+        # (live 2026-08-17). The leftover-shadow delete is best-effort: if it
+        # times out, create_index below fails loudly on the collision.
+        with contextlib.suppress(Exception):
+            await c.delete_index_if_exists(shadow_name)
+        shadow = await c.create_index(
+            shadow_name, primary_key="id", timeout_in_ms=int(total_budget * 1000)
+        )
         task_uids: list[int] = []
         try:
             # Same settings routine ensure_index() uses (provably no drift).

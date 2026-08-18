@@ -120,6 +120,36 @@ def log_startup_disk_status() -> str:
 # half-finished scan would be surprising.
 SCAN_TASK_NAME = "filearr.tasks.scan.scan_library"
 
+#: Whole-catalog jobs that legitimately run for hours and are therefore EXEMPT
+#: from the reaper's absolute-age net (they are still reaped by the heartbeat
+#: net when their worker truly dies). Live 2026-08-17: nightly_reconcile (a
+#: full shadow-index rebuild of 1.37M docs) passed job_stall_seconds while
+#: healthy, was requeued, and a SECOND copy ran concurrently -- doubling the
+#: Meili load and ending the first with "job not in doing status".
+AGE_NET_EXEMPT_TASKS: tuple[str, ...] = (
+    SCAN_TASK_NAME,
+    "filearr.worker.nightly_reconcile",
+    "filearr.tasks.index_sync.rebuild_index",
+    "filearr.tasks.index_sync.reproject_library",
+    "filearr.tasks.chunks.rebuild_chunks_index",
+    "filearr.tasks.embed.embed_missing",
+    "filearr.tasks.chunks.chunk_missing",
+    "filearr.worker.backup_now",
+    "filearr.worker.compact_meili",
+    "filearr.worker.content_sniff",
+    "filearr.worker.rehash_small_files",
+)
+
+
+def age_net_exempt_tasks() -> list[str]:
+    """Built-in exemptions plus ``job_stall_age_exempt_tasks`` from settings."""
+    extra = get_settings().job_stall_age_exempt_tasks
+    out = list(AGE_NET_EXEMPT_TASKS)
+    for name in extra:
+        if name and name not in out:
+            out.append(name)
+    return out
+
 # Detect doing jobs that are stalled. TWO independent nets ORed together:
 #   * heartbeat net (ALL doing jobs): worker_id IS NULL (procrastinate SET NULL
 #     when the worker row was pruned) OR the job's worker has not heartbeat
@@ -148,7 +178,7 @@ WHERE j.status = 'doing'
   AND (
     (j.worker_id IS NULL OR sw.id IS NOT NULL)
     OR (
-      j.task_name <> %(scan_task)s
+      j.task_name <> ALL(%(age_exempt)s)
       AND s.started_at IS NOT NULL
       AND s.started_at < NOW() - make_interval(secs => %(age)s)
     )
@@ -338,7 +368,7 @@ async def reap_stalled_jobs_now() -> dict:
     pruned = await manager.prune_stalled_workers(seconds_since_heartbeat=hb)
 
     rows = await connector.execute_query_all_async(
-        _DETECT_STALLED_SQL, hb=hb, age=age, scan_task=SCAN_TASK_NAME
+        _DETECT_STALLED_SQL, hb=hb, age=age, age_exempt=age_net_exempt_tasks()
     )
 
     retried = 0
