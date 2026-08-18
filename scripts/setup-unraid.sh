@@ -2557,7 +2557,17 @@ if ! state_done PHASE1; then
   phase1
 else
   info "phase 1 already done — re-run with --reconfigure to change answers, --force to rewrite templates"
-  [[ "$RECONFIGURE" == 1 || "$FORCE" == 1 ]] && phase1
+  if [[ "$RECONFIGURE" == 1 || "$FORCE" == 1 ]]; then
+    phase1
+  else
+    # A plain re-run still refreshes the templates: existing containers get
+    # NEW upstream fields merged into their my-*.xml (values untouched), and a
+    # template whose container was never created is regenerated with its
+    # values carried over. Without this, a field added upstream never reached
+    # an installed box (live 2026-08-17: HF_TOKEN) -- phase 1 was skipped
+    # wholesale, so the merge inside generate_templates never ran.
+    generate_templates
+  fi
 fi
 
 walkthrough
