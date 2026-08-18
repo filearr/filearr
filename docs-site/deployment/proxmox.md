@@ -63,6 +63,7 @@ Configure optional app settings (semantic search, thumbnail budget, ...)? [y/N]
 | Prompt | Default | What it does |
 |---|---|---|
 | `FILEARR_SEMANTIC_ENABLED` | `false` | Semantic/hybrid search. The worker loads a local embedding model (~500 MB RSS) and backfilling 1M+ items takes hours. |
+| `HF_TOKEN` | *(blank)* | **Only asked when semantic search is `true`.** Optional Hugging Face token for the one-off model download (higher rate limit). A secret: written to the CT `.env` only, never `deploy.conf`, never echoed. Blank keeps what the CT has (or downloads anonymously); `none` removes it. |
 | `FILEARR_CONTENT_SNIFF_ENABLED` | `false` | libmagic reclassification of extensionless files. |
 | `FILEARR_UPDATE_CHECK_AUTO` | `false` | Auto-refresh the GitHub update check (outbound network call). |
 | `FILEARR_LOG_DB_ENABLED` | `true` | The database log recorder behind the console Logs panel. |

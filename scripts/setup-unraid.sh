@@ -886,6 +886,24 @@ wizard() {
   echo "  slow on a large catalog and adds a little to each later scan. Off = no"
   echo "  model, no embedding, zero cost."
   ask_bool "enable semantic search" "${SEMANTIC:-false}"; SEMANTIC="$REPLY"
+  if [[ "$SEMANTIC" == "true" ]]; then
+    echo
+    echo "  Hugging Face token (OPTIONAL): only used for that one-off model download"
+    echo "  — an authenticated request gets a higher rate limit and no 'unauthenticated"
+    echo "  requests' warning. Blank = download anonymously (fine for one model). It is"
+    echo "  a secret: stored in ${SECRETS} and masked in the template, never echoed."
+    local _hf _cur; _cur="$(secret_get HF_TOKEN)"
+    if [[ -n "$_cur" ]]; then
+      read -r -s -p "  Hugging Face token (blank = keep existing, fingerprint $(fingerprint "$_cur"); 'none' = remove): " _hf; echo
+    else
+      read -r -s -p "  Hugging Face token (blank = none): " _hf; echo
+    fi
+    case "$_hf" in
+      "") ;;
+      none|NONE|None) secret_put HF_TOKEN ""; info "Hugging Face token cleared (anonymous downloads)" ;;
+      *) secret_put HF_TOKEN "$_hf"; info "Hugging Face token stored (fingerprint $(fingerprint "$_hf"))" ;;
+    esac
+  fi
   echo
   if [[ "$TIER" == "full" ]]; then
     echo "  Distributed agents: ON — the full tier exists for the agent fleet."
@@ -1263,6 +1281,7 @@ generate_templates() {
   seckey="$(secret_get FILEARR_SECRET_KEY)"
   proxysec="$(secret_get FILEARR_PROXY_SHARED_SECRET)"
   cftok="$(secret_get CLOUDFLARE_API_TOKEN)"
+  local hftok; hftok="$(secret_get HF_TOKEN)"
 
   local order; order="$([[ "$TIER" == "full" ]] && echo "$APPLY_ORDER_FULL" || echo "$APPLY_ORDER_SIMPLE")"
   local name f regenerated=""
@@ -1335,6 +1354,15 @@ generate_templates() {
         set_cfg "$f" 'Target="TZ"' "$TZ_"
         # FEATURES answered in the wizard (full tier forces agents on below).
         set_cfg "$f" 'Target="FILEARR_SEMANTIC_ENABLED"'      "$SEMANTIC"
+        # HF_TOKEN: a value typed on the Edit page (field added 2026-08-17) is
+        # adopted into ${SECRETS} when we hold none; carry-over already kept it
+        # in the template. set_cfg is a no-op on a template without the field
+        # (older CA XML); blank = anonymous downloads.
+        if [[ -z "$hftok" && -n "$_prev_tpl" ]]; then
+          local _pv; _pv="$(get_cfg "$_prev_tpl" 'Target="HF_TOKEN"' 2>/dev/null || true)"
+          if [[ -n "$_pv" ]]; then hftok="$(xml_unescape "$_pv")"; secret_put HF_TOKEN "$hftok"; info "recorded Hugging Face token from the previous template (fingerprint $(fingerprint "$hftok"))"; fi
+        fi
+        set_cfg "$f" 'Target="HF_TOKEN"' "$hftok"
         set_cfg "$f" 'Target="FILEARR_AGENTS_ENABLED"'        "$AGENTS"
         set_cfg "$f" 'Target="FILEARR_CONTENT_SNIFF_ENABLED"' "$CONTENT_SNIFF"
         set_cfg "$f" 'Target="FILEARR_THUMBNAIL_BUDGET_GB"'   "$THUMB_BUDGET_GB"
@@ -2101,6 +2129,14 @@ summary_part_two_secrets() {
     echo "    ${v}"
     echo "    Same class as FILEARR_SECRET_KEY. Without it agents register fine and"
     echo "    then fail enrolment on a null ca_ott."
+    echo
+  fi
+  v="$(secret_get HF_TOKEN)"
+  if [[ -n "$v" ]]; then
+    echo "  HF_TOKEN  (Hugging Face; already filled into the filearr template)"
+    echo "    ${v}"
+    echo "    Only used for the semantic-model download. Revocable at Hugging Face;"
+    echo "    remove it (Edit page or rerun with 'none') to download anonymously."
     echo
   fi
   v="$(secret_get CLOUDFLARE_API_TOKEN)"

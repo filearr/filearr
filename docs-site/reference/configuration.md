@@ -240,6 +240,7 @@ per-library flag.
 | `FILEARR_SEMANTIC_ENABLED` | `false` | Load the local ONNX embedder (off = zero cost). |
 | `FILEARR_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Local embedding model (downloaded once). |
 | `FILEARR_EMBEDDER_CONCURRENCY` | `1` | One memory-capped, lowest-priority worker. |
+| `HF_TOKEN` | *(unset)* | Optional Hugging Face access token used ONLY for the one-off model download (higher anonymous rate limit, no "unauthenticated requests" warning). Leave blank — or any placeholder such as `none` — to download anonymously; a blank/placeholder is never sent as a token. This is the Hub's own variable name, so it is picked up by anything else in the container that talks to Hugging Face. Treated as a secret in the deployment templates (masked on Unraid, CT `.env` only on Proxmox). |
 
 ### RAG passage chunking (per-library opt-in)
 

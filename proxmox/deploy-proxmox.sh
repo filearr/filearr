@@ -59,6 +59,10 @@ CONF="${CONF_DIR}/deploy.conf"
 # deliberately never persisted to deploy.conf), so on non-interactive or
 # keep-current redeploys it must still exist as a (possibly empty) variable.
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+# Same class: optional Hugging Face token for the semantic-model download.
+# Read interactively (or from the environment), written to the CT .env only.
+HF_TOKEN="${HF_TOKEN:-}"
+HF_TOKEN_CLEAR=0   # set when the operator answers 'none' -> remove from CT .env
 
 # Dirty-tree guard (live incident 2026-07-17): this script deploys whatever is
 # in the source tree — including half-finished, unverified work if a deploy
@@ -319,6 +323,11 @@ ct_has_cf_token() {
   [[ -n "${VMID:-}" ]] || return 1
   pct status "$VMID" >/dev/null 2>&1 || return 1
   pct exec "$VMID" -- bash -c "grep -q '^CLOUDFLARE_API_TOKEN=..*' '${CT_APP_DIR}/.env' 2>/dev/null"
+}
+ct_has_hf_token() {
+  [[ -n "${VMID:-}" ]] || return 1
+  pct status "$VMID" >/dev/null 2>&1 || return 1
+  pct exec "$VMID" -- bash -c "grep -q '^HF_TOKEN=..*' '${CT_APP_DIR}/.env' 2>/dev/null"
 }
 
 # mode "replace" (wizard / --reconfigure): always offer the prompt so a rotated/expired
@@ -656,6 +665,22 @@ configure_optional_settings() {
   ask_optional_bool FILEARR_SEMANTIC_ENABLED \
     "semantic/hybrid search; the worker loads a local embedding model (~500 MB RSS) and backfilling 1M+ items takes hours"
   persist_optional_setting FILEARR_SEMANTIC_ENABLED "$REPLY"
+  if [[ "$REPLY" == "true" ]]; then
+    # HF_TOKEN is a SECRET: CT .env only (never deploy.conf), never echoed —
+    # same handling as CLOUDFLARE_API_TOKEN. Blank keeps whatever the CT has
+    # (or none); 'none' removes it; anything else replaces it. The app treats a
+    # blank/placeholder as "download anonymously".
+    local _hfp="no"; ct_has_hf_token && _hfp="yes"
+    echo "  Hugging Face token (OPTIONAL): only used for the one-off embedding-model"
+    echo "  download — authenticated requests get a higher rate limit and no"
+    echo "  'unauthenticated requests' warning. Blank = $([[ "$_hfp" == yes ]] && echo "keep the token already in CT ${VMID:-?}" || echo "download anonymously"); 'none' = remove."
+    local _hf; read -r -s -p "  HF_TOKEN: " _hf; echo
+    case "$_hf" in
+      "") ;;
+      none|NONE|None) HF_TOKEN=""; HF_TOKEN_CLEAR=1; echo "    Hugging Face token will be removed from the CT .env" ;;
+      *) HF_TOKEN="$_hf"; echo "    Hugging Face token captured (written to the CT .env on this deploy)" ;;
+    esac
+  fi
 
   ask_optional_bool FILEARR_CONTENT_SNIFF_ENABLED \
     "libmagic content sniffing — reclassifies extensionless files by their bytes"
@@ -1360,6 +1385,12 @@ if [ \"${TLS_MODE:-internal}\" = \"acme-dns\" ]; then
     echo '[deploy] generated FILEARR_PROXY_SHARED_SECRET (agent mTLS proxy trust)'
   fi
 fi
+# Hugging Face token (optional, semantic-model download): overwrite only when
+# a new one was entered this run; 'none' at the prompt clears it. SECRET —
+# CT .env only, never deploy.conf, never echoed. Blank/placeholder = the app
+# downloads anonymously.
+if [ -n \"${HF_TOKEN:-}\" ]; then _upsert HF_TOKEN \"${HF_TOKEN}\"; fi
+if [ \"${HF_TOKEN_CLEAR:-0}\" = 1 ]; then grep -v '^HF_TOKEN=' .env > .env._t 2>/dev/null || true; mv .env._t .env; fi
 # iGPU: map /dev/dri into the worker ONLY when the CT actually has it
 # (docker hard-fails on missing device paths — live failure 2026-07-13)
 if [ -e /dev/dri/renderD128 ]; then

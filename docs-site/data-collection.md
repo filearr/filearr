@@ -114,8 +114,10 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
         You may see `You are sending unauthenticated requests to the HF Hub` in
         the log while it downloads. That is Hugging Face's own notice, not an
         error: anonymous downloads work and are only rate-limited by IP. Set
-        `HF_TOKEN` in the environment if you hit a limit — the client picks it up
-        automatically. **If that line appears repeatedly rather than once, the
+        `HF_TOKEN` in the environment if you hit a limit (the Unraid template,
+        compose file and Proxmox wizard all expose it; blank or a placeholder
+        such as `none` means "download anonymously" and is never sent as a
+        token). **If that line appears repeatedly rather than once, the
         model cache is not persisting** (check the `/config` volume), because a
         warm cache never reaches the network. Once it is warm you can set
         `HF_HUB_OFFLINE=1` to guarantee the worker never tries.

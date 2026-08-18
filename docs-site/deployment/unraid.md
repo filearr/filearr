@@ -663,6 +663,7 @@ index sync, purge). One container, because its Post Arguments say `all`.
 | Postgres Data (disk monitor) | optional | `/mnt/cache/appdata/filearr-postgres` (ro) | Point at step 1's Data path. |
 | Postgres Disk Watch | optional | `/pgdata` | Leave as-is. |
 | Semantic Search | optional | `false` | Downloads and runs a local ONNX embedding model. |
+| Hugging Face Token | optional | *(empty)* | Only with Semantic Search: token for the one-off model download (higher rate limit). Empty or `none` = anonymous download; a placeholder is never sent as a token. Masked. |
 | Content Sniffing | optional | `false` | libmagic MIME reclassification of extensionless files. |
 | Auto Update Check | optional | `false` | The only automatic outbound call the product makes. |
 | Thumbnail Budget (GiB) | optional | `5` | Advisory; nothing is ever deleted. |

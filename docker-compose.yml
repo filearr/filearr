@@ -25,6 +25,10 @@ services:
       # instead of being inferred from the code defaults. The `:-` fallback only
       # applies when the var is UNSET, so a value in .env still wins.
       FILEARR_SEMANTIC_ENABLED: ${FILEARR_SEMANTIC_ENABLED:-false}
+      # Optional Hugging Face token for the semantic model download (higher
+      # anonymous rate limit). Blank / a placeholder such as "none" = download
+      # anonymously; the app never sends a placeholder as a token.
+      HF_TOKEN: ${HF_TOKEN:-}
       FILEARR_CONTENT_SNIFF_ENABLED: ${FILEARR_CONTENT_SNIFF_ENABLED:-false}
       FILEARR_UPDATE_CHECK_AUTO: ${FILEARR_UPDATE_CHECK_AUTO:-false}
       FILEARR_THUMBNAIL_BUDGET_GB: ${FILEARR_THUMBNAIL_BUDGET_GB:-5}
@@ -177,6 +181,10 @@ services:
       # the semantic ONNX embedder and runs the content-sniff pass. The `:-`
       # fallback only applies when the var is UNSET, so .env still wins.
       FILEARR_SEMANTIC_ENABLED: ${FILEARR_SEMANTIC_ENABLED:-false}
+      # Optional Hugging Face token for the semantic model download (higher
+      # anonymous rate limit). Blank / a placeholder such as "none" = download
+      # anonymously; the app never sends a placeholder as a token.
+      HF_TOKEN: ${HF_TOKEN:-}
       FILEARR_CONTENT_SNIFF_ENABLED: ${FILEARR_CONTENT_SNIFF_ENABLED:-false}
       FILEARR_UPDATE_CHECK_AUTO: ${FILEARR_UPDATE_CHECK_AUTO:-false}
       FILEARR_THUMBNAIL_BUDGET_GB: ${FILEARR_THUMBNAIL_BUDGET_GB:-5}

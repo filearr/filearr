@@ -725,3 +725,33 @@ def test_hf_telemetry_optout_respects_an_operator_override(monkeypatch):
 
     importlib.reload(filearr.embed)
     assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "0"
+
+
+# ------------------------------------------------------------- HF_TOKEN
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "none", "None", "placeholder", "changeme", "<your token>", "hf_xxx",
+     "hf_ ab", "short"],
+)
+def test_effective_hf_token_treats_placeholders_as_absent(monkeypatch, value):
+    from filearr import embed as embed_mod
+
+    monkeypatch.setenv("HF_TOKEN", value)
+    assert embed_mod.effective_hf_token() is None
+    # removed so huggingface_hub cannot pick the placeholder up implicitly
+    assert "HF_TOKEN" not in __import__("os").environ
+
+
+def test_effective_hf_token_passes_real_token(monkeypatch):
+    from filearr import embed as embed_mod
+
+    monkeypatch.setenv("HF_TOKEN", "  hf_abcdefghijklmnop  ")
+    assert embed_mod.effective_hf_token() == "hf_abcdefghijklmnop"
+    assert __import__("os").environ["HF_TOKEN"] == "hf_abcdefghijklmnop"
+
+
+def test_effective_hf_token_unset(monkeypatch):
+    from filearr import embed as embed_mod
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert embed_mod.effective_hf_token() is None

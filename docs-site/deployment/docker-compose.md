@@ -110,7 +110,8 @@ The full, grouped list is in the [Configuration reference](../reference/configur
     knob](../reference/configuration.md#optional-features) —
     `FILEARR_SEMANTIC_ENABLED`, `FILEARR_CONTENT_SNIFF_ENABLED`,
     `FILEARR_UPDATE_CHECK_AUTO`, `FILEARR_THUMBNAIL_BUDGET_GB`,
-    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED` — in the `environment:`
+    `FILEARR_LOG_DB_ENABLED`, `FILEARR_AGENTS_ENABLED`, plus the optional
+    `HF_TOKEN` (blank = anonymous model download) — in the `environment:`
     map of **both** `app` and `worker`, with its safe default, written as
     `${VAR:-default}`. So they are visible in the deployment file rather than
     inferred, and because the fallback only applies when the variable is

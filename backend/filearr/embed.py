@@ -59,11 +59,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # Canonical defaults for BAAI/bge-small-en-v1.5 served via ONNX (see docstring).
 # Kept identical to the Settings defaults so a hand-built EmbedderConfig and the
@@ -139,6 +142,43 @@ def embedder_fingerprint(cfg: EmbedderConfig) -> str:
 # the very first download; an operator can set it once the cache is warm to
 # guarantee the worker never reaches the network again).
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+#: ``HF_TOKEN`` values that mean "no token". Deployment templates (Unraid CA,
+#: compose, the Proxmox wizard) expose the field so an operator can raise the
+#: Hub's anonymous rate limit / speed up the one-off model fetch; a form field
+#: left at a placeholder must NOT be sent as a bearer token (the Hub answers 401
+#: to a bogus token even for public repos, which would turn "no token" into "no
+#: model"). Compared case-insensitively after strip.
+HF_TOKEN_PLACEHOLDERS = frozenset(
+    {"", "none", "null", "unset", "no", "false", "0", "-", "placeholder", "changeme",
+     "change-me", "your-token", "your_token", "hf_xxx", "hf_...", "xxx", "token"}
+)
+
+
+def effective_hf_token() -> str | None:
+    """The Hugging Face token to use for model downloads, or ``None``.
+
+    Reads ``HF_TOKEN`` (the Hub's own variable, so a token also works for any
+    other HF client in the container). Empty / placeholder / obviously-not-a-
+    token values are treated as absent — and REMOVED from the environment so
+    ``huggingface_hub`` cannot pick the placeholder up implicitly."""
+    raw = os.environ.get("HF_TOKEN")
+    if raw is None:
+        return None
+    tok = raw.strip()
+    bogus = (
+        tok.lower() in HF_TOKEN_PLACEHOLDERS
+        or "<" in tok
+        or ">" in tok
+        or any(ch.isspace() for ch in tok)
+        or len(tok) < 8
+    )
+    if bogus:
+        os.environ.pop("HF_TOKEN", None)
+        return None
+    if tok != raw:
+        os.environ["HF_TOKEN"] = tok
+    return tok
 # The generic opt-out several tools honour, including HF's own client. Cheap to
 # set and it covers libraries that read it instead of the HF-specific flag.
 os.environ.setdefault("DO_NOT_TRACK", "1")
@@ -244,8 +284,21 @@ def _load_engine(cfg: EmbedderConfig) -> _Engine:
     # Download every companion the tokenizer/session needs; they land in the same
     # snapshot dir (hf_hub_download returns per-file paths — the model file's
     # parent is that shared dir).
+    # HF_TOKEN (optional): authenticated downloads get the Hub's higher rate
+    # limit and skip its "unauthenticated requests" warning; a placeholder or
+    # blank is explicitly "no token" (token=False also stops the library from
+    # picking up a stray cached login inside the container).
+    token = effective_hf_token()
+    if token:
+        _log.info("huggingface: using HF_TOKEN (…%s) for model downloads", token[-4:])
+    else:
+        _log.info(
+            "huggingface: no HF_TOKEN set — anonymous model download (rate-limited; "
+            "set HF_TOKEN in the deployment to authenticate)"
+        )
+    dl_token: str | bool = token if token else False
     model_path = hf_hub_download(
-        repo_id=cfg.repo, filename=cfg.model_file, cache_dir=cache_dir
+        repo_id=cfg.repo, filename=cfg.model_file, cache_dir=cache_dir, token=dl_token
     )
     for companion in (
         "tokenizer.json",
@@ -253,7 +306,9 @@ def _load_engine(cfg: EmbedderConfig) -> _Engine:
         "tokenizer_config.json",
         "special_tokens_map.json",
     ):
-        hf_hub_download(repo_id=cfg.repo, filename=companion, cache_dir=cache_dir)
+        hf_hub_download(
+            repo_id=cfg.repo, filename=companion, cache_dir=cache_dir, token=dl_token
+        )
 
     tokenizer = _build_tokenizer(Path(model_path).parent)
 
