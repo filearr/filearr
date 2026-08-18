@@ -1197,6 +1197,19 @@
           indexing
         </span>
       {/if}
+      {#if m.failed_tasks}
+        <span class="rounded-full bg-red-500 px-2 py-0.5 text-xs font-medium text-white" title="Meilisearch tasks that failed for this index (document writes are fire-and-forget; this is the only place they surface)">
+          {m.failed_tasks.toLocaleString()} failed Meili task{m.failed_tasks === 1 ? "" : "s"}
+        </span>
+      {/if}
+      {#if m.last_failed_task}
+        <div class="basis-full text-xs text-red-700 dark:text-red-400">
+          <span class="font-medium">Latest Meili failure</span>
+          ({m.last_failed_task.type ?? "task"}{m.last_failed_task.finished_at ? `, ${new Date(m.last_failed_task.finished_at).toLocaleString()}` : ""}):
+          <code class="break-all">{m.last_failed_task.code ?? ""}</code>
+          {m.last_failed_task.message}
+        </div>
+      {/if}
     </div>
   {/if}
 

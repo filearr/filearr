@@ -1048,6 +1048,16 @@ export interface MeiliSnapshot {
   postgres_active: number;
   drift: number | null;
   in_sync: boolean | null;
+  /** Meili-side failed tasks for our index (document writes are fire-and-forget,
+   *  so a failed task never fails a queue job — this is the only place it shows). */
+  failed_tasks?: number | null;
+  last_failed_task?: {
+    uid: number | null;
+    type: string | null;
+    finished_at: string | null;
+    code: string | null;
+    message: string;
+  } | null;
 }
 
 export interface ExtractSummary {

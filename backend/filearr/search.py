@@ -671,6 +671,19 @@ def build_doc(
         cfg = get_settings().embedder_config
         if has_current_embedding(meta, cfg):
             doc["_vectors"] = {DEFAULT_EMBEDDER_NAME: meta[EMBEDDING_KEY]}
+        else:
+            # An EXPLICIT null, never an absent key. With a ``userProvided``
+            # embedder registered, Meilisearch (>= the 1.12 indexer; verified on
+            # 1.53) FAILS the whole document task for any NEW document that has
+            # no ``_vectors.<embedder>`` ("no vectors provided for document
+            # ..."), and ``upsert_docs`` is fire-and-forget -- so every scan
+            # batch was silently rejected and the index held only the items
+            # that had already been embedded (live 2026-08-17: 14,994 docs vs
+            # 1,373,576 active items). ``null`` = "this embedder has no vector
+            # for this doc, do not generate one" and is accepted on insert; on
+            # an UPDATE it also drops a stale (drifted-model) vector, which is
+            # exactly the never-mix rule above.
+            doc["_vectors"] = {DEFAULT_EMBEDDER_NAME: None}
     return doc
 
 

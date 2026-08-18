@@ -270,11 +270,20 @@ def test_build_doc_attaches_vector_on_match(monkeypatch):
     assert doc["_vectors"] == {"default": VEC}
 
 
-def test_build_doc_omits_vector_on_drift(monkeypatch):
+def test_build_doc_nulls_vector_on_drift(monkeypatch):
+    """A drifted vector is not attached -- but the key MUST be present as an
+    explicit null: Meili rejects a new document with no ``_vectors.default``
+    when a userProvided embedder is registered (live 2026-08-17)."""
     _enable_semantic(monkeypatch)
     it = _item(metadata_={EMBEDDING_KEY: VEC, FINGERPRINT_KEY: "old-model-fp"})
     doc = search_mod.build_doc(it)
-    assert "_vectors" not in doc
+    assert doc["_vectors"] == {"default": None}
+
+
+def test_build_doc_nulls_vector_when_missing(monkeypatch):
+    _enable_semantic(monkeypatch)
+    doc = search_mod.build_doc(_item(metadata_={}))
+    assert doc["_vectors"] == {"default": None}
 
 
 def test_build_doc_omits_vector_when_disabled(monkeypatch):

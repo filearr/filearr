@@ -51,12 +51,21 @@ async def meili_snapshot(session: AsyncSession) -> dict:
     healthy = False
     document_count: int | None = None
     is_indexing: bool | None = None
+    failed_tasks: int | None = None
+    last_failed_task: dict | None = None
     try:
         async with client() as c:
             healthy = (await c.health()).status == "available"
             stats = await c.index(s.meili_index).get_stats()
             document_count = stats.number_of_documents
             is_indexing = stats.is_indexing
+            # Meili-side task failures are otherwise INVISIBLE: document writes
+            # are fire-and-forget (a failed task never fails a procrastinate
+            # job). Live 2026-08-17: every scan batch had been failing for
+            # weeks (userProvided embedder + docs without _vectors) and nothing
+            # said so -- only the drift number hinted. Surface the newest
+            # failure so the operator sees WHY, not just that drift exists.
+            failed_tasks, last_failed_task = await _recent_failed_tasks(c, s.meili_index)
     except Exception:  # noqa: BLE001 — stats must stay total even if Meili is down
         logger.warning("meili_snapshot: Meilisearch unreachable", exc_info=True)
 
@@ -68,4 +77,35 @@ async def meili_snapshot(session: AsyncSession) -> dict:
         "postgres_active": postgres_active,
         "drift": drift,
         "in_sync": None if drift is None else drift == 0,
+        "failed_tasks": failed_tasks,
+        "last_failed_task": last_failed_task,
     }
+
+
+async def _recent_failed_tasks(c, index_uid: str) -> tuple[int | None, dict | None]:
+    """``(total_failed, newest_failed)`` for ``index_uid`` from Meili's task
+    list (``GET /tasks?statuses=failed&indexUids=...&limit=1``, newest first).
+    The SDK's ``get_tasks`` has no status filter, so this goes through its raw
+    HTTP layer. Best-effort: any error -> ``(None, None)`` so the snapshot stays
+    total. ``newest_failed`` is a small dict (uid, type, finished_at, code,
+    message) -- message truncated for the UI."""
+    try:
+        resp = await c._http_requests.get(  # noqa: SLF001 - SDK has no status filter
+            f"tasks?statuses=failed&indexUids={index_uid}&limit=1"
+        )
+        body = resp.json()
+    except Exception:  # noqa: BLE001
+        return None, None
+    results = body.get("results") or []
+    newest = None
+    if results:
+        t = results[0]
+        err = t.get("error") or {}
+        newest = {
+            "uid": t.get("uid"),
+            "type": t.get("type"),
+            "finished_at": t.get("finishedAt"),
+            "code": err.get("code"),
+            "message": (err.get("message") or "")[:500],
+        }
+    return body.get("total"), newest
