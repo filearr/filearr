@@ -45,11 +45,86 @@ Emitted schema (all keys optional):
 
 from __future__ import annotations
 
+import contextvars
+import logging
 import os
 import re
 import zipfile
 from pathlib import PurePath
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+# --- pypdf log noise ---------------------------------------------------------
+# pypdf logs ONE WARNING PER MALFORMED OBJECT while it repairs a sloppy PDF
+# ("Ignoring wrong pointing object 173 0 (offset 0)", "incorrect startxref
+# pointer", "Early EOD in RunLengthDecode", ...). One bad file emits dozens of
+# lines and none of them is actionable for an operator (live 2026-08-18: the
+# console Logs panel was mostly this). Policy: pypdf's WARNING records are
+# swallowed here and COUNTED per extraction, so the file's metadata carries a
+# single ``pdf_repaired_objects`` number and the worker logs one INFO line per
+# repaired file. ERROR+ records from pypdf still reach the root handlers.
+#
+# Mechanics: pypdf logs on child loggers ("pypdf._reader", "pypdf.filters"), so
+# a Filter on the "pypdf" logger would not see them (filters do not inherit) --
+# but a HANDLER on the parent does, via propagation. We attach one, stop further
+# propagation, and forward anything >= ERROR to the root ourselves.
+_pypdf_repairs: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "pypdf_repairs", default=None
+)
+
+
+class _PypdfNoiseHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno >= logging.ERROR:
+            logging.getLogger().handle(record)
+            return
+        if record.levelno == logging.WARNING:
+            bucket = _pypdf_repairs.get()
+            if bucket is not None:
+                bucket.append(record.getMessage())
+        # WARNING/INFO/DEBUG from pypdf: dropped (counted above when inside an
+        # extraction; otherwise nothing is listening).
+
+
+def _install_pypdf_noise_handler() -> None:
+    lg = logging.getLogger("pypdf")
+    if any(isinstance(h, _PypdfNoiseHandler) for h in lg.handlers):
+        return
+    lg.addHandler(_PypdfNoiseHandler())
+    lg.propagate = False
+
+
+_install_pypdf_noise_handler()
+
+
+class _pypdf_repair_counter:
+    """``with _pypdf_repair_counter(path, meta):`` -- collects pypdf's repair
+    warnings for the block, stores the count as ``meta["pdf_repaired_objects"]``
+    (when ``meta`` is given) and logs ONE info line per repaired file."""
+
+    def __init__(self, path: str, meta: dict[str, Any] | None = None) -> None:
+        self.path = path
+        self.meta = meta
+        self.count = 0
+        self._token: contextvars.Token | None = None
+
+    def __enter__(self) -> _pypdf_repair_counter:
+        self._token = _pypdf_repairs.set([])
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        bucket = _pypdf_repairs.get() or []
+        if self._token is not None:
+            _pypdf_repairs.reset(self._token)
+        self.count = len(bucket)
+        if self.count:
+            if self.meta is not None:
+                self.meta["pdf_repaired_objects"] = self.count
+            log.info(
+                "pypdf repaired %d malformed object(s) while reading %s (first: %s)",
+                self.count, self.path, bucket[0][:80],
+            )
 
 
 class DocumentError(RuntimeError):
@@ -192,71 +267,72 @@ def extract_pdf(path: str, *, max_bytes: int) -> dict[str, Any]:
     from pypdf.errors import PyPdfError
 
     meta: dict[str, Any] = {}
-    try:
-        # strict=False: tolerate malformed PDFs instead of raising mid-parse.
-        reader = PdfReader(path, strict=False)
-        # is_encrypted is cheap and set before page access.
-        encrypted = bool(getattr(reader, "is_encrypted", False))
-        meta["encrypted"] = encrypted
-        if encrypted:
-            # Try the empty-password path many "encrypted" PDFs use; never guess
-            # a real password. If it stays locked, report encrypted + stop before
-            # any page/metadata access (which would raise FileNotDecrypted).
-            unlocked = False
-            try:
-                result = reader.decrypt("")
-                # pypdf returns a PasswordType enum: 0 == NOT_DECRYPTED.
-                unlocked = bool(result) and int(getattr(result, "value", result)) != 0
-            except Exception:
-                unlocked = False
-            if not unlocked:
-                return meta
+    with _pypdf_repair_counter(path, meta):
         try:
-            meta["pages"] = len(reader.pages)
-        except Exception:
-            pass  # page tree unreadable — keep whatever else we have
-        info = getattr(reader, "metadata", None)
-        if info is not None:
-            # Per-field defensive access (live class D). pypdf decodes each
-            # DocumentInformation property lazily and a MALFORMED value throws on
-            # access -- most infamously a non-conformant /CreationDate
-            # ("2006/05/24 21:06") raising ValueError "Can not convert date". That
-            # must NOT sink the whole document extract, so every field is read in
-            # its own try; a failure just drops that one field.
-            for out_key, attr in (
-                ("title", "title"),
-                ("author", "author"),
-                ("subject", "subject"),
-                ("creator", "creator"),
-                ("producer", "producer"),
-            ):
+            # strict=False: tolerate malformed PDFs instead of raising mid-parse.
+            reader = PdfReader(path, strict=False)
+            # is_encrypted is cheap and set before page access.
+            encrypted = bool(getattr(reader, "is_encrypted", False))
+            meta["encrypted"] = encrypted
+            if encrypted:
+                # Try the empty-password path many "encrypted" PDFs use; never guess
+                # a real password. If it stays locked, report encrypted + stop before
+                # any page/metadata access (which would raise FileNotDecrypted).
+                unlocked = False
                 try:
-                    val = _clean_str(getattr(info, attr, None))
+                    result = reader.decrypt("")
+                    # pypdf returns a PasswordType enum: 0 == NOT_DECRYPTED.
+                    unlocked = bool(result) and int(getattr(result, "value", result)) != 0
                 except Exception:
-                    val = None
-                if val is not None:
-                    meta[out_key] = val
-            # Dates: prefer the typed (parsed) datetime, but when pypdf cannot
-            # parse a malformed date, fall back to the RAW string rather than
-            # discarding it (integrity > tidiness -- keep what the file states).
-            for out_key, attr, raw_attr in (
-                ("created", "creation_date", "creation_date_raw"),
-                ("modified", "modification_date", "modification_date_raw"),
-            ):
-                val = None
-                try:
-                    val = _iso(getattr(info, attr, None))
-                except Exception:
+                    unlocked = False
+                if not unlocked:
+                    return meta
+            try:
+                meta["pages"] = len(reader.pages)
+            except Exception:
+                pass  # page tree unreadable — keep whatever else we have
+            info = getattr(reader, "metadata", None)
+            if info is not None:
+                # Per-field defensive access (live class D). pypdf decodes each
+                # DocumentInformation property lazily and a MALFORMED value throws on
+                # access -- most infamously a non-conformant /CreationDate
+                # ("2006/05/24 21:06") raising ValueError "Can not convert date". That
+                # must NOT sink the whole document extract, so every field is read in
+                # its own try; a failure just drops that one field.
+                for out_key, attr in (
+                    ("title", "title"),
+                    ("author", "author"),
+                    ("subject", "subject"),
+                    ("creator", "creator"),
+                    ("producer", "producer"),
+                ):
                     try:
-                        val = _clean_str(getattr(info, raw_attr, None))
+                        val = _clean_str(getattr(info, attr, None))
                     except Exception:
                         val = None
-                if val is not None:
-                    meta[out_key] = val
-    except (PyPdfError, ValueError, OSError, EOFError) as exc:
-        raise DocumentError(f"pypdf could not read PDF: {exc}") from exc
-    except Exception as exc:  # any other pypdf internal error → safe message
-        raise DocumentError(f"pypdf failed: {exc}") from exc
+                    if val is not None:
+                        meta[out_key] = val
+                # Dates: prefer the typed (parsed) datetime, but when pypdf cannot
+                # parse a malformed date, fall back to the RAW string rather than
+                # discarding it (integrity > tidiness -- keep what the file states).
+                for out_key, attr, raw_attr in (
+                    ("created", "creation_date", "creation_date_raw"),
+                    ("modified", "modification_date", "modification_date_raw"),
+                ):
+                    val = None
+                    try:
+                        val = _iso(getattr(info, attr, None))
+                    except Exception:
+                        try:
+                            val = _clean_str(getattr(info, raw_attr, None))
+                        except Exception:
+                            val = None
+                    if val is not None:
+                        meta[out_key] = val
+        except (PyPdfError, ValueError, OSError, EOFError) as exc:
+            raise DocumentError(f"pypdf could not read PDF: {exc}") from exc
+        except Exception as exc:  # any other pypdf internal error → safe message
+            raise DocumentError(f"pypdf failed: {exc}") from exc
     return meta
 
 
@@ -390,36 +466,37 @@ def _pdf_body(path: str, *, max_chars: int, max_bytes: int) -> tuple[str, bool]:
     from pypdf import PdfReader
     from pypdf.errors import PyPdfError
 
-    try:
-        reader = PdfReader(path, strict=False)
-        if bool(getattr(reader, "is_encrypted", False)):
-            unlocked = False
-            try:
-                result = reader.decrypt("")
-                unlocked = bool(result) and int(getattr(result, "value", result)) != 0
-            except Exception:
+    with _pypdf_repair_counter(path):
+        try:
+            reader = PdfReader(path, strict=False)
+            if bool(getattr(reader, "is_encrypted", False)):
                 unlocked = False
-            if not unlocked:
-                return "", False  # never extract text from a locked PDF
-        parts: list[str] = []
-        total = 0
-        stopped = False
-        for page in reader.pages:
-            try:
-                text = page.extract_text() or ""
-            except Exception:
-                continue  # one bad page loses only that page
-            if text:
-                parts.append(text)
-                total += len(text)
-            if total >= max_chars:
-                stopped = True
-                break
-        return _normalize_body_text("\n".join(parts), max_chars, hard_stopped=stopped)
-    except (PyPdfError, ValueError, OSError, EOFError) as exc:
-        raise DocumentError(f"pypdf could not extract text: {exc}") from exc
-    except Exception as exc:
-        raise DocumentError(f"pypdf text extraction failed: {exc}") from exc
+                try:
+                    result = reader.decrypt("")
+                    unlocked = bool(result) and int(getattr(result, "value", result)) != 0
+                except Exception:
+                    unlocked = False
+                if not unlocked:
+                    return "", False  # never extract text from a locked PDF
+            parts: list[str] = []
+            total = 0
+            stopped = False
+            for page in reader.pages:
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    continue  # one bad page loses only that page
+                if text:
+                    parts.append(text)
+                    total += len(text)
+                if total >= max_chars:
+                    stopped = True
+                    break
+            return _normalize_body_text("\n".join(parts), max_chars, hard_stopped=stopped)
+        except (PyPdfError, ValueError, OSError, EOFError) as exc:
+            raise DocumentError(f"pypdf could not extract text: {exc}") from exc
+        except Exception as exc:
+            raise DocumentError(f"pypdf text extraction failed: {exc}") from exc
 
 
 def _docx_body(path: str, *, max_chars: int, max_bytes: int) -> tuple[str, bool]:
