@@ -18,8 +18,14 @@ Filearr supports two credential carriers, side by side:
     ```
 
     Admins create and revoke them under **Admin → API keys** (name, scopes,
-    optional expiry in days). The key material is shown exactly once at
-    creation. Revoking is immediate — the next request with that key gets 401.
+    optional expiry in days, and the **service account** that owns the key —
+    every key belongs to one; pick an existing account or create it inline).
+    **Service accounts** (Admin → Service accounts) are the non-human
+    principals: one per integration, so a retired or compromised integration
+    is one switch — *disable* refuses every key the account owns on the next
+    request, *delete* revokes them. Keys that predate service accounts sit under
+    *Pre-existing keys*. The key material is shown exactly once at creation.
+    Revoking is immediate — the next request with that key gets 401.
     Every mint/revoke lands in the audit log (`API_KEY_MINTED` /
     `API_KEY_REVOKED`). The REST equivalents are `GET/POST /api/v1/api-keys`
     and `DELETE /api/v1/api-keys/{id}` (admin scope). LLM access keys are a

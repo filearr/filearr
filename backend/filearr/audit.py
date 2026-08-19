@@ -172,6 +172,10 @@ LLM_KEY_MINTED = "LLM_KEY_MINTED"
 LLM_KEY_REVOKED = "LLM_KEY_REVOKED"
 # Ordinary (read/write/admin) API keys, admin-minted (2026-08-17).
 API_KEY_MINTED = "API_KEY_MINTED"
+# P6-T10 service accounts (2026-08-19).
+SERVICE_ACCOUNT_CREATED = "service_account_created"
+SERVICE_ACCOUNT_UPDATED = "service_account_updated"
+SERVICE_ACCOUNT_DELETED = "service_account_deleted"
 API_KEY_REVOKED = "API_KEY_REVOKED"
 
 _SECRET_SUBSTRINGS = (

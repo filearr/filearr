@@ -49,6 +49,7 @@ async def db_maker(pg_uri):
             "path_grants",
             "users",
             "api_keys",
+            "service_accounts",
             "principals",
         ):
             await conn.execute(text(f"DELETE FROM {t}"))

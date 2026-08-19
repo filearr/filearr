@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit
 from filearr.db import get_session
-from filearr.models import ApiKey
+from filearr.models import ApiKey, Principal, ServiceAccount
 from filearr.security import generate_key, require_scope
 
 router = APIRouter()
@@ -44,6 +44,8 @@ class MintRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     scopes: list[str] = Field(default_factory=lambda: ["read"], min_length=1)
     expires_days: int | None = Field(default=None, ge=1, le=3650)
+    #: P6-T10: the OWNING service account. Required -- there are no orphan keys.
+    service_account_id: uuidlib.UUID
 
     @field_validator("scopes")
     @classmethod
@@ -59,11 +61,13 @@ class MintRequest(BaseModel):
         return [s for s in VALID_SCOPES if s in out]
 
 
-def _row(k: ApiKey) -> dict:
+def _row(k: ApiKey, owner_name: str | None = None) -> dict:
     now = datetime.now(UTC)
     return {
         "id": str(k.id),
         "name": k.name,
+        "service_account_id": str(k.service_account_id) if k.service_account_id else None,
+        "service_account": owner_name,
         "prefix": k.prefix,
         "scopes": list(k.scopes or []),
         "expires_at": k.expires_at.isoformat() if k.expires_at else None,
@@ -81,17 +85,14 @@ async def list_scopes() -> dict:
 @router.get("", dependencies=[Depends(require_scope("admin"))])
 async def list_api_keys(session: AsyncSession = Depends(get_session)) -> dict:
     rows = (
-        (
-            await session.execute(
-                select(ApiKey)
-                .where(ApiKey.llm_role.is_(None))
-                .order_by(ApiKey.created_at.desc())
-            )
+        await session.execute(
+            select(ApiKey, ServiceAccount.name)
+            .outerjoin(ServiceAccount, ServiceAccount.principal_id == ApiKey.service_account_id)
+            .where(ApiKey.llm_role.is_(None))
+            .order_by(ApiKey.created_at.desc())
         )
-        .scalars()
-        .all()
-    )
-    return {"keys": [_row(k) for k in rows]}
+    ).all()
+    return {"keys": [_row(k, owner) for k, owner in rows]}
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_scope("admin"))])
@@ -100,12 +101,19 @@ async def mint_api_key(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    owner = await session.get(ServiceAccount, body.service_account_id)
+    if owner is None:
+        raise HTTPException(404, "service account not found")
+    owner_principal = await session.get(Principal, body.service_account_id)
+    if owner_principal is not None and owner_principal.disabled_at is not None:
+        raise HTTPException(409, "service account is disabled -- enable it first")
     full, prefix, key_hash = generate_key()
     row = ApiKey(
         name=body.name.strip(),
         prefix=prefix,
         key_hash=key_hash,
         scopes=body.scopes,
+        service_account_id=body.service_account_id,
         expires_at=(
             datetime.now(UTC) + timedelta(days=body.expires_days)
             if body.expires_days
@@ -118,9 +126,12 @@ async def mint_api_key(
     await audit.emit(
         audit.API_KEY_MINTED,
         request=request,
-        details={"key_id": str(row.id), "name": row.name, "scopes": row.scopes},
+        details={
+            "key_id": str(row.id), "name": row.name, "scopes": row.scopes,
+            "service_account_id": str(body.service_account_id),
+        },
     )
-    out = _row(row)
+    out = _row(row, owner.name)
     out["key"] = full  # shown exactly once
     return out
 

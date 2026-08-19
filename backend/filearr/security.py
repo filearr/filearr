@@ -58,6 +58,20 @@ async def _verify_credentials(
     now = datetime.now(UTC)
     if api_key is None or (api_key.expires_at and api_key.expires_at < now):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired API key")
+    # P6-T10: a DISABLED service account takes every key it owns with it
+    # (soft-disable, instant: checked per request, no cache).
+    if api_key.service_account_id is not None:
+        from filearr.models import Principal
+
+        disabled_at = (
+            await session.execute(
+                select(Principal.disabled_at).where(Principal.id == api_key.service_account_id)
+            )
+        ).scalar_one_or_none()
+        if disabled_at is not None:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "API key's service account is disabled"
+            )
     if scope not in api_key.scopes and "admin" not in api_key.scopes:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Scope '{scope}' required")
     api_key.last_used_at = now

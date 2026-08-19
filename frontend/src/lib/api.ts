@@ -3707,10 +3707,43 @@ export async function revokeLlmKey(id: string): Promise<void> {
 // --- Ordinary API keys (read / write / admin Bearer tokens; admin-minted) ---
 export type ApiKeyScope = "read" | "write" | "admin";
 
+export interface ServiceAccountOut {
+  id: string;
+  name: string;
+  description: string | null;
+  disabled: boolean;
+  created_at: string;
+  key_count: number;
+  llm_key_count: number;
+  last_used_at: string | null;
+}
+export const listServiceAccounts = () =>
+  request<{ service_accounts: ServiceAccountOut[] }>("/service-accounts");
+export const createServiceAccount = (body: { name: string; description?: string | null }) =>
+  request<ServiceAccountOut>("/service-accounts", { method: "POST", body: JSON.stringify(body) });
+export const patchServiceAccount = (
+  id: string,
+  body: { name?: string; description?: string | null; disabled?: boolean },
+) =>
+  request<ServiceAccountOut>(`/service-accounts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+export async function deleteServiceAccount(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/service-accounts/${id}`, {
+    method: "DELETE",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
 export interface ApiKeyRow {
   id: string;
   name: string;
   prefix: string;
+  /** P6-T10: the owning service account (every console-minted key has one). */
+  service_account_id?: string | null;
+  service_account?: string | null;
   scopes: ApiKeyScope[];
   expires_at: string | null;
   expired: boolean;
@@ -3737,6 +3770,7 @@ export function mintApiKey(body: {
   name: string;
   scopes: ApiKeyScope[];
   expires_days?: number | null;
+  service_account_id: string;
 }): Promise<ApiKeyRow> {
   return request("/api-keys", { method: "POST", body: JSON.stringify(body) });
 }

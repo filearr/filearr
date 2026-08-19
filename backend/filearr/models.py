@@ -789,6 +789,15 @@ class ApiKey(Base):
     # (filearr.llm.LLM_ROLES) — enforcement lives server-side in the facade
     # handlers, never in the prompt.
     llm_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: P6-T10 (2026-08-19): every key belongs to a service account (the
+    #: non-human principal that owns it). Pre-migration keys were backfilled
+    #: under the "Pre-existing keys" account. ON DELETE CASCADE: deleting a
+    #: service account revokes its keys -- there are no orphan keys.
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("service_accounts.principal_id", ondelete="CASCADE"),
+        nullable=True,
+    )
     path_scope: Mapped[str | None] = mapped_column(LtreeCompat(), nullable=True)
     libraries: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=True
@@ -1382,6 +1391,7 @@ class ServiceAccount(Base):
         ForeignKey("principals.id", ondelete="CASCADE"), primary_key=True
     )
     name: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Session(Base):

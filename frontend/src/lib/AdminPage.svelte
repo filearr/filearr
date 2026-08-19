@@ -20,6 +20,7 @@
   import AuditPanel from "./AuditPanel.svelte";
   import LlmKeysPanel from "./LlmKeysPanel.svelte";
   import ApiKeysPanel from "./ApiKeysPanel.svelte";
+  import ServiceAccountsPanel from "./ServiceAccountsPanel.svelte";
   import PresetsPanel from "./PresetsPanel.svelte";
   import { gotoBrowse } from "./routes";
   import { isAdminPrincipal, type AuthPrincipal } from "./api";
@@ -1042,6 +1043,7 @@
 
   <LlmKeysPanel />
   {#if isAdmin}<ApiKeysPanel />{/if}
+  {#if isAdmin}<ServiceAccountsPanel />{/if}
 
   {#if isAdmin}
     <UsersPanel />

@@ -809,6 +809,14 @@ scoped enough to ship independently.
   `user-profiles-full`) consumed via config-group `scan_selections`, which drive
   scan roots since 2026-08-18; enrolment tokens can pre-assign the group.
 
+## 20c. P6-T10 service accounts — DONE 2026-08-19
+
+`api_keys.service_account_id` (migration e0f1a2b3c4d5, existing keys backfilled
+under a "Pre-existing keys" account), `/service-accounts` CRUD, key minting
+requires an owning account (no orphan keys), disabling an account refuses its
+keys per request, deleting revokes them (CASCADE); Admin → Service accounts +
+owner selector on the API-keys form.
+
 ## 21. LLM / RAG integration (SHIPPED: M1 2026-07-28; M2+M3 2026-08-06)
 
 Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool

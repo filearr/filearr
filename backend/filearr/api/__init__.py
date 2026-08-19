@@ -36,6 +36,7 @@ from filearr.api import (
     scan_paths,
     scans,
     search,
+    service_accounts,
     stats,
     system,
     taxonomy,
@@ -55,6 +56,9 @@ v1_router.include_router(search.router, tags=["search"])
 v1_router.include_router(saved_searches.router, prefix="/saved-searches", tags=["saved-searches"])
 v1_router.include_router(llm_keys.router, prefix="/llm-keys", tags=["llm-keys"])
 v1_router.include_router(api_keys.router, prefix="/api-keys", tags=["api-keys"])
+v1_router.include_router(
+    service_accounts.router, prefix="/service-accounts", tags=["service-accounts"]
+)
 v1_router.include_router(items.router, prefix="/items", tags=["items"])
 v1_router.include_router(digests.router, prefix="/items", tags=["items"])
 v1_router.include_router(item_agent_status.router, prefix="/items", tags=["items"])

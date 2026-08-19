@@ -8,14 +8,20 @@
     listApiKeyScopes,
     mintApiKey,
     revokeApiKey,
+    listServiceAccounts,
+    createServiceAccount,
     friendlyError,
     type ApiKeyRow,
     type ApiKeyScope,
     type ApiKeyScopeInfo,
+    type ServiceAccountOut,
   } from "./api";
 
   let keys = $state<ApiKeyRow[]>([]);
   let scopes = $state<ApiKeyScopeInfo[]>([]);
+  let accounts = $state<ServiceAccountOut[]>([]);
+  let mintAccount = $state("");
+  let newAccountName = $state("");
   let error = $state("");
   let loaded = $state(false);
 
@@ -28,9 +34,11 @@
 
   async function load() {
     try {
-      const [k, s] = await Promise.all([listApiKeys(), listApiKeyScopes()]);
+      const [k, s, a] = await Promise.all([listApiKeys(), listApiKeyScopes(), listServiceAccounts()]);
       keys = k.keys;
       scopes = s.scopes;
+      accounts = a.service_accounts;
+      if (!mintAccount && accounts.length) mintAccount = accounts.find((x) => !x.disabled)?.id ?? "";
       loaded = true;
       error = "";
     } catch (e) {
@@ -61,11 +69,26 @@
       return;
     }
     try {
+      let owner = mintAccount;
+      if (owner === "__new__") {
+        if (!newAccountName.trim()) {
+          error = "Name the new service account.";
+          return;
+        }
+        owner = (await createServiceAccount({ name: newAccountName.trim() })).id;
+        newAccountName = "";
+      }
+      if (!owner) {
+        error = "Pick the service account this key belongs to.";
+        return;
+      }
       minted = await mintApiKey({
         name: mintName.trim(),
         scopes: mintScopes,
         expires_days: mintExpires ? Number(mintExpires) : null,
+        service_account_id: owner,
       });
+      mintAccount = owner;
       mintName = "";
       mintScopes = ["read"];
       mintExpires = "";
@@ -135,6 +158,19 @@
         <span>Name</span>
         <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" required bind:value={mintName} placeholder="grafana-readonly" />
       </label>
+      <label class="grid gap-1 text-sm">
+        <span>Service account (owner)</span>
+        <select class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={mintAccount}>
+          {#each accounts as a (a.id)}
+            <option value={a.id} disabled={a.disabled}>{a.name}{a.disabled ? " (disabled)" : ""}</option>
+          {/each}
+          <option value="__new__">+ new service account…</option>
+        </select>
+        {#if mintAccount === "__new__"}
+          <input class="mt-1 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={newAccountName} placeholder="e.g. grafana, sonarr, backup-script" />
+        {/if}
+        <span class="text-xs text-slate-500 dark:text-slate-400">Every key belongs to a service account — disable the account to cut all its keys at once, delete it to revoke them. Manage accounts below.</span>
+      </label>
       <fieldset class="grid gap-2 text-sm">
         <legend class="mb-1">Scopes</legend>
         {#each scopes as s (s.name)}
@@ -170,6 +206,7 @@
         <thead class="bg-slate-50 text-left dark:bg-slate-900">
           <tr>
             <th class="px-3 py-2">Name</th>
+            <th class="px-3 py-2">Service account</th>
             <th class="px-3 py-2">Prefix</th>
             <th class="px-3 py-2">Scopes</th>
             <th class="px-3 py-2">Expires</th>
@@ -182,6 +219,7 @@
           {#each keys as k (k.id)}
             <tr class="border-t border-slate-100 dark:border-slate-800" class:opacity-60={k.expired}>
               <td class="px-3 py-2">{k.name}</td>
+              <td class="px-3 py-2 text-xs">{k.service_account ?? "—"}</td>
               <td class="px-3 py-2 font-mono text-xs">{k.prefix}…</td>
               <td class="px-3 py-2">
                 {#each k.scopes as s (s)}
