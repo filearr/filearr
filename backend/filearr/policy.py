@@ -137,6 +137,12 @@ class PolicyModel(BaseModel):
     #: per-agent update action. Pure evaluation lives in filearr.update_gate.
     update_window: str | None = None
     update_not_before: str | None = None
+    #: How often the agent polls central's update manifest (2026-08-19). Was
+    #: env-only (``FILEARR_AGENT_UPDATE_POLL_INTERVAL``, default 6 h) — which
+    #: made a one-hour ``update_window`` easy to miss entirely. Agent-enforced:
+    #: the daemon live-retunes its poll loop on the next policy poll; the env
+    #: still seeds the cadence at start. 300 s .. 7 days.
+    update_poll_interval_seconds: int | None = Field(default=None, ge=300, le=604800)
 
     # --- agent-side content extraction (2026-08-09 parity pass) -------------
     # archive/docs/agent-parity-design.md §"Policy keys". The agent runs the

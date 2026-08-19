@@ -85,7 +85,7 @@ type updateTriggerFn = func(ctx context.Context, beforeApply func(version string
 // (if a swapped-in update is on trial this boot) and the long-interval poll loop.
 // It returns the TriggerNow seam for the command poller (nil when self-update
 // is disabled) and a done-channel so the daemon waits for a clean stop.
-func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) (updateTriggerFn, <-chan struct{}) {
+func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool, updInterval *intervalRelay) (updateTriggerFn, <-chan struct{}) {
 	log := newLogger()
 	if selfUpdateDisabled() {
 		log.Info("agent self-update disabled by configuration (container image? update by pulling a new image)",
@@ -95,6 +95,12 @@ func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertSto
 		return nil, done
 	}
 	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient, serviceManaged)
+	// Policy's update_poll_interval_seconds (2026-08-19) live-retunes the poll
+	// loop; the env value above only seeds it. Bind delivers a value the policy
+	// poller may already have applied before this point.
+	if updInterval != nil {
+		updInterval.Bind(upd.SetInterval)
+	}
 
 	// Boot check before any loop: on an exhausted trial this restores + re-execs
 	// the previous binary and never returns. On a live trial it returns

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -100,6 +101,13 @@ type Updater struct {
 	log    *slog.Logger
 	clock  func() time.Time
 	rnd    *rand.Rand
+
+	// interval is the live poll cadence (starts at cfg.Interval; SetInterval
+	// retunes it from policy). retick wakes Run out of its current sleep so a
+	// shortened interval takes effect now rather than after the old 6h nap.
+	intervalMu sync.Mutex
+	interval   time.Duration
+	retick     chan struct{}
 }
 
 // New builds an Updater, applying defaults.
@@ -154,9 +162,11 @@ func New(cfg Config) *Updater {
 			// (it would refuse it anyway — this avoids the noisy refusal loop).
 			keyPinned: len(keys) > 0,
 		},
-		log:   cfg.Logger,
-		clock: cfg.Clock,
-		rnd:   cfg.Rand,
+		log:      cfg.Logger,
+		clock:    cfg.Clock,
+		rnd:      cfg.Rand,
+		interval: cfg.Interval,
+		retick:   make(chan struct{}, 1),
 	}
 }
 
@@ -396,9 +406,38 @@ func (u *Updater) RunHealthWindow(ctx context.Context) {
 	}
 }
 
+// Interval is the live poll cadence.
+func (u *Updater) Interval() time.Duration {
+	u.intervalMu.Lock()
+	defer u.intervalMu.Unlock()
+	return u.interval
+}
+
+// SetInterval live-retunes the poll cadence (the update_poll_interval_seconds
+// policy key). A non-positive d is ignored. When the cadence changes, Run is
+// woken from its current sleep and re-polls immediately, then continues on the
+// new cadence — so tightening the interval to fit an update window does not
+// wait out the previous sleep.
+func (u *Updater) SetInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	u.intervalMu.Lock()
+	changed := d != u.interval
+	u.interval = d
+	u.intervalMu.Unlock()
+	if changed {
+		select {
+		case u.retick <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // Run is the long-interval poll loop for the daemon: check for an update every
 // Interval (±10% jitter), applying one when offered. A fetch/apply failure backs
-// off (capped) and never exits; only ctx cancellation returns.
+// off (capped) and never exits; only ctx cancellation returns. A SetInterval
+// change interrupts the current sleep.
 func (u *Updater) Run(ctx context.Context) error {
 	backoff := time.Duration(0)
 	for {
@@ -409,7 +448,7 @@ func (u *Updater) Run(ctx context.Context) error {
 		var wait time.Duration
 		if err != nil {
 			if backoff == 0 {
-				backoff = u.cfg.Interval
+				backoff = u.Interval()
 			} else {
 				backoff *= 2
 			}
@@ -420,11 +459,29 @@ func (u *Updater) Run(ctx context.Context) error {
 			wait = backoff
 		} else {
 			backoff = 0
-			wait = u.jittered(u.cfg.Interval)
+			wait = u.jittered(u.Interval())
 		}
-		if !sleepCtx(ctx, wait) {
+		if !u.sleepOrRetick(ctx, wait) {
 			return ctx.Err()
 		}
+	}
+}
+
+// sleepOrRetick sleeps for d unless the context ends (false) or SetInterval
+// changed the cadence (true — the caller re-polls now).
+func (u *Updater) sleepOrRetick(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	case <-u.retick:
+		return true
 	}
 }
 
@@ -446,23 +503,4 @@ func (u *Updater) jittered(d time.Duration) time.Duration {
 	}
 	delta := float64(d) * 0.1
 	return d + time.Duration((u.rnd.Float64()*2-1)*delta)
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }

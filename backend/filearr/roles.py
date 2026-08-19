@@ -76,6 +76,52 @@ def get(name: str | None) -> Role:
     return Role(name, frozenset(), frozenset(), False)
 
 
+def known(name: str | None) -> bool:
+    """Whether ``name`` is a role the registry (or the builtin fallback) knows.
+    Used by the OIDC/LDAP role mappers so a typo'd custom role in a role map is
+    skipped (warned) rather than minted as an empty fail-closed role."""
+    if not name:
+        return False
+    return name in _roles or name in _builtins()
+
+
+# Builtin ordering kept explicit so a "user" role that an operator narrowed
+# below "viewer" still ranks the way the docs promise (admin > user > viewer).
+_BUILTIN_RANK = {"viewer": 0, "user": 1, "admin": 2}
+
+
+def privilege_key(name: str) -> tuple[int, int, int, int, str]:
+    """Sort key for "highest-privilege role wins" across builtins AND custom
+    roles. Bypass (admin scope) outranks everything; then the coarse scopes
+    (write > read), then the ceiling breadth; builtins tie-break by their
+    documented order; the name last so the pick is deterministic."""
+    r = get(name)
+    scope_rank = 2 if "write" in r.scopes else (1 if "read" in r.scopes else 0)
+    return (
+        1 if r.bypass else 0,
+        scope_rank,
+        len(r.ceiling),
+        _BUILTIN_RANK.get(name, -1),
+        name,
+    )
+
+
+def pick_highest(candidates, *, log=None, source: str = "role map") -> str | None:
+    """The highest-privilege KNOWN role among ``candidates`` (``None`` when none
+    is known). Unknown names — a custom role that was deleted or mistyped in
+    ``FILEARR_OIDC_ROLE_MAP`` / ``FILEARR_LDAP_ROLE_MAP`` — are dropped with a
+    warning so they cannot silently mint an empty role."""
+    known_roles = []
+    for c in candidates:
+        if known(c):
+            known_roles.append(c)
+        elif log is not None:
+            log.warning("%s names unknown role %r; ignoring that mapping", source, c)
+    if not known_roles:
+        return None
+    return max(known_roles, key=privilege_key)
+
+
 def all_roles() -> list[Role]:
     """Every known role (registry when loaded, else the builtins), builtins first."""
     src = _roles if _roles else _builtins()

@@ -229,7 +229,8 @@ rollup — "which version has each agent confirmed").
 ### A/B swap + crash-loop rollback (research §5.2/§5.3)
 
 Each `run` daemon polls `GET /agents/{id}/update-manifest` on a long interval
-(`FILEARR_AGENT_UPDATE_POLL_INTERVAL`, default 6h), verifies the signature,
+(`FILEARR_AGENT_UPDATE_POLL_INTERVAL`, default 6h; the `update_poll_interval_seconds`
+policy key live-overrides it), verifies the signature,
 downloads + sha256-verifies the matching artifact, then swaps:
 
 - **Windows**: rename the running `.exe` aside to `.old.exe`, move the new

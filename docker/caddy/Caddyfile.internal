@@ -41,7 +41,12 @@
 	# UR-T1: env-parameterised so the published filearr-caddy image works on
 	# Unraid, where the app container is named `filearr`, not `app`. compose
 	# sets FILEARR_APP_UPSTREAM explicitly; the default keeps it literal.
-	reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000}
+	reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000} {
+		# Proves to the backend this request transited our proxy, so it may
+		# believe X-Forwarded-For for audit/session/rate-limit IPs. Empty when
+		# the secret is unset => the backend falls back to the socket peer.
+		header_up X-Filearr-Proxy-Trust {$FILEARR_PROXY_SHARED_SECRET}
+	}
 
 	# Give the poster/thumbnail and large-response paths room; homelab-scale.
 	encode zstd gzip

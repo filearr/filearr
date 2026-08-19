@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -53,6 +54,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.config import Settings, get_settings
 
+log = logging.getLogger("filearr.oidc")
+
 # EVERY failure inside the decode/validate block must funnel into a fail-closed
 # :class:`OIDCError`. ``JoseError`` is joserfc's own base (bad signature, bad
 # header, unsupported alg, and — since we raise them ourselves in
@@ -69,8 +72,6 @@ _JOSE_ERRORS: tuple = (JoseError, ValueError, KeyError, TypeError)
 ALLOWED_SIGNING_ALGS: frozenset[str] = frozenset(
     {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}
 )
-
-_GLOBAL_ROLE_RANK = {"viewer": 0, "user": 1, "admin": 2}
 
 # Clock-skew allowance applied to every time-based claim (exp/nbf/iat), in
 # seconds. Unchanged from the Authlib era (``claims.validate(leeway=120)``).
@@ -537,7 +538,14 @@ class OIDCProvider:
                 if mapped:
                     matched.append(mapped)
         if matched:
-            return max(matched, key=lambda r: _GLOBAL_ROLE_RANK.get(r, -1))
+            # Custom roles are valid targets (2026-08-19); an unknown name is
+            # dropped with a warning rather than minted as an empty role. The
+            # callback preloads the role registry so this sync check is fresh.
+            from filearr import roles as role_registry
+
+            picked = role_registry.pick_highest(matched, log=log, source="FILEARR_OIDC_ROLE_MAP")
+            if picked is not None:
+                return picked
         return cfg.default_role or None  # empty default => refuse (fail-closed)
 
     def authenticate(self, credentials: dict) -> object:

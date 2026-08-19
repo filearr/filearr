@@ -476,7 +476,8 @@ command. Attaching releases to the config tier engine (§9.3) is a roadmap item.
    artifact is present.
 4. **Decide who takes it, before you upload.** With `auto_update` left on
    everywhere, the whole fleet sees the release on its next poll (default 6h;
-   `FILEARR_AGENT_UPDATE_POLL_INTERVAL`). To stage it: set `auto_update: false`
+   `FILEARR_AGENT_UPDATE_POLL_INTERVAL`, or the `update_poll_interval_seconds`
+   policy key to retune a group live). To stage it: set `auto_update: false`
    in the **Global** config group and `true` in a small higher-priority group
    holding the machines you want on it first (§8.5).
 5. **Watch confirmations.** `GET /api/v1/agent-releases` returns each release's

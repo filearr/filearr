@@ -77,7 +77,8 @@ to confirm a change actually reached the containers.
 | `FILEARR_AUTH_RATELIMIT_MAX_ATTEMPTS` | `3` | Failures per window → lock. |
 | `FILEARR_AUTH_RATELIMIT_WINDOW_SECONDS` | `120` | Find window. |
 | `FILEARR_AUTH_RATELIMIT_LOCK_SECONDS` | `300` | Lockout duration. |
-| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | Only enable behind a trusted proxy. |
+| `FILEARR_TRUSTED_PROXIES` | *(unset)* | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (real client IPs in the audit log, sessions and rate limit). Not needed for the shipped Caddy sidecar — it proves itself with `X-Filearr-Proxy-Trust` = `FILEARR_PROXY_SHARED_SECRET`. |
+| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | Legacy: trust the leftmost `X-Forwarded-For` unconditionally. Prefer the two mechanisms above. |
 | `FILEARR_AUDIT_READS` | `false` | Record a per-query search event (high volume). |
 
 OIDC (`FILEARR_OIDC_*`) and LDAP (`FILEARR_LDAP_*`) are extensive, env-only
@@ -300,7 +301,7 @@ per-library flag.
 | `FILEARR_CA_PROVISIONER_JWK` | *(unset)* | **Secret** — decrypted private JWK; without it `ca_ott` is null. |
 | `FILEARR_AGENT_CERT_TTL_HOURS` | `48` | Advisory agent cert lifetime (24–72h band). |
 | `FILEARR_AGENT_AUTH_MODE` | `fingerprint` | `fingerprint` / `mtls-header` / `both`. |
-| `FILEARR_PROXY_SHARED_SECRET` | *(unset)* | **Secret** — mTLS proxy ↔ backend trust (required for mtls modes). |
+| `FILEARR_PROXY_SHARED_SECRET` | *(unset)* | **Secret** — proxy ↔ backend trust: Caddy stamps it on `X-Filearr-Proxy-Trust` (real client IPs behind the proxy) and `X-Filearr-Proxy-Auth` (required for the mtls agent-auth modes). Set on both containers. |
 | `FILEARR_AGENT_OFFLINE_ALERT_SECONDS` | `172800` | Agent-offline alert threshold (48h). |
 | `FILEARR_AGENT_REPLICATION_STALL_ALERT_SECONDS` | `21600` | Replication-stall alert threshold (6h). |
 | `FILEARR_AGENT_DIST_DIR` | `/app/agent-dist` | First-install agent binaries + install scripts served by `/api/v1/agent-dist` (baked into the image; the API 404s gracefully when absent). |

@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import RedirectResponse
 
-from filearr import audit, authx, oidc
+from filearr import audit, authx, oidc, ratelimit, roles
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.security import set_session_cookie
@@ -142,6 +142,9 @@ async def oidc_callback(
             code_verifier=verifier,
         )
         jwks = await oidc.fetch_jwks(cfg, meta["jwks_uri"])
+        # The role map may target custom roles; refresh the registry before the
+        # (sync) claims → role resolution inside authenticate().
+        await roles.ensure_loaded(session)
         provider = oidc.OIDCProvider(cfg)
         auth_result = provider.authenticate(
             {
@@ -156,7 +159,7 @@ async def oidc_callback(
         token = await authx.create_session(
             session,
             result.principal_id,
-            ip_address=request.client.host if request.client else None,
+            ip_address=ratelimit.client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
         await session.commit()

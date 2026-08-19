@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import AdminPage from "./lib/AdminPage.svelte";
+  import LibrariesPage from "./lib/LibrariesPage.svelte";
   import JobsPage from "./lib/JobsPage.svelte";
   import AlertsPage from "./lib/AlertsPage.svelte";
   import BrowsePage from "./lib/BrowsePage.svelte";
@@ -21,12 +22,14 @@
   import { parseBrowseHash } from "./lib/routes";
 
   // UI-T9 — hash-based routing so a refresh keeps the current tab and
-  // back/forward toggles between them. `#/search` (default), `#/admin`,
-  // `#/jobs` (UI-T10 jobs dashboard).
-  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
+  // back/forward toggles between them. `#/search` (default), `#/libraries`
+  // (library management, split from admin 2026-08-19), `#/admin`, `#/jobs`
+  // (UI-T10 jobs dashboard).
+  type Page = "search" | "libraries" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
+    if (location.hash === "#/libraries") return { page: "libraries", browseLib: "", browsePath: "" };
     if (location.hash === "#/admin") return { page: "admin", browseLib: "", browsePath: "" };
     if (location.hash === "#/jobs") return { page: "jobs", browseLib: "", browsePath: "" };
     if (location.hash === "#/alerts") return { page: "alerts", browseLib: "", browsePath: "" };
@@ -156,6 +159,9 @@
         class="rounded-lg px-3 py-1 text-sm {page === 'search' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
         onclick={() => goto("search")}>Search</button>
       <button
+        class="rounded-lg px-3 py-1 text-sm {page === 'libraries' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+        onclick={() => goto("libraries")}>Libraries</button>
+      <button
         class="rounded-lg px-3 py-1 text-sm {page === 'admin' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
         onclick={() => goto("admin")}>Admin</button>
       <button
@@ -205,7 +211,9 @@
       onclick={toggleDark}>Theme</button>
   </header>
 
-  {#if page === "admin"}
+  {#if page === "libraries"}
+    <LibrariesPage {me} />
+  {:else if page === "admin"}
     <AdminPage {me} authDisabled={authMode === "disabled"} />
   {:else if page === "jobs"}
     <JobsPage />

@@ -1,6 +1,6 @@
 # Why is a library failing?
 
-The Admin page shows three failure signals per library. Each has a different
+The Libraries page shows three failure signals per library. Each has a different
 cause class and a different fix. This page explains what they mean, how the
 **Diagnose** dialog gathers everything into one report, and what to do about
 every verdict it can produce.
@@ -15,7 +15,7 @@ every verdict it can produce.
 
 ## The three failure signals {#signals}
 
-| Signal on the Admin page | What it means | Cause class |
+| Signal on the Libraries page | What it means | Cause class |
 |---|---|---|
 | **FAILED** badge on the last scan | The scan walk crashed and was marked `failed` (never left `running`). The library was *not* fully walked; nothing was tombstoned by that run. | Mount / permissions / worker crash |
 | **Errors** column (count) | Items that were seen and indexed by name/path but whose *extraction* (ffprobe, exiftool, PDF text …) failed. Clicking the count opens the per-item list with an error kind per item. | Missing tool / corrupt file / safety ceiling / I/O |
@@ -29,7 +29,7 @@ ordered **verdicts**.
 
 ## Running Diagnose and reading verdicts {#running-diagnose}
 
-1. Admin → library row → **Diagnose**. The dialog probes and renders in a few
+1. Libraries → library row → **Diagnose**. The dialog probes and renders in a few
    seconds; a hung mount is capped at 8 s and becomes a verdict itself.
 2. **Verdicts** are listed first, worst first: `error` → `warning` → `info` →
    `ok`. Each card has a plain-language cause, a **What to do** list, an
@@ -56,7 +56,7 @@ for them; the agent's own health is what matters.
 **Meaning.** The library's `source_agent_id` points at an agent that no longer
 exists (deleted). Nothing can scan or serve it.
 
-**Confirm.** Admin → Agents does not list the agent named in the report.
+**Confirm.** Agents does not list the agent named in the report.
 
 **Fix.** Re-enrol the agent and re-add the library, or delete this library.
 Deleting a library is the product's one intentional hard delete — items and
@@ -71,10 +71,10 @@ you delete the library.
 cannot report; scans and metadata for this library are frozen at their last
 state.
 
-**Confirm.** Admin → Agents shows the agent as revoked; its log shows
+**Confirm.** Agents shows the agent as revoked; its log shows
 rejected polls.
 
-**Fix.** Un-revoke or re-enrol under Admin → Agents (see
+**Fix.** Un-revoke or re-enrol under Agents (see
 [Distributed agents](../agents.md)).
 
 **Data at risk.** None — the catalogue keeps its last replicated state.
@@ -258,7 +258,7 @@ be seen.
 
 ### never-scanned {#never-scanned}
 
-**Meaning.** No scan has ever run. Click **Scan** on the Admin page.
+**Meaning.** No scan has ever run. Click **Scan** on the Libraries page.
 
 ### scan-failed {#scan-failed}
 
@@ -314,7 +314,7 @@ so far are kept; nothing was tombstoned.
 **Meaning.** A scan is running now. If it has been running far longer than
 usual with a rate of 0/s, the worker is probably stuck on a hung mount.
 
-**Fix.** Watch the live rate on the Admin page; use **Stop**, fix the mount,
+**Fix.** Watch the live rate on the Libraries page; use **Stop**, fix the mount,
 then re-scan.
 
 ### scan-tombstoned-all {#scan-tombstoned-all}
@@ -360,7 +360,7 @@ report.
 
 Extraction failures are per item. The item is still indexed by name and path;
 only the deep metadata (duration, codec, EXIF, text …) is missing. The
-**Errors** column on the Admin page opens the per-item list with the kind and
+**Errors** column on the Libraries page opens the per-item list with the kind and
 message for each; **Retry extracts** re-queues them.
 
 ### extract-dependency {#extract-dependency}
@@ -438,7 +438,7 @@ still work. Enable it in Edit when you want the schedule back.
   unmounted-share signature.
 - **Extraction errors** — total count, a per-kind breakdown (`dependency`,
   `corrupt`, `guard`, `error`) and the most frequent messages. The per-item
-  list lives behind the Errors column on the Admin page.
+  list lives behind the Errors column on the Libraries page.
 - **Failed jobs** — up to ten failed jobs whose arguments name this library
   (task, queue, attempts, scheduled time, last error).
 - **Agent** — only for agent-owned libraries: name, host, platform, last

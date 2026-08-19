@@ -53,7 +53,6 @@ from filearr.config import Settings, get_settings
 logger = logging.getLogger("filearr.ldap")
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1", "", None}
-_GLOBAL_ROLE_RANK = {"viewer": 0, "user": 1, "admin": 2}
 
 
 class LDAPError(Exception):
@@ -439,7 +438,13 @@ def resolve_role(cfg: LdapConfig, group_dns: tuple[str, ...]) -> str | None:
         if role:
             matched.append(role)
     if matched:
-        return max(matched, key=lambda r: _GLOBAL_ROLE_RANK.get(r, -1))
+        # Custom roles are valid targets (2026-08-19); unknown names are dropped
+        # with a warning. provision_ldap_principal preloads the registry first.
+        from filearr import roles as role_registry
+
+        picked = role_registry.pick_highest(matched, log=logger, source="FILEARR_LDAP_ROLE_MAP")
+        if picked is not None:
+            return picked
     return cfg.default_role or None
 
 
@@ -453,9 +458,13 @@ async def provision_ldap_principal(
     typically the same directory as local accounts — an unrequested surface);
     JIT-provisions an SSO-only user (NULL password_hash) when auto_provision is
     on, else refuses. Role mapping + group sync applied on every login."""
+    from filearr import roles as role_registry
     from filearr.models import Principal, User
     from filearr.provisioning import sync_external_groups, unique_username
 
+    # Role map targets may be custom roles: make sure the registry is current
+    # before the (sync) mapping consults it.
+    await role_registry.ensure_loaded(session)
     role = resolve_role(cfg, identity.group_dns)
     if role is None:
         raise LDAPError("no_role", "user matched no role and ldap_default_role is empty")

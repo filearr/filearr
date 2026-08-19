@@ -71,6 +71,12 @@ type Policy struct {
 	// upload (documented). Additive — does not disturb the P7-T4 keys above.
 	UploadRatePerSec *int64 `json:"upload_rate_bytes_per_sec"`
 
+	// Update-manifest poll cadence (2026-08-19). Was env-only
+	// (FILEARR_AGENT_UPDATE_POLL_INTERVAL, 6h default), which made a short
+	// central update_window easy to miss. Absent (nil) => keep the env/default
+	// cadence; the daemon live-retunes its updater on every policy apply.
+	UpdatePollIntervalSeconds *int `json:"update_poll_interval_seconds"`
+
 	// Agent-side extraction pass (agent-parity design contract, 2026-08-09).
 	// All are additive and default OFF, so an existing fleet's behaviour is
 	// unchanged until an operator opts in. The sub-keys are only consulted when
@@ -327,6 +333,21 @@ func (p Policy) ReconcileInterval() (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(*p.ReconcileIntervalSeconds) * time.Second, true
+}
+
+// UpdatePollInterval returns the policy's update-manifest poll cadence and
+// true when the policy sets a positive update_poll_interval_seconds; (0,false)
+// means "absent — keep the daemon's current interval". Floored at 5 minutes so
+// a typo can never turn the fleet into a manifest-hammering loop.
+func (p Policy) UpdatePollInterval() (time.Duration, bool) {
+	if p.UpdatePollIntervalSeconds == nil || *p.UpdatePollIntervalSeconds <= 0 {
+		return 0, false
+	}
+	d := time.Duration(*p.UpdatePollIntervalSeconds) * time.Second
+	if d < 5*time.Minute {
+		d = 5 * time.Minute
+	}
+	return d, true
 }
 
 // WatchAllowed reports the policy's watch_mode: allowed is its value, set is

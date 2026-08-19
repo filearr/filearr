@@ -40,24 +40,14 @@ class _Bucket:
 
 
 def client_ip(request: Request, *, trust_forwarded: bool | None = None) -> str | None:
-    """The caller's source IP. When ``FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR``
-    is set (a trusted reverse proxy — the Caddy TLS sidecar — is in front), the
-    LEFTMOST ``X-Forwarded-For`` entry is used; otherwise the direct socket peer.
-    Never trust the header by default: a client could otherwise spoof it to dodge
-    the per-IP bucket (the per-username bucket stays unspoofable regardless)."""
-    settings = get_settings()
-    trust = (
-        settings.auth_ratelimit_trust_forwarded_for
-        if trust_forwarded is None
-        else trust_forwarded
-    )
-    if trust:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            first = xff.split(",")[0].strip()
-            if first:
-                return first
-    return request.client.host if request.client else None
+    """The caller's source IP — see :mod:`filearr.proxy_trust` for the trust
+    rules (Caddy proxy-trust header, ``FILEARR_TRUSTED_PROXIES`` CIDRs, or the
+    legacy unconditional ``FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR``). Never
+    trusts ``X-Forwarded-For`` by default: a client could otherwise spoof it to
+    dodge the per-IP bucket (the per-username bucket stays unspoofable)."""
+    from filearr.proxy_trust import client_ip as _resolve
+
+    return _resolve(request, trust_forwarded=trust_forwarded)
 
 
 def _buckets(username: str | None, ip: str | None) -> list[_Bucket]:

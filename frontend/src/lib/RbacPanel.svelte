@@ -10,7 +10,8 @@
   } from "./api";
 
   // P6-T2 RBAC admin panel: groups + members, path grants, and a decision
-  // preview. Functional, not fancy. Enforcement on data endpoints is P6-T4.
+  // preview. Functional, not fancy. Enforcement lives in security.require_permission
+  // (search scope + data endpoints) with the generation-invalidated grant cache.
   let error = $state("");
   let users = $state<AuthPrincipal[]>([]);
   let groups = $state<RbacGroup[]>([]);
@@ -126,8 +127,9 @@
   <h2 class="text-lg font-semibold">Access control (RBAC)</h2>
   <p class="text-sm text-slate-500">
     Groups + path-scoped grants. Grants only ever narrow a principal within its
-    global-role ceiling. Enforcement on data endpoints ships next (P6-T4); this
-    panel builds, stores, and previews decisions.
+    global-role ceiling and are enforced on search and every data endpoint
+    (items, browse, timeline, reports). Use the preview below to check what a
+    principal can see before saving.
   </p>
   {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
 

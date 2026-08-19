@@ -713,12 +713,12 @@ with its own LAN IP publishes nothing through the host.
 1. **Create the admin account.** With `FILEARR_AUTH_ENABLED=true` the first visit
    shows a one-time bootstrap screen. It is one-time in the strict sense — once
    an admin exists, the endpoint is closed.
-2. **Create your first library.** Admin → Libraries → New. The path is the
+2. **Create your first library.** Libraries → New. The path is the
    **in-container** path: if you mapped `/mnt/user/data/media` to `/data/media`,
    a share at `/mnt/user/data/media/movies` is `/data/media/movies` here. The
    folder browser only offers paths inside the mapped roots, which is the fastest
    way to confirm you mapped what you think you mapped.
-3. **Scan it.** Admin → the library → Scan.
+3. **Scan it.** Libraries → the library → Scan.
 
 A first scan looks like this, and knowing the shape saves you from stopping it
 early:

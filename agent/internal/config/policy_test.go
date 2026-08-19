@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func i64(v int64) *int64 { return &v }
@@ -154,5 +155,19 @@ func TestWatchAndReconcileAccessors(t *testing.T) {
 	d, ok := (Policy{ReconcileIntervalSeconds: &secs}).ReconcileInterval()
 	if !ok || d != 3600*1e9 {
 		t.Errorf("reconcile interval = %s ok=%v", d, ok)
+	}
+	// update_poll_interval_seconds (2026-08-19): absent => keep; floored at 5m.
+	if _, ok := (Policy{}).UpdatePollInterval(); ok {
+		t.Error("absent update poll interval must report ok=false")
+	}
+	upd := 1800
+	d, ok = (Policy{UpdatePollIntervalSeconds: &upd}).UpdatePollInterval()
+	if !ok || d != 1800*1e9 {
+		t.Errorf("update poll interval = %s ok=%v", d, ok)
+	}
+	tiny := 10
+	d, ok = (Policy{UpdatePollIntervalSeconds: &tiny}).UpdatePollInterval()
+	if !ok || d != 5*time.Minute {
+		t.Errorf("update poll interval floor = %s ok=%v, want 5m", d, ok)
 	}
 }

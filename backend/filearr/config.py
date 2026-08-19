@@ -1,9 +1,14 @@
 """Application settings, loaded from environment / .env (pydantic-settings)."""
 
+import re
 from functools import lru_cache
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Role NAMES accepted in the OIDC/LDAP role maps: the same shape api/roles.py
+# enforces for custom roles (lowercase slug). Existence is checked at login.
+_ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
 
 
 class Settings(BaseSettings):
@@ -109,6 +114,12 @@ class Settings(BaseSettings):
     # front — otherwise a client could spoof the header to evade the per-IP
     # bucket (the per-USERNAME bucket is unspoofable regardless).
     auth_ratelimit_trust_forwarded_for: bool = False
+    # Preferred proxy trust (2026-08-19): comma-separated IPs/CIDRs of reverse
+    # proxies whose X-Forwarded-For may be believed (rightmost-untrusted walk).
+    # The shipped Caddy sidecar needs NO entry here — it proves itself with the
+    # X-Filearr-Proxy-Trust header (= FILEARR_PROXY_SHARED_SECRET) instead. Set
+    # this for a third-party proxy (nginx/Traefik/NPM). See filearr/proxy_trust.py.
+    trusted_proxies: str | None = None
 
     # --- Phase 6 P6-T9: security audit log ------------------------------------
     # Opt-in READ/search auditing. Login/logout/lifecycle/grant events are ALWAYS
@@ -1240,6 +1251,25 @@ class Settings(BaseSettings):
     # server agent stays green, an offline one flips within minutes.
     agent_online_threshold_seconds: int = 300  # 5m
 
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _check_trusted_proxies(cls, v: str | None) -> str | None:
+        if not v or not v.strip():
+            return None
+        import ipaddress
+
+        for part in v.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ipaddress.ip_network(part, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"FILEARR_TRUSTED_PROXIES: {part!r} is not an IP address or CIDR"
+                ) from exc
+        return v
+
     @field_validator("agent_auth_mode")
     @classmethod
     def _valid_agent_auth_mode(cls, v: str) -> str:
@@ -1267,16 +1297,19 @@ class Settings(BaseSettings):
     @property
     def oidc_role_map_parsed(self) -> dict[str, str]:
         """Parse ``oidc_role_map`` ("val:role,val:role") → {claim_value: role}.
-        Malformed pairs (no colon, unknown role) are dropped (fail-safe)."""
+        Malformed pairs (no colon, role not a valid role NAME) are dropped
+        (fail-safe). Since 2026-08-19 the role may be any role name — builtin
+        or custom (``Admin → Roles``); whether it EXISTS is checked at login
+        against the role registry (an unknown name is skipped with a warning),
+        so a role map can reference a custom role before it is created."""
         out: dict[str, str] = {}
-        valid = {"admin", "user", "viewer"}
         for pair in self.oidc_role_map.split(","):
             pair = pair.strip()
             if not pair or ":" not in pair:
                 continue
             k, _, v = pair.partition(":")
             k, v = k.strip(), v.strip().lower()
-            if k and v in valid:
+            if k and _ROLE_NAME_RE.match(v):
                 out[k] = v
         return out
 
@@ -1295,16 +1328,17 @@ class Settings(BaseSettings):
 
         Group DNs contain commas, so pairs are ';'-separated and the DN/role
         delimiter is '=>'. DNs are lower-cased for case-insensitive matching.
-        Malformed pairs (no '=>', unknown role) are dropped (fail-safe)."""
+        Malformed pairs (no '=>', role not a valid role NAME) are dropped
+        (fail-safe). Custom roles are accepted (checked against the registry at
+        login, like the OIDC map)."""
         out: dict[str, str] = {}
-        valid = {"admin", "user", "viewer"}
         for pair in self.ldap_role_map.split(";"):
             pair = pair.strip()
             if not pair or "=>" not in pair:
                 continue
             dn, _, role = pair.rpartition("=>")
             dn, role = dn.strip().lower(), role.strip().lower()
-            if dn and role in valid:
+            if dn and _ROLE_NAME_RE.match(role):
                 out[dn] = role
         return out
 

@@ -692,8 +692,12 @@
 <div class="mt-4">
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">Jobs</h2>
-    <span class="text-xs text-slate-500">
-      {#if lastUpdated}updated {new Date(lastUpdated).toLocaleTimeString()}{:else}loading…{/if}
+    <span class="flex items-center gap-1.5 text-xs text-slate-500">
+      {#if loading}
+        <span class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-slate-300 border-t-[var(--accent)]"
+          aria-hidden="true"></span>
+      {/if}
+      {#if lastUpdated}updated {new Date(lastUpdated).toLocaleTimeString()}{#if loading} · refreshing…{/if}{:else}loading…{/if}
     </span>
     {#if summary && summary.stalled.total > 0}
       <span
@@ -725,6 +729,26 @@
   </div>
 
   {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
+
+  <!-- First-load banner: the summary query fans out over several tables and
+       can take a few seconds on a large catalog; without this the page looked
+       frozen (header only, no body). Hidden once the first summary lands. -->
+  {#if !summary && !error}
+    <div
+      class="mt-4 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="inline-block h-5 w-5 shrink-0 animate-spin rounded-full border-[3px] border-slate-300 border-t-[var(--accent)] dark:border-slate-700 dark:border-t-[var(--accent)]"
+        aria-hidden="true"></span>
+      <div>
+        <div class="font-medium">Loading job status…</div>
+        <div class="text-xs text-slate-500">
+          Counting queues, scans and failures — this can take several seconds on a large catalog.
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Global maintenance-mode banner (2026-08-09): shown while the operator
        switch is active. Data piggybacks the jobs-summary poll. -->

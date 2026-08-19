@@ -376,8 +376,11 @@ def test_config_parsing_helpers():
     s = get_settings()
     s.oidc_scopes = "profile email"
     assert "openid" in s.oidc_scope_list
-    s.oidc_role_map = "admins:admin, editors:user , bad:notarole,noColon"
-    assert s.oidc_role_map_parsed == {"admins": "admin", "editors": "user"}
+    # Since 2026-08-19 any role NAME parses (custom roles are valid targets;
+    # existence is checked at login against the registry) — only malformed
+    # pairs and non-slug names are dropped.
+    s.oidc_role_map = "admins:admin, editors:user , bad:notarole,noColon,ugly:Not A Role"
+    assert s.oidc_role_map_parsed == {"admins": "admin", "editors": "user", "bad": "notarole"}
     get_settings.cache_clear()
 
 

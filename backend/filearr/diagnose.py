@@ -1,7 +1,7 @@
-"""Library diagnosis — the "why is this library red on the Admin page?" report
+"""Library diagnosis — the "why is this library red on the Libraries page?" report
 (2026-08-16).
 
-The Admin page shows three failure signals per library: a FAILED last scan, an
+The Libraries page shows three failure signals per library: a FAILED last scan, an
 extraction-Errors count, and failed jobs. Each has a different cause class and
 a different fix, and until now the operator had to correlate scan stats, the
 failing-items list, the failed-jobs table, the container log and the mount by
@@ -485,7 +485,7 @@ def _verdicts(
                 "never-scanned",
                 "Never scanned",
                 "No scan has run for this library yet.",
-                actions=["Click Scan on the Admin page."],
+                actions=["Click Scan on the Libraries page."],
             )
         )
     else:
@@ -540,7 +540,7 @@ def _verdicts(
                     "A scan is running",
                     f"Started {started}. If it has been running far longer than usual and the rate is 0, the worker may be stuck on a hung mount.",
                     actions=[
-                        "Watch the live rate on the Admin page; use Stop, then re-scan, if it sits at 0/s."
+                        "Watch the live rate on the Libraries page; use Stop, then re-scan, if it sits at 0/s."
                     ],
                 )
             )

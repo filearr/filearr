@@ -1,6 +1,6 @@
 <script lang="ts">
   // W8 — the file-extension similarity taxonomy EDITOR. A dedicated #/taxonomy
-  // route reachable from the Admin page. Shows the category -> group -> extension
+  // route reachable from the Libraries page. Shows the category -> group -> extension
   // tree and supports full CRUD: create/rename/delete categories (with an
   // extractor), create/rename/delete/REPARENT groups, and add/remove/MOVE
   // extensions (the add-to-group endpoint upserts, so adding an ext that already
@@ -225,7 +225,7 @@
   }
 
   function goBack() {
-    location.hash = "#/admin";
+    location.hash = "#/libraries";
   }
 </script>
 

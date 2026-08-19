@@ -8,7 +8,7 @@ to the central server over mTLS.
 !!! info "Agents are opt-in and off by default"
     A single-node Filearr deployment is entirely unaffected by any of this. With
     `FILEARR_AGENTS_ENABLED=false` (the default), the agent API returns 404, the
-    Admin → Agents panel is hidden, and the certificate authority never runs. The
+    Agents panel is hidden, and the certificate authority never runs. The
     tables still exist (empty), so enabling later needs no migration.
 
 !!! tip "Looking for a specific setting?"
@@ -1376,7 +1376,7 @@ sequenceDiagram
 
 Step by step:
 
-1. **Mint a token.** Admin → Agents → **Mint token** (or `POST
+1. **Mint a token.** Agents → **Mint token** (or `POST
    /api/v1/agents/enrollment-tokens`, admin scope). The raw token is shown
    **once** and never stored — only its hash is persisted. Tokens are
    **single-use** and short-lived (`FILEARR_ENROLLMENT_TOKEN_TTL_MINUTES`,
@@ -1511,6 +1511,7 @@ actually acts on the value.
 | `auto_update` | bool | on | **central** | Whether central *offers* an update on this agent's update-manifest poll (the poll answers `204` when off), so it gates every agent build uniformly — including old ones. An operator-triggered update from the agents table bypasses it: the click *is* the authorization. |
 | `update_window` | string | any time | **central** | *When* central offers updates: `<days> HH:MM-HH:MM [zone]`, e.g. `sat,sun 02:00-05:00` or `* 01:00-04:00 America/Chicago`. Days: `*` or a list/range of `mon..sun` (the day the window **starts**; an end before the start wraps past midnight). Zone: IANA name; absent = the central server's local zone. Outside the window the poll answers `204`. Bypassed by the per-agent update action. |
 | `update_not_before` | string | no hold | **central** | ISO-8601 date-time (naive = central-local) before which the poll answers `204` — "release at 02:00 tonight". **Release now** = set the key back to *Inherit* (or a past time). Bypassed by the per-agent update action. |
+| `update_poll_interval_seconds` | int 300..604800 | `FILEARR_AGENT_UPDATE_POLL_INTERVAL` (6 h) | agent | How often the agent asks central for an update manifest. Set it **shorter than your `update_window`** (e.g. `1800` for a 3-hour window) or a narrow window can be missed entirely. Live-retuned on the next policy poll — tightening it wakes the poll loop immediately. |
 
 Two more keys appear in a delivered document but are **not operator-settable**:
 
@@ -1739,8 +1740,10 @@ authorization):
   `false` in a group whose members should hold indefinitely.
 - `update_window` — *when*: e.g. `sat,sun 02:00-05:00` (central-local unless a
   zone is given). Agents in the group only take updates inside the window; the
-  6-hourly update poll that lands inside it applies the update. Container
-  agents are unaffected (they update by image pull).
+  update poll that lands inside it applies the update — so pair a narrow window
+  with `update_poll_interval_seconds` shorter than the window (the default
+  poll is 6-hourly and can skip a short window). Container agents are
+  unaffected (they update by image pull).
 - `update_not_before` — *not until*: an ISO-8601 date-time. Stage a release
   ahead of time, set the group to `2026-08-23T02:00`, and the fleet moves at
   02:00 that night on its next poll; **release now** by switching the key back to
@@ -1845,7 +1848,7 @@ either change.
 
 ## Killing an agent: revoke vs delete
 
-- **Revoke** (Admin → Agents → revoke, or `DELETE /api/v1/agents/{id}`) is an
+- **Revoke** (Agents → revoke, or `DELETE /api/v1/agents/{id}`) is an
   application-layer denylist: the agent is refused on every replication/config
   request regardless of whether its short-lived cert is still cryptographically
   valid. The row and its replication history are kept. Combined with the short

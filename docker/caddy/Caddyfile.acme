@@ -80,7 +80,12 @@
 	@filearr host filearr.{$FILEARR_TLS_DOMAIN}
 	handle @filearr {
 		encode zstd gzip
-		reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000}
+		reverse_proxy {$FILEARR_APP_UPSTREAM:app:8000} {
+			# Proves to the backend this request transited our proxy, so it may
+			# believe X-Forwarded-For for audit/session/rate-limit IPs. Empty when
+			# the secret is unset => the backend falls back to the socket peer.
+			header_up X-Filearr-Proxy-Trust {$FILEARR_PROXY_SHARED_SECRET}
+		}
 	}
 
 	# Unknown subdomain: do not silently serve the app.
@@ -112,5 +117,6 @@ agents.{$FILEARR_TLS_DOMAIN} {
 		header_up X-Filearr-Agent-Fp {http.request.tls.client.fingerprint}
 		header_up X-Filearr-Agent-San {http.request.tls.client.san.dns_names.0}
 		header_up X-Filearr-Proxy-Auth {$FILEARR_PROXY_SHARED_SECRET}
+		header_up X-Filearr-Proxy-Trust {$FILEARR_PROXY_SHARED_SECRET}
 	}
 }

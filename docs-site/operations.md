@@ -304,7 +304,7 @@ behind:
     ```
 
 2. Force a reaper pass and confirm: `GET /api/v1/system/jobs/reap` (admin).
-3. Re-enable schedules (Admin → each library → Scan schedule, or `PATCH
+3. Re-enable schedules (Libraries → each library → Scan schedule, or `PATCH
    /api/v1/libraries/{id}` with `scan_cron`).
 
 **Tunables.** `FILEARR_SCAN_SCHEDULE_MAX_CATCHUP_MINUTES` (default 2880 = 48h —
@@ -337,7 +337,7 @@ It is stuck if there is **no** `scan_library` job for that library still in
 - **Auto-heal:** the 5-minutely maintenance reconciler drives any run older than
   the grace window terminal (`stopping → stopped`, `running → failed`).
 - **Immediate:** `POST /api/v1/scans/{id}/force-clear` (admin; audited). Also a
-  **Force clear** button on the Admin page. Returns `409 "still active; use stop"`
+  **Force clear** button on the Libraries page. Returns `409 "still active; use stop"`
   only if a live worker is genuinely draining it.
 - A **manual** library scan (`POST /libraries/{id}/scan`) also self-heals leftover
   rows before deferring.
@@ -572,7 +572,7 @@ pruned wholesale by the default-on `hidden_dotfiles` preset.
 
 !!! tip "Custom exclusion presets"
     The bundles a library toggles under **Exclusion presets** are managed on
-    **Admin → Exclusion presets**: the shipped ones (`system_files`,
+    **Libraries → Exclusion presets**: the shipped ones (`system_files`,
     `hidden_dotfiles`, `caches_temp`, …) are read-only — **fork** one to get an
     editable copy — and you can create your own (gitignore syntax, one pattern
     per line, trailing `/` prunes a directory). A custom bundle reaches the walk
@@ -632,7 +632,7 @@ find "$P" -type f -name "*.*" | sed "s|.*\.||" | tr "[:upper:]" "[:lower:]" \
 
 ### Make the numbers reconcile exactly
 
-Enable **Count files in pruned folders** on the library (Admin → edit library →
+Enable **Count files in pruned folders** on the library (Libraries → edit library →
 Content processing), or via the API:
 
 ```bash
@@ -931,8 +931,8 @@ container). The shipped Caddyfile pins the check to public resolvers
 **Symptom.** No notifications for scan failures, extract spikes, low disk, agent
 offline/stall, or failed report deliveries.
 
-**Fix.** All system rules ship **seeded, disabled, with no channel**. In Admin →
-Alerts: create a channel (webhook / SMTP / Apprise), attach it to the rule, and
+**Fix.** All system rules ship **seeded, disabled, with no channel**. In the
+Alerts tab: create a channel (webhook / SMTP / Apprise), attach it to the rule, and
 **enable** the rule. Use the channel-row **Test** button to confirm delivery.
 
 **Webhook specifics.** A Discord webhook rejects a generic body (`400 … Cannot
@@ -946,7 +946,7 @@ default-deny, no-redirect, bounded I/O) are identical.
 [Apprise](https://github.com/caronc/apprise) is the "everything else" channel: one
 URL selects one of ~100 notification services — `tgram://`, `ntfy://`, `pover://`,
 `matrixs://`, `gotify://`, `discord://` and so on — so Filearr does not need a
-driver per service. Pick channel type **apprise** in Admin → Alerts and paste the
+driver per service. Pick channel type **apprise** in Alerts and paste the
 service URL; the [Apprise URL syntax][apprise-urls] page documents the format for
 each service.
 
@@ -1415,7 +1415,7 @@ finds zero files under it and tombstones the entire library as `missing` — a
 catalogue-wide deletion event that then ages out on the recycle-bin retention
 schedule.
 
-Fix it before the first scan, in the console (Admin → Libraries → each library →
+Fix it before the first scan, in the console (Libraries → each library →
 edit the path), or in SQL:
 
 ```sql

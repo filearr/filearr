@@ -242,6 +242,16 @@ The **Compare roles** view shows a matrix of every scope and action against
 every role, plus who currently holds each role, so you can pick the least
 privileged role that still has every ✓ a person needs.
 
+Custom roles are valid targets for the **federated role maps** too:
+`FILEARR_OIDC_ROLE_MAP=filearr-curators:curator` and
+`FILEARR_LDAP_ROLE_MAP=cn=curators,…=>curator` assign them at login exactly
+like the builtins. When a user matches several mapped roles the
+highest-privilege one wins — a role with the admin scope first, then
+write over read, then the wider ceiling, then the builtin order. A map entry
+that names a role which does **not** exist (deleted, or not created yet) is
+skipped with a warning in the log and never minted as an empty role; the user
+falls back to the remaining matches or to the provider's default role.
+
 !!! warning "A role change signs the user out"
     Changing a user's role revokes all of that user's sessions immediately;
     they sign back in with the new permissions. This is deliberate — a session

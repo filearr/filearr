@@ -53,7 +53,7 @@ identical:
    administrator account"** screen — set the first admin's username and a
    strong passphrase, then log in. (API equivalent:
    [`POST /api/v1/auth/bootstrap`](../operations.md#enabling-authentication).)
-2. **Create your first library**: Admin → Libraries → New. Pick the media root
+2. **Create your first library**: Libraries → New. Pick the media root
    as the *in-container* path (`/data/media/...` on the standard mappings),
    choose the content presets to include, and save. The folder browser only
    offers allow-listed roots, so a mapping mistake is visible immediately.

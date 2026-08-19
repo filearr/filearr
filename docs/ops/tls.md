@@ -112,6 +112,16 @@ The backend trusts these headers only when `X-Filearr-Proxy-Auth` matches
 `FILEARR_PROXY_SHARED_SECRET` (constant-time) — i.e. the request demonstrably
 transited *this* proxy. See `FILEARR_AGENT_AUTH_MODE` below and agents.md §6.
 
+Every `reverse_proxy` block in **both** Caddyfiles (web and agent vhosts) also
+stamps `X-Filearr-Proxy-Trust {$FILEARR_PROXY_SHARED_SECRET}`. This is a
+separate header on purpose — `X-Filearr-Proxy-Auth` switches the agent plane
+into mTLS-header auth and must not appear on the web vhost — and it serves one
+purpose: when it matches, the backend believes `X-Forwarded-For`, so the
+security audit, session list and login rate limit see the **real client IP**
+rather than the Caddy container's. Without the secret they record the proxy
+address (see auth.md "Proxy note" for `FILEARR_TRUSTED_PROXIES`, the
+third-party-proxy alternative).
+
 ### What the operator must do (acme-dns)
 
 1. **DNS** — create `A`/`AAAA` records pointing `filearr.<domain>`,

@@ -227,7 +227,7 @@ What state you're in:
 - **Nothing partial** — the stack still runs the previous build in its
   entirety, and no new database migrations were applied.
 - Scans the deploy quiesced were **not** auto-resumed (the script aborts
-  before that step) — restart them from the Admin page, or just rerun the
+  before that step) — restart them from the Libraries page, or just rerun the
   deploy.
 
 The two usual causes are a **full CT disk** (`pct exec <vmid> -- df -h /`)

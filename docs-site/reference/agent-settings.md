@@ -57,6 +57,7 @@ There is no single rule; it is per setting, and the split is deliberate.
 | Scan interval | `scan_interval_seconds` | local override, then `FILEARR_AGENT_SCAN_EVERY` | Policy wins whenever the key is present |
 | Scan on start | `scan_on_start` | local override, then `FILEARR_AGENT_SCAN_ON_BOOT` | Policy wins whenever the key is present |
 | Reconcile cadence | `reconcile_interval_seconds` | `FILEARR_AGENT_RECONCILE_INTERVAL` | Env seeds the interval at daemon start; a policy value **live-overrides** it on the next poll, without a restart |
+| Update poll cadence | `update_poll_interval_seconds` | `FILEARR_AGENT_UPDATE_POLL_INTERVAL` | Same: env seeds, policy live-overrides (and wakes the poll loop when tightened) |
 
 The scan-schedule knobs are resolved **per knob**, on every scheduler tick. An
 absent policy key falls through to the next surface rather than to "off", so a
@@ -416,7 +417,7 @@ PDF text work here" is per binary. Install guidance per OS is in
 | Variable | What it controls | Default |
 | --- | --- | --- |
 | `FILEARR_AGENT_SELF_UPDATE` | Boolean. `false`/`0` switches the **whole** self-update subsystem off: no boot check, no poll loop, one quiet informational line instead. An unparseable value keeps updates on — a typo must never silently disable them. | on. The **container image sets it to `false`**: an image is immutable by design (update = pull a new image), and an unpinned build's fail-closed refusal is correct there but its every-boot warning reads like a fault. |
-| `FILEARR_AGENT_UPDATE_POLL_INTERVAL` | Go duration between update-manifest polls. | `6h` |
+| `FILEARR_AGENT_UPDATE_POLL_INTERVAL` | Go duration between update-manifest polls. Seeds the cadence at start; the `update_poll_interval_seconds` policy key live-overrides it. | `6h` |
 | `FILEARR_AGENT_CONTAINER` | Marks this process as containerized. Advertised to central as the `container` capability, so the console flags a newer build ("pull the new image") instead of offering an in-place binary swap. `0`/`false` opts back out. When unset, the presence of `/.dockerenv` is used instead, which catches hand-rolled containers. | The shipped image sets `1`; otherwise auto-detected |
 | `FILEARR_AGENT_SERVICE` | **Set by the installer, not by you.** The service unit's environment carries `FILEARR_AGENT_SERVICE=1` so the running daemon knows it is service-managed and takes the clean-exit-for-restart path after a self-update swap, instead of self-re-exec (which a service manager would race, possibly ending up with two instances). | set to `1` in the service environment |
 

@@ -183,7 +183,7 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
     """List libraries, each annotated with its most-recent scan (FIX-10).
 
     ``last_scan`` is sourced per-library directly from ``scan_runs`` via a single
-    ``DISTINCT ON (library_id)`` query (no N+1), so the Admin page's "Last scan"
+    ``DISTINCT ON (library_id)`` query (no N+1), so the Libraries page's "Last scan"
     column survives worker restarts / redeploys and is NOT subject to the capped,
     global ``GET /scans`` feed dropping a library's latest run out of its window.
     Terminal non-``finished`` runs (failed/stopped/cancelled) are surfaced too, so

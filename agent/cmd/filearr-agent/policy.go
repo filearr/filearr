@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
@@ -28,12 +29,22 @@ type daemonApplier struct {
 	// like "no tesseract on this NAS" must be said clearly once, not on every
 	// policy version bump forever.
 	ignored *agentcfg.IgnoredLogger
+	// updInterval forwards update_poll_interval_seconds to the self-updater.
+	// The updater is constructed AFTER the poller (it needs to hand its
+	// TriggerNow seam to the command poller), so this is a late-bound relay:
+	// the value is kept and delivered when the updater binds.
+	updInterval *intervalRelay
 }
 
 func (a *daemonApplier) ApplyPolicy(p agentcfg.Policy) error {
 	if d, ok := p.ReconcileInterval(); ok {
 		a.sup.SetInterval(d)
 		a.log.Info("policy applied: reconcile interval", "interval", d.String())
+	}
+	if d, ok := p.UpdatePollInterval(); ok && a.updInterval != nil {
+		if a.updInterval.Set(d) {
+			a.log.Info("policy applied: update poll interval", "interval", d.String())
+		}
 	}
 	if allowed, set := p.WatchAllowed(); set {
 		a.log.Info("policy applied: watch_mode", "watch_mode", allowed)
@@ -68,7 +79,7 @@ func newPolicyClient(certStore *enroll.CertStore, centralURL, agentID string, ht
 // propagates the compact taxonomy to <dataDir>/taxonomy.json — the same file the
 // `scan` path reads. Refresh runs in a detached goroutine so the ~1271-entry
 // fetch never blocks the poll loop.
-func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, sup *reconcile.Supervisor, httpClient *http.Client) <-chan struct{} {
+func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, sup *reconcile.Supervisor, httpClient *http.Client, updInterval *intervalRelay) <-chan struct{} {
 	taxCache := taxonomy.NewCache(dataDir, newLogger())
 	taxClient := taxonomy.NewClient(taxonomy.ClientConfig{
 		BaseURL: centralURL,
@@ -80,7 +91,7 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 	poller := agentcfg.NewPoller(agentcfg.PollerConfig{
 		Client:  newPolicyClient(certStore, centralURL, agentID, httpClient),
 		Cache:   agentcfg.NewETagCache(dataDir),
-		Applier: &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger())},
+		Applier: &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger()), updInterval: updInterval},
 		Logger:  newLogger(),
 		AfterFetch: chainAfterFetch(
 			taxonomyRefreshHook(taxCache, taxClient, newLogger()),
@@ -216,4 +227,36 @@ func printPolicyDoc(doc agentcfg.PolicyDoc) {
 		return
 	}
 	fmt.Printf("policy keys: %s\n", strings.Join(keys, ", "))
+}
+
+// intervalRelay carries a policy-set duration to a consumer that may not exist
+// yet (the updater is built after the policy poller). Set stores the value and
+// forwards it when bound; Bind delivers any value already received. Set reports
+// whether the value changed (so the applier logs once per change, not per poll).
+type intervalRelay struct {
+	mu     sync.Mutex
+	value  time.Duration
+	target func(time.Duration)
+}
+
+func (r *intervalRelay) Set(d time.Duration) bool {
+	r.mu.Lock()
+	changed := d != r.value
+	r.value = d
+	t := r.target
+	r.mu.Unlock()
+	if t != nil && d > 0 {
+		t(d)
+	}
+	return changed
+}
+
+func (r *intervalRelay) Bind(target func(time.Duration)) {
+	r.mu.Lock()
+	r.target = target
+	d := r.value
+	r.mu.Unlock()
+	if d > 0 {
+		target(d)
+	}
 }

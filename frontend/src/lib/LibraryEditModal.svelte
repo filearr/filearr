@@ -8,7 +8,7 @@
   // surfaces inline. All dynamic strings render as text (no {@html}).
   //
   // The SAME modal also CREATES a library (`library === null`): the old inline
-  // "Add library" form on the Admin page exposed only a subset of these fields
+  // "Add library" form on the Libraries page exposed only a subset of these fields
   // and cluttered the page; one dialog with one field set means an option that
   // exists on Edit also exists on Add, and the page shows a single button.
   import { untrack } from "svelte";
@@ -44,7 +44,7 @@
     onClose: () => void;
   } = $props();
 
-  // Mode is fixed for the modal's lifetime (AdminPage mounts a fresh instance per
+  // Mode is fixed for the modal's lifetime (LibrariesPage mounts a fresh instance per
   // target), so capturing it once is intended — same reasoning as `seed` below.
   const creating = untrack(() => library === null);
 
@@ -54,7 +54,7 @@
   const HASH_POLICIES: HashPolicy[] = ["auto", "full", "quick_only"];
 
   // Working draft, seeded ONCE from the library prop. The modal is remounted per
-  // edit target (keyed by `editing` in AdminPage), so capturing the initial value
+  // edit target (keyed by `editing` in LibrariesPage), so capturing the initial value
   // is the intended behaviour — `untrack` makes that explicit and keeps the draft
   // fields from re-binding to the prop (silences state_referenced_locally). Globs
   // edit as newline-joined text.

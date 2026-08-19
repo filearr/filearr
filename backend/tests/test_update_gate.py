@@ -86,3 +86,13 @@ def test_policy_model_validates_keys():
         PolicyModel.model_validate({"update_window": "sometime"})
     with pytest.raises(ValidationError):
         PolicyModel.model_validate({"update_not_before": "later"})
+
+
+def test_policy_model_update_poll_interval_bounds():
+    # 2026-08-19: update_poll_interval_seconds (agent-enforced) 300 s .. 7 days.
+    PolicyModel.model_validate({"update_poll_interval_seconds": 300})
+    PolicyModel.model_validate({"update_poll_interval_seconds": 604800})
+    with pytest.raises(ValidationError):
+        PolicyModel.model_validate({"update_poll_interval_seconds": 60})
+    with pytest.raises(ValidationError):
+        PolicyModel.model_validate({"update_poll_interval_seconds": 604801})

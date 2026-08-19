@@ -7,11 +7,15 @@
     friendlyError, type AuthPrincipal, type AuthSession, type SessionSettings,
   } from "./api";
 
-  // P6-T11 session management. Every signed-in user sees + revokes their OWN
-  // active sessions ("log out everywhere"); an admin can additionally pick any
-  // user and force-revoke all of theirs. Revocation takes effect on that
-  // session's very next request (Postgres-backed instant revocation).
-  let { isAdmin = false }: { isAdmin?: boolean } = $props();
+  // P6-T11 session management. Two views of one panel (2026-08-19 split):
+  //   "mine"  — the signed-in user's OWN active sessions ("log out everywhere"),
+  //             rendered on the Account page;
+  //   "admin" — global session timeouts + force sign-out of any user, rendered
+  //             on the Admin page.
+  // Revocation takes effect on that session's very next request
+  // (Postgres-backed instant revocation).
+  let { view = "mine" }: { view?: "mine" | "admin" } = $props();
+  const isAdmin = $derived(view === "admin");
 
   let error = $state("");
   let mine = $state<AuthSession[]>([]);
@@ -36,6 +40,10 @@
     } catch (e) {
       error = friendlyError(e);
     }
+  }
+  /** Trim float noise (0.08333… → 0.08) without padding whole numbers. */
+  function fmtHours(h: number): string {
+    return String(Math.round(h * 100) / 100);
   }
   function sourceLabel(src: "env" | "global"): string {
     return src === "env" ? "from env default" : "set here";
@@ -97,8 +105,8 @@
   }
 
   onMount(() => {
-    refreshMine();
     if (isAdmin) { refreshUsers(); refreshSettings(); }
+    else refreshMine();
   });
 
   async function revokeOne(id: string) {
@@ -142,15 +150,23 @@
 </script>
 
 <section class="mt-8">
-  <h2 class="text-lg font-semibold">Active sessions</h2>
-  <p class="text-xs text-slate-500">
-    Revoking a session signs it out on its next request — no waiting for expiry.
-  </p>
+  {#if isAdmin}
+    <h2 class="text-lg font-semibold">Sessions</h2>
+    <p class="text-xs text-slate-500">
+      Global timeouts and forced sign-out. Your own sessions are on the Account page.
+    </p>
+  {:else}
+    <h2 class="text-lg font-semibold">Active sessions</h2>
+    <p class="text-xs text-slate-500">
+      Revoking a session signs it out on its next request — no waiting for expiry.
+    </p>
+  {/if}
 
   {#if error}
     <p class="mt-2 text-sm text-red-600">{error}</p>
   {/if}
 
+  {#if !isAdmin}
   <ul class="mt-3 divide-y divide-slate-200 text-sm dark:divide-slate-800">
     {#each mine as s (s.id)}
       <li class="flex items-center gap-3 py-2">
@@ -174,9 +190,10 @@
 
   <button class="mt-3 rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
     onclick={revokeAll}>Log out everywhere</button>
+  {/if}
 
   {#if isAdmin}
-    <div class="mt-6 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+    <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
       <h3 class="text-sm font-semibold">Session timeouts (global)</h3>
       <p class="text-xs text-slate-500">
         Runtime override of the env defaults. Idle changes apply live to existing
@@ -214,7 +231,7 @@
             {#if ssSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
           </div>
           <p class="basis-full text-xs text-slate-400">
-            Allowed range {ss.min_hours}–{ss.max_hours} h; 0 clears back to the env default.
+            Allowed range {fmtHours(ss.min_hours)}–{fmtHours(ss.max_hours)} h; 0 clears back to the env default.
           </p>
         </form>
       {:else}

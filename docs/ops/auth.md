@@ -99,9 +99,11 @@ results (fail-closed — never over-share); admins and API keys are unaffected.
 New/rescanned items get `path_scope` automatically. Items scanned before P6-T2
 (no `path_scope` stamped) are invisible to scoped users until re-scanned.
 
-**Grant changes take effect on the next request** — the filter is recompiled
-from live DB grants every query (no cache yet; the P6-T4 grant cache will add
-invalidation). A role change also revokes the user's sessions immediately.
+**Grant changes take effect on the next request** — grants are memoised per
+request and cached process-wide for 30 s, but every grant / group / membership
+mutation bumps a generation counter that invalidates the cache instantly
+(`filearr/grant_cache.py`), so a revoked grant never lingers. A role change also
+revokes the user's sessions immediately.
 
 **Too many narrow grants?** If a user's compiled filter exceeds
 `FILEARR_MEILI_SCOPE_FILTER_CEILING` (default 4096 chars) the search returns
@@ -209,7 +211,7 @@ preserved. Operators who never use SSO may set it back to `strict`.
 | `FILEARR_OIDC_SCOPES` | `openid profile email` | Requested scopes (`openid` is force-added). |
 | `FILEARR_OIDC_REDIRECT_URI` | derived | Override when the public URL can't be inferred from the request. Must match the IdP client registration. |
 | `FILEARR_OIDC_ROLE_CLAIM` | — | ID-token claim carrying role/group values. |
-| `FILEARR_OIDC_ROLE_MAP` | — | `claimval:role,claimval:role` (e.g. `filearr-admins:admin,staff:user`). Highest-privilege match wins. |
+| `FILEARR_OIDC_ROLE_MAP` | — | `claimval:role,claimval:role` (e.g. `filearr-admins:admin,staff:user`). Highest-privilege match wins. The role may be a builtin or a **custom role** (Admin → Roles); an unknown name is skipped with a warning at login. |
 | `FILEARR_OIDC_DEFAULT_ROLE` | `viewer` | Role when nothing maps. **Set EMPTY to REFUSE unmapped users** (fail-closed). |
 | `FILEARR_OIDC_AUTO_PROVISION` | `true` | Create a local account on first login (no password — SSO-only). |
 | `FILEARR_OIDC_USERNAME_CLAIM` | `preferred_username` | Username source (falls back to email local-part, then `sub`); numeric suffix on collision. |
@@ -375,7 +377,7 @@ matrix (`)(*\/`, NUL, `*` wildcard) is covered by `tests/test_ldap_p6t6.py`.
 | `FILEARR_LDAP_ATTR_MEMBEROF` | `memberOf` | |
 | `FILEARR_LDAP_GROUP_BASE` | — | Group search base (group-search mode). |
 | `FILEARR_LDAP_GROUP_FILTER` | `(member={user_dn})` | `{user_dn}` is filter-escaped. |
-| `FILEARR_LDAP_ROLE_MAP` | — | `groupDN=>role;groupDN=>role`. DNs contain commas, so pairs are `;`-separated and the DN/role delimiter is `=>`. Matched case-insensitively; highest-privilege wins. |
+| `FILEARR_LDAP_ROLE_MAP` | — | `groupDN=>role;groupDN=>role`. DNs contain commas, so pairs are `;`-separated and the DN/role delimiter is `=>`. Matched case-insensitively; highest-privilege wins. Builtin or custom role names; unknown names are skipped with a warning at login. |
 | `FILEARR_LDAP_DEFAULT_ROLE` | — (empty) | Role when nothing maps. **Empty ⇒ REFUSE unmapped users** (fail-closed). |
 | `FILEARR_LDAP_AUTO_PROVISION` | `true` | JIT-create an SSO-only account on first successful bind. |
 | `FILEARR_LDAP_GROUP_SYNC` | `false` | Sync LDAP groups → existing `principal_groups` matched BY NAME (the group CN), `source='ldap'` (add+remove for ldap-sourced only; a `source='local'` name-match is add-only). |
@@ -495,12 +497,28 @@ bucket decays on its own window (it may be shared behind a NAT).
 | `FILEARR_AUTH_RATELIMIT_MAX_ATTEMPTS` | `3` | failures within the window before a lock |
 | `FILEARR_AUTH_RATELIMIT_WINDOW_SECONDS` | `120` | the find window |
 | `FILEARR_AUTH_RATELIMIT_LOCK_SECONDS` | `300` | how long a locked bucket stays locked |
-| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | trust the leftmost `X-Forwarded-For` |
+| `FILEARR_TRUSTED_PROXIES` | unset | IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed |
+| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | legacy: trust the leftmost `X-Forwarded-For` unconditionally |
 
-**Proxy note:** set `TRUST_FORWARDED_FOR=true` **only** when a trusted reverse
-proxy (the Caddy TLS sidecar, OPS-T1) is in front and strips/sets the header —
-otherwise a client can spoof it to dodge the per-IP bucket. The per-username
-bucket is unspoofable either way.
+**Proxy note — client IPs behind a proxy.** The per-IP bucket, every security
+event and every session row record the *caller's* IP, which behind a reverse
+proxy is only available from `X-Forwarded-For` — a header any client can forge
+against the directly-published app port (8484). It is therefore honoured only
+when the request demonstrably came through a trusted proxy (`filearr/proxy_trust.py`):
+
+* **The shipped Caddy sidecar** stamps `X-Filearr-Proxy-Trust: <FILEARR_PROXY_SHARED_SECRET>`
+  on every proxied request (both Caddyfiles). When the app and Caddy share the
+  secret (the deploy scripts and the Unraid full tier set it on both), real
+  client IPs appear with no further configuration. Without the secret the app
+  records the proxy's address.
+* **A third-party proxy** (nginx, Traefik, NPM): list its address(es) in
+  `FILEARR_TRUSTED_PROXIES=10.0.0.5,172.18.0.0/16`. The chain is walked from the
+  right, skipping trusted hops; the first untrusted hop is the client.
+* `TRUST_FORWARDED_FOR=true` is the old blunt switch (leftmost entry, no
+  checks) — keep it only if you already rely on it and nothing can reach the
+  app port except the proxy.
+
+The per-username bucket is unspoofable either way.
 
 The OIDC callback is deliberately **not** rate-limited: its 256-bit single-use
 `state` (consumed server-side) already defeats replay/brute force, and there is

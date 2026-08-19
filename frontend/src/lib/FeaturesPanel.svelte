@@ -71,7 +71,7 @@
             title={f.detail}>{f.title}</span>
           <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {p.cls}">{p.text}</span>
           {#if f.scope === "libraries"}
-            <span class="text-slate-400">per-library toggle in Admin → library settings</span>
+            <span class="text-slate-400">per-library toggle in Libraries → library settings</span>
           {:else if f.env}
             <span class="text-slate-400">
               env: <code class="font-mono text-slate-500 dark:text-slate-400">{f.env}</code>

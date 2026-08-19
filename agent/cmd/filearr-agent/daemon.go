@@ -229,12 +229,15 @@ func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enrol
 
 	sup, supDone := startSupervisor(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	replDone := startReplication(ctx, idx, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, onAuthError, ops.ReplicationPaused)
-	pollDone := startPoller(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, sup, httpClient)
+	// update_poll_interval_seconds relay: the poller may apply policy before the
+	// updater exists; the relay hands the cadence over once the updater binds.
+	updInterval := &intervalRelay{}
+	pollDone := startPoller(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, sup, httpClient, updInterval)
 	localDone := startLocalAPI(ctx, p.cfg.DataDir, p.socket, idx, hist)
 	webDone := startWebUI(ctx, p.cfg, p.webAddr, idx, hist, ops)
 	// The updater starts BEFORE the command poller so its TriggerNow seam can be
 	// handed to the self_update command handler (console "update now" button).
-	updTrigger, updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged)
+	updTrigger, updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged, updInterval)
 	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError, updTrigger, ops)
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	// Policy-driven scan scheduling (2026-08-03): the daemon runs scans itself

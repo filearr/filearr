@@ -725,7 +725,7 @@ export const createLibrary = (body: {
 }) => request<Library>("/libraries", { method: "POST", body: JSON.stringify(body) });
 
 // Partial update (scan_cron / watch_mode edits are re-validated server-side; a
-// 422 body carries the reason, surfaced by AdminPage's error banner).
+// 422 body carries the reason, surfaced by LibrariesPage's error banner).
 export const updateLibrary = (
   id: string,
   patch: Partial<{

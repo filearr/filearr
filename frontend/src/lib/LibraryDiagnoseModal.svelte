@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Library DIAGNOSIS dialog — "why is this library red on the Admin page?".
+  // Library DIAGNOSIS dialog — "why is this library red on the Libraries page?".
   // Calls GET /libraries/{id}/diagnose (backend/filearr/diagnose.py) and shows
   // the ordered verdicts first (severity badge, cause, what to do, evidence,
   // docs anchor), then the raw sections the verdicts were derived from, in
@@ -249,7 +249,7 @@
                 {/each}
               </tbody>
             </table>
-            <p class="mt-2 text-slate-500">The Errors column on the Admin page opens the per-item list.</p>
+            <p class="mt-2 text-slate-500">The Errors column on the Libraries page opens the per-item list.</p>
           {/if}
         </DiagnoseSection>
 

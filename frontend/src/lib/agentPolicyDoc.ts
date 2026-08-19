@@ -40,6 +40,7 @@ export interface AgentPolicyDoc {
   upload_rate_bytes_per_sec?: number;
   auto_update?: boolean;
   update_window?: string;
+  update_poll_interval_seconds?: number;
   update_not_before?: string;
   extract_enabled?: boolean;
   extract_body_text?: boolean;
@@ -385,6 +386,17 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     fallback: "no hold",
     enforcedBy: "central",
     placeholder: "2026-08-23T02:00",
+  },
+  {
+    key: "update_poll_interval_seconds",
+    label: "Update poll interval (seconds)",
+    kind: "int",
+    section: "updates",
+    min: 300,
+    max: 604800,
+    hint: "How often the agent asks central for an update manifest. The default 6 hours is fine for always-on release; with an update window, set this shorter than the window so the agent actually polls inside it (e.g. 1800 for a 3-hour window). Agent-enforced; live-retuned on the next policy poll. 300 s – 7 days.",
+    fallback: "the agent's FILEARR_AGENT_UPDATE_POLL_INTERVAL env (6 hours)",
+    enforcedBy: "agent",
   },
 ];
 

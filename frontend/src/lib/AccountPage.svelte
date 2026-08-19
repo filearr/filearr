@@ -7,7 +7,6 @@
     putMyPreferences,
     changeMyPassword,
     mySessionTimeouts,
-    revokeAllMySessions,
     ApiError,
     type AuthPrincipal,
     type MySessionTimeouts,
@@ -16,6 +15,7 @@
   import { theme, applyTheme, applyServerPreferences, type Mode } from "./theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./osFormat.svelte";
   import type { FormatPref } from "./osFormat";
+  import SessionsPanel from "./SessionsPanel.svelte";
 
   let { me, onUpdated }: { me: AuthPrincipal; onUpdated: (p: AuthPrincipal) => void } = $props();
 
@@ -152,7 +152,6 @@
   // --- Session ---------------------------------------------------------------
   let timeouts = $state<MySessionTimeouts | null>(null);
   let timeoutsErr = $state<string | null>(null);
-  let signOutBusy = $state(false);
   const sourceLabel = (s: string) =>
     s === "env" ? "deployment default (env)" : s === "global" ? "set by an administrator (global)" : "set for your account";
   const hours = (h: number) => (h % 24 === 0 && h >= 24 ? `${h / 24} day${h === 24 ? "" : "s"} (${h} h)` : `${h} h`);
@@ -165,16 +164,6 @@
     }
   });
 
-  async function signOutEverywhere() {
-    if (!confirm("Sign out of every session, including this one?")) return;
-    signOutBusy = true;
-    try {
-      await revokeAllMySessions();
-    } finally {
-      location.hash = "";
-      location.reload();
-    }
-  }
 </script>
 
 <section class="mx-auto max-w-2xl">
@@ -313,11 +302,10 @@
             <span class="text-xs text-slate-400">— {sourceLabel(timeouts.ttl_source)}</span></span>
         </div>
       {/if}
-      <div class="mt-3 flex flex-wrap items-center gap-3">
-        <a class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700" href="#/admin">View active sessions</a>
-        <button class="rounded-lg border border-red-300 px-3 py-1.5 text-sm text-red-600 disabled:opacity-40 dark:border-red-800"
-          disabled={signOutBusy} onclick={signOutEverywhere}>Sign out everywhere</button>
-      </div>
     </section>
   </div>
+
+  <!-- The user's own active sessions (moved here from the Admin page
+       2026-08-19; admin-wide session controls stay on Admin). -->
+  <SessionsPanel view="mine" />
 </section>
