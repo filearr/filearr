@@ -67,7 +67,11 @@ bash /boot/config/plugins/filearr/setup-unraid.sh --local-dir /path/to/filearr/u
 ```
 
 `--reconfigure` re-asks the questions and `--force` rewrites templates for
-containers that already exist; `--help` lists the rest. Nothing regenerates a
+containers that already exist; `--dry-run` shows what a run *would* do
+(state, secrets and templates are worked on in a scratch copy, Docker/dir/cron
+changes are printed instead of executed, and each template that would change
+is listed field by field) — combine it with `--force` or `--reconfigure` to
+preview those; `--help` lists the rest. Nothing regenerates a
 secret that already exists, ever. A plain re-run on an existing install keeps
 your templates but **merges in any fields upstream has added since** (at their
 defaults — open the container's Edit page and Apply to pick them up), so you

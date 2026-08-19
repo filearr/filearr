@@ -293,6 +293,103 @@ gen_hex() {
 
 secret_get() { grep -E "^$1=" "$SECRETS" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 
+# --- --dry-run ---------------------------------------------------------------
+# DRY_RUN=1 makes a run observable without side effects: state/answers/secrets
+# and the templates dir are redirected to a scratch COPY (so every read still
+# sees the box's real state and every write lands in /tmp), the handful of
+# primitives that mutate the box outside those files go through mut(), which
+# prints instead of executing, and the walkthrough/summary phases are replaced
+# by a diff of the templates that would be written. Nothing under /boot or
+# Docker is touched.
+DRY_RUN="${DRY_RUN:-0}"
+DRY_DIR=""
+ORIG_TEMPLATE_DIR=""
+mut() {  # mut DESCRIPTION -- CMD ARGS...   (runs CMD unless dry-run)
+  local desc="$1"; shift; [[ "${1:-}" == "--" ]] && shift
+  if [[ "$DRY_RUN" == 1 ]]; then echo "  [dry-run] would: ${desc}"; return 0; fi
+  "$@"
+}
+enter_dry_run() {
+  DRY_DIR="$(mktemp -d /tmp/filearr-dryrun.XXXXXX)"
+  ORIG_TEMPLATE_DIR="$TEMPLATE_DIR"
+  mkdir -p "$DRY_DIR/state" "$DRY_DIR/templates"
+  [[ -d "$STATE_DIR" ]] && cp -a "$STATE_DIR"/. "$DRY_DIR/state/" 2>/dev/null || true
+  for f in "$TEMPLATE_DIR"/my-filearr*.xml; do [[ -f "$f" ]] && cp -a "$f" "$DRY_DIR/templates/"; done
+  STATE_DIR="$DRY_DIR/state"
+  CONF="${STATE_DIR}/setup.conf"; SECRETS="${STATE_DIR}/secrets.env"; STATE="${STATE_DIR}/setup.state"
+  TEMPLATE_DIR="$DRY_DIR/templates"
+  echo
+  echo "  DRY RUN — nothing on this box will change. Scratch copy: ${DRY_DIR}"
+  echo "  (answers you give go to the scratch copy and are discarded)"
+  echo
+}
+_dry_field_diff() {  # OLD NEW
+  local old="$1" new="$2" line key name ov nv
+  while IFS= read -r line; do
+    key="$(sed -n 's/.*<Config \(Name="[^"]*" Target="[^"]*"\).*/\1/p' <<<"$line")"
+    [[ -n "$key" ]] || continue
+    name="$(sed -n 's/.*<Config Name="\([^"]*\)".*/\1/p' <<<"$line")"
+    nv="$(get_cfg "$new" "$key")"
+    if ! grep -qF -- "<Config ${key}" "$old"; then
+      echo "+ ${name}: (new field) = ${nv:-<empty>}"; continue
+    fi
+    ov="$(get_cfg "$old" "$key")"
+    if [[ "$ov" != "$nv" ]]; then
+      if grep -qF -- "<Config ${key}" <(grep -F 'Mask="true"' "$new"); then
+        echo "~ ${name}: (masked value changed)"
+      else
+        echo "~ ${name}: ${ov:-<empty>} -> ${nv:-<empty>}"
+      fi
+    fi
+  done < <(grep -F '<Config ' "$new")
+  while IFS= read -r line; do
+    key="$(sed -n 's/.*<Config \(Name="[^"]*" Target="[^"]*"\).*/\1/p' <<<"$line")"
+    [[ -n "$key" ]] || continue
+    grep -qF -- "<Config ${key}" "$new" || echo "- $(sed -n 's/.*<Config Name="\([^"]*\)".*/\1/p' <<<"$line"): (field removed)"
+  done < <(grep -F '<Config ' "$old")
+  # non-Config single-line elements (<Network>, <Privileged>, <PostArgs>, ...)
+  diff <(grep -vF '<Config ' "$old" | grep -E '^\s*<[A-Za-z]+>' ) <(grep -vF '<Config ' "$new" | grep -E '^\s*<[A-Za-z]+>') \
+    | grep -E '^[<>]' | sed -E 's/^< /- element: /; s/^> /+ element: /' | cut -c1-160 || true
+}
+
+dry_run_report() {
+  echo
+  echo "═══════════════════════════════════════════════════════════════════════════"
+  echo "  DRY RUN — what would change"
+  echo "═══════════════════════════════════════════════════════════════════════════"
+  local f name orig
+  for f in "$TEMPLATE_DIR"/my-*.xml; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f")"; orig="${ORIG_TEMPLATE_DIR}/${name}"
+    if [[ ! -f "$orig" ]]; then
+      echo "  ${name}: would be CREATED ($(grep -c '<Config ' "$f") fields)"
+    elif cmp -s "$f" "$orig"; then
+      echo "  ${name}: unchanged"
+    else
+      echo "  ${name}: would CHANGE:"
+      # Per-field summary (each <Config> is one long line, so a raw diff is
+      # unreadable): compare values by Name+Target; secrets are shown as a
+      # fingerprint-free "(value changed)". Non-<Config> element changes are
+      # listed by tag.
+      _dry_field_diff "$orig" "$f" | sed 's/^/      /'
+    fi
+  done
+  local k
+  for k in setup.conf secrets.env setup.state; do
+    if [[ -f "${STATE_DIR}/${k}" ]] && ! cmp -s "${STATE_DIR}/${k}" "/boot/config/plugins/filearr/${k}" 2>/dev/null; then
+      if [[ "$k" == "secrets.env" ]]; then
+        echo "  ${k}: would change (keys: $(cut -d= -f1 "${STATE_DIR}/${k}" | tr '\n' ' '))"
+      else
+        echo "  ${k}: would change:"; diff -u "/boot/config/plugins/filearr/${k}" "${STATE_DIR}/${k}" 2>/dev/null | sed -n '3,40p' | sed 's/^/      /'
+      fi
+    fi
+  done
+  echo
+  echo "  Phase 2 (walkthrough) and phase 3 (summary) are interactive Apply steps and"
+  echo "  were not simulated. Re-run without --dry-run to perform the above."
+  echo "  Scratch copy left at ${DRY_DIR} for inspection (safe to delete)."
+}
+
 # secret_put KEY VALUE — upsert, keeping the file single-valued per key. Used
 # for secrets that are DISCOVERED rather than generated (the Cloudflare token,
 # the CA admin password, the provisioner JWK), so that ${SECRETS} really is the
@@ -1001,6 +1098,10 @@ check_preserve_networks() {
   echo "  it STOPS EVERY CONTAINER ON THIS SERVER, not just Filearr's."
   echo
 
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "  [dry-run] would: write DOCKER_USER_NETWORKS=\"preserve\" to ${DOCKER_CFG} and cycle the Docker service (after asking)"
+    return 0
+  fi
   if ! confirm "Set it and cycle the Docker service now?" n always-ask; then
     echo
     echo "  Fine — do it in the UI instead, in this order, then re-run this script:"
@@ -1048,7 +1149,7 @@ create_filearr_network() {
   if network_exists filearr; then
     info "network 'filearr' already exists"
   else
-    docker network create filearr >/dev/null
+    mut "docker network create filearr" -- docker network create filearr >/dev/null
     info "created network 'filearr'"
   fi
   # A name starting with a digit is not preserved even with the setting on
@@ -1071,10 +1172,10 @@ create_appdata_dirs() {
   local d
   _own_if_new() {  # DIR UID:GID LABEL
     if [[ ! -d "$1" ]]; then
-      mkdir -p "$1"; chown -R "$2" "$1" 2>/dev/null || true
+      mut "mkdir -p $1 && chown -R $2 $1" -- bash -c 'mkdir -p "$1"; chown -R "$2" "$1" 2>/dev/null || true' _ "$1" "$2"
       info "$1  (created, $3)"
     elif [[ -z "$(ls -A "$1" 2>/dev/null)" ]]; then
-      chown -R "$2" "$1" 2>/dev/null || true
+      mut "chown -R $2 $1" -- bash -c 'chown -R "$2" "$1" 2>/dev/null || true' _ "$1" "$2"
       info "$1  (empty, $3)"
     else
       info "$1  (exists with content -- ownership left to its container: $(stat -c '%u:%g' "$1" 2>/dev/null))"
@@ -1103,8 +1204,8 @@ create_appdata_dirs() {
     # else ever legitimately owns that tree, and Unraid's New Permissions tool
     # is known to break it (below). 1000:1000 is what the container itself
     # expects, so re-applying it is safe while it runs.
-    mkdir -p "${APPDATA_CACHE}/filearr-stepca"
-    chown -R 1000:1000 "${APPDATA_CACHE}/filearr-stepca"
+    mut "mkdir -p ${APPDATA_CACHE}/filearr-stepca && chown -R 1000:1000 (step-ca)" -- \
+      bash -c 'mkdir -p "$1"; chown -R 1000:1000 "$1"' _ "${APPDATA_CACHE}/filearr-stepca"
     info "${APPDATA_CACHE}/filearr-stepca  (1000:1000 step — REQUIRED before first start)"
     warn "Unraid's unsafe 'New Permissions' tool (not 'Docker Safe New Permissions')"
     warn "resets this and re-breaks the CA the same way. Re-run --check after using it."
@@ -1139,6 +1240,10 @@ make_secrets() {
 # safety net for the cases Post Arguments cannot cover — someone editing that
 # field away, or a container recreated by a tool that ignores it.
 install_reattach_helper() {
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "  [dry-run] would: install the filearr-caddy-network reattach helper (User Scripts, */10 cron)"
+    return 0
+  fi
   [[ "$TIER" == "full" && "$TOPOLOGY" == "A" ]] || return 0
   step "caddy re-attach helper (TRAP 3)"
   mkdir -p "$STATE_DIR"
@@ -2458,6 +2563,10 @@ Run it in the Unraid terminal (web terminal icon, or SSH) as root:
                    JWK -> secrets.env + the filearr template); then re-Apply
                    filearr. For a CA that was verified on an earlier run.
   --yes            assume yes to WARN confirmations (never to the Docker cycle)
+  --dry-run        show what a run WOULD do and change nothing: state, secrets and
+                   templates are worked on in a scratch copy, Docker/dir/cron
+                   mutations are printed instead of executed, and the templates
+                   that would be written are diffed against the current ones
   --version, --help
 
 Phases: 0 preflight (read-only gate) · 1 prepare (settings, network, dirs,
@@ -2480,6 +2589,7 @@ while [[ $# -gt 0 ]]; do
     --reconfigure) RECONFIGURE=1 ;;
     --force)       FORCE=1 ;;
     --yes|-y)      ASSUME_YES=1 ;;
+    --dry-run)     DRY_RUN=1 ;;
     --local-dir)   shift; LOCAL_DIR="${1:-}"; [[ -d "$LOCAL_DIR" ]] || die "--local-dir: '$LOCAL_DIR' is not a directory" ;;
     --phase)       shift; PHASE_ONLY="${1:-}" ;;
     --harvest-ca)  MODE="harvest-ca" ;;
@@ -2490,6 +2600,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "${DRY_RUN:-0}" == 1 ]]; then enter_dry_run; fi
 mkdir -p "$STATE_DIR"
 touch "$STATE" 2>/dev/null || true
 load_conf
@@ -2540,9 +2651,9 @@ case "${PHASE_ONLY}" in
   # FAIL is a RESULT, not a crash, and a bare call would trip the ERR trap under
   # set -e and print a scary "SETUP FAILED" over a perfectly good report.
   0) if preflight; then exit 0; else exit 1; fi ;;
-  1) phase1; exit 0 ;;
-  2) walkthrough; exit 0 ;;
-  3) phase3; exit 0 ;;
+  1) phase1; [[ "$DRY_RUN" == 1 ]] && dry_run_report; exit 0 ;;
+  2) [[ "$DRY_RUN" == 1 ]] && die "--dry-run cannot simulate phase 2 (interactive Apply walkthrough)"; walkthrough; exit 0 ;;
+  3) [[ "$DRY_RUN" == 1 ]] && die "--dry-run has nothing to show for phase 3 (summary only)"; phase3; exit 0 ;;
   "") ;;
   *) die "--phase takes 0, 1, 2 or 3" ;;
 esac
@@ -2570,5 +2681,6 @@ else
   fi
 fi
 
+if [[ "$DRY_RUN" == 1 ]]; then dry_run_report; exit 0; fi
 walkthrough
 phase3
