@@ -15,6 +15,18 @@ from filearr.profiles import seed_profiles_to_db
 from filearr.search import ensure_index
 
 
+async def _seed_and_load_presets() -> None:
+    from filearr import preset_registry
+    from filearr.db import SessionLocal
+
+    try:
+        async with SessionLocal() as s:
+            await preset_registry.seed_builtins(s)
+            await preset_registry.ensure_loaded(s, force=True)
+    except Exception:  # noqa: BLE001 - never block boot on the presets table
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Console Logs panel: persist this process's log stream to app_logs.
@@ -33,6 +45,9 @@ async def lifespan(app: FastAPI):
     await keyguard.run_startup_check()
     # P4-T1: register the code-shipped metadata profiles (idempotent upsert).
     await seed_profiles_to_db()
+    # P2-T7: mirror the builtin exclusion presets into preset_bundles and load
+    # the operator's custom ones (best-effort: a pre-migration DB just skips).
+    await _seed_and_load_presets()
     await ensure_index()
     # Open the procrastinate pool ONCE for the app's lifetime. The defer
     # helpers used to open/close per call, which not only churned pools but

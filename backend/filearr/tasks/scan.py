@@ -320,6 +320,11 @@ async def scan_library(
     N->0 empty-walk guard for a deliberate everything-was-deleted rescan."""
     scope = _norm_scope(rel_path)
     async with SessionLocal() as session:
+        # P2-T7: pick up operator-created exclusion presets (one cheap query,
+        # TTL-cached) so a bundle made in the console reaches THIS walk.
+        from filearr import preset_registry
+
+        await preset_registry.ensure_loaded(session)
         library = (
             await session.execute(select(Library).where(Library.id == library_id))
         ).scalar_one()

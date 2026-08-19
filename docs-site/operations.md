@@ -570,6 +570,16 @@ unexplained        21,982     ← all of it inside pruned dot-directories
 Every missing file lived under a `.`-prefixed directory (`.git`, `.venv`, `.vs`)
 pruned wholesale by the default-on `hidden_dotfiles` preset.
 
+!!! tip "Custom exclusion presets"
+    The bundles a library toggles under **Exclusion presets** are managed on
+    **Admin → Exclusion presets**: the shipped ones (`system_files`,
+    `hidden_dotfiles`, `caches_temp`, …) are read-only — **fork** one to get an
+    editable copy — and you can create your own (gitignore syntax, one pattern
+    per line, trailing `/` prunes a directory). A custom bundle reaches the walk
+    on the next scan of any library that enables it; a bundle a library still
+    enables cannot be deleted. REST: `GET/POST /api/v1/presets`,
+    `POST /presets/{name}/fork`, `PATCH`/`DELETE /presets/{name}` (admin).
+
 ### The four mechanisms
 
 | Mechanism | Counted as | Visible? |

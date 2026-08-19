@@ -179,6 +179,8 @@ class PresetOut(BaseModel):
     patterns: list[str]
     default_enabled: bool
     caveat: str | None = None
+    #: P2-T7: builtins come from code and are fork-not-mutate; customs are editable.
+    builtin: bool = True
 
 
 class ExtensionGroupOut(BaseModel):

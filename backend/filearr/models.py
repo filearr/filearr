@@ -1949,6 +1949,30 @@ class AgentConfigRollout(Base):
     )
 
 
+class PresetBundleRow(Base):
+    """P2-T7 (2026-08-19): exclusion preset bundles as data. Builtins are
+    mirrored here from ``filearr.presets.BUILTIN_PRESET_BUNDLES`` (``is_builtin``,
+    refreshed from code at startup, never edited via the API -- fork instead);
+    custom bundles are operator-created. ``version`` bumps on every content
+    change (the load-bearing column for a later agent-distribution stage)."""
+
+    __tablename__ = "preset_bundles"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    label: Mapped[str] = mapped_column(Text)
+    exclude: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    default_enabled: Mapped[bool] = mapped_column(server_default=text("false"))
+    caveat: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_builtin: Mapped[bool] = mapped_column(server_default=text("false"))
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class AgentReleaseRollout(Base):
     """A phased rollout of ONE agent binary version to a growing slice of the
     fleet (roadmap §23, 2026-08-19) -- the release counterpart of

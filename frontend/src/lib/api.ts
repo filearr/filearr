@@ -474,6 +474,8 @@ export interface Preset {
   patterns: string[];
   default_enabled: boolean;
   caveat: string | null;
+  /** P2-T7: builtins are fork-not-mutate; customs are editable. */
+  builtin?: boolean;
 }
 
 export interface ExtensionGroup {
@@ -488,8 +490,36 @@ export interface PresetsResponse {
   extension_groups: ExtensionGroup[];
 }
 
-/** The code-constant preset bundles + extension groups (read scope). */
+/** The preset bundles (builtin + custom) + extension groups (read scope). */
 export const listPresets = () => request<PresetsResponse>("/presets");
+
+// ---- P2-T7 custom preset bundles (admin) ----
+export const createPreset = (body: {
+  name: string;
+  label: string;
+  patterns: string[];
+  caveat?: string | null;
+}) => request<Preset>("/presets", { method: "POST", body: JSON.stringify(body) });
+export const forkPreset = (name: string, body: { name: string; label?: string | null }) =>
+  request<Preset>(`/presets/${encodeURIComponent(name)}/fork`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const patchPreset = (
+  name: string,
+  body: { label?: string; patterns?: string[]; caveat?: string | null },
+) =>
+  request<Preset>(`/presets/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+export async function deletePreset(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/presets/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
 
 // ---- file groups (controlled vocabulary for the search file_group facet) ----
 // One filterable category derived from the file extension (e.g. archive,

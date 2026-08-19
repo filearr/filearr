@@ -67,6 +67,12 @@ async def main() -> None:
         print("filearr: procrastinate schema already present, skipping")
     # P4-T1: seed the code-shipped metadata profiles (idempotent).
     await seed_profiles_to_db()
+    # P2-T7: mirror the builtin exclusion presets into preset_bundles (idempotent).
+    from filearr import preset_registry
+    from filearr.db import SessionLocal
+
+    async with SessionLocal() as s:
+        await preset_registry.seed_builtins(s)
     # P8-T9/T10: seed the disabled is_system operational alert rules (idempotent).
     await seed_system_alert_rules()
     await ensure_index()

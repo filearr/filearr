@@ -20,6 +20,7 @@
   import AuditPanel from "./AuditPanel.svelte";
   import LlmKeysPanel from "./LlmKeysPanel.svelte";
   import ApiKeysPanel from "./ApiKeysPanel.svelte";
+  import PresetsPanel from "./PresetsPanel.svelte";
   import { gotoBrowse } from "./routes";
   import { isAdminPrincipal, type AuthPrincipal } from "./api";
 
@@ -1034,6 +1035,7 @@
   </div>
 
   <CustomFieldsPanel {libraries} />
+  {#if isAdmin}<PresetsPanel />{/if}
 
   {#if isAdmin}<RolesPanel />{/if}
   <RbacPanel />

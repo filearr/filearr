@@ -796,6 +796,19 @@ scoped enough to ship independently.
   capabilities advertisement so central's fleet console can show which agents
   lack it.
 
+## 20b. Phase-2 leftovers P2-T7 / P2-T8 — DONE 2026-08-19
+
+- **P2-T7 preset bundles → DB**: `preset_bundles` table (migration
+  c8d9e0f1a2b3), builtins mirrored from code (fork-not-mutate; a builtin never
+  overwrites a same-named custom row), `filearr.preset_registry` TTL cache
+  merged into the live `PRESET_BUNDLES` mapping every walk reads, CRUD/fork API,
+  Admin → Exclusion presets panel, `version` column reserved for agent
+  distribution.
+- **P2-T8 default search locations per platform**: delivered by the agent's
+  per-OS presets (`user-documents`, `user-media`, `downloads`, `server-data`,
+  `user-profiles-full`) consumed via config-group `scan_selections`, which drive
+  scan roots since 2026-08-18; enrolment tokens can pre-assign the group.
+
 ## 21. LLM / RAG integration (SHIPPED: M1 2026-07-28; M2+M3 2026-08-06)
 
 Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool

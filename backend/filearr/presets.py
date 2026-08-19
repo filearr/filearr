@@ -87,7 +87,7 @@ class ExtensionGroup:
 # CACHEDIR.TAG-tagged dirs are handled by ``is_cachedir_tagged`` (signature
 # check), NOT by a pattern here — a filename pattern cannot verify the signature.
 
-PRESET_BUNDLES: dict[str, PresetBundle] = {
+BUILTIN_PRESET_BUNDLES: dict[str, PresetBundle] = {
     "system_files": PresetBundle(
         label="System files",
         exclude=(
@@ -240,6 +240,49 @@ EXTENSION_GROUPS: dict[str, ExtensionGroup] = {
 
 
 # --- Pure helpers (implemented + unit-tested now) --------------------------
+
+# --------------------------------------------------------------------------- #
+# P2-T7 (2026-08-19): preset bundles are DATA. The builtins above are the seed
+# and stay authoritative for their own content; operator-created bundles live in
+# the ``preset_bundles`` table (``filearr.preset_registry``) and are merged into
+# ONE live mapping, ``PRESET_BUNDLES``, that every consumer keeps reading
+# exactly as before (iteration order: builtins in code order, then customs by
+# name). Builtins are fork-not-mutate: an operator copies one under a new name
+# and edits the copy; a code change to a builtin never touches a custom bundle,
+# and a custom bundle can never take a builtin's name.
+# --------------------------------------------------------------------------- #
+from collections.abc import Iterator, Mapping  # noqa: E402
+
+CUSTOM_PRESET_BUNDLES: dict[str, PresetBundle] = {}
+
+
+class _LiveBundles(Mapping[str, PresetBundle]):
+    """Read-only, always-current view over builtins + custom bundles."""
+
+    def __getitem__(self, name: str) -> PresetBundle:
+        if name in BUILTIN_PRESET_BUNDLES:
+            return BUILTIN_PRESET_BUNDLES[name]
+        return CUSTOM_PRESET_BUNDLES[name]
+
+    def __iter__(self) -> Iterator[str]:
+        yield from BUILTIN_PRESET_BUNDLES
+        yield from sorted(n for n in CUSTOM_PRESET_BUNDLES if n not in BUILTIN_PRESET_BUNDLES)
+
+    def __len__(self) -> int:
+        return len(BUILTIN_PRESET_BUNDLES) + sum(
+            1 for n in CUSTOM_PRESET_BUNDLES if n not in BUILTIN_PRESET_BUNDLES
+        )
+
+    def __contains__(self, name: object) -> bool:
+        return name in BUILTIN_PRESET_BUNDLES or name in CUSTOM_PRESET_BUNDLES
+
+
+PRESET_BUNDLES: Mapping[str, PresetBundle] = _LiveBundles()
+
+
+def is_builtin_preset(name: str) -> bool:
+    return name in BUILTIN_PRESET_BUNDLES
+
 
 def get_preset(name: str) -> PresetBundle:
     """Return the bundle named ``name``. Raises ``KeyError`` if unknown."""
