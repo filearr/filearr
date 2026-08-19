@@ -894,6 +894,15 @@ class AlertRule(Base):
     repeat_interval_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
     threshold_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     threshold_window_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Roadmap §6 polish (2026-08-19): inhibition. While any rule in
+    # ``inhibited_by`` produced an event within the last ``inhibit_window_s``
+    # seconds (matching library, or a library-less inhibitor), this rule's groups
+    # are MUTED -- marked delivered with a "suppressed: inhibited by" note, never
+    # sent. Alertmanager semantics: "agent offline" mutes "replication stalled".
+    inhibited_by: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    inhibit_window_s: Mapped[int] = mapped_column(Integer, server_default=text("900"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

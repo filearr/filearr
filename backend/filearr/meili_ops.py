@@ -76,6 +76,11 @@ SEARCHABLE_ATTRIBUTES: tuple[str, ...] = (
     # (searchableAttributes is in ORDERED_LIST_SETTINGS) so this append is a
     # genuine settings change; build_doc projects it from metadata_.archive_members.
     "archive_members",
+    # Roadmap §5 P3 provenance (2026-08-19): the download-source URL
+    # (metadata_.origin_url from xattrs / Zone.Identifier). LAST so a real
+    # name/body/archive hit outranks "I downloaded it from that site". Genuine
+    # ordered-settings change -> ensure_index reapplies at boot.
+    "origin_url",
 )
 FILTERABLE_ATTRIBUTES: tuple[str, ...] = (
     "library_id", "status", "extension", "year", "tags",

@@ -41,6 +41,7 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 | `stale_files` | Files not **modified** in *N* days (default 730) — see [Staleness](#staleness). |
 | `permissions_by_principal` | Every **explicit** (non-inherited) allow/deny from a non-system principal on paths an agent has inventoried with the `permissions` collector — one row per ACE, newest snapshot per path; owner always shown. Read agent-side (Linux mode bits + POSIX ACL xattrs; Windows owner + full DACL, local or UNC). Check `fidelity`: `synthesized_from_mode` means a cifs mount without `cifsacl` — the mount options, not the server's ACL. |
 | `permissions_broad_access` | Paths where **Everyone / Authenticated Users / Users / POSIX "other"** hold an explicit allow with write, delete, change-permissions or full control — the world-writable review list. |
+| `permission_changes` | **Permission drift**: what changed between consecutive permission snapshots of the same path — one row per change event, newest first, with ACEs added (`+`), removed (`-`), modified (`~ before → after`) and owner/group changes in a readable `details` column. Only re-inventoried paths appear; an unchanged re-collection writes no snapshot, so every row is real drift. Threshold input = "changes in the last *N* days" (default 30). Pair with the **System: permission change** alert rule for push notification — see [Permission drift](#permission-drift). |
 
 Run one as a paginated JSON page (this is what the Reports screen shows):
 
@@ -168,6 +169,33 @@ back with a `'` in front of it**. If you parse the CSV, strip that quote when th
 character after it is one of the guarded set — the PowerShell script below does
 exactly this. NDJSON is not affected (JSON needs no such guard), which is the
 main reason the shell examples use NDJSON.
+
+## Permission drift {#permission-drift}
+
+The `permission_changes` report and the **System: permission change** alert
+rule are two views of the same signal. Every time an agent re-inventories a
+path with the `permissions` collector, central compares the new record with the
+newest stored snapshot for that (agent, path):
+
+- **unchanged** — nothing is written (digest-gated), nothing fires;
+- **changed** — a new snapshot row is stored and diffed against the previous one
+  (ACEs keyed on principal + allow/deny + scope; a same-key entry whose verbs,
+  inheritance or mask changed is a *modification*, not a remove-plus-add); owner
+  and group are compared by canonical id.
+
+The report lists those pairs, newest first. The alert rule files one
+`permission_changed` event per changed path (deduplicated per hour and per
+snapshot digest, so repeats collapse while distinct changes stay distinct) with
+the same one-line summary in its payload — attach a channel and enable it under
+**Alerts** like any other system rule. A **fidelity-only** change (for example a
+share that started reporting `synthesized_from_mode` after a remount) is stored
+and shown in the report but does **not** raise the alert.
+
+!!! tip "Cadence is the inventory cadence"
+    Drift is observed at the next inventory of the path, not at the moment of
+    change — schedule the inventory command as often as you need the answer.
+    Retention is `FILEARR_PERMISSION_SNAPSHOTS_RETAIN` snapshots per path
+    (default 10); older history ages out of both the report and the diff basis.
 
 ## Staleness {#staleness}
 

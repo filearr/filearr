@@ -257,6 +257,16 @@ container-name value. For the Simple and
 Proxied tiers that is the whole of the networking configuration; skip to
 [installing a template](#installing-a-template).
 
+!!! note "Proxied tier: tell filearr which proxy to trust {#proxied-trusted-proxies}"
+    Your proxy forwards `X-Forwarded-For`, but filearr ignores that header from
+    anyone it does not trust (a client could forge it against port 8484). Set
+    the `filearr` template's **Trusted Proxies** field (`FILEARR_TRUSTED_PROXIES`,
+    under *advanced*) to the proxy's IP or CIDR — for a SWAG/NPM container on
+    the Docker bridge that is usually `172.17.0.0/16` — so the security audit,
+    the session list and the login rate limit record the real client. The Full
+    tier needs nothing here: `filearr-caddy` proves itself with the Proxy
+    Shared Secret.
+
 Only the full-parity tier has more to do, because of the proxy.
 
 #### The proxy has to be on two networks at once {#dual-homing}
@@ -678,6 +688,7 @@ index sync, purge). One container, because its Post Arguments say `all`.
 | Distributed Agents | optional | `false` | Master switch. Turn on in [step 6](#step-6-agents). |
 | Agent Auth Mode | optional | `fingerprint` | `mtls-header` / `both` for full parity. |
 | Proxy Shared Secret | **secret**, optional | *(empty)* | Full parity only; see [step 5](#step-5-caddy). |
+| Trusted Proxies | optional | *(empty)* | Proxied tier only: your reverse proxy's IP/CIDR so real client IPs reach the audit log — see the [Proxied-tier note](#proxied-trusted-proxies). |
 | CA URL / CA Root Fingerprint / CA Provisioner | optional | — / — / `filearr-agents` | Full parity only; see [step 4](#step-4-stepca). |
 | CA Provisioner JWK | **secret**, optional | *(empty)* | Full parity only. |
 | PUID / PGID / TZ | optional | `99` / `100` / `Etc/UTC` | |

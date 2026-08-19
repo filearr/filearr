@@ -48,6 +48,21 @@ def test_model3d_glb_scene_aggregates(glb_scene):
     assert "bbox" in meta
 
 
+def test_model3d_accurate_tier_merges_stl_vertices(stl_cube):
+    """Roadmap §15 (2026-08-19): a binary STL stores 3 vertices per triangle
+    (36 for a box). The default fast tier reports that raw count and can't call
+    it watertight; the opt-in accurate tier (process=True) merges them to the
+    true 8 and proves the box closed. The tier is recorded."""
+    fast = model_extract(str(stl_cube), max_bytes=BIG)
+    assert fast["geometry_tier"] == "fast" and fast["vertices"] == 36
+    acc = model_extract(str(stl_cube), max_bytes=BIG, accurate_max_bytes=BIG)
+    assert acc["geometry_tier"] == "accurate"
+    assert acc["vertices"] == 8 and acc["watertight"] is True and acc["triangles"] == 12
+    # above the accurate ceiling -> fast path again
+    small = model_extract(str(stl_cube), max_bytes=BIG, accurate_max_bytes=10)
+    assert small["geometry_tier"] == "fast"
+
+
 def test_model3d_size_ceiling(stl_cube):
     with pytest.raises(Model3DError, match="too large"):
         model_extract(str(stl_cube), max_bytes=10)

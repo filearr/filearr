@@ -111,6 +111,11 @@ class AlertRuleIn(BaseModel):
     threshold_count: int | None = Field(default=None, ge=0)
     threshold_window_s: int | None = Field(default=None, ge=0)
     channel_ids: list[uuid.UUID] = Field(default_factory=list)
+    # Roadmap §6 polish (2026-08-19): extra grouping keys beyond the fixed R1
+    # base (folder / extension / file) and inhibition.
+    group_by: list[str] | None = None
+    inhibited_by: list[uuid.UUID] = Field(default_factory=list)
+    inhibit_window_s: int = Field(default=900, ge=0, le=86400)
 
 
 class AlertRuleUpdate(BaseModel):
@@ -126,6 +131,9 @@ class AlertRuleUpdate(BaseModel):
     threshold_count: int | None = Field(default=None, ge=0)
     threshold_window_s: int | None = Field(default=None, ge=0)
     channel_ids: list[uuid.UUID] | None = None
+    group_by: list[str] | None = None
+    inhibited_by: list[uuid.UUID] | None = None
+    inhibit_window_s: int | None = Field(default=None, ge=0, le=86400)
 
 
 class AlertRuleOut(BaseModel):
@@ -145,6 +153,8 @@ class AlertRuleOut(BaseModel):
     threshold_count: int | None
     threshold_window_s: int | None
     channel_ids: list[uuid.UUID] = Field(default_factory=list)
+    inhibited_by: list[uuid.UUID] | None = None
+    inhibit_window_s: int = 900
     created_at: datetime
 
 
@@ -248,6 +258,37 @@ def _validate_webhook_format(type_: str, config: dict | None) -> None:
             f"invalid webhook_format {fmt!r}; one of "
             f"{sorted(webhook_formats.WEBHOOK_FORMATS)}",
         )
+
+
+def _normalize_group_by(group_by: list[str] | None) -> list[str]:
+    """The stored group_by: the R1 base in canonical order plus any allowed
+    extras (sorted). Unknown keys -> 422."""
+    from filearr.alerts.rules import GROUP_BY, GROUP_BY_EXTRAS
+
+    extras = sorted({g for g in (group_by or []) if g not in GROUP_BY})
+    bad = [g for g in extras if g not in GROUP_BY_EXTRAS]
+    if bad:
+        raise HTTPException(
+            422, f"unknown group_by keys {bad}; allowed extras: {sorted(GROUP_BY_EXTRAS)}"
+        )
+    return [*GROUP_BY, *extras]
+
+
+async def _validate_inhibitors(
+    session: AsyncSession, rule_id: uuid.UUID | None, inhibited_by: list[uuid.UUID]
+) -> list[uuid.UUID]:
+    """Every inhibiting rule must exist and must not be the rule itself."""
+    out: list[uuid.UUID] = []
+    for rid in dict.fromkeys(inhibited_by):
+        if rule_id is not None and rid == rule_id:
+            raise HTTPException(422, "a rule cannot inhibit itself")
+        exists = (
+            await session.execute(select(AlertRule.id).where(AlertRule.id == rid))
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(422, f"inhibiting rule {rid} not found")
+        out.append(rid)
+    return out
 
 
 def _validate_digest_window(digest_window: str | None) -> None:
@@ -531,6 +572,7 @@ async def create_rule(body: AlertRuleIn, session: AsyncSession = Depends(get_ses
     _validate_digest_window(body.digest_window)
     await _validate_library(session, body.library_id)
     await _validate_channels(session, body.channel_ids)
+    inhibitors = await _validate_inhibitors(session, None, body.inhibited_by)
     row = AlertRule(
         name=body.name,
         enabled=body.enabled,
@@ -539,12 +581,14 @@ async def create_rule(body: AlertRuleIn, session: AsyncSession = Depends(get_ses
         path_glob=body.path_glob or None,
         event_types=list(body.event_types),
         hash_change_only=body.hash_change_only,
-        group_by=["event_type", "library_id", "rule_id"],  # R1 fixed
+        group_by=_normalize_group_by(body.group_by),  # R1 base + optional extras
         group_wait_s=body.group_wait_s,
         digest_window=body.digest_window,
         repeat_interval_s=body.repeat_interval_s,
         threshold_count=body.threshold_count,
         threshold_window_s=body.threshold_window_s,
+        inhibited_by=inhibitors or None,
+        inhibit_window_s=body.inhibit_window_s,
     )
     session.add(row)
     await session.flush()
@@ -596,6 +640,13 @@ async def update_rule(
     if "library_id" in sent:
         await _validate_library(session, body.library_id)
         row.library_id = body.library_id
+    if "group_by" in sent:
+        row.group_by = _normalize_group_by(body.group_by)
+    if "inhibited_by" in sent:
+        inhibitors = await _validate_inhibitors(session, row.id, body.inhibited_by or [])
+        row.inhibited_by = inhibitors or None
+    if "inhibit_window_s" in sent and body.inhibit_window_s is not None:
+        row.inhibit_window_s = body.inhibit_window_s
     for key in (
         "name",
         "enabled",

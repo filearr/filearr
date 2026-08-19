@@ -237,6 +237,24 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         category="integrity", default_cron="55 4 * * *",
         lock="rehash-small-files", editable=True,
     ),
+    # Roadmap §16 (2026-08-19). Opt-in: NO default cron -- streaming full
+    # hashes over a network share is sustained I/O an operator should schedule
+    # (give it a cron here, or "Run now"). Budget/rate knobs in config.
+    MaintTaskSpec(
+        key="backfill_content_hashes",
+        task_name="filearr.worker.backfill_content_hashes",
+        title="Backfill content hashes (network libraries)",
+        description=(
+            "Streams whole-file content hashes for files in quick-hash-only "
+            "(network) libraries that have none, so exact-duplicate detection "
+            "and move confirmation work there too. Bounded per run by "
+            "FILEARR_HASH_BACKFILL_MAX_BYTES and throttled to "
+            "FILEARR_HASH_BACKFILL_RATE_MBPS; skips agent libraries and files "
+            "over the hash ceiling. No default schedule -- opt in here."
+        ),
+        category="integrity", default_cron=None,
+        lock="backfill-content-hashes", editable=True,
+    ),
     # BK-T3. Category `integrity` rather than `cleanup`: it produces state
     # rather than reclaiming it, and it is the only task here whose failure
     # means an operator has no recovery path. NO default cron, on purpose —

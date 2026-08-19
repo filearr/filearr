@@ -14,10 +14,13 @@ import (
 	"strings"
 )
 
-// Archive families, mirroring backend/filearr/tasks/archives.py exactly: the
-// same zip extensions and the same tar suffix table, checked in the same order
-// (compound ".tar.gz" before a bare ".gz" could match). 7z/rar need third-party
-// readers on both sides and are recognised by neither.
+// Archive families, mirroring backend/filearr/tasks/archives.py: the same zip
+// extensions and the same tar suffix table, checked in the same order (compound
+// ".tar.gz" before a bare ".gz" could match). 7z/rar: central lists them since
+// 2026-08-19 (py7zr / rarfile, header-only); the agent deliberately does NOT --
+// the parity plan forbids new module dependencies for a listing-only feature
+// (the same rule that leaves .tar.xz unlisted here), so agent-hosted 7z/rar
+// files carry no member listing. Documented asymmetry, not a bug.
 var zipArchiveExts = map[string]bool{"zip": true, "cbz": true, "jar": true}
 
 var tarSuffixes = []string{"tar.gz", "tar.bz2", "tar.xz", "tar", "tgz", "tbz2", "tbz", "txz"}

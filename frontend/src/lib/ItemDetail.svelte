@@ -77,6 +77,14 @@
   // library-share_prefix "Open file" row in <Breadcrumbs> (suppressed below).
   // Null => render nothing (no fabricated location, no empty state).
   const itemShareUrl = $derived(str("share_url"));
+  // Roadmap §5 P3 provenance: extracted download-source URLs (never user-editable).
+  const extractedMeta = $derived(
+    (item?.metadata as Record<string, unknown> | undefined) ?? {},
+  );
+  const safeHttpUrl = (v: unknown): string | null =>
+    typeof v === "string" && /^(https?|s?ftp):\/\//i.test(v) ? v : null;
+  const originUrl = $derived(safeHttpUrl(extractedMeta["origin_url"]));
+  const referrerUrl = $derived(safeHttpUrl(extractedMeta["referrer_url"]));
   const shareSource = $derived(str("share_source"));
   const shareSourceLabel = $derived(
     shareSource === "agent_hint"
@@ -592,6 +600,31 @@
         <Card {item} />
       {/if}
     </div>
+
+    <!-- Roadmap §5 P3 provenance: where the file was downloaded from (xattrs /
+         Zone.Identifier read at extract time). Rendered only when present; the
+         link is rel=noopener and never auto-fetched. -->
+    {#if item && (originUrl || referrerUrl)}
+      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+        <h3 class="mb-2 text-sm font-semibold">Origin</h3>
+        <dl class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs">
+          {#if originUrl}
+            <dt class="text-slate-500">Downloaded from</dt>
+            <dd class="min-w-0 truncate">
+              <a class="font-mono underline hover:text-[var(--accent)]" href={originUrl}
+                target="_blank" rel="noopener noreferrer" title={originUrl}>{originUrl}</a>
+            </dd>
+          {/if}
+          {#if referrerUrl}
+            <dt class="text-slate-500">Referrer</dt>
+            <dd class="min-w-0 truncate">
+              <a class="font-mono underline hover:text-[var(--accent)]" href={referrerUrl}
+                target="_blank" rel="noopener noreferrer" title={referrerUrl}>{referrerUrl}</a>
+            </dd>
+          {/if}
+        </dl>
+      </div>
+    {/if}
 
     <!-- P3-T13 Archive contents: shown whenever this item's extracted metadata
          carries an ``archive`` fact (zip/tar member listing, index-only). -->

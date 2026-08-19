@@ -175,10 +175,12 @@ def test_body_text_is_last_searchable():
 
     # body_text sits at the TAIL of searchableAttributes so a name/title/tags hit
     # outranks a deep body match (attribute-ranking rule). P3-T13 appended
-    # ``archive_members`` after it (an even-lower-priority match), so body_text is
-    # now the SECOND-to-last attribute and must still come AFTER every name field.
-    assert SEARCHABLE_ATTRIBUTES[-1] == "archive_members"
-    assert SEARCHABLE_ATTRIBUTES[-2] == "body_text"
+    # ``archive_members`` after it (an even-lower-priority match) and provenance
+    # appended ``origin_url`` after that, so body_text is the THIRD-to-last
+    # attribute and must still come AFTER every name field.
+    assert SEARCHABLE_ATTRIBUTES[-1] == "origin_url"
+    assert SEARCHABLE_ATTRIBUTES[-2] == "archive_members"
+    assert SEARCHABLE_ATTRIBUTES[-3] == "body_text"
     assert SEARCHABLE_ATTRIBUTES.index("body_text") > SEARCHABLE_ATTRIBUTES.index("filename")
     assert "body_text" in search_mod.SEARCHABLE
     # never a filter/sort target (it is free text, not a facet).

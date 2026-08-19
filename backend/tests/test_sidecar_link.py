@@ -121,3 +121,38 @@ def test_adobe_style_xmp_still_links_same_stem():
     links = resolve_links(items)
     p = _by_path(items)
     assert links[str(p["Pics/IMG_0003.xmp"].id)] == str(p["Pics/IMG_0003.jpg"].id)
+
+
+def test_directory_artwork_ambiguous_in_season_folder_stays_unlinked():
+    """Roadmap §12 (2026-08-19): a folder of comparable primaries (a season) is
+    ambiguous — poster.jpg / tvshow.nfo describe the FOLDER, so they are left
+    unlinked rather than attributed to the biggest episode."""
+    items = [
+        FakeItem("Show/S01/E01.mkv", "video", size=1_000_000),
+        FakeItem("Show/S01/E02.mkv", "video", size=1_100_000),
+        FakeItem("Show/S01/E03.mkv", "video", size=900_000),
+        FakeItem("Show/S01/poster.jpg", "image"),
+        FakeItem("Show/S01/season.nfo", "other"),
+        # a per-episode sidecar still links by stem
+        FakeItem("Show/S01/E02-thumb.jpg", "image"),
+    ]
+    links = resolve_links(items)
+    p = _by_path(items)
+    assert links[str(p["Show/S01/poster.jpg"].id)] is None
+    assert links[str(p["Show/S01/season.nfo"].id)] is None
+    assert links[str(p["Show/S01/E02-thumb.jpg"].id)] == str(p["Show/S01/E02.mkv"].id)
+
+
+def test_directory_artwork_links_when_one_primary_dominates():
+    # movie + a small featurette: the movie clearly dominates (>= 2x) -> linked
+    items = [
+        FakeItem("Heat/Heat.mkv", "video", size=10_000_000),
+        FakeItem("Heat/Featurette.mkv", "video", size=400_000),
+        FakeItem("Heat/poster.jpg", "image"),
+        FakeItem("Heat/movie.nfo", "other"),
+    ]
+    links = resolve_links(items)
+    p = _by_path(items)
+    movie = str(p["Heat/Heat.mkv"].id)
+    assert links[str(p["Heat/poster.jpg"].id)] == movie
+    assert links[str(p["Heat/movie.nfo"].id)] == movie

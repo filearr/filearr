@@ -17,6 +17,9 @@ implementing task (P8-T2) wires a real one that re-validates the IP **at
 socket-connect time**, closing the DNS-rebinding TOCTOU gap the brief calls out.
 ``allow_private`` corresponds to the single boolean
 ``FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS`` (R5) and flips **only** the ``private``
+class; ``allowed_cidrs`` (``FILEARR_WEBHOOK_ALLOWED_CIDRS``, 2026-08-19) is the
+finer per-target allowlist that admits listed addresses of any class except
+unspecified. It flips **only** the ``private``
 class — loopback, link-local (cloud metadata: 169.254.169.254) and
 reserved/unspecified stay denied regardless, since those are never a legitimate
 LAN webhook target.
@@ -96,10 +99,38 @@ class UrlVerdict:
     resolved: tuple[tuple[str, IpClass], ...] = ()
 
 
+def parse_allowed_cidrs(
+    raw: str | None,
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """``FILEARR_WEBHOOK_ALLOWED_CIDRS`` ("10.0.0.5/32, 192.168.1.0/24") -> networks.
+    Malformed entries are dropped (config validation already rejects them)."""
+    out = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            continue
+    return tuple(out)
+
+
+def _in_allowlist(ip: str, nets) -> bool:
+    if not nets:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in n for n in nets)
+
+
 def check_webhook_url(
     url: str,
     resolver: Resolver,
     allow_private: bool = False,
+    allowed_cidrs=(),
 ) -> UrlVerdict:
     """Vet ``url`` for outbound webhook dispatch (resolve-then-validate, §7.1).
 
@@ -138,7 +169,14 @@ def check_webhook_url(
 
     allowed_classes = _PRIVATE_OK if allow_private else _PUBLIC_OK
     resolved = tuple((ip, classify_ip(ip)) for ip in ips)
-    for _ip, cls in resolved:
-        if cls not in allowed_classes:
-            return UrlVerdict(False, f"blocked:{cls.value}", resolved)
+    for ip, cls in resolved:
+        if cls in allowed_classes:
+            continue
+        # Roadmap §6 polish (2026-08-19): an explicit operator CIDR allowlist
+        # (FILEARR_WEBHOOK_ALLOWED_CIDRS) admits a specific target regardless of
+        # class -- "my ntfy on 127.0.0.1:8080" / "10.0.0.5/32" -- without the
+        # blunt private-class switch. Unspecified (0.0.0.0 / ::) never passes.
+        if cls is not IpClass.UNSPECIFIED and _in_allowlist(ip, allowed_cidrs):
+            continue
+        return UrlVerdict(False, f"blocked:{cls.value}", resolved)
     return UrlVerdict(True, "ok", resolved)

@@ -9,6 +9,34 @@ Each section is **symptom → diagnosis → fix**, drawn from real incidents.
     your own. The stack is assumed at `/opt/filearr` with the API on `:8484`, the
     CA on `:9000`, and TLS on `:8443`.
 
+## Day-one checklist {#day-one-checklist}
+
+The things that are easy to skip on a fresh install and expensive to discover
+later. Each links to the section that explains it.
+
+- [ ] **Copy `FILEARR_SECRET_KEY` (the deployment `.env`) somewhere off the box.**
+  It is the envelope key for every alert-channel secret and is *not* in a
+  database dump — a restore under a different key silently orphans them.
+  [Backup and restore](#backup-and-restore).
+- [ ] **Attach a channel to the system alert rules and enable them** — at
+  least *scan failure* and *low disk space*; *agent replication stalled* if
+  you run agents. They ship disabled and unattached.
+  [Alerts & notifications](alerts.md).
+- [ ] **Schedule backups.** *Back up now* has no default cron on purpose; give
+  it one on the Jobs page once you know the config volume has room, and test a
+  restore once. [Maintenance schedules](#maintenance-schedules).
+- [ ] **Behind your own reverse proxy?** Set `FILEARR_TRUSTED_PROXIES` so the
+  audit log and rate limiter see real client IPs (the bundled Caddy needs
+  nothing). [Security → client IPs](security.md#client-ips-behind-a-proxy).
+- [ ] **Network (quick-hash-only) libraries:** opt in to *Backfill content
+  hashes* on an idle-window cron if you rely on the duplicate reports or move
+  confirmation there. [Maintenance schedules](#maintenance-schedules).
+- [ ] **Serve HTTPS before enabling logins** — the session cookie is
+  `Secure`-only. [Authentication and the first admin](#enabling-authentication).
+- [ ] **Glance at the Jobs page after the first scan**: failed jobs, the
+  extract queue draining, the disk tiles, and the About page for any
+  `degraded` row. [The About page](#about-page).
+
 ## Working inside the containers
 
 This is the toolkit everything below uses. On a Proxmox LXC the compose stack runs
@@ -66,6 +94,18 @@ default schedule, enabled). The API surface is
 Each task row also shows **how long the last run took** (wall time of the
 latest attempt, derived from job history) — a purge that suddenly takes
 minutes instead of seconds is an early signal worth investigating.
+
+!!! tip "Opt-in tasks with no default schedule"
+    Two integrity tasks ship **unscheduled** on purpose and only run when you
+    press *Run now* or give them a cron here: **Back up now** (an unattended
+    `pg_dump` that fills the config volume is worse than no backup) and
+    **Backfill content hashes** — it streams whole-file hashes for files in
+    quick-hash-only (network) libraries that have none, so exact-duplicate
+    detection and move confirmation work there too. Each run is bounded by
+    `FILEARR_HASH_BACKFILL_MAX_BYTES` (20 GiB) and throttled to
+    `FILEARR_HASH_BACKFILL_RATE_MBPS` (50 MB/s); schedule it for an idle
+    window (e.g. `0 2 * * *`) and it converges over a few nights, then
+    no-ops. It never touches agent libraries or files above the hash ceiling.
 
 ## Maintenance mode (Jobs page) {#maintenance-mode}
 
@@ -929,7 +969,8 @@ container). The shipped Caddyfile pins the check to public resolvers
 ## Alerting doesn't fire
 
 **Symptom.** No notifications for scan failures, extract spikes, low disk, agent
-offline/stall, or failed report deliveries.
+offline/stall, agent verification mismatches, permission changes, or failed
+report deliveries.
 
 **Fix.** All system rules ship **seeded, disabled, with no channel**. In the
 Alerts tab: create a channel (webhook / SMTP / Apprise), attach it to the rule, and
@@ -1409,11 +1450,12 @@ remapping a library's root to the new host's mount is safe and correct: the item
 keep their identity, their metadata, their tags and their history, and the next
 scan simply records new absolute paths.
 
-It is also why **skipping** it is destructive. If the old root was
-`/data/media/movies` and that path does not exist on the new host, the first scan
-finds zero files under it and tombstones the entire library as `missing` — a
-catalogue-wide deletion event that then ages out on the recycle-bin retention
-schedule.
+It is also why **skipping** it is unpleasant, though no longer destructive. If
+the old root was `/data/media/movies` and that path does not exist on the new
+host, the first scan **fails** (a missing root aborts before the walk; an empty
+mountpoint trips the [empty-scan guard](troubleshooting/library-failures.md#empty-scan-guard))
+and nothing is tombstoned — but every library sits red until you fix the paths,
+and a forced or guard-disabled scan *would* tombstone the lot.
 
 Fix it before the first scan, in the console (Libraries → each library →
 edit the path), or in SQL:

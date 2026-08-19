@@ -1046,9 +1046,16 @@ def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = Fa
         )
         # JSONB @> '["write"]' etc. -- pass Python lists so psycopg serialises
         # a JSON ARRAY (a str would arrive as a JSON string and never match).
+        # Verb tokens are the agent's normalized set (permissions.Verb): "full"
+        # and "change_perms" (the earlier "full_control"/"change_permissions"
+        # spellings never matched anything the collector emits; kept as
+        # harmless extras in case a third-party producer uses them).
         writes = or_(
             a["verbs"].contains(["write"]),
             a["verbs"].contains(["delete"]),
+            a["verbs"].contains(["full"]),
+            a["verbs"].contains(["change_perms"]),
+            a["verbs"].contains(["take_ownership"]),
             a["verbs"].contains(["full_control"]),
             a["verbs"].contains(["change_permissions"]),
         )
@@ -1105,6 +1112,157 @@ _PERM_COLUMNS = (
     "verbs", "raw_mask", "scope", "fidelity", "collected_at",
 )
 
+
+# --- W7-T9 (2026-08-19): permission drift -----------------------------------
+# Consecutive snapshot PAIRS per (agent, path) via LAG; the stored rows are
+# already digest-gated (an unchanged re-collection writes nothing), so every
+# pair IS a change. The ACE/owner/group diff itself is computed row-side with
+# the pure ``permissions.diff_records`` engine (JSONB set-diff in SQL would be
+# unreadable and could not apply the same key/material rules).
+def _changes_base(params: ReportParams, scope_clause=None) -> Select:
+    from datetime import timedelta
+
+    lagged = (
+        select(
+            PermissionSnapshot.id.label("id"),
+            PermissionSnapshot.agent_id.label("agent_id"),
+            PermissionSnapshot.path.label("path"),
+            PermissionSnapshot.is_dir.label("is_dir"),
+            PermissionSnapshot.item_id.label("item_id"),
+            PermissionSnapshot.collected_at.label("collected_at"),
+            PermissionSnapshot.owner.label("owner"),
+            PermissionSnapshot.group_.label("group_"),
+            PermissionSnapshot.aces.label("aces"),
+            PermissionSnapshot.fidelity.label("fidelity"),
+            PermissionSnapshot.posture.label("posture"),
+            func.lag(PermissionSnapshot.collected_at)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_collected_at"),
+            func.lag(PermissionSnapshot.owner)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_owner"),
+            func.lag(PermissionSnapshot.group_)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_group"),
+            func.lag(PermissionSnapshot.aces)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_aces"),
+            func.lag(PermissionSnapshot.fidelity)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_fidelity"),
+            func.lag(PermissionSnapshot.posture)
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at, PermissionSnapshot.id),
+            )
+            .label("prev_posture"),
+        )
+    ).subquery("ps_lag")
+    stmt = (
+        select(
+            lagged.c.id,
+            lagged.c.agent_id,
+            Agent.name.label("agent"),
+            lagged.c.path,
+            lagged.c.is_dir,
+            lagged.c.item_id,
+            lagged.c.collected_at,
+            lagged.c.owner,
+            lagged.c.group_,
+            lagged.c.aces,
+            lagged.c.fidelity,
+            lagged.c.posture,
+            lagged.c.prev_collected_at,
+            lagged.c.prev_owner,
+            lagged.c.prev_group,
+            lagged.c.prev_aces,
+            lagged.c.prev_fidelity,
+            lagged.c.prev_posture,
+        )
+        .select_from(lagged)
+        .join(Agent, Agent.id == lagged.c.agent_id)
+        .where(lagged.c.prev_collected_at.is_not(None))
+    )
+    # threshold_days: "changes in the last N days"; None => the report default.
+    days = params.threshold_days if params.threshold_days is not None else 30
+    if days > 0:
+        stmt = stmt.where(lagged.c.collected_at >= datetime.now(UTC) - timedelta(days=days))
+    if params.library_id is not None or scope_clause is not None:
+        stmt = stmt.join(Item, Item.id == lagged.c.item_id)
+        if params.library_id is not None:
+            stmt = stmt.where(Item.library_id == params.library_id)
+        if scope_clause is not None:
+            stmt = stmt.where(scope_clause)
+    # id (uuidv7, time-ordered) breaks collected_at ties the same way LAG did
+    return stmt.order_by(
+        lagged.c.collected_at.desc(), lagged.c.id.desc(), Agent.name, lagged.c.path
+    )
+
+
+def _build_perm_changes(params: ReportParams) -> Select:
+    return _changes_base(params)
+
+
+def _scoped_perm_changes(params: ReportParams, scope_clause) -> Select:
+    return _changes_base(params, scope_clause)
+
+
+def _row_perm_change(r: Any) -> dict:
+    from filearr.permissions import diff_records, record_from_wire, summarize_diff
+
+    old = record_from_wire(
+        owner=r.prev_owner, group=r.prev_group, aces=r.prev_aces,
+        fidelity=r.prev_fidelity, posture=r.prev_posture,
+    )
+    new = record_from_wire(
+        owner=r.owner, group=r.group_, aces=r.aces, fidelity=r.fidelity, posture=r.posture,
+    )
+    diff = diff_records(old, new)
+    details = summarize_diff(diff)
+    if not details:
+        # digest differed but no ACE/owner/group delta: fidelity/posture only
+        if (r.prev_fidelity or "") != (r.fidelity or ""):
+            details = f"fidelity {r.prev_fidelity or '?'} → {r.fidelity or '?'}"
+        else:
+            details = "posture changed"
+    fmt = lambda p: (p.display if p and p.display else (p.canonical_id if p else "")) or ""  # noqa: E731
+    return {
+        "agent": r.agent,
+        "path": r.path,
+        "is_dir": bool(r.is_dir),
+        "changed_at": r.collected_at.isoformat() if r.collected_at else "",
+        "previous_at": r.prev_collected_at.isoformat() if r.prev_collected_at else "",
+        "owner_before": fmt(old.owner),
+        "owner_after": fmt(new.owner),
+        "added": len(diff.added),
+        "removed": len(diff.removed),
+        "modified": len(diff.modified),
+        "details": details,
+        "fidelity": r.fidelity or "",
+        "item_id": str(r.item_id) if r.item_id else None,
+    }
+
+
+_PERM_CHANGE_COLUMNS = (
+    "agent", "path", "is_dir", "changed_at", "previous_at", "owner_before", "owner_after",
+    "added", "removed", "modified", "details", "fidelity",
+)
+
 _REPORTS = _REPORTS + (
     CannedReport(
         id="permissions_by_principal",
@@ -1143,6 +1301,30 @@ _REPORTS = _REPORTS + (
         supports_library=True,
         scoped_build=_scoped_perm_broad,
         default_limit=1000,
+    ),
+    CannedReport(
+        id="permission_changes",
+        title="Permissions: changes (drift)",
+        description=(
+            "What changed between consecutive permission snapshots of the same "
+            "path -- one row per change event, newest first: ACEs added (+), "
+            "removed (-) and modified (~ before -> after), plus owner/group "
+            "changes. Only paths an agent re-inventoried with the 'permissions' "
+            "collector appear; an unchanged re-collection writes no snapshot, so "
+            "every row here is real drift. Pair it with the 'System: permission "
+            "change' alert rule for push notification. The threshold input "
+            "limits rows to changes in the last N days (default 30; retention "
+            "is FILEARR_PERMISSION_SNAPSHOTS_RETAIN snapshots per path)."
+        ),
+        columns=_PERM_CHANGE_COLUMNS,
+        build=_build_perm_changes,
+        row=_row_perm_change,
+        supports_library=True,
+        scoped_build=_scoped_perm_changes,
+        default_limit=1000,
+        supports_threshold=True,
+        threshold_label="Changes in the last (days)",
+        default_threshold_days=30,
     ),
 )
 

@@ -27,8 +27,10 @@ Deliberately INERT in this scaffold (documented, not wired):
   shape) plus a denormalised ``principals`` array; ingestion is
   ``filearr.permission_ingest``.
 * **Reports** — ``permissions_by_principal`` and ``permissions_broad_access``
-  are LIVE in ``filearr.reports`` (W7-T7, 2026-08-19); the outlier and drift
-  builders below remain typed stubs (W7-T9).
+  are LIVE in ``filearr.reports`` (W7-T7, 2026-08-19), as is the
+  ``permission_changes`` drift report (W7-T9, same day: consecutive snapshot
+  pairs diffed with :func:`diff_records`, plus the ``permission_changed`` system
+  alert emitted at ingest). The explicit-ACE-outlier builder remains a stub.
 
 §9.1 open storage question (unresolved, for the architect): whether a snapshot
 persists as ONE wide JSONB blob per (path, run) — simplest, mirrors the
@@ -360,11 +362,7 @@ class PermissionDiff:
     def is_empty(self) -> bool:
         """True when nothing changed (no ACE add/remove/modify, no owner/group)."""
         return not (
-            self.added
-            or self.removed
-            or self.modified
-            or self.owner_changed
-            or self.group_changed
+            self.added or self.removed or self.modified or self.owner_changed or self.group_changed
         )
 
 
@@ -388,9 +386,7 @@ def _principal_key(p: Principal | None) -> str | None:
     return None if p is None else p.canonical_id
 
 
-def diff_records(
-    old: PermissionRecord | None, new: PermissionRecord | None
-) -> PermissionDiff:
+def diff_records(old: PermissionRecord | None, new: PermissionRecord | None) -> PermissionDiff:
     """Compute the ACE/owner/group diff between two snapshots (§5.1), pure.
 
     Cases handled:
@@ -434,6 +430,155 @@ def diff_records(
         group_before=old_group,
         group_after=new_group,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Wire-shape adapter + human diff summary (W7-T9, 2026-08-19)                   #
+# --------------------------------------------------------------------------- #
+# The Go collector's record (``permissions.Record``) is what central STORES
+# verbatim; its field names differ slightly from the §3.1 schema above
+# (``principal.id/name/well_known`` vs ``canonical_id/display``, flat inherit
+# bools vs ``inherit_flags``). These adapters lift a stored row into the typed
+# record so :func:`diff_records` can run on it. Lenient on purpose: a field the
+# agent build did not emit degrades to a default, never to an exception.
+
+
+def _principal_from_wire(raw: object) -> Principal | None:
+    if not isinstance(raw, dict):
+        return None
+    ident = str(raw.get("id") or "")
+    if not ident and not raw.get("name"):
+        return None
+    kind_raw = str(raw.get("kind") or "").lower()
+    try:
+        kind = PrincipalKind(kind_raw)
+    except ValueError:
+        kind = PrincipalKind.well_known if raw.get("well_known") else PrincipalKind.unmapped
+    name = raw.get("name")
+    return Principal(
+        kind=kind,
+        canonical_id=ident or str(name),
+        source_identifier=ident or str(name),
+        display=str(name) if name else None,
+        domain=str(raw["domain"]) if raw.get("domain") else None,
+        resolved=bool(name) or kind == PrincipalKind.well_known,
+    )
+
+
+def _enum_or(enum_cls, value: object, default):
+    try:
+        return enum_cls(str(value))
+    except (ValueError, TypeError):
+        return default
+
+
+def _ace_from_wire(raw: object, idx: int) -> Ace | None:
+    if not isinstance(raw, dict):
+        return None
+    principal = _principal_from_wire(raw.get("principal"))
+    if principal is None:
+        return None
+    verbs: list[Verb] = []
+    for v in raw.get("verbs") or []:
+        try:
+            verbs.append(Verb(str(v)))
+        except ValueError:
+            continue  # an unknown verb token is not ours to interpret
+    flags = tuple(
+        f
+        for f in ("container_inherit", "object_inherit", "inherit_only", "no_propagate")
+        if raw.get(f)
+    )
+    order = raw.get("order_index")
+    return Ace(
+        principal=principal,
+        type=_enum_or(AceType, raw.get("type"), AceType.allow),
+        verbs=tuple(verbs),
+        raw_mask=str(raw.get("raw_mask") or ""),
+        native_kind=_enum_or(NativeKind, raw.get("native_kind"), None),
+        inherited=bool(raw.get("inherited")),
+        inherit_flags=flags,
+        scope=_enum_or(AceScope, raw.get("scope"), AceScope.this),
+        source=_enum_or(AceSource, raw.get("source"), AceSource.local),
+        order_index=int(order) if isinstance(order, int) else idx,
+    )
+
+
+def record_from_wire(
+    *,
+    owner: object = None,
+    group: object = None,
+    aces: object = None,
+    fidelity: object = None,
+    posture: object = None,
+) -> PermissionRecord:
+    """Lift a stored snapshot (the agent's wire shape) into a typed
+    :class:`PermissionRecord`. Never raises."""
+    entries: list[Ace] = []
+    for i, raw in enumerate(aces if isinstance(aces, list) else []):
+        ace = _ace_from_wire(raw, i)
+        if ace is not None:
+            entries.append(ace)
+    post = None
+    if isinstance(posture, dict):
+        post = Posture(
+            dacl_present=bool(posture.get("dacl_present", True)),
+            dacl_canonical=bool(posture.get("dacl_canonical", True)),
+            generic_mapping_applied=bool(posture.get("generic_mapping_applied", False)),
+        )
+    return PermissionRecord(
+        owner=_principal_from_wire(owner),
+        group=_principal_from_wire(group),
+        entries=tuple(entries),
+        fidelity=_enum_or(Fidelity, fidelity, Fidelity.unavailable),
+        posture=post,
+    )
+
+
+def _fmt_principal(p: Principal | None) -> str:
+    if p is None:
+        return "-"
+    if p.display and p.display != p.canonical_id:
+        return f"{p.display} ({p.canonical_id})"
+    return p.canonical_id
+
+
+def _fmt_ace(a: Ace) -> str:
+    verbs = ",".join(v.value for v in a.verbs) or (a.raw_mask or "?")
+    scope = "" if a.scope == AceScope.this else f"/{a.scope.value}"
+    inh = " (inherited)" if a.inherited else ""
+    return f"{a.type.value} {_fmt_principal(a.principal)}: {verbs}{scope}{inh}"
+
+
+def summarize_diff(diff: PermissionDiff, *, max_items: int = 12) -> str:
+    """One-line, operator-readable description of a :class:`PermissionDiff`
+    (used by the drift report's ``details`` column and the alert message).
+    ``+`` added, ``-`` removed, ``~`` modified (before → after), then owner /
+    group changes. Truncated past ``max_items`` entries."""
+    parts: list[str] = []
+    if diff.owner_changed:
+        parts.append(
+            f"owner {_fmt_principal(diff.owner_before)} → {_fmt_principal(diff.owner_after)}"
+        )
+    if diff.group_changed:
+        parts.append(
+            f"group {_fmt_principal(diff.group_before)} → {_fmt_principal(diff.group_after)}"
+        )
+    parts += [f"+{_fmt_ace(a)}" for a in diff.added]
+    parts += [f"-{_fmt_ace(a)}" for a in diff.removed]
+    for m in diff.modified:
+        before = ",".join(v.value for v in m.before.verbs) or (m.before.raw_mask or "?")
+        after = ",".join(v.value for v in m.after.verbs) or (m.after.raw_mask or "?")
+        extra = ""
+        if m.before.inherited != m.after.inherited:
+            extra = " (inherited→explicit)" if m.before.inherited else " (explicit→inherited)"
+        parts.append(
+            f"~{m.after.type.value} {_fmt_principal(m.after.principal)}: {before} → {after}{extra}"
+        )
+    if len(parts) > max_items:
+        rest = len(parts) - max_items
+        parts = parts[:max_items] + [f"… +{rest} more"]
+    return "; ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,6 +680,9 @@ def _explicit_ace_outliers(params: ReportParams) -> Select:
 
 
 def _permission_drift(params: ReportParams) -> Select:
-    """The ``permission_changes`` diff report over consecutive snapshots (§5).
-    NOT registered (scaffold)."""
-    raise NotImplementedError("permissions report: scaffold, W7-T9")
+    """LIVE since 2026-08-19 as ``permission_changes`` (W7-T9): consecutive
+    snapshot pairs per (agent, path), diffed row-side with :func:`diff_records`.
+    Kept as a forwarding alias."""
+    from filearr.reports import get_report
+
+    return get_report("permission_changes").build(params)  # type: ignore[union-attr]

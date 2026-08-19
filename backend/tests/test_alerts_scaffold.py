@@ -432,3 +432,25 @@ def test_crypto_helpers_round_trip():
     token = encrypt_channel_secret("s3cret", key)
     assert token != "s3cret"  # not plaintext
     assert decrypt_channel_secret(token, key) == "s3cret"
+
+
+# --- Roadmap §6 polish (2026-08-19): explicit CIDR allowlist -----------------
+
+
+def test_allowed_cidrs_admit_listed_private_and_loopback_only():
+    from filearr.alerts.ssrf import parse_allowed_cidrs
+
+    nets = parse_allowed_cidrs("127.0.0.1/32, 10.0.0.0/24, junk")
+    assert len(nets) == 2
+    r = fake_resolver({"ntfy.local": ["127.0.0.1"], "lan.test": ["10.0.0.5"],
+                       "other.test": ["10.0.1.5"], "zero.test": ["0.0.0.0"]})
+    assert check_webhook_url("http://ntfy.local:8080/t", r, allowed_cidrs=nets).allowed is True
+    assert check_webhook_url("http://lan.test/", r, allowed_cidrs=nets).allowed is True
+    # outside the listed range: still denied (allow_private False)
+    assert check_webhook_url("http://other.test/", r, allowed_cidrs=nets).allowed is False
+    # unspecified can never be allowlisted
+    nets0 = parse_allowed_cidrs("0.0.0.0/0")
+    assert check_webhook_url("http://zero.test/", r, allowed_cidrs=nets0).allowed is False
+    # a rebinding record set mixing an allowed and a blocked answer fails whole
+    r2 = fake_resolver({"mix.test": ["10.0.0.5", "169.254.169.254"]})
+    assert check_webhook_url("http://mix.test/", r2, allowed_cidrs=nets).allowed is False

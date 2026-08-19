@@ -411,13 +411,14 @@ async def test_threshold_rejected_for_reports_that_declare_none(api):
     assert "threshold_days" in r.text
 
 
-async def test_only_stale_files_declares_a_threshold(api):
+async def test_only_threshold_reports_declare_a_threshold(api):
     """The UI renders the numeric input off meta(); no other report may grow a
-    stray control by accident."""
+    stray control by accident. stale_files (days unmodified) and, since
+    2026-08-19, permission_changes (changes in the last N days) are the two."""
     client, _ = api
     reports = (await client.get(REPORTS)).json()["reports"]
     declared = {r["id"] for r in reports if r["supports_threshold"]}
-    assert declared == {"stale_files"}
+    assert declared == {"stale_files", "permission_changes"}
     for r in reports:
         assert {"supports_threshold", "threshold_label", "default_threshold_days"} <= set(r)
 

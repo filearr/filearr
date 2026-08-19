@@ -469,3 +469,107 @@ async def test_permission_snapshots_from_ndjson_upload(client):
     async with maker() as s:
         n = (await s.execute(select(func.count()).select_from(PermissionSnapshot))).scalar_one()
     assert n == 1
+
+
+# --------------------------------------------------------------------------- #
+# W7-T9 (2026-08-19): permission drift report + change alert + item link       #
+# --------------------------------------------------------------------------- #
+async def test_permission_changes_report_and_alert(client):
+    from filearr import permission_ingest
+    from filearr.alerts import ops
+    from filearr.models import AlertEvent, AlertRule, PermissionSnapshot
+
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    # make the seeded library AGENT-owned so the path → item link resolves
+    async with maker() as s:
+        lib = (await s.execute(select(Library))).scalars().first()
+        lib.source_agent_id = agent_id
+        lib.agent_library_ref = "/data"
+        await s.commit()
+        lib_id = lib.id
+    # enable the system rule
+    await ops.seed_system_alert_rules(maker)
+    async with maker() as s:
+        rule = (
+            await s.execute(select(AlertRule).where(AlertRule.name == ops.PERMISSION_CHANGE_RULE_NAME))
+        ).scalar_one()
+        rule.enabled = True
+        await s.commit()
+
+    async with maker() as s:
+        # first snapshot: no previous → no alert, but the item link is stamped
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None,
+            entries=[{"path": "/data/x.mkv", "permissions": _perm_record()}],
+        )
+        assert out["written"] == 1
+        snap = (await s.execute(select(PermissionSnapshot))).scalars().one()
+        assert snap.item_id == item_id
+        evs = (await s.execute(select(AlertEvent))).scalars().all()
+        assert evs == []
+
+        # second snapshot: owner changes + Everyone gains write → alert
+        world_write = {
+            "principal": {"kind": "well_known", "id": "other", "name": "other", "well_known": "EVERYONE"},
+            "type": "allow", "verbs": ["read", "write"], "raw_mask": "mode:other=06",
+            "inherited": False, "scope": "this", "source": "local", "order_index": 3,
+        }
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None,
+            entries=[{"path": "/data/x.mkv",
+                      "permissions": _perm_record(owner_id="1001", extra_aces=[world_write])}],
+        )
+        assert out["written"] == 1
+        evs = (await s.execute(select(AlertEvent))).scalars().all()
+        assert len(evs) == 1
+        ev = evs[0]
+        assert ev.event_type == ops.PERMISSION_CHANGE_EVENT
+        assert ev.item_id == item_id and ev.library_id == lib_id
+        assert ev.payload["owner_changed"] is True
+        assert ev.payload["added"] >= 1
+        assert "other" in ev.payload["summary"] and "write" in ev.payload["summary"]
+
+        # re-ingesting the same record is digest-gated → nothing new
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None,
+            entries=[{"path": "/data/x.mkv",
+                      "permissions": _perm_record(owner_id="1001", extra_aces=[world_write])}],
+        )
+        assert out == {"seen": 1, "written": 0, "unchanged": 1, "skipped": 0}
+        n = (await s.execute(select(func.count()).select_from(AlertEvent))).scalar_one()
+        assert n == 1
+
+        # fidelity-only change: snapshot written, NO alert (diff is empty)
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None,
+            entries=[{"path": "/data/x.mkv",
+                      "permissions": _perm_record(owner_id="1001", extra_aces=[world_write],
+                                                  fidelity="posix_mode_only")}],
+        )
+        assert out["written"] == 1
+        n = (await s.execute(select(func.count()).select_from(AlertEvent))).scalar_one()
+        assert n == 1
+
+    # the drift report: two change rows (newest first), the fidelity-only one labelled
+    r = await c.get("/api/v1/reports")
+    assert "permission_changes" in {x["id"] for x in r.json()["reports"]}
+    r = await c.get("/api/v1/reports/permission_changes")
+    assert r.status_code == 200, r.text
+    rows = r.json()["rows"] if isinstance(r.json(), dict) else r.json()
+    assert len(rows) == 2
+    assert rows[0]["details"].startswith("fidelity full_native → posix_mode_only")
+    assert rows[0]["added"] == 0 and rows[0]["removed"] == 0
+    real = rows[1]
+    assert real["owner_before"] == "eric" and real["owner_after"] == "eric"  # same display name
+    assert real["added"] == 1 and real["modified"] >= 1  # Everyone +write, owner ACE moved
+    assert "owner" in real["details"] and "+allow" in real["details"]
+    # library filter rides the item link
+    r = await c.get(f"/api/v1/reports/permission_changes?library_id={lib_id}")
+    assert r.status_code == 200 and len(r.json()["rows"]) == 2
+    # threshold: nothing older than a day ago is excluded; 1 day still includes now
+    r = await c.get("/api/v1/reports/permission_changes?threshold_days=1")
+    assert r.status_code == 200 and len(r.json()["rows"]) == 2
+    # csv export works
+    r = await c.get("/api/v1/reports/permission_changes?format=csv")
+    assert r.status_code == 200 and "details" in r.text.splitlines()[0]

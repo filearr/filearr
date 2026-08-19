@@ -61,7 +61,7 @@ async def client(db, monkeypatch):
 #: than no backup, so the schedule is opt-in. Editable is exactly what makes
 #: opting in possible, and the tick now skips any task whose EFFECTIVE cron is
 #: still None. Anything added here must justify itself the same way.
-_EDITABLE_WITHOUT_DEFAULT_CRON = {"backup_now"}
+_EDITABLE_WITHOUT_DEFAULT_CRON = {"backup_now", "backfill_content_hashes"}
 
 
 async def test_registry_is_coherent():

@@ -138,6 +138,7 @@ AGE_NET_EXEMPT_TASKS: tuple[str, ...] = (
     "filearr.worker.compact_meili",
     "filearr.worker.content_sniff",
     "filearr.worker.rehash_small_files",
+    "filearr.worker.backfill_content_hashes",
 )
 
 
@@ -1240,6 +1241,110 @@ async def rehash_small_files(timestamp: int) -> int:
     old provenance scheme through the normal extract path (QH-T4). Runs at 04:55,
     clear of the other 04:xx maintenance jobs. Returns the number re-queued."""
     return (await rehash_small_files_now())["requeued"]
+
+
+async def backfill_content_hashes_now(*, max_bytes: int | None = None) -> dict:
+    """Roadmap §16 (2026-08-19): stream whole-file ``content_hash`` (+ ``mid_hash``)
+    for active items in CENTRAL libraries whose effective hash policy is
+    ``quick_only`` (network roots under ``auto``, or declared), so the integrity
+    benefit of content hashes -- exact duplicate detection, move confirmation --
+    becomes available without paying the cost on the hot scan path.
+
+    Bounded per run by a byte budget (``FILEARR_HASH_BACKFILL_MAX_BYTES``) and a
+    throughput cap (``FILEARR_HASH_BACKFILL_RATE_MBPS``, sleep-throttled), commits
+    every 100 rows, honours the per-library/global size ceiling and the
+    small-file band (<=128 KiB is always hashed in full already), and skips
+    agent-owned libraries (central cannot open their files). Opt-in: no default
+    schedule; run from the Jobs page or give it a cron there. Returns
+    ``{hashed, bytes, remaining, budget_bytes}``."""
+    import asyncio
+    import time
+
+    from sqlalchemy import func, select
+
+    from filearr.db import SessionLocal
+    from filearr.hashpolicy import resolve_hash_policy
+    from filearr.models import Item, ItemStatus, Library
+    from filearr.tasks.extract import QUICK_CHUNK, full_hash, mid_hash
+
+    settings = get_settings()
+    budget = max_bytes if max_bytes is not None else int(settings.hash_backfill_max_bytes)
+    rate = float(settings.hash_backfill_rate_mbps) * 1_000_000.0  # bytes/sec; <=0 = unthrottled
+    hashed = spent = remaining = 0
+    started = time.monotonic()
+    async with SessionLocal() as session:
+        libs = (
+            await session.execute(select(Library).where(Library.source_agent_id.is_(None)))
+        ).scalars().all()
+        for lib in libs:
+            resolved = resolve_hash_policy(
+                declared=lib.hash_policy or "auto",
+                root_path=lib.root_path or "",
+                hash_full_max_bytes=lib.hash_full_max_bytes,
+                global_max_bytes=settings.scan_hash_full_max_bytes,
+            )
+            if resolved.compute_content:
+                continue  # full policy: the extract path already hashes these
+            cond = (
+                Item.library_id == lib.id,
+                Item.status == ItemStatus.active,
+                Item.content_hash.is_(None),
+                Item.size > QUICK_CHUNK * 2,
+                Item.size <= resolved.full_max_bytes,
+            )
+            if spent >= budget:
+                n = (
+                    await session.execute(select(func.count()).select_from(Item).where(*cond))
+                ).scalar_one()
+                remaining += int(n or 0)
+                continue
+            stream = await session.stream_scalars(
+                select(Item).where(*cond).order_by(Item.id).execution_options(yield_per=200)
+            )
+            batch = 0
+            async for item in stream:
+                if spent >= budget:
+                    remaining += 1
+                    continue
+                if item.size is None or item.path is None:
+                    continue
+                try:
+                    digest = await asyncio.to_thread(full_hash, item.path, item.size)
+                    mid = await asyncio.to_thread(mid_hash, item.path, item.size)
+                except OSError:
+                    continue  # gone / unreadable: the next scan tombstones it
+                item.content_hash = digest
+                if mid is not None:
+                    item.mid_hash = mid
+                hashed += 1
+                spent += int(item.size)
+                batch += 1
+                if batch >= 100:
+                    await session.commit()
+                    batch = 0
+                if rate > 0:
+                    # sleep-throttle to the configured average throughput
+                    ahead = spent / rate - (time.monotonic() - started)
+                    if ahead > 0:
+                        await asyncio.sleep(min(ahead, 5.0))
+            await session.commit()
+    return {"hashed": hashed, "bytes": spent, "remaining": remaining, "budget_bytes": budget}
+
+
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.backfill_content_hashes",
+    queueing_lock="backfill-content-hashes",
+)
+async def backfill_content_hashes(timestamp: int) -> dict:
+    """Opt-in maintenance task (no default cron): see ``backfill_content_hashes_now``.
+    Skipped under maintenance mode (it is exactly the sustained disk/network I/O
+    an operator enters that mode to stop)."""
+    from filearr import maintmode
+
+    if await maintmode.is_active_standalone():
+        return {"status": "skipped", "reason": "maintenance_mode", "hashed": 0}
+    return await backfill_content_hashes_now()
 
 
 # Scheduled by maintenance_tick (registry default "30 4 * * *" in

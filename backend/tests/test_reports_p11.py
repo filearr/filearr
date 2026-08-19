@@ -240,6 +240,7 @@ async def test_registry_lists_every_canned_report(api):
         # W7-T7 (2026-08-19): permission snapshots
         "permissions_by_principal",
         "permissions_broad_access",
+        "permission_changes",
     }
 
 

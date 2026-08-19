@@ -64,13 +64,14 @@ queues. What each extractor reads and stores:
 
 | Type | Tool | What it extracts |
 |---|---|---|
-| Video | `ffprobe` | Codecs, resolution, duration, bitrate, streams, container facts (bounded runtime + output size). |
+| Video | `ffprobe` | Codecs, resolution, duration, bitrate, streams, container facts (bounded runtime + output size). HDR signalling (HDR10 / HLG / Dolby Vision incl. profile, level and base-layer compatibility from the DOVI record); for HDR streams a second, bounded first-frames probe tells **HDR10+** from HDR10 and records MaxCLL / MaxFALL / mastering display (`FILEARR_FFPROBE_DEEP_HDR`, default on; SDR files never pay it). |
 | Audio / audiobook / sample | tag libraries | Tags (artist/album/title/etc.), duration, channels, sample rate, cover art. |
 | Image | `exiftool` | Curated camera / lens / exposure / dimension fields under an `exif.` namespace. **GPS is gated — see below.** |
 | Document | pypdf / python-docx / openpyxl | Document properties; optional **body text** for search snippets (bounded, opt-in per feature). |
 | Spreadsheet | openpyxl | Workbook properties (metadata only; cell extraction is a future capability). |
-| 3D model | trimesh | Geometry facts for safe formats; a lightweight file-fact record for formats with no safe pure loader. |
-| Archive | zip/tar readers | **Member name listing** (searchable) *without unpacking*, guarded against zip/decompression bombs. |
+| 3D model | trimesh | Geometry facts for safe formats (fast `process=False` path by default; `FILEARR_MODEL3D_ACCURATE_MAX_BYTES` opts small files into vertex-merged "accurate" geometry with a true watertight flag, recorded as `geometry_tier`); a lightweight file-fact record for formats with no safe pure loader (STEP/FBX/BLEND — a native CAD kernel is out of scope). |
+| Archive | zip / tar / 7z / rar readers | **Member name listing** (searchable) *without unpacking* — stdlib for zip/tar, `py7zr` and `rarfile` header-only for 7z/rar (and `.cb7`/`.cbr`); guarded against zip/decompression bombs, declared-size bombs and encrypted headers. Agents list zip/tar only. |
+| E-mail | stdlib `email` / `mailbox`, `olefile` | `.eml`: subject/from/to/cc/date/Message-ID, attachment names, **body text** (plain, or HTML reduced to text); `.mbox`: message count, date range and a searchable subject/sender digest (capped at `FILEARR_EMAIL_MBOX_MAX_MESSAGES`); Outlook `.msg`: the same headers/body from the OLE MAPI streams. PST/OST are marked unsupported — convert with `readpst` to mbox. |
 | PDF / image / video | Pillow / PDFium / ffmpeg | Content-addressed WebP **thumbnails** + video poster frames (a disposable cache). |
 
 Every extractor is bounded (timeouts, output-size caps, pixel/decompression bomb
@@ -122,6 +123,27 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
         warm cache never reaches the network. Once it is warm you can set
         `HF_HUB_OFFLINE=1` to guarantee the worker never tries.
 
+### File origin (download provenance) {#file-origin}
+
+Browsers and download tools stamp the source URL onto the file itself, and the
+extract pass reads it for **every** file type into `origin_url` /
+`referrer_url` (extracted metadata, so it is never user-editable and shows under
+**Origin** in the item detail):
+
+| Where the file lives | What is read | Who reads it |
+| --- | --- | --- |
+| Linux mount scanned by central, or a Linux agent | freedesktop xattrs `user.xdg.origin.url` / `user.xdg.referrer.url` (Firefox, Chrome, wget, `curl --xattr`, GNOME/KDE downloaders) | central `file_origin.py` / agent |
+| macOS agent | `com.apple.metadata:kMDItemWhereFroms` (Safari, Chrome, Finder copies keep it) | agent |
+| Windows agent | the `Zone.Identifier` alternate data stream (`HostUrl` / `ReferrerUrl` — the Mark-of-the-Web every browser writes) | agent |
+
+One `listxattr` (or ADS open) per file; filesystems without user xattrs (cifs
+without `user_xattr`, FAT) answer "none" and cost nothing further. Only
+`http(s)`/`ftp(s)`/`sftp` URLs with a host are kept — a `file:` or `javascript:`
+"origin" is dropped. `origin_url` is also the lowest-ranked searchable field, so
+a query for a site name finds what you downloaded from it without outranking a
+filename or body match. `FILEARR_PROVENANCE_ENABLED=false` switches the central
+read off entirely.
+
 ## Sidecar files (.nfo, .xmp, artwork) {#sidecar-files}
 
 Media collections are full of files that *describe* other files: Kodi/Emby
@@ -132,8 +154,21 @@ treats them as **sidecars, not content**:
 
 - Every scan classifies sidecars by path shape and links each to its parent
   item (`sidecar_of`) — the same-stem sibling, or the folder's primary media
-  file for folder-level artwork. Kodi NFO title/plot/year fold into the
-  parent's extracted metadata.
+  file for folder-level artwork. Folder-level artwork (`poster.jpg`,
+  `movie.nfo`, `season.nfo`) is attributed to the folder's largest primary
+  file **only when it clearly dominates** (at least twice the runner-up — the
+  movie-plus-featurette case); in a folder of comparable files such as a season
+  of episodes the artwork describes the folder, so it is left unlinked rather
+  than pinned to an arbitrary episode.
+- **Kodi NFO** title/plot/year/genre/ids fold into the parent's extracted
+  metadata under `nfo_*`; **JRiver `*_JRSidecar.xml`** (its MPL dialect: Name,
+  Year, Genre, Director, Actors, Description, Rating, Series/Season/Episode,
+  IMDb/TMDb/TVDb ids — a conservative known-field subset) fold in under
+  `jr_*`. Both promote `title`/`year` onto the item when those are empty; set
+  `FILEARR_SIDECAR_METADATA_PRIORITY=sidecar` to make the sidecar the
+  authority and overwrite an already-derived title/year instead (the raw
+  `nfo_*`/`jr_*` values are kept either way, and your own edits still win at
+  read time).
 - Sidecars are **hidden from default search results and from the timeline
   histogram** (they'd otherwise dominate both — a bulk photo-tool metadata
   export can stamp hundreds of thousands of `.xmp` files in a week). They stay
@@ -223,8 +258,8 @@ column (never `user_metadata`).
 
 Meilisearch holds a **projection** of the catalog optimized for search: item
 identity and display fields (path, filename, type, size, times), searchable text
-(titles, tags, selected metadata, capped document body text and archive member
-names when present), facet values, and — when RBAC search is enabled — the item's
+(titles, tags, selected metadata, capped document body text, archive member
+names and the download-origin URL when present), facet values, and — when RBAC search is enabled — the item's
 path scope for tenant filtering. GPS is excluded unless a library opts in — when
 it does, the coordinates are also projected as Meilisearch's `_geo` point so
 [geo queries](reference/api.md#geo-search-radius-and-bounding-box) can filter and

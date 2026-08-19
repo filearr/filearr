@@ -79,13 +79,20 @@ def _iter_meshes(loaded: Any):
                 yield g
 
 
-def extract_model3d(path: str, *, max_bytes: int) -> dict[str, Any]:
+def extract_model3d(path: str, *, max_bytes: int, accurate_max_bytes: int = 0) -> dict[str, Any]:
     """Return geometry metadata for a 3D model at ``path``.
 
     Raises Model3DError on any failure (oversized, unreadable, unloadable) so the
     caller can record ``_extract_error``. Files whose extension has no geometry
     loader return ``{"unsupported": True}`` (not an error).
-    """
+
+    ``accurate_max_bytes`` (roadmap §15 "accurate geometry" tier, 2026-08-19):
+    when > 0 and the file is no larger than it, trimesh runs with
+    ``process=True`` (vertex merge + basic repair) so a naively exported mesh
+    with duplicated vertices reports a true vertex count and a correct
+    ``watertight`` flag. Costlier and only for files under that smaller
+    ceiling; 0 (default) keeps every file on the cheap ``process=False`` path.
+    The tier used is recorded as ``geometry_tier`` ("fast" / "accurate")."""
     ext = PurePath(path).suffix.lstrip(".").lower()
     if ext not in _GEOMETRY_EXTS:
         return {"unsupported": True}
@@ -101,10 +108,12 @@ def extract_model3d(path: str, *, max_bytes: int) -> dict[str, Any]:
 
     import trimesh
 
+    accurate = accurate_max_bytes > 0 and size <= accurate_max_bytes
     try:
         # force="mesh" would merge scenes; keep the natural type so scene bounds
-        # are exact. process=False: no repair/merge work on untrusted geometry.
-        loaded = trimesh.load(path, process=False)
+        # are exact. process=False: no repair/merge work on untrusted geometry
+        # (unless the opt-in accurate tier applies to this small file).
+        loaded = trimesh.load(path, process=accurate)
     except Exception as exc:  # trimesh raises a zoo of exception types
         # A missing lazy-import (networkx/charset-normalizer absent from the
         # image) is a DEPLOYMENT bug, not a bad file — classify it so the
@@ -138,6 +147,7 @@ def extract_model3d(path: str, *, max_bytes: int) -> dict[str, Any]:
         "vertices": vertices,
         "mesh_count": len(meshes),
         "watertight": watertight,
+        "geometry_tier": "accurate" if accurate else "fast",
     }
     if isinstance(ext, str) and ext:
         meta["file_format"] = ext

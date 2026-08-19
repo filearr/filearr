@@ -143,6 +143,7 @@ async def test_seed_system_rules_idempotent_and_preserving(maker):
             ops.AGENT_OFFLINE_RULE_NAME,
             ops.AGENT_STALL_RULE_NAME,
             ops.AGENT_VERIFY_RULE_NAME,
+            ops.PERMISSION_CHANGE_RULE_NAME,
         ]
     )
     assert all(r.enabled is False for r in rows)

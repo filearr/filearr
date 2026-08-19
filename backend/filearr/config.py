@@ -532,6 +532,19 @@ class Settings(BaseSettings):
     # a fresh scan's I/O. Set FALSE to restore the trickle-in-during-scan
     # behaviour. Global this round (no per-library override column yet -- future).
     staged_pipeline: bool = True
+    # Roadmap §12 (2026-08-19): who wins for title/year when a metadata SIDECAR
+    # (Kodi NFO / JRiver) disagrees with what the scan derived. "fill" (default,
+    # historic) = the sidecar only fills an EMPTY title/year; "sidecar" = the
+    # sidecar's title/year overwrite the typed columns (the curated NFO is the
+    # authority). Either way the raw values are always kept under nfo_* / jr_*,
+    # and user_metadata edits still win at read time (invariant 2).
+    sidecar_metadata_priority: str = "fill"
+    # Roadmap §5 P3 provenance (2026-08-19): read the download-source xattrs
+    # (user.xdg.origin.url / .referrer.url on Linux, kMDItemWhereFroms on macOS)
+    # during extract into metadata_.origin_url / referrer_url. One listxattr per
+    # file; silently skipped where user xattrs are unsupported (cifs without
+    # user_xattr, FAT). Off = never call listxattr at all.
+    provenance_enabled: bool = True
     # Delay (seconds) an ``extract_item`` waits before re-checking the staged gate
     # when a scan is walking its library. Rescheduling is attempt-agnostic (it
     # never burns the job's real failure-retry budget -- see extract.py).
@@ -600,6 +613,11 @@ class Settings(BaseSettings):
     ffprobe_path: str = "ffprobe"
     ffprobe_timeout_s: float = 30.0
     ffprobe_max_output_bytes: int = 8_388_608  # 8 MiB cap on ffprobe JSON
+    # Roadmap §11 (2026-08-19): when the stream-level probe says HDR, ALSO read
+    # the first few frames' side data (one extra bounded ffprobe, ~6 frames) to
+    # tell HDR10+ from HDR10 and capture MaxCLL/MaxFALL + mastering display.
+    # Costs nothing for SDR files. Off = stream-level answer only.
+    ffprobe_deep_hdr: bool = True
 
     # 3D model extraction (trimesh). trimesh loads the whole mesh into RAM, so a
     # size ceiling caps memory before a hostile/huge asset can OOM a worker.
@@ -609,6 +627,21 @@ class Settings(BaseSettings):
     # legitimate print-ready STL/3MF routinely exceed 256 MiB — live errors).
     # This DIRECTLY caps worker RSS; size it to worker RAM before raising further.
     model3d_max_bytes: int = 536_870_912
+    # Roadmap §15 (2026-08-19) opt-in "accurate geometry" tier: files up to this
+    # many bytes are loaded with trimesh process=True (vertex merge + repair) so
+    # duplicated-vertex exports report true vertex counts / watertightness.
+    # 0 (default) = everything stays on the cheap process=False path.
+    model3d_accurate_max_bytes: int = 0
+    # Roadmap §15 (2026-08-19) e-mail extractor: size ceiling for one .eml /
+    # .msg / .mbox handed to the parser, and the per-mailbox message cap (a
+    # 20-year mbox is summarised, not walked to the end).
+    email_max_bytes: int = 268_435_456
+    email_mbox_max_messages: int = 5000
+    # Roadmap §16 (2026-08-19) content-hash backfill for quick_only libraries:
+    # per-run byte budget (default 20 GiB) and average throughput cap (MB/s;
+    # 0 = unthrottled). Opt-in maintenance task, no default schedule.
+    hash_backfill_max_bytes: int = 20 * 1024**3
+    hash_backfill_rate_mbps: float = 50.0
 
     # --- P3-T1: on-demand cryptographic digests (MD5/SHA-256) ---------------
     # POST /api/v1/items/{id}/digests streams the file ONCE and caches the hex
@@ -793,6 +826,11 @@ class Settings(BaseSettings):
     # link-local (cloud metadata 169.254.169.254), reserved and unspecified stay
     # denied regardless. Admin/server-config level, NOT a per-rule toggle.
     webhook_allow_private_cidrs: bool = False
+    # Roadmap §6 polish (2026-08-19): finer than the boolean above -- an explicit
+    # comma-separated list of IPs/CIDRs a webhook MAY target regardless of class
+    # (a ntfy on 127.0.0.1:8080, a Gotify on 10.0.0.5/32, a link-local
+    # appliance). Only "unspecified" (0.0.0.0 / ::) can never be allowlisted.
+    webhook_allowed_cidrs: str | None = None
     # Outbound webhook dispatch hygiene (brief §7.1 pt 4): bound the wall-clock of
     # one POST and cap the response body a hostile endpoint can make us read.
     alert_webhook_timeout_s: float = 10.0
@@ -1251,9 +1289,17 @@ class Settings(BaseSettings):
     # server agent stays green, an offline one flips within minutes.
     agent_online_threshold_seconds: int = 300  # 5m
 
-    @field_validator("trusted_proxies")
+    @field_validator("sidecar_metadata_priority")
     @classmethod
-    def _check_trusted_proxies(cls, v: str | None) -> str | None:
+    def _check_sidecar_priority(cls, v: str) -> str:
+        v = (v or "fill").strip().lower()
+        if v not in ("fill", "sidecar"):
+            raise ValueError("FILEARR_SIDECAR_METADATA_PRIORITY must be 'fill' or 'sidecar'")
+        return v
+
+    @field_validator("trusted_proxies", "webhook_allowed_cidrs")
+    @classmethod
+    def _check_cidr_list(cls, v: str | None, info) -> str | None:
         if not v or not v.strip():
             return None
         import ipaddress
@@ -1266,7 +1312,7 @@ class Settings(BaseSettings):
                 ipaddress.ip_network(part, strict=False)
             except ValueError as exc:
                 raise ValueError(
-                    f"FILEARR_TRUSTED_PROXIES: {part!r} is not an IP address or CIDR"
+                    f"FILEARR_{info.field_name.upper()}: {part!r} is not an IP address or CIDR"
                 ) from exc
         return v
 

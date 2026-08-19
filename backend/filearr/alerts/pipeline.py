@@ -41,7 +41,15 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from filearr.alerts.rules import AlertRule, FileEvent, _compile_glob, group_key, match_rule
+from filearr.alerts.rules import (
+    GROUP_BY,
+    AlertRule,
+    FileEvent,
+    _compile_glob,
+    group_extras,
+    group_key,
+    match_rule,
+)
 from filearr.alerts.windows import assign_window
 from filearr.models import AlertEvent
 from filearr.models import AlertRule as AlertRuleRow
@@ -63,6 +71,7 @@ def _rule_from_row(row: AlertRuleRow) -> AlertRule:
         library_id=str(row.library_id) if row.library_id is not None else None,
         path_glob=row.path_glob,
         hash_change_only=row.hash_change_only,
+        group_by=tuple(row.group_by or GROUP_BY),
         group_wait_s=row.group_wait_s,
         digest_window=row.digest_window,
         repeat_interval_s=row.repeat_interval_s,
@@ -99,16 +108,22 @@ def compute_dedup_key(
     library_id: str | None,
     rule_id: str,
     window_start: datetime | None = None,
+    extras: dict[str, str] | None = None,
 ) -> str:
-    """sha256 of the fixed R1 group vocabulary (+ the digest window start).
+    """sha256 of the fixed R1 group vocabulary (+ the digest window start, + any
+    extra group_by values).
 
     Matches :func:`filearr.alerts.rules.group_key`'s canonical order
     ``(event_type, library_id, rule_id)``. For a digest rule the ISO window start
     is appended so each hourly/daily bucket hashes to a distinct key (its rows are
-    a separate group flushed at its own boundary)."""
+    a separate group flushed at its own boundary). ``extras`` (``folder`` /
+    ``extension`` / ``file``, roadmap §6 polish) are appended in sorted key order
+    so an R1-only rule's key is byte-identical to before."""
     parts = [event_type, str(library_id), str(rule_id)]
     if window_start is not None:
         parts.append(window_start.isoformat())
+    for k in sorted(extras or {}):
+        parts.append(f"{k}={extras[k]}")
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -136,13 +151,16 @@ def build_draft(
         assign_window(now, rule.digest_window) if rule.digest_window else None
     )
     et, lib, rid = group_key(rule, event)
-    dedup_key = compute_dedup_key(et, lib, rid, window_start)
+    extras = group_extras(rule, event)
+    dedup_key = compute_dedup_key(et, lib, rid, window_start, extras or None)
     payload = {
         "event_type": event.event_type,
         "rel_path": event.rel_path,
         "library_id": event.library_id,
         "rule_name": rule.name,
     }
+    if extras:
+        payload["group"] = extras
     return AlertDraft(
         rule_id=rule.id,
         event_type=event.event_type,

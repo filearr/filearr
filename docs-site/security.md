@@ -150,10 +150,42 @@ source IP. Either bucket crossing the threshold locks it, and the lock is checke
 *before* the slow argon2 verify runs. Defaults: 3 failures / 120-second window →
 300-second lock, returning `429 + Retry-After`.
 
-!!! warning "Only trust `X-Forwarded-For` behind a trusted proxy"
-    Leave `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR=false` unless a trusted
-    proxy sets the header — otherwise a client can spoof it to dodge the per-IP
-    bucket. The per-username bucket is unspoofable regardless.
+### Client IPs behind a reverse proxy {#client-ips-behind-a-proxy}
+
+The per-IP bucket, every security-audit row and every session record the
+*caller's* address. Behind a reverse proxy that address is only available from
+`X-Forwarded-For` — a header any client can forge against the directly
+published app port — so Filearr honours it only when the request demonstrably
+came through a proxy you trust:
+
+- **The bundled Caddy sidecar** stamps `X-Filearr-Proxy-Trust` with
+  `FILEARR_PROXY_SHARED_SECRET` on every proxied request. When the app and
+  Caddy share that secret (the Proxmox deploy and the Unraid full tier set it
+  on both), real client IPs appear with no further configuration.
+- **A third-party proxy** (SWAG, NPM, Traefik, nginx): list its address(es)
+  in `FILEARR_TRUSTED_PROXIES=10.0.0.5,172.18.0.0/16`. The chain is walked
+  from the right, skipping trusted hops; the first untrusted hop is the
+  client.
+- `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR=true` is the **legacy** blunt
+  switch (leftmost entry, no checks). Keep it only if you already rely on it
+  and nothing but the proxy can reach the app port.
+
+Without any of these the proxy's own address is recorded (you will see the
+Caddy container IP on every login in the audit log). The per-username bucket
+is unspoofable either way.
+
+## Outbound webhooks (SSRF guard)
+
+Alert and report-delivery webhooks are the only place Filearr makes outbound
+HTTP requests to operator-supplied URLs, so they are fenced: the target host is
+resolved and **every** DNS answer vetted before the request; private,
+loopback, link-local (cloud metadata) and reserved addresses are refused by
+default; the socket is pinned to the vetted IP (DNS-rebinding defence);
+redirects are never followed; responses are size- and time-capped; and the
+`generic` payload format is HMAC-signed. Reaching a LAN receiver is an explicit
+choice: `FILEARR_WEBHOOK_ALLOWED_CIDRS` lists exact targets, or
+`FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS=true` admits RFC1918/ULA (loopback and
+link-local stay denied). Details: [Alerts & notifications](alerts.md#channels).
 
 ## Signed agent updates
 

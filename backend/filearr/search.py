@@ -624,6 +624,9 @@ def build_doc(
         # P3-T13 searchable archive member names (index-capped; "which archive
         # CONTAINS a file named X"). Meili-searchable only (LAST attribute).
         "archive_members": _index_archive_members(meta.get("archive_members")),
+        # Roadmap §5 P3 provenance: the download-source URL (xattr / Zone.Identifier),
+        # searchable last so a name/body hit outranks a "came from that site" hit.
+        "origin_url": meta.get("origin_url"),
         "is_sidecar": item.sidecar_of is not None,
         "sidecar_of": str(item.sidecar_of) if item.sidecar_of else None,
         # P6-T3 RBAC scope key: the ARRAY of every ltree ancestor covering this

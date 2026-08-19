@@ -32,8 +32,8 @@ from filearr.schedule import is_network_path
 class ResolvedHashPolicy:
     """The effective, per-file-agnostic hashing decision for one scan run."""
 
-    policy: str          # the resolved *behaviour*: 'full' | 'quick_only'
-    declared: str        # the library's declared policy: 'auto' | 'full' | 'quick_only'
+    policy: str  # the resolved *behaviour*: 'full' | 'quick_only'
+    declared: str  # the library's declared policy: 'auto' | 'full' | 'quick_only'
     compute_content: bool
     full_max_bytes: int
     network: bool | None  # detected fs class for 'auto'; None when not probed
@@ -47,6 +47,33 @@ class ResolvedHashPolicy:
             "full_max_bytes": self.full_max_bytes,
             "network": self.network,
         }
+
+
+# Roadmap §16 (2026-08-19): the extract worker resolves `auto` per ITEM (one
+# /proc/self/mountinfo parse per file). A short-TTL memo per root keeps the
+# per-file cost to a dict lookup; 60 s is long enough to cover an extract burst
+# and short enough that a remount is noticed within a minute. Test injections
+# (an explicit ``mountinfo``) bypass the cache so fixtures stay deterministic.
+_NETWORK_TTL_S = 60.0
+_network_memo: dict[str, tuple[float, bool]] = {}
+
+
+def _network_cached(root_path: str) -> bool:
+    import time
+
+    now = time.monotonic()
+    hit = _network_memo.get(root_path)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    val = is_network_path(root_path)
+    if len(_network_memo) > 1024:  # a library count, never per-file: bounded anyway
+        _network_memo.clear()
+    _network_memo[root_path] = (now + _NETWORK_TTL_S, val)
+    return val
+
+
+def reset_network_cache_for_tests() -> None:
+    _network_memo.clear()
 
 
 def resolve_hash_policy(
@@ -82,7 +109,11 @@ def resolve_hash_policy(
 
     network: bool | None = None
     if pol is HashPolicy.auto:
-        network = is_network_path(root_path, mountinfo)
+        network = (
+            _network_cached(root_path)
+            if mountinfo is None
+            else is_network_path(root_path, mountinfo)
+        )
         effective = HashPolicy.quick_only if network else HashPolicy.full
     else:
         effective = pol

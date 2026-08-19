@@ -937,7 +937,7 @@ The collectors this release ships descriptions for:
 | `stat` | Size, timestamps and basic file attributes. The cheapest collector, and the one every other inventory answer builds on. | Linux, macOS, Windows | low |
 | `owner` | The owning user and group — uid/gid resolved to names on POSIX, the owning security principal on Windows. | Linux, macOS, Windows | low |
 | `perms` | Permission bits / ACL summary per file. Dearer than `stat`: a second syscall per entry, and an ACL read on Windows. The detailed knobs are the [`inventory.permissions`](#group-settings-schema) block below. | Linux, macOS, Windows | medium |
-| `permissions` | The **full normalized permission record** per entry (owner, group, every allow/deny ACE with native mask, inheritance flags, fidelity stamp). Linux: mode bits + POSIX ACL xattrs, pure Go; cifs-without-`cifsacl` mounts stamped `synthesized_from_mode`. Windows: owner + full DACL via the security descriptor (local and UNC). Central stores each record in `permission_snapshots` (unchanged re-collections write nothing; newest *N* per path, `FILEARR_PERMISSION_SNAPSHOTS_RETAIN`, default 10) and the Reports page gains the two `permissions_*` reports. Not implemented on macOS (per-entry error, harmless). | Linux, Windows | medium |
+| `permissions` | The **full normalized permission record** per entry (owner, group, every allow/deny ACE with native mask, inheritance flags, fidelity stamp). Linux: mode bits + POSIX ACL xattrs, pure Go; cifs-without-`cifsacl` mounts stamped `synthesized_from_mode`. Windows: owner + full DACL via the security descriptor (local and UNC). Central stores each record in `permission_snapshots` (unchanged re-collections write nothing; newest *N* per path, `FILEARR_PERMISSION_SNAPSHOTS_RETAIN`, default 10), diffs each new snapshot against the previous one (the `permission_changes` report + the **System: permission change** alert rule) and the Reports page gains the `permissions_*` reports. Not implemented on macOS (per-entry error, harmless). | Linux, Windows | medium |
 | `placeholder` | Whether a file is a cloud placeholder (OneDrive / Files On-Demand and friends) rather than resident on disk. A no-op that reports nothing elsewhere. | Windows | low |
 
 !!! note "The list is a catalogue, not a whitelist"
@@ -975,8 +975,12 @@ it. Defaults make a first run highlight only explicit, non-baseline grants:
 **`inventory.permissions.audit`** — `enabled` (bool, default false),
 `retain_snapshots` (int 1..1000, default 10), `alert_on_change` (bool, default
 false), `watch_paths` (path specs, max 200). Central validates and stores this
-ahead of the collector; the snapshot-diff and alert routing are agent-side
-scaffold.
+ahead of the collector. Note that the **central** drift pipeline does not need
+this block: every stored snapshot is diffed against the previous one on ingest,
+the `permission_changes` report lists the changes and the **System: permission
+change** alert rule (disabled until you attach a channel) pushes them — see
+[Reports → Permission drift](reports.md#permission-drift). The block remains the
+agent-side knob for a future agent-local audit mode.
 
 The console's group dialog covers all of the above. Collectors are a **checkbox
 list** built from the catalogue endpoint above, with the description, platforms
@@ -988,14 +992,17 @@ distinguishable from "configured, all off". (`permissions` itself has no checkbo
 until an agent advertises it; name it with **+ add another**.)
 
 !!! warning "Stored and delivered, but not acted on yet"
-    `log_level` and everything under `inventory` are validated, versioned, and
-    pushed to the agent, but **no shipped agent build reads them yet** — the
-    collectors are agent-side scaffold, and the agent's log level still comes
-    only from its sidecar config, `FILEARR_AGENT_LOG_LEVEL`, or the `-log-level`
-    flag. The console marks these fields with a *not enforced yet* chip.
-    Authoring them now is safe and forward-looking. `scan_selections` (agent ≥
-    2026-08-18), `scan_schedule_cron` and the three local-access gates **are**
-    live.
+    `log_level` and the `inventory` **group settings** are validated,
+    versioned, and pushed to the agent, but **no shipped agent build reads
+    them from the group document yet** — the agent's log level still comes
+    only from its sidecar config, `FILEARR_AGENT_LOG_LEVEL`, or the
+    `-log-level` flag, and the `inventory.collectors` / `permissions` /
+    `audit` blocks do not (yet) drive a scheduled inventory. The console marks
+    these fields with a *not enforced yet* chip. The **collectors themselves
+    are live**: an [inventory command](#inventory-commands) names the
+    collectors to run (including `permissions`), and its results are stored
+    and reported. `scan_selections` (agent ≥ 2026-08-18), `scan_schedule_cron`
+    and the three local-access gates **are** live.
 
 
 ### Versions, history and rollback {#config-versions}
@@ -1152,11 +1159,15 @@ ship to the whole fleet on upload and are gated by the `auto_update` policy key
 instead — see [Self-update with signed releases](#self-update-with-signed-releases).
 
 
+#### Inventory commands {#inventory-commands}
+
 Beyond media scanning, agents accept generic **inventory commands**: a
 composition of *collectors* over a preset or path selection. Built-in
 collectors: `stat` (sizes/timestamps), `owner` (POSIX uid/gid or Windows
 owner account), `perms` (POSIX mode + xattr names, or a compact Windows ACL
-summary), and `placeholder` (cloud-placeholder detection) — see the
+summary), `permissions` (the full normalized ACL record behind the
+permission reports and drift alert), and `placeholder` (cloud-placeholder
+detection) — see the
 [collector table](#group-settings-schema) for what each one collects. Each agent
 advertises the collectors it supports, and new **compositions** — for
 example adding permission enumeration to a documents sweep — need no agent

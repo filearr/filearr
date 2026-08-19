@@ -25,21 +25,43 @@ type ffprobeJSON struct {
 }
 
 type ffprobeStream struct {
-	CodecType      string         `json:"codec_type"`
-	CodecName      string         `json:"codec_name"`
-	Width          any            `json:"width"`
-	Height         any            `json:"height"`
-	AvgFrameRate   string         `json:"avg_frame_rate"`
-	SampleRate     any            `json:"sample_rate"`
-	Channels       any            `json:"channels"`
-	ChannelLayout  string         `json:"channel_layout"`
-	ColorPrimaries string         `json:"color_primaries"`
-	ColorTransfer  string         `json:"color_transfer"`
-	Tags           map[string]any `json:"tags"`
-	Disposition    map[string]any `json:"disposition"`
-	SideDataList   []struct {
-		SideDataType string `json:"side_data_type"`
-	} `json:"side_data_list"`
+	CodecType      string            `json:"codec_type"`
+	CodecName      string            `json:"codec_name"`
+	Width          any               `json:"width"`
+	Height         any               `json:"height"`
+	AvgFrameRate   string            `json:"avg_frame_rate"`
+	SampleRate     any               `json:"sample_rate"`
+	Channels       any               `json:"channels"`
+	ChannelLayout  string            `json:"channel_layout"`
+	ColorPrimaries string            `json:"color_primaries"`
+	ColorTransfer  string            `json:"color_transfer"`
+	Tags           map[string]any    `json:"tags"`
+	Disposition    map[string]any    `json:"disposition"`
+	SideDataList   []ffprobeSideData `json:"side_data_list"`
+}
+
+// ffprobeSideData is one stream- or frame-level side-data entry. Only the
+// fields the HDR/DV readers consume are modelled; everything else is ignored.
+type ffprobeSideData struct {
+	SideDataType string `json:"side_data_type"`
+	// DOVI configuration record (stream level)
+	DVProfile  any `json:"dv_profile"`
+	DVLevel    any `json:"dv_level"`
+	DVBLCompat any `json:"dv_bl_signal_compatibility_id"`
+	// Content light level metadata (frame level)
+	MaxContent any `json:"max_content"`
+	MaxAverage any `json:"max_average"`
+	// Mastering display metadata (frame level; rationals as "n/d" strings)
+	RedX         string `json:"red_x"`
+	RedY         string `json:"red_y"`
+	MinLuminance string `json:"min_luminance"`
+	MaxLuminance string `json:"max_luminance"`
+}
+
+type ffprobeFramesJSON struct {
+	Frames []struct {
+		SideDataList []ffprobeSideData `json:"side_data_list"`
+	} `json:"frames"`
 }
 
 // runFFprobe executes ffprobe against path and returns its parsed JSON.
@@ -130,6 +152,24 @@ func probeVideo(ctx context.Context, path string, opts Options, res *Result) err
 			if hdr, format := detectHDR(s); hdr {
 				res.Meta["hdr"] = true
 				res.set("hdr_format", format)
+				dvRecord(s, res)
+				// Roadmap §11 deep probe (port of ffprobe.py probe_hdr_frames):
+				// only for HDR streams, a few frames, failure ignored.
+				if deep, err := probeHDRFrames(ctx, opts.FFprobePath, path, opts); err == nil {
+					plus := deep.plus
+					if deep.maxCLL > 0 {
+						res.Meta["hdr_max_cll"] = deep.maxCLL
+					}
+					if deep.maxFALL > 0 {
+						res.Meta["hdr_max_fall"] = deep.maxFALL
+					}
+					res.set("hdr_master_display", deep.masterDisplay)
+					if plus && format == "HDR10" {
+						res.set("hdr_format", "HDR10+")
+					} else if plus && format == "Dolby Vision" {
+						res.Meta["hdr10_plus"] = true
+					}
+				}
 			}
 			res.set("color_primaries", s.ColorPrimaries)
 			res.set("color_transfer", s.ColorTransfer)
@@ -239,6 +279,140 @@ func detectHDR(s ffprobeStream) (bool, string) {
 		return true, ""
 	}
 	return false, ""
+}
+
+// dvCompat maps dv_bl_signal_compatibility_id to what a non-DV display gets
+// (port of ffprobe.py _DV_COMPAT).
+var dvCompat = map[int64]string{1: "HDR10", 2: "SDR", 4: "HLG", 6: "Blu-ray HDR10"}
+
+// dvRecord stores dv_profile / dv_level / dv_compat from the stream-level DOVI
+// configuration record (port of ffprobe.py _dv_record).
+func dvRecord(s ffprobeStream, res *Result) {
+	for _, d := range s.SideDataList {
+		if !strings.Contains(strings.ToLower(d.SideDataType), "dovi configuration record") {
+			continue
+		}
+		if p, ok := asInt(d.DVProfile); ok {
+			res.Meta["dv_profile"] = p
+		}
+		if l, ok := asInt(d.DVLevel); ok {
+			res.Meta["dv_level"] = l
+		}
+		if c, ok := asInt(d.DVBLCompat); ok {
+			res.set("dv_compat", dvCompat[c])
+		}
+		return
+	}
+}
+
+type hdrFrameFacts struct {
+	plus          bool
+	maxCLL        int64
+	maxFALL       int64
+	masterDisplay string
+}
+
+// probeHDRFrames reads the side data of the first few video frames (bounded by
+// -read_intervals %+#N) to tell HDR10+ (SMPTE ST 2094-40 dynamic metadata) from
+// HDR10 and to capture MaxCLL / MaxFALL / mastering display. Port of
+// ffprobe.py probe_hdr_frames; same argv shape and caps.
+func probeHDRFrames(ctx context.Context, binary, path string, opts Options) (hdrFrameFacts, error) {
+	cctx, cancel := context.WithTimeout(ctx, opts.FFprobeTimeout)
+	defer cancel()
+	argv := []string{
+		"-v", "error",
+		"-hide_banner",
+		"-print_format", "json",
+		"-select_streams", "v:0",
+		"-read_intervals", "%+#6",
+		"-show_entries", "frame_side_data",
+		"--",
+		path,
+	}
+	cmd := exec.CommandContext(cctx, binary, argv...)
+	out := &capBuffer{limit: 4 * 1024 * 1024}
+	cmd.Stdout = out
+	if err := cmd.Run(); err != nil || out.overflowed {
+		return hdrFrameFacts{}, fmt.Errorf("ffprobe frames: %v", err)
+	}
+	var data ffprobeFramesJSON
+	if err := json.Unmarshal(out.buf.Bytes(), &data); err != nil {
+		return hdrFrameFacts{}, err
+	}
+	return hdrFromFrames(data), nil
+}
+
+// hdrFromFrames folds frame side data into the HDR facts (pure; port of
+// ffprobe.py hdr_from_frames).
+func hdrFromFrames(data ffprobeFramesJSON) hdrFrameFacts {
+	var f hdrFrameFacts
+	for _, fr := range data.Frames {
+		for _, d := range fr.SideDataList {
+			t := strings.ToLower(d.SideDataType)
+			switch {
+			case strings.Contains(t, "2094-40"), strings.Contains(t, "hdr10+"), strings.Contains(t, "dynamic hdr"):
+				f.plus = true
+			case strings.Contains(t, "content light level"):
+				if v, ok := asInt(d.MaxContent); ok {
+					f.maxCLL = v
+				}
+				if v, ok := asInt(d.MaxAverage); ok {
+					f.maxFALL = v
+				}
+			case strings.Contains(t, "mastering display"):
+				var parts []string
+				if name := primariesName(d.RedX, d.RedY); name != "" {
+					parts = append(parts, name)
+				}
+				if mx, ok := ratio(d.MaxLuminance); ok {
+					parts = append(parts, fmt.Sprintf("max %d nits", int(mx+0.5)))
+				}
+				if mn, ok := ratio(d.MinLuminance); ok {
+					parts = append(parts, fmt.Sprintf("min %.4g nits", mn))
+				}
+				if len(parts) > 0 {
+					f.masterDisplay = strings.Join(parts, ", ")
+				}
+			}
+		}
+	}
+	return f
+}
+
+// ratio parses ffprobe's "n/d" rational strings (also accepts a plain number).
+func ratio(s string) (float64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	if i := strings.IndexByte(s, '/'); i > 0 {
+		n, err1 := strconv.ParseFloat(s[:i], 64)
+		d, err2 := strconv.ParseFloat(s[i+1:], 64)
+		if err1 != nil || err2 != nil || d == 0 {
+			return 0, false
+		}
+		return n / d, true
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	return v, err == nil
+}
+
+// primariesName names the mastering gamut from its red primary.
+func primariesName(rx, ry string) string {
+	x, ok1 := ratio(rx)
+	y, ok2 := ratio(ry)
+	if !ok1 || !ok2 {
+		return ""
+	}
+	near := func(a, b float64) bool { return a-b < 0.01 && b-a < 0.01 }
+	switch {
+	case near(x, 0.708) && near(y, 0.292):
+		return "BT.2020"
+	case near(x, 0.680) && near(y, 0.320):
+		return "P3-D65"
+	case near(x, 0.640) && near(y, 0.330):
+		return "BT.709"
+	}
+	return ""
 }
 
 // --- tolerant coercion helpers (ffprobe emits numbers as strings) -----------

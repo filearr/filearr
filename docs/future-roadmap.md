@@ -12,24 +12,24 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 | 2 | Local query access | **shipped** |
 | 3 | Identity, auth & RBAC | **shipped** except SAML (**blocked**: pysaml2 pins pyopenssl<24.3); roles-as-data + service accounts (P6-T10) shipped 2026-08-16/19 |
 | 4 | Indexing controls | **shipped**; custom exclusion presets (P2-T7) + per-OS agent presets driving roots (P2-T8) 2026-08-19 |
-| 5 | Search & findability | P0/P1 **shipped**; long tail (federated multi-search, geo filters in UI) open |
-| 6 | Alerting | **shipped**; apprise now in the image (P8-T3 close-out); polish (inhibition/group_by/CIDR allowlist) open |
+| 5 | Search & findability | **All shipped** incl. P3 provenance (2026-08-19); email/mbox indexing tracked in §15; geo map filter is in the search UI (R8); federated multi-search only if indexes ever split (§8) |
+| 6 | Alerting | **shipped**; apprise in the image (P8-T3); **polish shipped 2026-08-19** — inhibition (`inhibited_by` + `inhibit_window_s`, mute semantics), `group_by` extras (folder / extension / file), `FILEARR_WEBHOOK_ALLOWED_CIDRS` |
 | 7 | Data model extensions | **shipped** |
 | 8 | Meilisearch adoption | adopt-now **done** (v1.53.0; compaction P9-T4 live weekly); adopt-later items open |
 | 9 | License | **decided** (AGPL-3.0-or-later) |
 | 10 | Sequencing | both waves **delivered** |
-| 11 | ffprobe follow-ups | open tail (precise HDR10+/DoVi profiling, etc.) — low value |
-| 12 | Sidecar follow-ups | open tail |
-| 13 | Move detection follow-ups | 2 of 4 **shipped**; rest open |
+| 11 | ffprobe follow-ups | **shipped 2026-08-19** (DV profile/level/compat from the DOVI record; deep first-frames probe for HDR10+ / MaxCLL / MaxFALL / mastering display, Python + Go); pymediainfo cross-check declined |
+| 12 | Sidecar follow-ups | **closed 2026-08-19** — JRiver sidecar parsing, directory-artwork dominance rule, `FILEARR_SIDECAR_METADATA_PRIORITY` |
+| 13 | Move detection follow-ups | **closed 2026-08-19** — 2 of 4 shipped 2026-07-24; hash-policy interplay already honoured; in-place swap a documented non-goal |
 | 14 | SSE follow-ups | **shipped** |
-| 15 | Extractor follow-ups | open tail (email/mbox/PST, RAR, CAD/proprietary 3D) |
-| 16 | Hash-policy follow-ups | open tail |
+| 15 | Extractor follow-ups | **closed 2026-08-19** — 7z/RAR listing, e-mail (.eml/.mbox/.msg), accurate-geometry tier; CAD kernels declined; PST → readpst |
+| 16 | Hash-policy follow-ups | **closed 2026-08-19** — opt-in content-hash backfill task + mountinfo memo |
 | 17 | Extraction throughput | **shipped** (adaptive backpressure) |
 | 18 | Error surfacing | **shipped** (+ traceback head/tail, Meili task ack 2026-08-18) |
 | 19 | Test suite + CI | **shipped** (+ cross-compiled images 2026-08-16) |
 | 20 | UX/preview backlog | **shipped** |
 | 21 | LLM / RAG | **shipped** (M1–M3) |
-| 22 | Permissions audit (W7) | **v1 shipped 2026-08-19** (Linux/Windows collector, snapshots, 2 reports); T4 macOS, T8 canonicalisation, T9 drift/alerts, T10 effective access open |
+| 22 | Permissions audit (W7) | **v1 shipped 2026-08-19** (Linux/Windows collector, snapshots, 2 reports); **T9 drift report + `permission_changed` alert shipped 2026-08-19**; T4 macOS, T8 canonicalisation, T10 effective access open |
 | 23 | Binary release rollouts on the tier engine | **shipped 2026-08-19** |
 | 24 | GPU acceleration | **declined** (assessed 2026-08-12) |
 | 25 | Insight features | **shipped 2026-08-13** |
@@ -170,7 +170,10 @@ configured:
 > "describe it" box). P3 central frecency SHIPPED 2026-08-06 (item_frecency
 > per-principal store mirroring the agent's zoxide-style scoring; detail-open
 > touches + bounded page-local search re-rank, FILEARR_FRECENCY_ENABLED).
-> P3 provenance download-URL still open.
+> P3 provenance download-URL SHIPPED 2026-08-19 (`file_origin.py` xattr
+> reader central-side; agent reads Zone.Identifier / xdg xattrs /
+> kMDItemWhereFroms; `origin_url` searchable last; Origin block in item
+> detail). §5 now has no open items except email/mbox/PST indexing (→ §15).
 
 Priority-ordered from prior-art research (Everything, Recoll, sist2, Spotlight,
 Paperless-ngx, Immich, 2024-26 local-AI tools):
@@ -211,7 +214,7 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 - **Natural-language query assist** (query→filter translation, local LLM optional). *(SHIPPED 2026-08-06)*
 
 **P3**
-- File provenance (download source URL, originating agent/machine).
+- File provenance (download source URL, originating agent/machine). *(SHIPPED 2026-08-19 — origin/referrer URL from xattrs / Zone.Identifier; originating agent was already the item's agent library)*
 - Frecency (frequency+recency) personal ranking profiles. *(SHIPPED 2026-08-06 — central per-principal store + search re-rank)*
 
 ## 6. Alerting
@@ -221,6 +224,14 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 > signing, email), per-rule throttling/windows, AND the operational alerts
 > (scan failures, agent offline / replication stall, disk pressure,
 > extract-error spikes). Channel secrets AES-GCM-encrypted at rest.
+> **Polish shipped 2026-08-19:** rule inhibition (Alertmanager mute: a rule
+> lists `inhibited_by` rules + `inhibit_window_s`; a group is marked
+> delivered with "suppressed: inhibited by …" while an inhibitor fired for the
+> same library / library-less), `group_by` extras beyond the R1 base
+> (`folder` / `extension` / `file` split one library batch into finer
+> notifications; dedup key + rendered header carry them), and
+> `FILEARR_WEBHOOK_ALLOWED_CIDRS` (explicit per-target allowlist, finer than
+> the private-class boolean; unspecified never allowlisted). Remaining: none.
 
 - **File-change alert rules:** watch expressions (path glob + event type:
   created/modified/deleted/moved + optional hash-change) → notification
@@ -323,22 +334,37 @@ CLI/web, hot-folder scheduling, per-agent alerting.
 
 ## 11. Deferred enhancements from T1 (ffprobe video extraction)
 
-> **Status 2026-08-19:** deferred tail; nothing here has been requested since T1 shipped.
-- **Precise HDR10+/DoVi profiling.** T1 detects HDR from stream-level colour
+> **Status 2026-08-19 (later the same day): SHIPPED.** Dolby Vision
+> profile/level/base-layer compatibility now come from the stream-level DOVI
+> configuration record (no frame probe needed), and a bounded "deep probe"
+> (`-read_intervals %+#6 -show_entries frame_side_data`, HDR streams only,
+> `FILEARR_FFPROBE_DEEP_HDR`) tells HDR10+ (ST 2094-40) from HDR10 and records
+> MaxCLL / MaxFALL / mastering display — Python and the Go agent in lock-step,
+> verified live against an x265 HDR10 sample. pymediainfo cross-check:
+> DECLINED (single source of truth; nothing it adds has been asked for).
+- **Precise HDR10+/DoVi profiling.** *(SHIPPED 2026-08-19, see above.)* T1 detects HDR from stream-level colour
   signalling (transfer=smpte2084 → HDR10, arib-std-b67 → HLG, DOVI side-data →
   Dolby Vision, bt2020 primaries → generic HDR). Distinguishing HDR10 vs HDR10+
   reliably, and reading the Dolby Vision profile/level, needs per-frame side
   data (`ffprobe -read_intervals` / `-show_frames`) — a heavier probe. Deferred
   as a major item; revisit with a dedicated "deep probe" opt-in when a real HDR
   library exists to validate against.
-- **pymediainfo cross-check.** The stack already pins `pymediainfo`; a second
+- **pymediainfo cross-check.** *(DECLINED 2026-08-19.)* The stack already pins `pymediainfo`; a second
   extractor could corroborate codecs/track languages and fill fields ffprobe
   omits (e.g. some container-specific tags). Left out of T1 to keep a single
   source of truth; consider a merge strategy later.
 
 ## 12. Sidecar follow-ups (deferred from T3, 2026-07-07)
 
-> **Status 2026-08-19:** deferred tail (T3 core shipped; the bullets below remain optional).
+> **Status 2026-08-19 (later): CLOSED.** JRiver `*_JRSidecar.xml` parsing
+> shipped (`filearr/jriver.py`, MPL `<Item><Field Name=…>` dialect, conservative
+> known-field map → `jr_*` + external ids, defusedxml posture, association
+> stat `jriver_parsed`); directory-artwork ambiguity resolved with a dominance
+> rule (folder-level artwork links only when the largest primary is ≥ 2× the
+> runner-up, else unlinked — season folders no longer mis-attribute); NFO
+> authority via `FILEARR_SIDECAR_METADATA_PRIORITY=fill|sidecar` (per-field /
+> per-library priority remains a possible refinement, unrequested). Subtitle
+> sidecars were already decided/shipped.
 T3 shipped detection + parent linking (`items.sidecar_of`, ondelete CASCADE),
 Kodi NFO → parent `metadata` parsing (defusedxml, XXE-safe), and search
 exclusion (`is_sidecar` filterable; endpoint hides sidecars unless
@@ -378,8 +404,12 @@ exclusion (`is_sidecar` filterable; endpoint hides sidecars unless
 > — `items.mid_hash` (64 KiB xxh3 centred on the midpoint, NULL <=128 KiB),
 > stamped by extraction and used by `plan_moves` as the confirm/veto tier when
 > content_hash is unavailable, rescuing quick_only collision-family moves that
-> were previously refused as ambiguous. Still open below: scan-thread hashing
-> policy interplay (first paragraph) and in-place-swap semantics (a non-goal).
+> were previously refused as ambiguous. **Closed 2026-08-19:** the
+> scan-thread hashing/policy interplay was already honoured — `detect_moves`
+> / `detect_cross_library_moves` take the library's resolved T7 policy
+> (`compute_content`, `full_max_bytes`) and skip full-hash confirmation for
+> quick_only libraries and above the ceiling (`_ensure_hashes`); in-place
+> swap stays a documented non-goal. **Nothing open in §13.**
 T2 shipped identity transfer on rename/move: at scan end, before tombstoning,
 vanished rows are matched to newly-discovered rows by `(quick_hash, size)`,
 confirmed with `content_hash` when both sides have one, and — only when
@@ -505,7 +535,19 @@ Follow-ups (deferred):
 
 ## 15. Extractor follow-ups (deferred from T6, 2026-07-07)
 
-> **Status 2026-08-19:** deferred tail. Agent-side parity phases 1-3 (2026-08-09/10) cover the shipped extractors on remote hosts; email/mbox/PST, RAR and CAD/proprietary 3D remain unbuilt.
+> **Status 2026-08-19 (later): CLOSED.** Shipped the same day: **7z + RAR
+> listing** (py7zr / rarfile, header-only, declared-size + ratio guard,
+> encrypted-header refusal; `.cb7`/`.cbr` ride along; agent stays zip/tar by
+> its no-new-deps rule), the **e-mail extractor** (`tasks/email_extract.py`:
+> `.eml` headers/attachments/body, `.mbox` summary + searchable subject digest,
+> Outlook `.msg` via olefile MAPI streams; PST/OST marked unsupported →
+> `readpst`; routed by the `email` file_group override; `_EMAIL_FIELDS` on the
+> system profile), and the **accurate-geometry tier**
+> (`FILEARR_MODEL3D_ACCURATE_MAX_BYTES`, `geometry_tier`). Already shipped
+> earlier: document/e-book body text (P3-T5) and the zip decompression-ratio
+> guard (`guard_decompression`). **CAD/proprietary 3D: DECLINED** — a native
+> CAD kernel (OpenCASCADE/Blender) is a deployment-footprint decision no user
+> has asked for; the `unsupported` marker stands.
 T6 shipped the remaining per-type property extractors: **model3d** (trimesh —
 triangle/vertex counts, bbox extents + volume, watertight flag, multi-mesh scene
 aggregation for GLTF/GLB/3MF), **document** (pypdf page count + core properties +
@@ -547,7 +589,13 @@ Remaining, non-trivial:
 
 ## 16. Hash-policy follow-ups (deferred from T7, 2026-07-07)
 
-> **Status 2026-08-19:** deferred tail; the QH-T6 rehash sweep (2026-08-12) closed the quick-hash correctness item.
+> **Status 2026-08-19 (later): CLOSED.** The two remaining tails shipped:
+> the opt-in **content-hash backfill** for quick_only libraries
+> (`backfill_content_hashes` maintenance task, no default cron; byte budget +
+> rate throttle, skips agent libraries and the <=128 KiB band, age-net exempt)
+> and the **per-root network-classification memo** in `hashpolicy` (60 s TTL;
+> the extract worker no longer re-parses mountinfo per file). The QH-T6 rehash
+> sweep (2026-08-12) had closed the correctness item.
 T7 shipped per-library hash policy: `hash_policy` (`auto` | `full` |
 `quick_only`) + a nullable `hash_full_max_bytes` per-library ceiling override
 (null → global `FILEARR_SCAN_HASH_FULL_MAX_BYTES`). `auto` detects the root's
@@ -891,9 +939,15 @@ silently-dropped facade audit events — ApiKey uuid vs principals FK).
 > questions: storage = wide JSONB per (agent, path, run) + denormalised
 > `principals text[]` (GIN); agent-only capture (no central-scanner parity);
 > exclusion applied report-side (collection stays full-fidelity); no SACL in v1;
-> Samba share-ACLs docs-only; retention 10 per path. **Still open:** T4 macOS
-> read, T8 principal canonicalisation, T9 drift report + alerting (the pure
-> `diff_records` core exists), T10 effective access. Original note follows.
+> Samba share-ACLs docs-only; retention 10 per path. **T9 SHIPPED 2026-08-19**:
+> `permission_changes` report (LAG over consecutive snapshots per (agent, path),
+> diffed row-side with `diff_records` via the `record_from_wire` adapter,
+> `summarize_diff` details column, threshold = last N days) + the "System:
+> permission change" rule fed by `permission_ingest` after the batch commit
+> (`alerts.ops.emit_permission_change`, hourly+digest dedup; fidelity-only
+> changes recorded, not alerted); ingest also links snapshots to catalog items
+> via the agent library root. **Still open:** T4 macOS read, T8 principal
+> canonicalisation, T10 effective access. Original note follows.
 
 **Status: scaffolded on both sides 2026-07-18, inert since.** Recorded here on
 2026-08-10 because it had no roadmap entry at all — the design lived only in

@@ -24,9 +24,15 @@ Guard discipline (mirrors P3-T5/T6 — the SAME central-directory zip-bomb guard
     64 MiB) past which listing stops CLEANLY (truncated), so a decompression-bomb
     tar can never force unbounded work.
 
-7z / rar require third-party readers (``py7zr`` / ``rarfile``) and are a roadmap
-follow-up — they are NOT recognised by :func:`detect_archive`, so the extract hook
-skips them (no partial/unsafe handling).
+7z / rar (roadmap §15, 2026-08-19) list through ``py7zr`` / ``rarfile`` --
+header-only in both cases (rarfile parses RAR3/RAR5 headers in pure Python; its
+external unrar tool is only for EXTRACTION, which never happens here). A 7z
+listing decompresses the (small) end header, never a member. The same
+decompression-total / ratio guard as zip is applied to the DECLARED sizes after
+listing, so a declared bomb is recorded as a guard error rather than indexed.
+Encrypted headers (7z/RAR "encrypt file names") raise a ``corrupt``-class error
+("encrypted headers") -- nothing is listed. ``.cbr``/``.cb7`` comic archives
+ride the same readers.
 
 Emitted schema (merged into ``metadata_`` by the extract wrapper, all optional):
   ``archive``:            {member_count:int, total_uncompressed:int,
@@ -39,6 +45,7 @@ Emitted schema (merged into ``metadata_`` by the extract wrapper, all optional):
 
 from __future__ import annotations
 
+import os
 import tarfile
 import zipfile
 from pathlib import PurePath
@@ -79,19 +86,30 @@ _MEMBER_NAME_CAP = 1024
 
 # zip-family extensions (single suffix). cbz is a comic-book zip; jar is a zip.
 _ZIP_EXTS: frozenset[str] = frozenset({"zip", "cbz", "jar"})
+# 7z / rar families (roadmap §15): cb7 / cbr are the comic-book wrappers.
+_SEVENZ_EXTS: frozenset[str] = frozenset({"7z", "cb7"})
+_RAR_EXTS: frozenset[str] = frozenset({"rar", "cbr"})
 # tar-family suffixes (checked against the full lower-cased filename so the
 # compound ``.tar.gz`` forms match before the bare ``.gz`` suffix would).
 _TAR_SUFFIXES: tuple[str, ...] = (
-    "tar.gz", "tar.bz2", "tar.xz", "tar", "tgz", "tbz2", "tbz", "txz",
+    "tar.gz",
+    "tar.bz2",
+    "tar.xz",
+    "tar",
+    "tgz",
+    "tbz2",
+    "tbz",
+    "txz",
 )
 
 
 def detect_archive(path: str) -> str | None:
-    """Return the archive FAMILY (``"zip"`` or ``"tar"``) for ``path``, else None.
+    """Return the archive FAMILY (``"zip"`` / ``"tar"`` / ``"7z"`` / ``"rar"``) for
+    ``path``, else None.
 
     Keys off the EXTENSION only (never opens the file). Compound tar suffixes
     (``.tar.gz`` etc.) are matched against the whole filename so they win over the
-    bare ``.gz`` single-suffix. 7z/rar/etc. are unrecognised (roadmap follow-up)."""
+    bare ``.gz`` single-suffix."""
     name = PurePath(path).name.lower()
     for suffix in _TAR_SUFFIXES:
         if name.endswith("." + suffix):
@@ -99,6 +117,10 @@ def detect_archive(path: str) -> str | None:
     ext = PurePath(path).suffix.lstrip(".").lower()
     if ext in _ZIP_EXTS:
         return "zip"
+    if ext in _SEVENZ_EXTS:
+        return "7z"
+    if ext in _RAR_EXTS:
+        return "rar"
     return None
 
 
@@ -279,6 +301,81 @@ def _list_tar(path: str, acc: _Accumulator, *, scan_max_bytes: int) -> None:
         acc.truncated = True
 
 
+def _guard_declared(
+    acc: _Accumulator,
+    compressed: int,
+    *,
+    decompressed_max: int,
+    ratio_limit: float,
+    ratio_min_bytes: int,
+) -> None:
+    """Post-listing guard for readers that expose only DECLARED sizes (7z/rar):
+    same ceilings as the zip central-directory guard, applied to what the headers
+    claim. Nothing was decompressed to get here; this just refuses to INDEX a
+    declared bomb (the extract records a guard error instead)."""
+    if acc.total > decompressed_max:
+        raise ArchiveError(
+            f"archive declares {acc.total} uncompressed bytes (> {decompressed_max})",
+            kind="guard",
+        )
+    if compressed >= ratio_min_bytes and compressed > 0 and acc.total / compressed > ratio_limit:
+        raise ArchiveError(
+            f"archive decompression ratio {acc.total / compressed:.0f}:1 exceeds {ratio_limit:g}:1",
+            kind="guard",
+        )
+
+
+def _list_7z(path: str, acc: _Accumulator, **guard: Any) -> None:
+    try:
+        import py7zr
+        from py7zr.exceptions import PasswordRequired
+    except ImportError as exc:  # pragma: no cover - dependency pinned
+        raise ArchiveError("7z reader unavailable (py7zr not installed)", kind="error") from exc
+    try:
+        with py7zr.SevenZipFile(path, mode="r") as zf:
+            for info in zf.list():
+                if getattr(info, "is_directory", False):
+                    continue
+                if acc.full():
+                    acc.truncated = True
+                    break
+                acc.add(info.filename, int(getattr(info, "uncompressed", 0) or 0))
+    except PasswordRequired as exc:
+        raise ArchiveError("7z archive has encrypted headers") from exc
+    except OSError as exc:
+        raise ArchiveError(f"cannot read 7z archive: {exc}", kind="error") from exc
+    except Exception as exc:  # noqa: BLE001 - py7zr raises a zoo of parse errors
+        raise ArchiveError(f"not a valid 7z archive: {type(exc).__name__}") from exc
+    _guard_declared(acc, os.path.getsize(path), **guard)
+
+
+def _list_rar(path: str, acc: _Accumulator, **guard: Any) -> None:
+    try:
+        import rarfile
+    except ImportError as exc:  # pragma: no cover - dependency pinned
+        raise ArchiveError("rar reader unavailable (rarfile not installed)", kind="error") from exc
+    try:
+        with rarfile.RarFile(path) as rf:
+            if rf.needs_password():
+                raise ArchiveError("rar archive has encrypted headers")
+            for info in rf.infolist():
+                if info.is_dir():
+                    continue
+                if acc.full():
+                    acc.truncated = True
+                    break
+                acc.add(info.filename, int(info.file_size or 0))
+    except ArchiveError:
+        raise
+    except rarfile.NeedFirstVolume as exc:
+        raise ArchiveError("rar volume is not the first of its set") from exc
+    except rarfile.Error as exc:
+        raise ArchiveError(f"not a valid rar archive: {type(exc).__name__}") from exc
+    except OSError as exc:
+        raise ArchiveError(f"cannot read rar archive: {exc}", kind="error") from exc
+    _guard_declared(acc, os.path.getsize(path), **guard)
+
+
 def list_archive_members(
     path: str,
     *,
@@ -300,17 +397,18 @@ def list_archive_members(
     family = detect_archive(path)
     if family is None:
         return {}
-    acc = _Accumulator(
-        max_members=max_members, max_stored=max_stored, index_chars=index_chars
-    )
+    acc = _Accumulator(max_members=max_members, max_stored=max_stored, index_chars=index_chars)
+    guard = {
+        "decompressed_max": decompressed_max,
+        "ratio_limit": ratio_limit,
+        "ratio_min_bytes": ratio_min_bytes,
+    }
     if family == "zip":
-        _list_zip(
-            path,
-            acc,
-            decompressed_max=decompressed_max,
-            ratio_limit=ratio_limit,
-            ratio_min_bytes=ratio_min_bytes,
-        )
+        _list_zip(path, acc, **guard)
+    elif family == "7z":
+        _list_7z(path, acc, **guard)
+    elif family == "rar":
+        _list_rar(path, acc, **guard)
     else:
         _list_tar(path, acc, scan_max_bytes=scan_max_bytes)
 

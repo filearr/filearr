@@ -90,9 +90,17 @@ model and the source `config.py` for every field.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FILEARR_SCAN_HASH_FULL_MAX_BYTES` | `1073741824` | Skip the full content hash above this size (1 GiB). |
+| `FILEARR_SCAN_EMPTY_GUARD` | `true` | Refuse (fail, tombstone nothing) a full scan that sees zero entries over a previously populated library; per-run override `?force_empty=true` on the scan endpoint. |
+| `FILEARR_SCAN_CROSS_LIBRARY_MOVES` | `true` | Match unmatched new files against `missing` tombstones in other libraries and revive identity when byte-confirmed. |
+| `FILEARR_WATCH_INCREMENTAL` | `true` | A small watch-mode event batch triggers a scoped incremental scan instead of a full library scan. |
+| `FILEARR_WATCH_INCREMENTAL_MAX_EVENTS` | `64` | Batch size above which watch mode falls back to a full scan. |
+| `FILEARR_HASH_BACKFILL_MAX_BYTES` | `21474836480` | Per-run byte budget of the opt-in **Backfill content hashes** maintenance task (20 GiB). |
+| `FILEARR_HASH_BACKFILL_RATE_MBPS` | `50` | Average throughput cap for that task (MB/s; `0` = unthrottled). |
 | `FILEARR_SCAN_BATCH_SIZE` | `500` | Files per batch commit. |
 | `FILEARR_RECYCLE_RETENTION_DAYS` | `30` | Recycle-bin retention before purge. |
 | `FILEARR_STAGED_PIPELINE` | `true` | Defer all extraction to scan end (vs trickle during walk). |
+| `FILEARR_SIDECAR_METADATA_PRIORITY` | `fill` | `fill` = a Kodi NFO / JRiver sidecar only fills an empty title/year; `sidecar` = it overwrites them (sidecar is the authority). Raw values always kept under `nfo_*`/`jr_*`. |
+| `FILEARR_PROVENANCE_ENABLED` | `true` | Read download-origin xattrs (`user.xdg.origin.url`, `kMDItemWhereFroms`) into `origin_url`/`referrer_url` during extract. One `listxattr` per file. |
 | `FILEARR_AUDIT_RETENTION_DAYS` | `90` | Retention for extractor-sourced item audit rows (user edits exempt). |
 | `FILEARR_BACKUP_KEEP` | `7` | Bundles the [in-app backup](../operations.md#in-app-backup) keeps in `{config}/backups`. Matters more than it looks: those bundles sit on the volume the disk monitor watches. (`scripts/backup.sh` reads the same number from its own `BACKUP_KEEP`.) |
 
@@ -201,7 +209,11 @@ now*; results are cached for 6 hours.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FILEARR_FFPROBE_TIMEOUT_S` | `30` | ffprobe wall-clock cap. |
-| `FILEARR_MODEL3D_MAX_BYTES` | `268435456` | Mesh size ceiling handed to trimesh (256 MiB). |
+| `FILEARR_FFPROBE_DEEP_HDR` | `true` | For HDR streams only, read the first frames' side data (one extra bounded ffprobe) to distinguish HDR10+ and capture MaxCLL/MaxFALL + mastering display. |
+| `FILEARR_MODEL3D_MAX_BYTES` | `536870912` | Mesh size ceiling handed to trimesh (512 MiB). |
+| `FILEARR_MODEL3D_ACCURATE_MAX_BYTES` | `0` | Opt-in "accurate geometry" tier: files up to this size load with `process=True` (vertex merge/repair → true vertex counts and watertight flag). `0` = off. |
+| `FILEARR_EMAIL_MAX_BYTES` | `268435456` | Size ceiling for one `.eml` / `.msg` / `.mbox` handed to the e-mail extractor. |
+| `FILEARR_EMAIL_MBOX_MAX_MESSAGES` | `5000` | Messages summarised per mailbox before the listing is marked truncated. |
 | `FILEARR_DOCUMENT_MAX_BYTES` | `268435456` | Doc/spreadsheet size ceiling. |
 | `FILEARR_DIGEST_MAX_BYTES` | `53687091200` | On-demand MD5/SHA-256 size ceiling (50 GiB). |
 | `FILEARR_ARCHIVE_MAX_MEMBERS` | `10000` | Archive member-listing cap. |
@@ -282,6 +294,7 @@ per-library flag.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `FILEARR_DISK_MONITOR_ENABLED` | `true` | Master switch for the 5-minutely disk monitor (low-space alerts + Jobs-page tiles). |
 | `FILEARR_DISK_MIN_FREE_GB` | `5` | Critical below this (absolute floor). |
 | `FILEARR_DISK_WARN_FREE_GB` | `20` | Warn below this (absolute floor). |
 | `FILEARR_DISK_CRIT_PCT_FREE` | `2` | Critical below this percent free. |
@@ -320,9 +333,17 @@ per-library flag.
 | Variable | Default | Purpose |
 |---|---|---|
 | `FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS` | `false` | Permit RFC1918/ULA webhook targets (loopback/link-local still denied). |
+| `FILEARR_WEBHOOK_ALLOWED_CIDRS` | *(unset)* | Comma-separated IPs/CIDRs a webhook may target regardless of class — the precise alternative to the switch above (`127.0.0.1/32` for a local ntfy, `10.0.0.5/32` for a Gotify box). A hostname whose DNS answers mix an allowed and a blocked address is still refused. |
 | `FILEARR_ALERT_WEBHOOK_TIMEOUT_S` | `10` | Per-POST wall clock. |
 | `FILEARR_ALERT_APPRISE_TIMEOUT_S` | `30` | Per-send wall clock for an [Apprise channel](../operations.md#apprise-channels) (one channel may hold several URLs, walked sequentially). |
 | `FILEARR_ALERT_RULE_MAX_PER_HOUR` | `100` | Per-rule dispatch ceiling (storm safety net). |
+| `FILEARR_ALERT_GROUP_INTERVAL_S` | `300` | Minimum gap before an already-notified group with NEW matches is re-notified. |
+| `FILEARR_ALERT_DIGEST_MAX_EVENTS` | `50` | Paths enumerated in one grouped/digest body before an "and N more" tail. |
+| `FILEARR_ALERT_MAX_DELIVERY_ATTEMPTS` | `5` | Transient-failure retries per batch before it goes terminal (`failed`). |
+| `FILEARR_ALERT_SIGNATURE_MAX_AGE_S` | `300` | Freshness window baked into the webhook `X-Filearr-Signature` (receivers should reject older timestamps). |
+| `FILEARR_ALERT_WEBHOOK_MAX_RESPONSE_BYTES` | `65536` | Response-body cap read from a webhook endpoint. |
+| `FILEARR_ALERT_ERROR_SPIKE_THRESHOLD` | `50` | Seeded threshold of *System: extract-error spike* (errors added per library within the window). |
+| `FILEARR_ALERT_ERROR_SPIKE_WINDOW_S` | `3600` | Its rolling window. |
 | `FILEARR_ALERT_EVENTS_RETENTION_DAYS` | `30` | Terminal alert-event retention. |
 
 For the complete, authoritative list see `backend/filearr/config.py`.

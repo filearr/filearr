@@ -16,10 +16,13 @@ Glob engine (brief §3.4): matching delegates to the **same**
 ``pathspec.GitIgnoreSpec`` (MPL-2.0) oracle used for library include/exclude in
 ``filearr.presets`` — one glob dialect across the product, no second engine.
 
-group_by (Architect ruling **R1**): fixed to ``{event_type, library_id,
-rule_id}`` for v1. Not user-extensible; revisited only after phase-4 custom
-metadata fields ship (open question §11 Q1). ``AlertRule.__post_init__``
-enforces this so a drifting caller fails loudly.
+group_by (Architect ruling **R1**): the base vocabulary ``{event_type,
+library_id, rule_id}`` is always present. Since 2026-08-19 (roadmap §6 polish) a
+rule may ADD keys from :data:`GROUP_BY_EXTRAS` — ``folder`` (the top-level
+directory of ``rel_path``), ``extension`` or ``file`` (per item) — to split
+one library-wide group into finer notifications ("one email per folder that
+changed" instead of one for the whole library). ``AlertRule.__post_init__``
+enforces base ⊆ group_by ⊆ base ∪ extras so a drifting caller fails loudly.
 """
 
 from __future__ import annotations
@@ -38,6 +41,8 @@ EVENT_TYPES: frozenset[str] = frozenset({"created", "modified", "deleted", "move
 # Fixed v1 group_by vocabulary (R1). Order is canonical + load-bearing:
 # ``group_key`` returns values in exactly this order.
 GROUP_BY: tuple[str, ...] = ("event_type", "library_id", "rule_id")
+#: Optional extra grouping keys a rule may add (roadmap §6 polish, 2026-08-19).
+GROUP_BY_EXTRAS: frozenset[str] = frozenset({"folder", "extension", "file"})
 
 # Digest window cadences (brief §4.1). ``None`` = fire per group_wait window.
 DIGEST_WINDOWS: frozenset[str] = frozenset({"hourly", "daily"})
@@ -101,11 +106,12 @@ class AlertRule:
             raise ValueError(f"unknown event_types {sorted(bad)}")
         if not self.event_types:
             raise ValueError("event_types must be non-empty")
-        # R1: group_by is a fixed set for v1. A rule that tries to carry any
-        # other grouping vocabulary is a programming error, not a runtime input.
-        if set(self.group_by) != set(GROUP_BY):
+        # R1 base set always present; only the documented extras may be added.
+        gb = set(self.group_by)
+        if not set(GROUP_BY) <= gb or not gb <= set(GROUP_BY) | GROUP_BY_EXTRAS:
             raise ValueError(
-                f"group_by is fixed to {GROUP_BY} in v1 (R1); got {self.group_by}"
+                f"group_by must contain {GROUP_BY} plus only {sorted(GROUP_BY_EXTRAS)}; "
+                f"got {self.group_by}"
             )
         if self.digest_window is not None and self.digest_window not in DIGEST_WINDOWS:
             raise ValueError(f"unknown digest_window {self.digest_window!r}")
@@ -167,6 +173,25 @@ def group_key(rule: AlertRule, event: FileEvent) -> tuple[str, str, str]:
     ``(event_type, library_id, rule_id)``. The dispatch layer hashes this into
     ``alert_events.dedup_key`` (brief §4.2) so throttle/digest windowing
     operates per-group — e.g. "all ``modified`` events in library X under rule
-    Y this window" is one key, not one per file.
+    Y this window" is one key, not one per file. Extra keys (``folder`` /
+    ``extension`` / ``file``) are computed by :func:`group_extras` and appended
+    to the dedup key by the pipeline.
     """
     return (event.event_type, event.library_id, rule.id)
+
+
+def group_extras(rule: AlertRule, event: FileEvent) -> dict[str, str]:
+    """The rule's extra grouping values for this event (empty for an R1-only
+    rule). ``folder`` = the first path segment of ``rel_path`` ("" at the root);
+    ``extension`` = lower-cased extension without the dot; ``file`` = rel_path."""
+    out: dict[str, str] = {}
+    rel = event.rel_path or ""
+    if "folder" in rule.group_by:
+        norm = rel.replace("\\", "/")
+        out["folder"] = norm.split("/", 1)[0] if "/" in norm else ""
+    if "extension" in rule.group_by:
+        name = rel.rsplit("/", 1)[-1]
+        out["extension"] = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if "file" in rule.group_by:
+        out["file"] = rel
+    return out

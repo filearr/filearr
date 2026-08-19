@@ -47,6 +47,12 @@ index other machines and replicate their catalogs to a central server.
   work offline / LAN-only, no CDN or internet required.
 - **Filter builder + query DSL.** Build structured queries visually, preview them
   live, and save them as custom reports.
+- **Alerts that reach you.** File-change rules (created / modified / deleted /
+  moved, path globs, hash-change gating) and built-in operational rules (scan
+  failures, disk pressure, agent health, permission drift) delivered by
+  webhook (generic / Discord / Slack), e-mail or Apprise, with batching,
+  digests, inhibition and a per-rule storm ceiling — see
+  [Alerts & notifications](alerts.md).
 - **Identity & access when you need it.** API keys with read/write/admin scopes,
   Postgres-backed login sessions, optional OIDC SSO and LDAP/AD, and path-scoped
   RBAC.
@@ -138,6 +144,8 @@ Contributions are accepted under the same license with a DCO sign-off.
 - [Setup requirements](setup.md) — hardware, platforms, dependency versions,
   ports.
 - [Deployment](deployment/index.md) — Docker Compose, Unraid, and Proxmox LXC.
+- [Reports & exports](reports.md) — the canned reports and what to do with them.
+- [Alerts & notifications](alerts.md) — channels, rules, system alerts.
 - [Distributed agents](agents.md) — enroll and operate the agent fleet.
 - [Security](security.md) — auth, RBAC, agent-plane trust, audit.
 - [Data collected & how](data-collection.md) — exactly what a scan reads.

@@ -41,7 +41,7 @@ import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from filearr.alerts.crypto import SecretDecryptError, SecretKeyMissing, get_content_key
 from filearr.alerts.dispatch import (
@@ -81,6 +81,38 @@ def _should_fire(rule: AlertRule, rows, prior_delivered_at, now, group_interval_
     return should_fire_now(
         state, rule.group_wait_s, group_interval_s, rule.repeat_interval_s, now
     )
+
+
+async def _active_inhibitor(session, rule: AlertRule, grp, now: datetime) -> str | None:
+    """Name of the first inhibiting rule that produced an event inside
+    ``rule.inhibit_window_s`` and matches this group's library (an inhibitor
+    event with NULL library_id matches everything); ``None`` when not muted."""
+    ids = list(rule.inhibited_by or [])
+    if not ids:
+        return None
+    window = int(rule.inhibit_window_s or 0)
+    if window <= 0:
+        return None
+    lib_ids = {r.library_id for r in grp}
+    since = now - timedelta(seconds=window)
+    conds = [AlertEvent.library_id.is_(None)]
+    real = [lid for lid in lib_ids if lid is not None]
+    if real:
+        conds.append(AlertEvent.library_id.in_(real))
+    hit = (
+        await session.execute(
+            select(AlertRule.name)
+            .select_from(AlertEvent)
+            .join(AlertRule, AlertRule.id == AlertEvent.rule_id)
+            .where(
+                AlertEvent.rule_id.in_(ids),
+                AlertEvent.occurred_at >= since,
+                or_(*conds),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return hit
 
 
 async def _central_channels(session, rule_id) -> list[AlertChannel]:
@@ -229,6 +261,21 @@ async def run_pending_dispatch(session, now: datetime | None = None) -> dict:
 
         if not _should_fire(rule, grp, prior_delivered_at, now, group_interval_s):
             stats["skipped"] += 1
+            continue
+
+        # Roadmap §6 polish (2026-08-19): inhibition. If any inhibiting rule
+        # fired recently (same library, or a library-less inhibitor), MUTE this
+        # group: mark it delivered-with-note so it is never sent and never
+        # retried (Alertmanager semantics: the broader alert already said it).
+        inhibitor = await _active_inhibitor(session, rule, grp, now)
+        if inhibitor is not None:
+            note = sanitize_error(f"suppressed: inhibited by rule {inhibitor}")
+            for r in grp:
+                r.delivered = True
+                r.delivered_at = now
+                r.last_error = note
+            stats["inhibited"] = stats.get("inhibited", 0) + 1
+            await session.commit()
             continue
 
         # P8-T15 ceiling: count of groups delivered for this rule in the last hour.

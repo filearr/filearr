@@ -115,6 +115,16 @@ dependencies = [
     "onnxruntime==1.28.0",
     "tokenizers==0.23.1",
     "huggingface-hub==1.23.0",
+    # Roadmap §15 (2026-08-19): 7z and RAR member LISTING (index-only, never
+    # extraction). py7zr is pure Python; rarfile parses RAR3/RAR5 headers in
+    # pure Python too -- its external unrar/bsdtar tool is only needed to
+    # EXTRACT, which Filearr never does. Both lazy-imported by tasks/archives.
+    "py7zr>=1.0,<2",
+    "rarfile>=4.2,<5",
+    # Roadmap §15 (2026-08-19): Outlook .msg (OLE compound file) header/body
+    # read for the e-mail extractor. Pure Python, BSD-2. PST/OST stay
+    # unsupported (libpff is a native dependency).
+    "olefile>=0.47,<1",
 ]
 
 [project.optional-dependencies]

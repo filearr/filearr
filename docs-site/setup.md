@@ -57,7 +57,7 @@ The stack is version-pinned. These are the current pins:
 | Python | 3.14 | Backend runtime (the image uses `python:3.14-slim`). |
 | PostgreSQL | 18.x (18.4 pinned) | Source of truth **and** job queue; uses native `uuidv7()` primary keys and PG18 async I/O. |
 | Meilisearch | v1.53.0 (pin **≥ 1.48.2**) | Search projection. See the security note below. |
-| FastAPI | 0.139 | Native Server-Sent Events (requires ≥ 0.135). |
+| FastAPI | 0.141 | Native Server-Sent Events (requires ≥ 0.135). |
 | SQLAlchemy | 2.x + psycopg3 | Async database access. |
 | Procrastinate | 3.9 | Postgres-native job queue — **no Redis** anywhere in the stack. |
 | Node.js | ≥ 24 | Frontend build only (dev / image build). |

@@ -21,6 +21,14 @@ The normalised schema (all keys optional; absent when unknown):
     frame_rate      float  avg fps
     hdr             bool    true when HDR signalling detected
     hdr_format      str     "HDR10"/"HDR10+"/"Dolby Vision"/"HLG" when identifiable
+    dv_profile      int     Dolby Vision profile (5, 7, 8, ...) from the DOVI
+                            configuration record (stream-level; no frame probe)
+    dv_level        int     Dolby Vision level
+    dv_compat       str     DV base-layer compatibility: "HDR10" / "SDR" / "HLG" /
+                            "Blu-ray HDR10" (what a non-DV display gets)
+    hdr_max_cll     int     content light level (nits), from frame side data
+    hdr_max_fall    int     frame-average light level (nits)
+    hdr_master_display str  mastering display (e.g. "P3-D65, max 1000 nits")
     color_primaries str
     color_transfer  str
     audio_codec     str    codec of the first/default audio track (convenience)
@@ -144,6 +152,144 @@ def _title(tags: dict[str, Any]) -> str | None:
     return t if isinstance(t, str) and t else None
 
 
+# DV base-layer signal compatibility ids (ETSI / Dolby "dv_bl_signal_
+# compatibility_id"): what a display WITHOUT Dolby Vision decodes the file as.
+_DV_COMPAT = {0: None, 1: "HDR10", 2: "SDR", 4: "HLG", 6: "Blu-ray HDR10"}
+
+
+def _dv_record(stream: dict[str, Any]) -> dict[str, Any]:
+    """Dolby Vision profile/level/compatibility from the stream-level DOVI
+    configuration record (ffprobe exposes it in ``side_data_list`` -- no
+    per-frame probe needed)."""
+    for d in stream.get("side_data_list") or []:
+        if not isinstance(d, dict):
+            continue
+        t = (d.get("side_data_type") or "").lower()
+        if "dovi configuration record" not in t:
+            continue
+        out: dict[str, Any] = {}
+        if (p := _as_int(d.get("dv_profile"))) is not None:
+            out["dv_profile"] = p
+        if (lv := _as_int(d.get("dv_level"))) is not None:
+            out["dv_level"] = lv
+        cid = _as_int(d.get("dv_bl_signal_compatibility_id"))
+        if cid is not None and _DV_COMPAT.get(cid):
+            out["dv_compat"] = _DV_COMPAT[cid]
+        return out
+    return {}
+
+
+def probe_hdr_frames(
+    path: str,
+    *,
+    ffprobe_path: str = "ffprobe",
+    timeout_s: float = 30.0,
+    frames: int = 6,
+) -> dict[str, Any]:
+    """Roadmap §11 "deep probe": read the side data of the first few video
+    frames to tell **HDR10+** (SMPTE ST 2094-40 dynamic metadata) from plain
+    HDR10 and to pick up the static **mastering display** / **content light
+    level** values. Bounded: ``-read_intervals %+#N`` decodes only N frames, and
+    it is only called when the stream-level probe already says HDR. Returns a
+    (possibly empty) dict; never raises past FfprobeError."""
+    binary = _resolve_binary(ffprobe_path)
+    argv = [
+        binary,
+        "-v", "error",
+        "-hide_banner",
+        "-print_format", "json",
+        "-select_streams", "v:0",
+        "-read_intervals", f"%+#{max(1, int(frames))}",
+        "-show_entries", "frame_side_data",
+        "--",
+        path,
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout_s, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise FfprobeError(f"ffprobe (frames) timed out after {timeout_s:g}s") from exc
+    except OSError as exc:
+        raise FfprobeError(f"ffprobe (frames) could not run: {exc}") from exc
+    if proc.returncode != 0 or len(proc.stdout) > 4_194_304:
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return {}
+    return hdr_from_frames(data)
+
+
+def _nits(v: Any) -> int | None:
+    """ffprobe renders luminance as a rational string like "10000000/10000" (cd/m2)."""
+    if isinstance(v, str) and "/" in v:
+        n, _, d = v.partition("/")
+        fn, fd = _as_float(n), _as_float(d)
+        if fn is None or not fd:
+            return None
+        return int(round(fn / fd))
+    f = _as_float(v)
+    return int(round(f)) if f is not None else None
+
+
+def _primaries_name(d: dict[str, Any]) -> str | None:
+    """Name the mastering display gamut from its red primary ("P3-D65" / "BT.2020")."""
+    rx, ry = _as_float(_ratio(d.get("red_x"))), _as_float(_ratio(d.get("red_y")))
+    if rx is None or ry is None:
+        return None
+    if abs(rx - 0.708) < 0.01 and abs(ry - 0.292) < 0.01:
+        return "BT.2020"
+    if abs(rx - 0.680) < 0.01 and abs(ry - 0.320) < 0.01:
+        return "P3-D65"
+    if abs(rx - 0.640) < 0.01 and abs(ry - 0.330) < 0.01:
+        return "BT.709"
+    return None
+
+
+def _ratio(v: Any) -> float | None:
+    if isinstance(v, str) and "/" in v:
+        n, _, d = v.partition("/")
+        fn, fd = _as_float(n), _as_float(d)
+        return fn / fd if fn is not None and fd else None
+    return _as_float(v)
+
+
+def hdr_from_frames(data: dict[str, Any]) -> dict[str, Any]:
+    """Pure: fold ``-show_frames`` JSON into the hdr_* keys. Exposed for tests."""
+    out: dict[str, Any] = {}
+    frames = data.get("frames") if isinstance(data, dict) else None
+    if not isinstance(frames, list):
+        return out
+    for fr in frames:
+        if not isinstance(fr, dict):
+            continue
+        for d in fr.get("side_data_list") or []:
+            if not isinstance(d, dict):
+                continue
+            t = (d.get("side_data_type") or "").lower()
+            if "2094-40" in t or "hdr10+" in t or "dynamic hdr" in t:
+                out["hdr10_plus"] = True
+            elif "content light level" in t:
+                if (cll := _as_int(d.get("max_content"))) is not None:
+                    out["hdr_max_cll"] = cll
+                if (fall := _as_int(d.get("max_average"))) is not None:
+                    out["hdr_max_fall"] = fall
+            elif "mastering display" in t:
+                parts = []
+                if (name := _primaries_name(d)) is not None:
+                    parts.append(name)
+                mx = _nits(d.get("max_luminance"))
+                mn = _ratio(d.get("min_luminance"))
+                if mx is not None:
+                    parts.append(f"max {mx} nits")
+                if mn is not None:
+                    parts.append(f"min {mn:.4g} nits")
+                if parts:
+                    out["hdr_master_display"] = ", ".join(parts)
+            elif "dolby vision rpu" in t or "dovi rpu" in t:
+                out["dv_rpu"] = True
+    return out
+
+
 def _detect_hdr(stream: dict[str, Any]) -> tuple[bool, str | None]:
     """Best-effort HDR detection from a video stream's colour signalling."""
     transfer = (stream.get("color_transfer") or "").lower()
@@ -175,11 +321,15 @@ def extract_video_tech(
     ffprobe_path: str = "ffprobe",
     timeout_s: float = 30.0,
     max_output_bytes: int = 8_388_608,
+    deep_hdr: bool = True,
 ) -> dict[str, Any]:
     """Return normalised technical metadata for a video file.
 
     Raises FfprobeError on probe failure so the caller can record ``_extract_error``.
-    """
+    ``deep_hdr`` (roadmap §11, 2026-08-19): when the stream-level probe reports
+    HDR, run the bounded first-frames probe too so HDR10+ is told apart from
+    HDR10 and MaxCLL/MaxFALL/mastering display are captured. A frames-probe
+    failure is swallowed (the stream-level answer stands)."""
     data = probe(
         path,
         ffprobe_path=ffprobe_path,
@@ -229,6 +379,22 @@ def extract_video_tech(
                 meta["hdr"] = True
                 if hdr_fmt:
                     meta["hdr_format"] = hdr_fmt
+                meta.update(_dv_record(s))
+                if deep_hdr:
+                    try:
+                        deep = probe_hdr_frames(
+                            path, ffprobe_path=ffprobe_path, timeout_s=timeout_s
+                        )
+                    except FfprobeError:
+                        deep = {}
+                    plus = deep.pop("hdr10_plus", False)
+                    deep.pop("dv_rpu", None)
+                    meta.update(deep)
+                    if plus and meta.get("hdr_format") == "HDR10":
+                        meta["hdr_format"] = "HDR10+"
+                    elif plus and meta.get("hdr_format") == "Dolby Vision":
+                        # DV with an HDR10+ enhancement layer (rare but real)
+                        meta["hdr10_plus"] = True
             for key in ("color_primaries", "color_transfer"):
                 if isinstance(s.get(key), str) and s[key]:
                     meta[key] = s[key]

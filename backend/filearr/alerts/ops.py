@@ -76,6 +76,11 @@ AGENT_STALL_EVENT = "agent_replication_stalled"
 # central catalog. Outside the file-watch vocabulary like the other ops events --
 # seeded directly, never via the write API.
 AGENT_VERIFY_MISMATCH_EVENT = "agent_verify_mismatch"
+# W7-T9 (2026-08-19): permission drift. Fired inline by permission_ingest when a
+# newly stored snapshot differs from the previous one for the same (agent,
+# path) -- ACEs added/removed/modified or owner/group changed. Outside the
+# file-watch vocabulary like the other ops events -- seeded directly.
+PERMISSION_CHANGE_EVENT = "permission_changed"
 
 SCAN_FAILED_RULE_NAME = "System: scan failure"
 EXTRACT_SPIKE_RULE_NAME = "System: extract-error spike"
@@ -84,6 +89,7 @@ REPORT_DELIVERY_RULE_NAME = "System: scheduled report delivery failure"
 AGENT_OFFLINE_RULE_NAME = "System: agent offline"
 AGENT_STALL_RULE_NAME = "System: agent replication stalled"
 AGENT_VERIFY_RULE_NAME = "System: agent verification mismatch"
+PERMISSION_CHANGE_RULE_NAME = "System: permission change"
 
 # Rolling per-library extract-error samples for the spike detector: a list of
 # (sampled_at, {library_id: total_error_count}). Module-level so it persists
@@ -144,6 +150,12 @@ async def seed_system_alert_rules(session_factory=None) -> None:
         {
             "name": AGENT_VERIFY_RULE_NAME,
             "event_types": [AGENT_VERIFY_MISMATCH_EVENT],
+            "threshold_count": None,
+            "threshold_window_s": None,
+        },
+        {
+            "name": PERMISSION_CHANGE_RULE_NAME,
+            "event_types": [PERMISSION_CHANGE_EVENT],
             "threshold_count": None,
             "threshold_window_s": None,
         },
@@ -650,6 +662,80 @@ async def emit_agent_replication_stall(
             item_id=None,
             library_id=None,
             event_type=AGENT_STALL_EVENT,
+            dedup_key=dedup_key,
+            payload=payload,
+            occurred_at=now,
+        )
+        .on_conflict_do_nothing()
+        .returning(AlertEvent.id)
+    )
+    inserted = (await session.execute(stmt)).first() is not None
+    await session.commit()
+    return inserted
+
+
+async def emit_permission_change(
+    session,
+    *,
+    agent_id: str,
+    agent_name: str,
+    path: str,
+    item_id: object | None,
+    library_id: object | None,
+    summary: str,
+    added: int,
+    removed: int,
+    modified: int,
+    owner_changed: bool,
+    digest: str,
+    now: datetime | None = None,
+) -> bool:
+    """Persist an ``alert_events`` row for the permission-change system rule
+    (W7-T9). No-op (``False``) when the rule is absent or disabled.
+
+    The dedup key carries the new snapshot's digest, so two DIFFERENT changes to
+    the same path within the hour are distinct rows while a re-ingest of the
+    same snapshot collapses (``ON CONFLICT DO NOTHING``). ``path`` and
+    ``agent_name`` are agent-controlled text and go through ``sanitize_error``;
+    ``summary`` is built centrally by ``permissions.summarize_diff`` from the
+    stored record (principal names are agent-supplied too, so it is sanitized
+    as well). Must be called wrapped so an alert-layer fault never breaks the
+    ingest path."""
+    now = now or datetime.now(UTC)
+    rule = await _first_enabled_system_rule(session, PERMISSION_CHANGE_EVENT)
+    if rule is None:
+        return False
+    window_start = assign_window(now, "hourly")
+    dedup_key = (
+        compute_dedup_key(PERMISSION_CHANGE_EVENT, f"{agent_id}:{path}", str(rule.id), window_start)
+        + f":{digest[:16]}"
+    )
+    safe_name = sanitize_error(agent_name)
+    safe_path = sanitize_error(path)
+    safe_summary = sanitize_error(summary)
+    counts = f"+{added} -{removed} ~{modified}" + (" owner" if owner_changed else "")
+    message = f"permissions changed on {safe_name}:{safe_path} ({counts}): {safe_summary}"
+    payload = {
+        "event_type": PERMISSION_CHANGE_EVENT,
+        "rule_name": rule.name,
+        "agent_id": agent_id,
+        "agent_name": safe_name,
+        "path": safe_path,
+        "item_id": str(item_id) if item_id else None,
+        "added": added,
+        "removed": removed,
+        "modified": modified,
+        "owner_changed": owner_changed,
+        "summary": safe_summary,
+        "message": message,
+    }
+    stmt = (
+        pg_insert(AlertEvent)
+        .values(
+            rule_id=rule.id,
+            item_id=item_id,
+            library_id=library_id,
+            event_type=PERMISSION_CHANGE_EVENT,
             dedup_key=dedup_key,
             payload=payload,
             occurred_at=now,

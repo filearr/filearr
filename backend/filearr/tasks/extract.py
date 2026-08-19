@@ -466,6 +466,7 @@ def extract_video(path: str) -> dict[str, Any]:
                 ffprobe_path=settings.ffprobe_path,
                 timeout_s=settings.ffprobe_timeout_s,
                 max_output_bytes=settings.ffprobe_max_output_bytes,
+                deep_hdr=settings.ffprobe_deep_hdr,
             )
         )
     except FfprobeError as exc:
@@ -499,9 +500,34 @@ def extract_model3d(path: str) -> dict[str, Any]:
     from filearr.tasks.model3d import Model3DError
     from filearr.tasks.model3d import extract_model3d as _extract
 
+    st = get_settings()
     try:
-        return _extract(path, max_bytes=get_settings().model3d_max_bytes)
+        return _extract(
+            path,
+            max_bytes=st.model3d_max_bytes,
+            accurate_max_bytes=st.model3d_accurate_max_bytes,
+        )
     except Model3DError as exc:
+        return {"_extract_error": str(exc), "_extract_error_kind": exc.kind}
+
+
+def extract_email(path: str) -> dict[str, Any]:
+    """.eml / .mbox / Outlook .msg headers + body text (roadmap §15, 2026-08-19),
+    bounded by FILEARR_EMAIL_MAX_BYTES / FILEARR_EMAIL_MBOX_MAX_MESSAGES and the
+    document body-text cap. PST/OST record an ``unsupported`` marker."""
+    from filearr.config import get_settings
+    from filearr.tasks.email_extract import EmailError
+    from filearr.tasks.email_extract import extract_email as _extract
+
+    st = get_settings()
+    try:
+        return _extract(
+            path,
+            max_bytes=st.email_max_bytes,
+            max_chars=st.body_text_max_chars,
+            max_messages=st.email_mbox_max_messages,
+        )
+    except EmailError as exc:
         return {"_extract_error": str(exc), "_extract_error_kind": exc.kind}
 
 
@@ -574,6 +600,10 @@ EXTRACTOR_BY_KIND = {
 # on ``item.file_group`` and consulted BEFORE the category extractor.
 EXTRACTOR_BY_GROUP = {
     "audiobook": extract_audiobook,
+    # Roadmap §15/§5 (2026-08-19): e-mail messages + mailboxes live under the
+    # "system" category (no category extractor), so the group override is what
+    # gives them headers/body text.
+    "email": extract_email,
 }
 
 
@@ -827,6 +857,17 @@ async def _extract_item_impl(
                     "_extract_error_kind": _error_kind(exc),
                 }
                 extract_failed = True
+
+        # Roadmap §5 P3 provenance (2026-08-19): download-source xattrs, any
+        # file type. Cheap (listxattr) and fail-soft; merged like any extractor
+        # fact. The agent's Windows reader emits the same keys.
+        if settings.provenance_enabled:
+            from filearr.file_origin import provenance_metadata
+
+            try:
+                meta.update(provenance_metadata(item.path))
+            except Exception:  # noqa: BLE001 - provenance must never fail the extract
+                pass
 
         # P3-T11 EXIF deep extraction (images v1). Curated exif.* keys — camera/
         # lens/exposure/dimension/timestamp + GPS — merge into metadata_. GPS is

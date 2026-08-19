@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 from sqlalchemy import select, update
 
+from filearr.config import get_settings
+from filearr.jriver import parse_jrsidecar_bytes
 from filearr.models import Item, ItemStatus
 from filearr.nfo import parse_nfo_bytes
 from filearr.sidecar import classify
@@ -74,12 +76,25 @@ def resolve_links(items: list[Item]) -> dict[str, str | None]:
             if it.file_category in _PRIMARY_CATEGORIES:
                 dir_primaries.setdefault(_dir_of(it.rel_path), []).append(it)
 
-    def primary_for(directory: str) -> Item | None:
+    def primary_for(directory: str, *, directory_level: bool = False) -> Item | None:
         cands = dir_primaries.get(directory)
         if not cands:
             return None
         # Deterministic: largest file, tie-break on rel_path.
-        return max(cands, key=lambda i: (i.size or 0, i.rel_path))
+        best = max(cands, key=lambda i: (i.size or 0, i.rel_path))
+        if directory_level and len(cands) > 1:
+            # Roadmap §12 (2026-08-19) directory-artwork ambiguity: a season
+            # folder holds many comparable episodes; "poster.jpg"/"movie.nfo"
+            # there describe the FOLDER, not the biggest episode. Only attribute
+            # directory-level sidecars when one primary clearly dominates (the
+            # movie + small extras case: >= 2x the runner-up); otherwise leave
+            # them unlinked (still sidecars, hidden from search) instead of
+            # mis-attributing metadata to an arbitrary file.
+            others = sorted((i.size or 0 for i in cands if i is not best), reverse=True)
+            runner_up = others[0] if others else 0
+            if runner_up and (best.size or 0) < 2 * runner_up:
+                return None
+        return best
 
     links: dict[str, str | None] = {}
     for it in items:
@@ -102,7 +117,7 @@ def resolve_links(items: list[Item]) -> dict[str, str | None]:
                 # Fall back to directory primary if the exact stem sibling is gone.
                 parent = primary_for(info.directory)  # type: ignore[union-attr]
         else:
-            parent = primary_for(info.directory)  # type: ignore[union-attr]
+            parent = primary_for(info.directory, directory_level=True)  # type: ignore[union-attr]
         # Never let a sidecar point at itself.
         if parent is not None and parent.id != it.id:
             links[str(it.id)] = str(parent.id)
@@ -146,36 +161,53 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
         if pid is not None:
             linked += 1
 
-    # Parse NFO sidecars into their parent's extracted metadata.
+    # Parse metadata sidecars (Kodi NFO; JRiver *_JRSidecar.xml since
+    # 2026-08-19, roadmap §12) into their parent's extracted metadata.
+    jr_parsed = 0
     for sid, pid in links.items():
         if pid is None:
             continue
         sidecar = by_id[sid]
         info = classify(sidecar.rel_path)
-        if info is None or info.kind != "nfo":
+        if info is None or info.kind not in ("nfo", "jriver"):
             continue
         parent = by_id.get(pid)
         if parent is None:
             continue
         try:
-            # Small NFO read; mirrors the synchronous file IO the extract task
-            # already uses. Media mounts are read-only and NFO files are tiny.
+            # Small sidecar read; mirrors the synchronous file IO the extract
+            # task already uses. Media mounts are read-only and these are tiny.
             with open(sidecar.path, "rb") as fh:  # noqa: ASYNC230
                 data = fh.read()
         except OSError:
             continue
-        parsed = parse_nfo_bytes(data)
+        if info.kind == "nfo":
+            parsed = parse_nfo_bytes(data)
+            prefix = "nfo_"
+        else:
+            parsed = parse_jrsidecar_bytes(data)
+            prefix = "jr_"
         if not parsed:
             continue
-        nfo_parsed += 1
+        if info.kind == "nfo":
+            nfo_parsed += 1
+        else:
+            jr_parsed += 1
         ext_ids = parsed.pop("external_ids", None)
         # Extractors write ONLY metadata_ (never user_metadata). Merge, don't clobber
-        # sibling extracted keys; NFO is authoritative for the keys it provides.
-        parent.metadata_ = {**parent.metadata_, **{f"nfo_{k}": v for k, v in parsed.items()}}
-        # Promote a few high-value fields to typed columns when still empty.
-        if not parent.title and parsed.get("title"):
+        # sibling extracted keys; the sidecar is authoritative for the keys it
+        # provides, each source under its own namespace (nfo_* / jr_*).
+        parent.metadata_ = {
+            **parent.metadata_,
+            **{f"{prefix}{k}": v for k, v in parsed.items()},
+        }
+        # Promote a few high-value fields to typed columns: when still empty
+        # (default "fill"), or always when the operator made the sidecar the
+        # authority (FILEARR_SIDECAR_METADATA_PRIORITY=sidecar, roadmap §12).
+        override = get_settings().sidecar_metadata_priority == "sidecar"
+        if parsed.get("title") and (override or not parent.title):
             parent.title = str(parsed["title"])
-        if not parent.year and parsed.get("year"):
+        if parsed.get("year") and (override or not parent.year):
             parent.year = int(parsed["year"])
         if ext_ids:
             parent.external_ids = {**parent.external_ids, **ext_ids}
@@ -185,6 +217,7 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
         "sidecars": sidecars,
         "linked": linked,
         "nfo_parsed": nfo_parsed,
+        "jriver_parsed": jr_parsed,
         "parents_updated": len(touched_parents),
         # Sidecars whose FK link changed this pass: the caller MUST re-project
         # these to Meili (is_sidecar/sidecar_of live in the doc) and MUST pop

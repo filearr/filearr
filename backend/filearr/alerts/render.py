@@ -101,6 +101,15 @@ def render_group(
     lines = [f"Rule: {safe_rule}", f"Event: {safe_event}", f"Matches: {total}"]
     if library_id is not None:
         lines.append(f"Library: {_clean(library_id)}")
+    # Roadmap §6 polish: extra group_by values (folder / extension / file) are
+    # shared by every event in the group -- render them once in the header.
+    group: dict = {}
+    for ev in events:
+        if isinstance(ev, dict) and isinstance(ev.get("group"), dict):
+            group = ev["group"]
+            break
+    for k in sorted(group):
+        lines.append(f"{_clean(k).title()}: {_clean(group[k]) or '(root)'}")
     lines.append("")
 
     shown = events[:max_events]
@@ -131,6 +140,8 @@ def render_group(
         payload["library_id"] = _clean(library_id)
     if digest_window:
         payload["digest_window"] = _clean(digest_window)
+    if group:
+        payload["group"] = {_clean(k): _clean(v) for k, v in group.items()}
     return RenderedAlert(subject=subject, body_text=body_text, payload=payload)
 
 

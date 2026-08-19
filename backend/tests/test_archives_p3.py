@@ -68,8 +68,8 @@ def test_detect_and_is_archive():
     # non-archives -> None (dispatch skips them)
     assert detect_archive("/x/a.mkv") is None
     assert detect_archive("/x/a.txt") is None
-    assert detect_archive("/x/a.7z") is None  # roadmap follow-up (no stdlib reader)
-    assert detect_archive("/x/a.rar") is None
+    assert detect_archive("/x/a.7z") == "7z"  # py7zr listing since 2026-08-19 (§15)
+    assert detect_archive("/x/a.rar") == "rar"
     assert is_archive("/x/a.zip") is True
     assert is_archive("/x/movie.mp4") is False
 
@@ -204,11 +204,14 @@ def test_non_archive_returns_empty(tmp_path):
 
 
 # --------------------------------------------------------------- projection
-def test_archive_members_is_last_searchable_attribute():
+def test_archive_members_is_after_body_text_searchable_attribute():
     from filearr.meili_ops import SEARCHABLE_ATTRIBUTES
 
-    assert SEARCHABLE_ATTRIBUTES[-1] == "archive_members"
-    assert "archive_members" in SEARCHABLE_ATTRIBUTES
+    # origin_url (provenance, 2026-08-19) was appended after it as the
+    # lowest-priority match; archive_members still ranks below body_text.
+    assert SEARCHABLE_ATTRIBUTES[-1] == "origin_url"
+    assert SEARCHABLE_ATTRIBUTES[-2] == "archive_members"
+    assert SEARCHABLE_ATTRIBUTES.index("archive_members") > SEARCHABLE_ATTRIBUTES.index("body_text")
 
 
 def test_build_doc_projects_and_caps_archive_members():
@@ -386,3 +389,56 @@ async def test_zipbomb_archive_records_error_not_crash(db, tmp_path):
     item = await _fetch(db, item_id)
     assert "_extract_error" in item.metadata_
     assert "archive" not in item.metadata_
+
+
+# --- Roadmap §15 (2026-08-19): 7z + RAR listing --------------------------------
+def test_7z_listing_via_py7zr(tmp_path):
+    import py7zr
+
+    from filearr.tasks.archives import detect_archive
+
+    p = tmp_path / "bundle.7z"
+    with py7zr.SevenZipFile(p, "w") as zf:
+        zf.writestr(b"hello world", "docs/readme.txt")
+        zf.writestr(b"x" * 1000, "data/big.bin")
+    assert detect_archive(str(p)) == "7z"
+    out = list_archive_members(str(p))
+    a = out["archive"]
+    assert a["format"] == "7z" and a["member_count"] == 2
+    assert {m["name"] for m in a["members"]} == {"docs/readme.txt", "data/big.bin"}
+    assert a["total_uncompressed"] == 1011
+    assert "readme.txt" in out["archive_members"]
+    # cb7 rides the same family
+    assert detect_archive("comic.CB7") == "7z"
+
+
+def test_7z_encrypted_headers_reported_not_listed(tmp_path):
+    import py7zr
+
+    p = tmp_path / "secret.7z"
+    with py7zr.SevenZipFile(p, "w", password="pw") as zf:
+        zf.set_encrypted_header(True)
+        zf.writestr(b"top secret", "s.txt")
+    with pytest.raises(ArchiveError, match="encrypted"):
+        list_archive_members(str(p))
+
+
+def test_7z_declared_bomb_is_guarded(tmp_path):
+    import py7zr
+
+    p = tmp_path / "bomb.7z"
+    with py7zr.SevenZipFile(p, "w") as zf:
+        zf.writestr(b"\0" * (2 * 1024 * 1024), "zeros.bin")  # compresses to ~nothing
+    with pytest.raises(ArchiveError) as ei:
+        list_archive_members(str(p), decompressed_max=1024 * 1024)
+    assert ei.value.kind == "guard"
+
+
+def test_rar_detection_and_garbage(tmp_path):
+    from filearr.tasks.archives import detect_archive
+
+    assert detect_archive("x.rar") == "rar" and detect_archive("x.CBR") == "rar"
+    p = tmp_path / "fake.rar"
+    p.write_bytes(b"not a rar at all")
+    with pytest.raises(ArchiveError):
+        list_archive_members(str(p))

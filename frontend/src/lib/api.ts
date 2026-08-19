@@ -1756,6 +1756,10 @@ export interface AlertRule {
   threshold_count: number | null;
   threshold_window_s: number | null;
   channel_ids: string[];
+  // Roadmap §6 polish (2026-08-19): inhibition. While any listed rule fired
+  // within inhibit_window_s (same library / library-less), this rule is muted.
+  inhibited_by: string[] | null;
+  inhibit_window_s: number;
   created_at: string;
 }
 
@@ -1772,6 +1776,9 @@ export const createAlertRule = (body: {
   digest_window?: DigestWindow | null;
   repeat_interval_s?: number | null;
   channel_ids?: string[];
+  group_by?: string[];
+  inhibited_by?: string[];
+  inhibit_window_s?: number;
 }) => request<AlertRule>("/alert-rules", { method: "POST", body: JSON.stringify(body) });
 
 // System rules: only channels + throttle/timings are editable (the match logic
@@ -1789,6 +1796,9 @@ export const updateAlertRule = (
     digest_window: DigestWindow | null;
     repeat_interval_s: number | null;
     channel_ids: string[];
+    group_by: string[];
+    inhibited_by: string[];
+    inhibit_window_s: number;
   }>,
 ) => request<AlertRule>(`/alert-rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 

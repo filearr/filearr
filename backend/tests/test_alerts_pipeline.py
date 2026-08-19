@@ -607,3 +607,102 @@ async def test_events_endpoint_delivered_filter(client):
     assert only_pending.status_code == 200
     body = only_pending.json()
     assert len(body) == 1 and body[0]["delivered"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Roadmap §6 polish (2026-08-19): group_by extras + inhibition                  #
+# --------------------------------------------------------------------------- #
+
+def test_group_by_extras_split_dedup_keys_and_render_header():
+    from filearr.alerts.render import render_group
+    from filearr.alerts.rules import GROUP_BY, AlertRule, FileEvent, group_extras
+
+    base = AlertRule(id="r1", name="by folder", event_types=("created",))
+    folder_rule = AlertRule(
+        id="r1", name="by folder", event_types=("created",), group_by=(*GROUP_BY, "folder")
+    )
+    ext_rule = AlertRule(
+        id="r1", name="by ext", event_types=("created",), group_by=(*GROUP_BY, "extension", "file")
+    )
+    e1 = FileEvent("created", "lib", "Movies/A/a.mkv")
+    e2 = FileEvent("created", "lib", "Shows/B/b.mkv")
+    e3 = FileEvent("created", "lib", "root.MKV")
+    assert group_extras(base, e1) == {}
+    assert group_extras(folder_rule, e1) == {"folder": "Movies"}
+    assert group_extras(folder_rule, e3) == {"folder": ""}
+    assert group_extras(ext_rule, e3) == {"extension": "mkv", "file": "root.MKV"}
+    # an R1-only rule's key is byte-identical to the historic one
+    k_plain = pipeline.compute_dedup_key("created", "lib", "r1")
+    assert k_plain == pipeline.compute_dedup_key("created", "lib", "r1", None, None)
+    k1 = pipeline.compute_dedup_key("created", "lib", "r1", None, group_extras(folder_rule, e1))
+    k2 = pipeline.compute_dedup_key("created", "lib", "r1", None, group_extras(folder_rule, e2))
+    assert k1 != k2 != k_plain
+    d = pipeline.build_draft(folder_rule, e1, None, datetime.now(UTC))
+    assert d.payload["group"] == {"folder": "Movies"} and d.dedup_key == k1
+    r = render_group(
+        rule_name="by folder", event_type="created", library_id="lib",
+        events=[d.payload], max_events=10,
+    )
+    assert "Folder: Movies" in r.body_text and r.payload["group"] == {"folder": "Movies"}
+    # bad extras are refused at the dataclass boundary
+    with pytest.raises(ValueError):
+        AlertRule(id="x", name="x", event_types=("created",), group_by=(*GROUP_BY, "owner"))
+    with pytest.raises(ValueError):
+        AlertRule(id="x", name="x", event_types=("created",), group_by=("event_type",))
+
+
+async def test_inhibition_mutes_group_while_inhibitor_recent(session, tmp_path, monkeypatch):
+    lib = await _mk_library(session, tmp_path / "l", "inh")
+    loud = await _mk_rule(session, group_wait_s=0, library_id=lib.id, name="loud")
+    quiet = await _mk_rule(session, group_wait_s=0, library_id=lib.id, name="quiet")
+    quiet.inhibited_by = [loud.id]
+    quiet.inhibit_window_s = 600
+    await session.commit()
+    await _mk_channel(session, quiet)
+    await _mk_channel(session, loud)
+    t0 = datetime.now(UTC)
+    # the inhibitor fired 2 minutes ago (its event may be delivered or not — it
+    # is the OCCURRENCE that mutes)
+    await _seed_group(session, loud, n=1, occurred_at=t0 - timedelta(minutes=2))
+    await _seed_group(session, quiet, n=2, occurred_at=t0)
+
+    drv = _Driver()
+    monkeypatch.setattr(alerts_dispatch, "send_webhook", drv)
+    stats = await alerts_task.run_pending_dispatch(session, now=t0 + timedelta(seconds=1))
+    assert stats.get("inhibited") == 1
+    # only the inhibitor itself was sent
+    assert [c[1]["rule"] for c in drv.calls] == ["loud"]
+    rows = await _events(session, quiet)
+    assert all(r.delivered for r in rows)
+    assert all("inhibited by rule loud" in (r.last_error or "") for r in rows)
+
+    # outside the window the quiet rule fires normally
+    await _seed_group(session, quiet, n=1, occurred_at=t0 + timedelta(minutes=20))
+    stats = await alerts_task.run_pending_dispatch(session, now=t0 + timedelta(minutes=20, seconds=1))
+    assert stats["delivered"] == 1 and "quiet" in [c[1]["rule"] for c in drv.calls]
+
+
+async def test_inhibitor_for_other_library_does_not_mute(session, tmp_path, monkeypatch):
+    lib_a = await _mk_library(session, tmp_path / "a", "inh-a")
+    lib_b = await _mk_library(session, tmp_path / "b", "inh-b")
+    loud = await _mk_rule(session, group_wait_s=0, library_id=lib_a.id, name="loud")
+    quiet = await _mk_rule(session, group_wait_s=0, library_id=lib_b.id, name="quiet")
+    quiet.inhibited_by = [loud.id]
+    await session.commit()
+    await _mk_channel(session, quiet)
+    t0 = datetime.now(UTC)
+    # inhibitor event carries library A; quiet's group is library B => no mute
+    await _seed_group(session, loud, n=1, occurred_at=t0 - timedelta(minutes=1))
+    async with session.begin_nested():
+        for r in await _events(session, loud):
+            r.library_id = lib_a.id
+    await session.commit()
+    await _seed_group(session, quiet, n=1, occurred_at=t0)
+    async with session.begin_nested():
+        for r in await _events(session, quiet):
+            r.library_id = lib_b.id
+    await session.commit()
+    drv = _Driver()
+    monkeypatch.setattr(alerts_dispatch, "send_webhook", drv)
+    stats = await alerts_task.run_pending_dispatch(session, now=t0 + timedelta(seconds=1))
+    assert stats.get("inhibited", 0) == 0 and stats["delivered"] == 1

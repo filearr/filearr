@@ -153,6 +153,13 @@ _VIDEO_FIELDS: list[FieldSpec] = [
     FieldSpec("frame_rate", "float", "Frame rate (fps)", sortable=True),
     FieldSpec("hdr", "boolean", "HDR", facetable=True),
     FieldSpec("hdr_format", "string", "HDR format", facetable=True),
+    # Roadmap §11 (2026-08-19): Dolby Vision record + deep-probe HDR facts.
+    FieldSpec("dv_profile", "integer", "Dolby Vision profile", facetable=True),
+    FieldSpec("dv_level", "integer", "Dolby Vision level"),
+    FieldSpec("dv_compat", "string", "DV base-layer compatibility", facetable=True),
+    FieldSpec("hdr_max_cll", "integer", "MaxCLL (nits)", sortable=True),
+    FieldSpec("hdr_max_fall", "integer", "MaxFALL (nits)", sortable=True),
+    FieldSpec("hdr_master_display", "string", "Mastering display"),
     FieldSpec("color_primaries", "string", "Colour primaries"),
     FieldSpec("color_transfer", "string", "Colour transfer"),
     FieldSpec("audio_codec", "string", "Audio codec", facetable=True),
@@ -167,6 +174,7 @@ _MODEL3D_FIELDS: list[FieldSpec] = [
     FieldSpec("triangles", "integer", "Triangles", sortable=True),
     FieldSpec("vertices", "integer", "Vertices", sortable=True),
     FieldSpec("mesh_count", "integer", "Mesh count", sortable=True),
+    FieldSpec("geometry_tier", "string", "Geometry tier", facetable=True),
     # coverage gap: list[float] [dx, dy, dz] -> generic string_list
     FieldSpec("bbox", "string_list", "Bounding box"),
     FieldSpec("bbox_volume", "float", "Bounding-box volume", sortable=True),
@@ -228,8 +236,23 @@ def _merge_fields(*groups: list[FieldSpec]) -> list[FieldSpec]:
 #     fields (the ``spreadsheet`` file_group lives under ``document``; both go
 #     through ``extract_document``).
 #   * ``three-d-cad`` — the old model3d vocabulary.
-#   * ``development`` / ``archive`` / ``system`` / ``other`` — no extractor, so
-#     empty profiles (every key passes through as unregistered, as before).
+#   * ``system`` — the e-mail fields (the ``email`` file_group lives under
+#     ``system`` and routes to ``extract_email`` via the group override).
+#   * ``development`` / ``archive`` / ``other`` — no extractor, so empty
+#     profiles (every key passes through as unregistered, as before).
+# email (roadmap §15, 2026-08-19): filearr/tasks/email_extract.py — the "email"
+# file_group lives under the ``system`` category, so these ride the system profile.
+_EMAIL_FIELDS: list[FieldSpec] = [
+    FieldSpec("email_subject", "string", "Subject"),
+    FieldSpec("email_from", "string", "From", facetable=True),
+    FieldSpec("email_to", "string", "To"),
+    FieldSpec("email_cc", "string", "Cc"),
+    FieldSpec("email_date", "string", "Sent"),
+    FieldSpec("email_message_id", "string", "Message-ID"),
+    FieldSpec("email_attachments", "string_list", "Attachments"),
+    FieldSpec("email_attachment_count", "integer", "Attachment count", sortable=True),
+]
+
 METADATA_PROFILES: dict[str, list[FieldSpec]] = {
     "image": _IMAGE_FIELDS,
     "audio": _AUDIOBOOK_FIELDS,
@@ -238,7 +261,7 @@ METADATA_PROFILES: dict[str, list[FieldSpec]] = {
     "three-d-cad": _MODEL3D_FIELDS,
     "development": [],
     "archive": [],
-    "system": [],
+    "system": _EMAIL_FIELDS,
     "other": [],
 }
 

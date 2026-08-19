@@ -279,8 +279,14 @@ func Extract(ctx context.Context, path, category string, opts Options) (*Result,
 	case CategoryModel3D:
 		res.run("model3d", func() error { return extractModel3D(ctx, path, ext, opts, res) })
 	default:
-		return nil, nil
+		// No type extractor — but provenance below applies to every file.
 	}
+
+	// Roadmap §5 P3 provenance (2026-08-19): the download-source URL the OS /
+	// browser stamped on the file (Zone.Identifier ADS on Windows, xdg /
+	// kMDItemWhereFroms xattrs elsewhere). Same keys central's own reader
+	// emits (origin_url / referrer_url). Cheap, fail-soft, every category.
+	res.run("provenance", func() error { return readProvenance(path, res) })
 
 	if res.Empty() {
 		return nil, nil

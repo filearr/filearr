@@ -176,8 +176,12 @@ modes, chosen by which Caddyfile the service loads:
 
 Any other reverse proxy you already run (SWAG, NPM, Traefik…) works exactly
 as well — point it at `app:8000` / host port 8484 and forward
-`X-Forwarded-*`. Serve HTTPS before relying on logins: the session cookie is
-`Secure`-only.
+`X-Forwarded-*`. Then tell the app to **trust that proxy** with
+`FILEARR_TRUSTED_PROXIES=<its IP or CIDR>` — forwarding the header alone does
+nothing, because `X-Forwarded-For` is ignored from untrusted peers (the bundled
+Caddy is exempt: it proves itself with the shared secret). Without it every
+login in the audit log shows the proxy's address. Serve HTTPS before relying on
+logins: the session cookie is `Secure`-only.
 
 ## Verifying it works
 

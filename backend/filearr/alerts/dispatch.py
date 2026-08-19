@@ -121,13 +121,26 @@ async def _threaded_resolver(host: str) -> list[str]:
 
 
 def _first_allowed_ip(
-    resolved: tuple[tuple[str, ssrf.IpClass], ...], allow_private: bool
+    resolved: tuple[tuple[str, ssrf.IpClass], ...], allow_private: bool, allowed_cidrs=()
 ) -> str | None:
     ok = ssrf._PRIVATE_OK if allow_private else ssrf._PUBLIC_OK
     for ip, cls in resolved:
         if cls in ok:
             return ip
+        if cls is not ssrf.IpClass.UNSPECIFIED and ssrf._in_allowlist(ip, allowed_cidrs):
+            return ip
     return None
+
+
+def _allowed_cidrs():
+    """The operator's explicit webhook target allowlist (parsed once per call;
+    the list is tiny). Read lazily so the pure unit surface never needs settings."""
+    try:
+        from filearr.config import get_settings
+
+        return ssrf.parse_allowed_cidrs(get_settings().webhook_allowed_cidrs)
+    except Exception:  # noqa: BLE001 - settings unavailable => no allowlist
+        return ()
 
 
 def _pin_hostname(url: str, ip: str) -> str:
@@ -166,7 +179,10 @@ async def send_webhook(
     ``follow_redirects=False`` (always — enforced here, not left to the caller).
     """
     sync_resolver = resolver or _system_resolver
-    verdict = ssrf.check_webhook_url(url, sync_resolver, allow_private=allow_private)
+    cidrs = _allowed_cidrs()
+    verdict = ssrf.check_webhook_url(
+        url, sync_resolver, allow_private=allow_private, allowed_cidrs=cidrs
+    )
     if not verdict.allowed:
         # An SSRF-blocked target is a permanent, non-retryable rejection.
         raise ChannelDeliveryError(
@@ -197,7 +213,7 @@ async def send_webhook(
     except ValueError:
         is_ip_literal = False
     if transport is None and not is_ip_literal:
-        pinned = _first_allowed_ip(verdict.resolved, allow_private)
+        pinned = _first_allowed_ip(verdict.resolved, allow_private, cidrs)
         if pinned is not None:
             target_url = _pin_hostname(url, pinned)
             req_headers["host"] = parts.netloc

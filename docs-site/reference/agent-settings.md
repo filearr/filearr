@@ -208,8 +208,8 @@ renders the same text as a hint under each field and as a hover tooltip.
 The `settings` section is the stricter half (unknown keys rejected with a 422
 rather than stored): see
 [Group settings schema](../agents.md#group-settings-schema). One exception to
-the strictness: `inventory.collectors` is free-form. The four shipped collectors
-(`stat`, `owner`, `perms`, `placeholder`) are a **catalogue the console renders
+the strictness: `inventory.collectors` is free-form. The five shipped collectors
+(`stat`, `owner`, `perms`, `permissions`, `placeholder`) are a **catalogue the console renders
 as a checkbox list**, not a whitelist — a newer agent build's collector still
 works, and a stored name central cannot describe is preserved rather than
 dropped.

@@ -321,24 +321,95 @@ def test_diff_allow_vs_deny_same_principal_are_distinct_keys():
 # 5. scaffold invariants: reports inert + DDL documented-only                   #
 # --------------------------------------------------------------------------- #
 def test_report_builders_are_inert_stubs():
-    for fn in (
-        permissions._explicit_ace_outliers,
-        permissions._permission_drift,
-    ):
-        with pytest.raises(NotImplementedError, match="scaffold, W7-"):
-            fn(None)  # type: ignore[arg-type] — raises before touching the arg
+    # Only the explicit-ACE-outlier builder is still a scaffold stub; the drift
+    # builder went live as ``permission_changes`` (W7-T9, 2026-08-19).
+    with pytest.raises(NotImplementedError, match="scaffold, W7-"):
+        permissions._explicit_ace_outliers(None)  # type: ignore[arg-type]
 
 
 def test_permission_snapshots_is_live_and_reports_registered():
-    """W7-T6/T7 (2026-08-19): the snapshot table is a real model and the two
-    v1 permission reports are in the live registry (the scaffold stubs for the
-    outlier/drift reports remain inert until W7-T9)."""
+    """W7-T6/T7/T9 (2026-08-19): the snapshot table is a real model and the
+    three permission reports are in the live registry."""
     from filearr.models import Base
     from filearr.reports import CANNED_REPORTS
 
     assert "permission_snapshots" in Base.metadata.tables
-    assert {"permissions_by_principal", "permissions_broad_access"} <= set(CANNED_REPORTS)
-    assert not any(rid.startswith("permission_changes") for rid in CANNED_REPORTS)
+    assert {
+        "permissions_by_principal",
+        "permissions_broad_access",
+        "permission_changes",
+    } <= set(CANNED_REPORTS)
+    drift = CANNED_REPORTS["permission_changes"]
+    assert drift.supports_threshold and drift.default_threshold_days == 30
+
+
+# --------------------------------------------------------------------------- #
+# 5b. W7-T9: wire-shape adapter + diff summary                                 #
+# --------------------------------------------------------------------------- #
+def _wire_ace(pid, name, verbs, *, typ="allow", inherited=False, idx=0, kind="user"):
+    return {
+        "principal": {"kind": kind, "id": pid, "name": name},
+        "type": typ, "verbs": verbs, "raw_mask": "m", "inherited": inherited,
+        "scope": "this", "source": "local", "order_index": idx,
+    }
+
+
+def test_record_from_wire_lifts_agent_shape():
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "1000", "name": "eric"},
+        group={"kind": "group", "id": "100", "name": "users"},
+        aces=[
+            _wire_ace("1000", "eric", ["read", "write"]),
+            {"principal": {"kind": "well_known", "id": "S-1-1-0", "name": "Everyone",
+                           "well_known": "EVERYONE"},
+             "type": "allow", "verbs": ["read", "bogus_verb"], "raw_mask": "0x1200a9",
+             "inherited": True, "container_inherit": True, "object_inherit": True,
+             "scope": "subtree", "source": "local", "order_index": 1},
+            "not-a-dict",
+        ],
+        fidelity="full_native",
+        posture={"dacl_present": True, "dacl_canonical": False},
+    )
+    assert rec.owner is not None and rec.owner.canonical_id == "1000" and rec.owner.display == "eric"
+    assert rec.group is not None and rec.group.kind is permissions.PrincipalKind.group
+    assert len(rec.entries) == 2  # the junk entry is dropped
+    ev = rec.entries[1]
+    assert ev.principal.kind is permissions.PrincipalKind.well_known
+    assert ev.verbs == (permissions.Verb.read,)  # unknown verb token ignored
+    assert ev.inherited and set(ev.inherit_flags) == {"container_inherit", "object_inherit"}
+    assert ev.scope is permissions.AceScope.subtree
+    assert rec.fidelity is permissions.Fidelity.full_native
+    assert rec.posture is not None and rec.posture.dacl_canonical is False
+    # garbage never raises
+    junk = permissions.record_from_wire(owner=5, aces="x", fidelity="??", posture=[])
+    assert junk.entries == () and junk.fidelity is permissions.Fidelity.unavailable
+
+
+def test_summarize_diff_reads_like_a_changelog():
+    old = permissions.record_from_wire(
+        owner={"kind": "user", "id": "1000", "name": "eric"},
+        aces=[_wire_ace("1000", "eric", ["read"]), _wire_ace("2000", "bob", ["read"], idx=1)],
+    )
+    new = permissions.record_from_wire(
+        owner={"kind": "user", "id": "3000", "name": "carol"},
+        aces=[
+            _wire_ace("1000", "eric", ["read", "write"]),
+            _wire_ace("S-1-1-0", "Everyone", ["write"], idx=1, kind="well_known"),
+        ],
+    )
+    diff = permissions.diff_records(old, new)
+    text = permissions.summarize_diff(diff)
+    assert "owner eric (1000) → carol (3000)" in text
+    assert "+allow Everyone (S-1-1-0): write" in text
+    assert "-allow bob (2000): read" in text
+    assert "~allow eric (1000): read → read,write" in text
+    assert permissions.summarize_diff(permissions.diff_records(old, old)) == ""
+    # truncation
+    many_new = permissions.record_from_wire(
+        aces=[_wire_ace(str(i), f"u{i}", ["read"], idx=i) for i in range(20)]
+    )
+    t = permissions.summarize_diff(permissions.diff_records(None, many_new), max_items=5)
+    assert t.endswith("… +15 more")
 
 
 # --------------------------------------------------------------------------- #

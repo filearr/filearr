@@ -257,6 +257,15 @@
   let rChannels = $state<string[]>([]);
   let rEnabled = $state(true);
   let rShowAdvanced = $state(false);
+  // Roadmap §6 polish (2026-08-19): optional extra grouping keys and inhibition.
+  let rGroupExtras = $state<string[]>([]);
+  let rInhibitedBy = $state<string[]>([]);
+  let rInhibitWindow = $state(900);
+  const GROUP_EXTRAS: { key: string; label: string; hint: string }[] = [
+    { key: "folder", label: "top-level folder", hint: "one notification per first-level folder that changed" },
+    { key: "extension", label: "file extension", hint: "one notification per extension" },
+    { key: "file", label: "each file", hint: "one notification per file — no batching" },
+  ];
   let rlBusy = $state(false);
 
   const isSystem = $derived(rlEditing?.is_system ?? false);
@@ -276,6 +285,9 @@
     rChannels = [];
     rEnabled = true;
     rShowAdvanced = false;
+    rGroupExtras = [];
+    rInhibitedBy = [];
+    rInhibitWindow = 900;
   }
 
   function startNewRule() {
@@ -297,6 +309,10 @@
     rRepeat = r.repeat_interval_s != null ? String(r.repeat_interval_s) : "";
     rChannels = [...r.channel_ids];
     rEnabled = r.enabled;
+    rGroupExtras = (r.group_by ?? []).filter((g) => GROUP_EXTRAS.some((x) => x.key === g));
+    rInhibitedBy = [...(r.inhibited_by ?? [])];
+    rInhibitWindow = r.inhibit_window_s ?? 900;
+    if (rGroupExtras.length || rInhibitedBy.length) rShowAdvanced = true;
   }
 
   function toggle(list: string[], id: string): string[] {
@@ -317,6 +333,8 @@
           digest_window: rThrottle === "digest" ? rDigest : null,
           repeat_interval_s: repeat,
           channel_ids: rChannels,
+          inhibited_by: rInhibitedBy,
+          inhibit_window_s: rInhibitWindow,
         };
         if (!rlEditing.is_system) {
           patch.name = rName;
@@ -324,6 +342,7 @@
           patch.path_glob = rGlob || null;
           patch.event_types = rEvents;
           patch.hash_change_only = rHashOnly && rEvents.includes("modified");
+          patch.group_by = ["event_type", "library_id", "rule_id", ...rGroupExtras];
         }
         await updateAlertRule(rlEditing.id, patch);
       } else {
@@ -338,6 +357,9 @@
           digest_window: rThrottle === "digest" ? rDigest : null,
           repeat_interval_s: repeat,
           channel_ids: rChannels,
+          group_by: ["event_type", "library_id", "rule_id", ...rGroupExtras],
+          inhibited_by: rInhibitedBy,
+          inhibit_window_s: rInhibitWindow,
         });
       }
       resetRuleForm();
@@ -369,8 +391,12 @@
   }
 
   function throttleLabel(r: AlertRule): string {
-    if (r.digest_window) return `${r.digest_window} digest`;
-    return `immediate (group ${r.group_wait_s}s)`;
+    const base = r.digest_window ? `${r.digest_window} digest` : `immediate (group ${r.group_wait_s}s)`;
+    const extras = (r.group_by ?? []).filter((g) => GROUP_EXTRAS.some((x) => x.key === g));
+    const parts = [base];
+    if (extras.length) parts.push(`by ${extras.join("+")}`);
+    if (r.inhibited_by?.length) parts.push(`inhibited by ${r.inhibited_by.length}`);
+    return parts.join(" · ");
   }
 
   // ---- events ---------------------------------------------------------- //
@@ -697,6 +723,44 @@
             <span class="text-slate-500">Repeat interval (seconds; blank = never re-notify)</span>
             <input class="mt-1 w-40 rounded border px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={rRepeat} placeholder="e.g. 3600" />
           </label>
+          {#if !rlEditing?.is_system}
+            <fieldset class="text-sm">
+              <span class="text-slate-500">Group notifications by</span>
+              <p class="text-xs text-slate-400">
+                Always per event type + library + rule. Add finer keys to split one
+                library-wide batch into several notifications.
+              </p>
+              <div class="mt-1 flex flex-wrap gap-3">
+                {#each GROUP_EXTRAS as g (g.key)}
+                  <label class="flex items-center gap-1" title={g.hint}>
+                    <input type="checkbox" checked={rGroupExtras.includes(g.key)}
+                      onchange={() => (rGroupExtras = toggle(rGroupExtras, g.key))} />
+                    {g.label}
+                  </label>
+                {/each}
+              </div>
+            </fieldset>
+          {/if}
+          <fieldset class="text-sm">
+            <span class="text-slate-500">Inhibited by</span>
+            <p class="text-xs text-slate-400">
+              Mute this rule while any selected rule has fired in the last
+              <input class="mx-1 w-20 rounded border px-1 py-0.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                type="number" min="0" max="86400" bind:value={rInhibitWindow} /> seconds
+              (same library, or a library-wide inhibitor). Muted batches are recorded as
+              "suppressed: inhibited by …" and never sent — e.g. let <em>agent offline</em>
+              silence <em>replication stalled</em>.
+            </p>
+            <div class="mt-1 flex flex-wrap gap-3">
+              {#each rules.filter((x) => x.id !== rlEditing?.id) as x (x.id)}
+                <label class="flex items-center gap-1">
+                  <input type="checkbox" checked={rInhibitedBy.includes(x.id)}
+                    onchange={() => (rInhibitedBy = toggle(rInhibitedBy, x.id))} />
+                  {x.name}
+                </label>
+              {/each}
+            </div>
+          </fieldset>
         {/if}
 
         <fieldset class="text-sm">

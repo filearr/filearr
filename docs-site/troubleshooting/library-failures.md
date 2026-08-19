@@ -132,13 +132,16 @@ bind mounts only see a *remount* when the compose file uses
 `filearr` and `filearr-worker` containers after remounting.
 
 **Data at risk.** None. A scan that hits a hung mount either times out
-(`failed`, nothing tombstoned) or sees an empty tree (everything tombstoned,
-restored by the next good scan).
+(`failed`, nothing tombstoned) or sees an empty tree — which the
+[empty-scan guard](#empty-scan-guard) also turns into a `failed` run with
+nothing tombstoned.
 
 ### path-missing {#path-missing}
 
-**Meaning.** The root path does not exist inside the container. Every file
-will be tombstoned as `missing` on the next scan (nothing is deleted).
+**Meaning.** The root path does not exist inside the container. The next
+scan **fails before walking** (`assert_scannable_root`): nothing is tombstoned
+and nothing is deleted; the run shows `failed` with the missing path in its
+error.
 
 **Likely causes.** The Docker volume mapping does not cover the directory;
 the share was renamed or moved on the host; the library was created with a
@@ -214,9 +217,10 @@ come back automatically.
 
 ### path-empty {#path-empty}
 
-**Meaning.** The directory exists, is readable, and lists **zero entries**. A
-scan will tombstone every item as `missing`. This is almost always an
-*unmounted* share: what you are looking at is the empty mount point.
+**Meaning.** The directory exists, is readable, and lists **zero entries**.
+This is almost always an *unmounted* share: what you are looking at is the
+empty mount point. A scan over it **refuses to proceed** (see the
+[empty-scan guard](#empty-scan-guard)) rather than tombstoning the library.
 
 **Confirm.**
 
@@ -321,7 +325,9 @@ then re-scan.
 
 **Meaning.** The last scan saw **zero** files and tombstoned every item as
 `missing`. Almost always an unmounted share at scan time — the tree looked
-empty.
+empty. With the [empty-scan guard](#empty-scan-guard) on (the default) this
+verdict only appears for scans that were **forced** (`force_empty`) or run
+with the guard disabled.
 
 **Confirm.** The path verdict above it usually says `path-empty` or
 `path-missing`.
@@ -332,6 +338,27 @@ successful scan restores every item, including its user metadata edits.
 **Data at risk.** Only if the situation persists past the recycle-bin
 retention. Consider raising `FILEARR_RECYCLE_RETENTION_DAYS` while you fix a
 long outage.
+
+### The empty-scan guard {#empty-scan-guard}
+
+A full scan whose walk sees **zero entries** over a library that previously
+held active items is refused: the run is marked `failed` with the message
+*"walk saw an empty tree but the library holds N active items … if the
+library really was emptied, rescan with force_empty"*, and **nothing is
+tombstoned**. This closes the classic dead-FUSE/SMB hole — a bind that
+presents as a readable-but-empty mountpoint — which used to tombstone a whole
+library in one pass and then age it out on the recycle-bin schedule.
+
+When the library genuinely was emptied and you want the catalog to follow:
+
+```bash
+curl -X POST "http://filearr.example.com:8484/api/v1/libraries/<id>/scan?force_empty=true" \
+  -H "Authorization: Bearer $FILEARR_ADMIN_KEY"
+```
+
+(one run only — the next scheduled scan is guarded again). To switch the guard
+off permanently set `FILEARR_SCAN_EMPTY_GUARD=false`. A missing or unreadable
+root is a separate, earlier check (`path-missing`) and always fails the scan.
 
 ### scan-many-missing {#scan-many-missing}
 

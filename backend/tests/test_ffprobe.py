@@ -110,3 +110,85 @@ def test_fps_parsing():
     assert ffprobe._fps("24000/1001") == pytest.approx(23.976, abs=0.001)
     assert ffprobe._fps("0/0") is None
     assert ffprobe._fps("30") == 30.0
+
+
+# --- Roadmap §11 (2026-08-19): DV record + deep HDR frame probe -------------
+
+
+def test_dv_record_from_stream_side_data():
+    stream = {
+        "color_transfer": "smpte2084",
+        "side_data_list": [
+            {
+                "side_data_type": "DOVI configuration record",
+                "dv_profile": 8,
+                "dv_level": 6,
+                "rpu_present_flag": 1,
+                "el_present_flag": 0,
+                "bl_present_flag": 1,
+                "dv_bl_signal_compatibility_id": 1,
+            }
+        ],
+    }
+    assert ffprobe._detect_hdr(stream) == (True, "Dolby Vision")
+    assert ffprobe._dv_record(stream) == {"dv_profile": 8, "dv_level": 6, "dv_compat": "HDR10"}
+    assert ffprobe._dv_record({"side_data_list": []}) == {}
+
+
+def test_hdr_from_frames_folds_plus_cll_and_mastering():
+    data = {
+        "frames": [
+            {
+                "side_data_list": [
+                    {"side_data_type": "Mastering display metadata",
+                     "red_x": "34000/50000", "red_y": "16000/50000",
+                     "green_x": "13250/50000", "green_y": "34500/50000",
+                     "blue_x": "7500/50000", "blue_y": "3000/50000",
+                     "white_point_x": "15635/50000", "white_point_y": "16450/50000",
+                     "min_luminance": "50/10000", "max_luminance": "10000000/10000"},
+                    {"side_data_type": "Content light level metadata",
+                     "max_content": 1000, "max_average": 400},
+                ]
+            },
+            {"side_data_list": [{"side_data_type": "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)"}]},
+            "junk",
+        ]
+    }
+    out = ffprobe.hdr_from_frames(data)
+    assert out["hdr10_plus"] is True
+    assert out["hdr_max_cll"] == 1000 and out["hdr_max_fall"] == 400
+    assert out["hdr_master_display"] == "P3-D65, max 1000 nits, min 0.005 nits"
+    assert ffprobe.hdr_from_frames({"frames": "x"}) == {}
+    assert ffprobe.hdr_from_frames({}) == {}
+
+
+def test_extract_video_tech_promotes_hdr10_plus(monkeypatch, tmp_path):
+    # stream-level says HDR10; the frame probe finds dynamic metadata => HDR10+
+    def fake_probe(path, **kw):
+        return {
+            "format": {"format_name": "matroska"},
+            "streams": [
+                {"codec_type": "video", "codec_name": "hevc", "width": 3840, "height": 2160,
+                 "color_transfer": "smpte2084", "color_primaries": "bt2020",
+                 "avg_frame_rate": "24000/1001"}
+            ],
+        }
+
+    def fake_frames(path, **kw):
+        return {"hdr10_plus": True, "hdr_max_cll": 4000}
+
+    monkeypatch.setattr(ffprobe, "probe", fake_probe)
+    monkeypatch.setattr(ffprobe, "probe_hdr_frames", fake_frames)
+    meta = extract_video_tech(str(tmp_path / "x.mkv"))
+    assert meta["hdr"] is True and meta["hdr_format"] == "HDR10+" and meta["hdr_max_cll"] == 4000
+    assert "hdr10_plus" not in meta  # folded into hdr_format, not a stray key
+    # deep_hdr off => stream-level answer only, frames never probed
+    called = []
+    monkeypatch.setattr(ffprobe, "probe_hdr_frames", lambda *a, **k: called.append(1) or {})
+    meta = extract_video_tech(str(tmp_path / "x.mkv"), deep_hdr=False)
+    assert meta["hdr_format"] == "HDR10" and not called
+    # a frames-probe failure never breaks the extract
+    def boom(*a, **k):
+        raise FfprobeError("nope")
+    monkeypatch.setattr(ffprobe, "probe_hdr_frames", boom)
+    assert extract_video_tech(str(tmp_path / "x.mkv"))["hdr_format"] == "HDR10"
