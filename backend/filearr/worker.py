@@ -1333,6 +1333,20 @@ async def compact_meili(timestamp: int) -> dict:
     return await compact_if_fragmented()
 
 
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.purge_meili_failed_tasks",
+    queueing_lock="purge-meili-failed-tasks",
+)
+async def purge_meili_failed_tasks() -> dict:
+    """On-demand: clear Meilisearch's failed-task HISTORY for the items index
+    (2026-08-18). Records only -- the index itself is untouched. Exists so the
+    Jobs-page 'failed Meili tasks' counter can be reset after an incident."""
+    from filearr.meili_ops import purge_failed_tasks
+
+    return await purge_failed_tasks(get_settings().meili_index)
+
+
 # --- T5: cron-scheduled scanning -------------------------------------------
 # One static, import-time periodic task on a 1-minute tick (Procrastinate cannot
 # register periodic tasks dynamically, so per-library cron is evaluated here in

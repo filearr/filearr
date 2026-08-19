@@ -469,3 +469,48 @@ async def test_rebuild_endpoint_requires_admin_scope(api_client):
         r = await c.post(BASE)
     assert r.status_code == 401, r.text
     deferred.assert_not_awaited()
+
+
+# --- 2026-08-18: transport-level push failures are retried, API errors not ---
+@pytest.mark.asyncio
+async def test_push_with_retry_retries_transport_errors_only(monkeypatch):
+    from meilisearch_python_sdk.errors import MeilisearchApiError, MeilisearchError
+
+    from filearr import meili_ops
+
+    async def _nosleep(_):  # keep the test instant
+        return None
+
+    import asyncio
+
+    monkeypatch.setattr(asyncio, "sleep", _nosleep)
+
+    calls = {"n": 0}
+
+    class _Idx:
+        async def update_documents(self, docs, primary_key=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise MeilisearchError("")  # bare ReadError shape
+            return type("Info", (), {"task_uid": 7})()
+
+    info = await meili_ops._push_with_retry(_Idx(), [{"id": "x"}])
+    assert info.task_uid == 7 and calls["n"] == 3
+
+    import httpx
+
+    class _Api:
+        async def update_documents(self, docs, primary_key=None):
+            raise MeilisearchApiError(
+                "bad", httpx.Response(400, json={"code": "x", "message": "bad"})
+            )
+
+    with pytest.raises(MeilisearchApiError):
+        await meili_ops._push_with_retry(_Api(), [{"id": "x"}], attempts=3)
+
+    class _Always:
+        async def update_documents(self, docs, primary_key=None):
+            raise MeilisearchError("")
+
+    with pytest.raises(MeilisearchError):
+        await meili_ops._push_with_retry(_Always(), [{"id": "x"}], attempts=2)

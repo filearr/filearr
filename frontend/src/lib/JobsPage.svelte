@@ -1198,11 +1198,15 @@
         </span>
       {/if}
       {#if m.failed_tasks}
-        <span class="rounded-full bg-red-500 px-2 py-0.5 text-xs font-medium text-white" title="Meilisearch tasks that failed for this index (document writes are fire-and-forget; this is the only place they surface)">
-          {m.failed_tasks.toLocaleString()} failed Meili task{m.failed_tasks === 1 ? "" : "s"}
+        <span class="rounded-full bg-red-500 px-2 py-0.5 text-xs font-medium text-white" title="Meilisearch tasks that failed for this index in the last 24 hours (document writes are fire-and-forget; this is the only place they surface)">
+          {m.failed_tasks.toLocaleString()} failed Meili task{m.failed_tasks === 1 ? "" : "s"} (24h)
+        </span>
+      {:else if m.failed_tasks_total}
+        <span class="rounded-full bg-slate-300 px-2 py-0.5 text-xs font-medium text-slate-800 dark:bg-slate-700 dark:text-slate-100" title="No Meilisearch task failed in the last 24 hours; this is old history Meili still keeps. Maintenance → 'Clear failed search-index tasks' removes the records (the index itself is untouched).">
+          {m.failed_tasks_total.toLocaleString()} old failed Meili task{m.failed_tasks_total === 1 ? "" : "s"} (history)
         </span>
       {/if}
-      {#if m.last_failed_task}
+      {#if m.last_failed_task && m.failed_tasks}
         <div class="basis-full text-xs text-red-700 dark:text-red-400">
           <span class="font-medium">Latest Meili failure</span>
           ({m.last_failed_task.type ?? "task"}{m.last_failed_task.finished_at ? `, ${new Date(m.last_failed_task.finished_at).toLocaleString()}` : ""}):

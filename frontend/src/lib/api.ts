@@ -1051,6 +1051,7 @@ export interface MeiliSnapshot {
   /** Meili-side failed tasks for our index (document writes are fire-and-forget,
    *  so a failed task never fails a queue job — this is the only place it shows). */
   failed_tasks?: number | null;
+  failed_tasks_total?: number | null;
   last_failed_task?: {
     uid: number | null;
     type: string | null;

@@ -675,6 +675,58 @@ async def compact_if_fragmented(
         }
 
 
+async def purge_failed_tasks(index_uid: str | None = None) -> dict:
+    """Delete Meili's FAILED task records (``DELETE /tasks?statuses=failed``),
+    optionally for one index. Task records are history, not data -- deleting
+    them changes nothing about the index; it only clears the "failed tasks"
+    counter so a fixed incident stops looking live. Returns Meili's own task
+    info for the deletion plus the count that was there before."""
+    from filearr.search import client
+
+    async with client() as c:
+        q = "tasks?statuses=failed" + (f"&indexUids={index_uid}" if index_uid else "")
+        before = (await c._http_requests.get(q + "&limit=1")).json().get("total")  # noqa: SLF001
+        resp = await c._http_requests.delete(q)  # noqa: SLF001
+        info = resp.json()
+        with contextlib.suppress(Exception):
+            await c.wait_for_task(info["taskUid"], timeout_in_ms=120_000)
+    return {"status": "ok", "deleted_before_count": before, "task_uid": info.get("taskUid")}
+
+
+async def _push_with_retry(index, docs: list[dict], *, attempts: int = 4):
+    """``index.update_documents(docs)`` with bounded retry on transport-level
+    failures. A busy Meili can drop a connection mid-PUT (live 2026-08-18: a
+    manual rebuild died on a bare ``ReadError`` -> "MeilisearchError. Error
+    message: ." after 20 min of work); one dropped batch must not throw the
+    whole shadow build away when the next try succeeds. API errors that carry
+    a code (a real 4xx/5xx from Meili) are NOT retried."""
+    import asyncio
+
+    from meilisearch_python_sdk.errors import (
+        MeilisearchApiError,
+        MeilisearchCommunicationError,
+        MeilisearchError,
+        MeilisearchTimeoutError,
+    )
+
+    delay = 2.0
+    for n in range(1, attempts + 1):
+        try:
+            return await index.update_documents(docs, primary_key="id")
+        except MeilisearchApiError:
+            raise
+        except (MeilisearchCommunicationError, MeilisearchTimeoutError, MeilisearchError) as exc:
+            if n == attempts:
+                raise
+            logger.warning(
+                "rebuild_via_swap: document push failed (%s: %s); retry %d/%d in %.0fs",
+                type(exc).__name__, exc, n, attempts - 1, delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30.0)
+    raise AssertionError("unreachable")
+
+
 async def rebuild_via_swap(*, wait_s: float | None = None) -> int:
     """P9-T5: full re-projection into a shadow index + atomic swap.
 
@@ -766,40 +818,37 @@ async def rebuild_via_swap(*, wait_s: float | None = None) -> int:
                         await session.execute(select(Library.id, Library.expose_gps))
                     ).all()
                 }
-                offset = 0
+                # KEYSET pagination (id > last), not OFFSET: at 1.5M rows an
+                # OFFSET page re-walks everything before it, so the backfill
+                # slowed with every page (live 2026-08-18: hour-long rebuilds).
+                last_id = None
                 while True:
-                    items = (
-                        (
-                            await session.execute(
-                                select(Item)
-                                .where(Item.status == ItemStatus.active)
-                                .order_by(Item.id)
-                                .offset(offset)
-                                .limit(batch)
-                            )
-                        )
-                        .scalars()
-                        .all()
+                    stmt = (
+                        select(Item)
+                        .where(Item.status == ItemStatus.active)
+                        .order_by(Item.id)
+                        .limit(batch)
                     )
+                    if last_id is not None:
+                        stmt = stmt.where(Item.id > last_id)
+                    items = (await session.execute(stmt)).scalars().all()
                     if not items:
                         break
+                    last_id = items[-1].id
                     # P6-T3: parents' path_scope so sidecars inherit RBAC scope.
                     pscope = await parent_scope_map(session, items)
-                    info = await shadow.update_documents(
-                        [
-                            build_doc(
-                                i,
-                                projection_defs,
-                                expose_gps=expose_gps.get(i.library_id, False),
-                                parent_path_scope=pscope.get(i.sidecar_of),
-                            )
-                            for i in items
-                        ],
-                        primary_key="id",
-                    )
+                    docs = [
+                        build_doc(
+                            i,
+                            projection_defs,
+                            expose_gps=expose_gps.get(i.library_id, False),
+                            parent_path_scope=pscope.get(i.sidecar_of),
+                        )
+                        for i in items
+                    ]
+                    info = await _push_with_retry(shadow, docs)
                     task_uids.append(info.task_uid)
                     total += len(items)
-                    offset += batch
 
             # Wait for every shadow task to finish, bounding the TOTAL wall clock so
             # a stuck task cannot hang the worker forever. wait_for_task raises on

@@ -378,6 +378,19 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         timestamp_arg=False,
     ),
     MaintTaskSpec(
+        key="purge_meili_failed_tasks",
+        task_name="filearr.worker.purge_meili_failed_tasks",
+        title="Clear failed search-index tasks",
+        description=(
+            "Deletes Meilisearch's record of FAILED tasks for the items index. "
+            "Task records are history, not data -- the index is untouched; "
+            "this only resets the 'failed Meili tasks' counter on this page "
+            "after an incident has been fixed (the counter also shows the "
+            "last-24h number separately)."
+        ),
+        category="ondemand", default_cron=None, timestamp_arg=False,
+    ),
+    MaintTaskSpec(
         key="embed_missing",
         task_name="filearr.tasks.embed.embed_missing",
         title="Semantic-embedding backfill",
