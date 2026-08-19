@@ -98,6 +98,12 @@ https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_C
 WORKDIR /app
 COPY backend/pyproject.toml ./
 RUN uv pip install --system -r pyproject.toml
+# P8-T3 (2026-08-19): the apprise alert channel ships IN the image. It stays an
+# optional extra for bare-Python installs (pyproject `[apprise]`), but every
+# supported deployment (compose, Unraid, Proxmox) runs this image, and a
+# channel type the console offers must work without a rebuilt image. Pinned
+# via the extra's `==`; ~30 MB of pure-Python deps.
+RUN uv pip install --system "apprise==1.12.0"
 COPY backend/ .
 COPY --from=frontend /build/dist ./static
 # Bundled documentation served by the /docs StaticFiles mount in main.py.

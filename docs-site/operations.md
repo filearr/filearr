@@ -952,17 +952,10 @@ each service.
 
 [apprise-urls]: https://github.com/caronc/apprise/wiki
 
-**It is an optional extra.** Apprise is not installed by default (it pulls a large
-dependency tree that webhook/SMTP-only deployments never use). Install it
-alongside Filearr:
-
-```bash
-pip install "filearr[apprise]"
-```
-
-For Docker, add it to the image (a one-line `RUN pip install apprise` layer on top
-of `ghcr.io/pwsh/filearr`, rebuilt with each upgrade) — installing into a running
-container does not survive a recreate.
+**Included in the image.** The `ghcr.io/pwsh/filearr` image ships apprise
+(pinned) since 2026-08-19, so compose, Unraid and Proxmox deployments can use
+apprise channels out of the box. Only a bare-Python install has to add the
+extra: `pip install "filearr[apprise]"`.
 
 **A missing extra never drops alerts silently.** An apprise channel configured
 without the package fails with a **permanent** (non-retryable) error naming the

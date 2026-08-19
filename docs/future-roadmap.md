@@ -817,6 +817,12 @@ requires an owning account (no orphan keys), disabling an account refuses its
 keys per request, deleting revokes them (CASCADE); Admin → Service accounts +
 owner selector on the API-keys form.
 
+## 20d. P8-T3 apprise channel — DONE 2026-08-19
+
+The driver, tests and docs shipped with Phase 8; the deferred piece was that
+the extra was not in the image. `apprise==1.12.0` is now installed in the
+runtime image (still an optional extra for bare-Python installs).
+
 ## 21. LLM / RAG integration (SHIPPED: M1 2026-07-28; M2+M3 2026-08-06)
 
 Let LLMs (Ollama, OpenWebUI, MCP clients) query the catalog as a tool
