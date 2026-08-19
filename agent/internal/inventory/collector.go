@@ -13,6 +13,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"github.com/filearr/filearr/agent/internal/inventory/permissions"
 	"io/fs"
 	"os"
 	"sort"
@@ -78,18 +79,25 @@ func (r *Registry) Names() []string {
 // placeholder. It is what the agent advertises and what a command's `collectors`
 // list resolves against.
 func DefaultRegistry() *Registry {
-	return NewRegistry().
+	r := NewRegistry().
 		Register(statCollector{}).
 		Register(ownerCollector{}).
 		Register(permsCollector{}).
 		Register(placeholderCollector{})
+	// W7 (2026-08-19): the full-ACE permissions collector, advertised only on
+	// platforms with a real read (Linux, Windows) so central never offers it
+	// where every entry would be a per-file scaffold error.
+	if permissions.Supported() {
+		r = r.Register(permissions.Collector{})
+	}
+	return r
 }
 
 // Capabilities is the additive advertisement the agent attaches to its command
 // poll so central can store what this agent supports (and the UI can offer only
 // composable collectors). Shape: {inventory_collectors: [...], inventory_version: N,
 // ffmpeg: bool, container: bool, extract: bool, extract_schema: N,
-// tools: {...}, formats: [...]}. ``ffmpeg`` (roadmap §20) lets the fleet console
+// tools: {...}, formats: [...]}. “ffmpeg“ (roadmap §20) lets the fleet console
 // show which agents can produce video poster-frames — a missing binary used to be
 // silently absent thumbs with no operator-visible signal.
 //
@@ -98,7 +106,7 @@ func DefaultRegistry() *Registry {
 // agent binary instead of an essentials/full split: the heavy capabilities are
 // host tools, so a build degrades PER CAPABILITY at runtime and central's console
 // can tell an operator exactly which policy keys this agent will ignore, and why.
-// ``ffmpeg`` stays a top-level key for the older centrals that read it there.
+// “ffmpeg“ stays a top-level key for the older centrals that read it there.
 //
 // 2026-08-11 adds the per-agent ABOUT payload — `tool_paths`, `build` and
 // (budget permitting) `modules`. Two notes on that:
@@ -128,7 +136,7 @@ func Capabilities() map[string]any {
 		// `extracted.schema` version its events will stamp.
 		"extract":        true,
 		"extract_schema": extract.Schema,
-		"tools": Tools(),
+		"tools":          Tools(),
 		// The VERSIONS of the tools that are present (2026-08-10). "ffmpeg: true"
 		// answers whether a capability runs here; it does not answer which build
 		// is running, which is the question an operator hits when OCR quality or
@@ -155,7 +163,7 @@ func Capabilities() map[string]any {
 // capabilitiesBudget is the size this advertisement keeps itself under, in
 // bytes of marshalled JSON.
 //
-// Central caps a `capabilities` body at ``agent_capabilities_max_bytes``
+// Central caps a `capabilities` body at “agent_capabilities_max_bytes“
 // (16 KiB, config.py) and DROPS an oversize one — the poll still succeeds, the
 // commands still drain, and the stored advertisement is silently left at
 // whatever it was before. That is a genuinely nasty failure mode from this

@@ -237,6 +237,9 @@ async def test_registry_lists_every_canned_report(api):
         "duplicate_files_detail",
         "largest_folders",
         "stale_files",
+        # W7-T7 (2026-08-19): permission snapshots
+        "permissions_by_principal",
+        "permissions_broad_access",
     }
 
 

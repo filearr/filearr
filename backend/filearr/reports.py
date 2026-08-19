@@ -66,7 +66,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import Grouping
 
 from filearr import share_map
-from filearr.models import Item, ItemStatus, Library
+from filearr.models import Agent, Item, ItemStatus, Library, PermissionSnapshot
 from filearr.quality_score import REVIEW_BAND, score_item
 
 #: Server-side cursor batch size for streaming exports (research §6.2).
@@ -961,6 +961,188 @@ _REPORTS: tuple[CannedReport, ...] = (
         is_capped=True,
         default_limit=500,
         row_link="browse",
+    ),
+)
+
+# --------------------------------------------------------------------------- #
+# W7-T7 (2026-08-19): permission reports over permission_snapshots.            #
+# Latest snapshot per (agent, path); ACEs unnested via jsonb_array_elements.   #
+# RBAC: an admin (no scope clause) sees everything; a scoped principal only     #
+# sees snapshots linked to items they may see (scoped_build joins items).      #
+# Exclusion defaults per research §4: well-known principals and inherited ACEs #
+# are hidden so the report highlights explicit, meaningful grants.            #
+# --------------------------------------------------------------------------- #
+from sqlalchemy import Boolean as _SABoolean  # noqa: E402
+from sqlalchemy import Integer as _SAInteger  # noqa: E402
+from sqlalchemy.dialects.postgresql import JSONB as _JSONB  # noqa: E402
+
+
+def _latest_snapshots_subq():
+    """One row per (agent, path): the newest snapshot."""
+    ranked = (
+        select(
+            PermissionSnapshot,
+            func.row_number()
+            .over(
+                partition_by=(PermissionSnapshot.agent_id, PermissionSnapshot.path),
+                order_by=(PermissionSnapshot.collected_at.desc(), PermissionSnapshot.id.desc()),
+            )
+            .label("rn"),
+        )
+    ).subquery("ps_ranked")
+    return ranked
+
+
+def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = False) -> Select:
+    ranked = _latest_snapshots_subq()
+    from sqlalchemy import column as _sacolumn
+
+    ace = (
+        func.jsonb_array_elements(ranked.c.aces)
+        .table_valued(_sacolumn("value", _JSONB))
+        .render_derived()
+    )
+    a = ace.c.value
+    principal = a["principal"]
+    p_id = principal["id"].astext
+    p_name = principal["name"].astext
+    p_wk = principal["well_known"].astext
+    p_kind = principal["kind"].astext
+    inherited = a["inherited"].astext.cast(_SABoolean)
+    stmt = (
+        select(
+            ranked.c.agent_id.label("agent_id"),
+            Agent.name.label("agent"),
+            ranked.c.path.label("path"),
+            ranked.c.is_dir.label("is_dir"),
+            ranked.c.item_id.label("item_id"),
+            ranked.c.fidelity.label("fidelity"),
+            ranked.c.collected_at.label("collected_at"),
+            ranked.c.owner["name"].astext.label("owner_name"),
+            ranked.c.owner["id"].astext.label("owner_id"),
+            p_id.label("principal_id"),
+            p_name.label("principal_name"),
+            p_kind.label("principal_kind"),
+            p_wk.label("well_known"),
+            a["type"].astext.label("ace_type"),
+            a["verbs"].label("verbs"),
+            a["raw_mask"].astext.label("raw_mask"),
+            inherited.label("inherited"),
+            a["scope"].astext.label("scope"),
+        )
+        .select_from(ranked)
+        .join(ace, literal(True))
+        .join(Agent, Agent.id == ranked.c.agent_id)
+        .where(ranked.c.rn == 1)
+        # exclusion defaults (§4): explicit ACEs from non-well-known principals
+        .where(or_(inherited.is_(None), inherited.is_(False)))
+    )
+    if broad_only:
+        # a broad principal (Everyone / Authenticated Users / POSIX "other")
+        # granted something beyond read
+        broad = or_(
+            p_wk.in_(("EVERYONE", "AUTHENTICATED_USERS", "USERS", "INTERACTIVE")),
+            p_id.in_(("S-1-1-0", "S-1-5-11", "other")),
+        )
+        # JSONB @> '["write"]' etc. -- pass Python lists so psycopg serialises
+        # a JSON ARRAY (a str would arrive as a JSON string and never match).
+        writes = or_(
+            a["verbs"].contains(["write"]),
+            a["verbs"].contains(["delete"]),
+            a["verbs"].contains(["full_control"]),
+            a["verbs"].contains(["change_permissions"]),
+        )
+        stmt = stmt.where(broad, a["type"].astext == "allow", writes)
+    else:
+        stmt = stmt.where(or_(p_wk.is_(None), p_wk == ""))
+    if params.library_id is not None or scope_clause is not None:
+        stmt = stmt.join(Item, Item.id == ranked.c.item_id)
+        if params.library_id is not None:
+            stmt = stmt.where(Item.library_id == params.library_id)
+        if scope_clause is not None:
+            stmt = stmt.where(scope_clause)
+    return stmt.order_by(Agent.name, ranked.c.path, a["order_index"].astext.cast(_SAInteger))
+
+
+def _build_perm_by_principal(params: ReportParams) -> Select:
+    return _perm_base(params)
+
+
+def _scoped_perm_by_principal(params: ReportParams, scope_clause) -> Select:
+    return _perm_base(params, scope_clause)
+
+
+def _build_perm_broad(params: ReportParams) -> Select:
+    return _perm_base(params, broad_only=True)
+
+
+def _scoped_perm_broad(params: ReportParams, scope_clause) -> Select:
+    return _perm_base(params, scope_clause, broad_only=True)
+
+
+def _row_perm(r: Any) -> dict:
+    verbs = r.verbs if isinstance(r.verbs, list) else (json.loads(r.verbs) if r.verbs else [])
+    return {
+        "agent": r.agent,
+        "path": r.path,
+        "is_dir": bool(r.is_dir),
+        "owner": r.owner_name or r.owner_id or "",
+        "principal": r.principal_name or r.principal_id or "",
+        "principal_id": r.principal_id or "",
+        "kind": r.principal_kind or "",
+        "ace_type": r.ace_type or "",
+        "verbs": ",".join(str(v) for v in verbs),
+        "raw_mask": r.raw_mask or "",
+        "scope": r.scope or "",
+        "fidelity": r.fidelity or "",
+        "collected_at": r.collected_at.isoformat() if r.collected_at else "",
+        "item_id": str(r.item_id) if r.item_id else None,
+    }
+
+
+_PERM_COLUMNS = (
+    "agent", "path", "is_dir", "owner", "principal", "principal_id", "kind", "ace_type",
+    "verbs", "raw_mask", "scope", "fidelity", "collected_at",
+)
+
+_REPORTS = _REPORTS + (
+    CannedReport(
+        id="permissions_by_principal",
+        title="Permissions: explicit grants by principal",
+        description=(
+            "Every EXPLICIT (non-inherited) allow/deny entry from a non-system "
+            "principal on paths an agent has inventoried with the 'permissions' "
+            "collector -- one row per ACE, newest snapshot per path. Well-known "
+            "principals (SYSTEM, Administrators, root, ...) and inherited entries "
+            "are hidden so what remains is the meaningful, hand-granted access. "
+            "'fidelity' says how much to trust the row: synthesized_from_mode means "
+            "a cifs mount without cifsacl -- mount options, not the server ACL. "
+            "Owner/group are always shown. Read agent-side; central stores the "
+            "normalized record verbatim (raw_mask is the native mask)."
+        ),
+        columns=_PERM_COLUMNS,
+        build=_build_perm_by_principal,
+        row=_row_perm,
+        supports_library=True,
+        scoped_build=_scoped_perm_by_principal,
+        default_limit=1000,
+    ),
+    CannedReport(
+        id="permissions_broad_access",
+        title="Permissions: broad write access",
+        description=(
+            "Paths where a BROAD principal -- Everyone, Authenticated Users, "
+            "Users, or POSIX 'other' -- holds an explicit (non-inherited) allow "
+            "with write, delete, change-permissions or full control. The "
+            "'world-writable' review list. Newest snapshot per path; same "
+            "fidelity caveat as the by-principal report."
+        ),
+        columns=_PERM_COLUMNS,
+        build=_build_perm_broad,
+        row=_row_perm,
+        supports_library=True,
+        scoped_build=_scoped_perm_broad,
+        default_limit=1000,
     ),
 )
 

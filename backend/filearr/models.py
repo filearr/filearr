@@ -1949,6 +1949,55 @@ class AgentConfigRollout(Base):
     )
 
 
+class PermissionSnapshot(Base):
+    """W7-T6 (2026-08-19): one collected permission snapshot for one agent path
+    (research §3.3) -- additive time-series (several historical rows per path
+    to diff), deliberately NOT items.metadata. ``owner``/``group``/``aces``/
+    ``posture`` hold the agent's normalized record VERBATIM (the Go
+    ``permissions.Record`` shape: principal {kind,id,name,well_known}, ACE
+    {principal,type,verbs,raw_mask,inherited,scope,source,order_index,...}).
+    ``principals`` denormalises every principal id in the record so
+    access-by-principal queries index (GIN) instead of walking JSONB.
+    ``digest`` = sha256 over the normalized record: an unchanged re-collection
+    writes no new row (retention economy)."""
+
+    __tablename__ = "permission_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_permission_snapshots_agent_path_time",
+            "agent_id",
+            "path",
+            text("collected_at DESC"),
+        ),
+        Index("ix_permission_snapshots_principals", "principals", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE")
+    )
+    item_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("items.id", ondelete="SET NULL"), nullable=True
+    )
+    command_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_commands.id", ondelete="SET NULL"), nullable=True
+    )
+    path: Mapped[str] = mapped_column(Text)
+    is_dir: Mapped[bool] = mapped_column(server_default=text("false"))
+    collected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    owner: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    group_: Mapped[dict | None] = mapped_column("group", JSONB, nullable=True)
+    aces: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    posture: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    fidelity: Mapped[str] = mapped_column(Text)
+    principals: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    digest: Mapped[str] = mapped_column(Text)
+
+
 class PresetBundleRow(Base):
     """P2-T7 (2026-08-19): exclusion preset bundles as data. Builtins are
     mirrored here from ``filearr.presets.BUILTIN_PRESET_BUNDLES`` (``is_builtin``,

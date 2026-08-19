@@ -118,19 +118,21 @@ COLLECTOR_CATALOGUE: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "permissions",
-        "label": "Permissions audit (W7) — not implemented yet",
+        "label": "Permissions (full ACL)",
         "description": (
-            "The detailed ACL enumeration the Permissions block below configures. "
-            "It is listed here because PermissionsConfig only takes effect when "
-            "'permissions' is ALSO named here (defense in depth: an admin must "
-            "both name the collector and configure it), so leaving it out of the "
-            "catalogue would mean the one setting that REQUIRES this name has no "
-            "way to select it. Distinct from 'perms' above, which is the shipped "
-            "permission-bit collector. The agent side is scaffold only — naming "
-            "it is harmless and authors the intent, but nothing collects yet."
+            "The full normalized permission record per entry: owner, group and "
+            "every allow/deny ACE with its native mask, inheritance flags and a "
+            "fidelity stamp (Linux: mode bits + POSIX ACL xattrs, cifs-without-"
+            "cifsacl mounts flagged as synthesized; Windows: owner + full DACL "
+            "via the security descriptor, local and UNC). Central stores each "
+            "record in permission_snapshots (digest-gated, N per path) and the "
+            "Reports page gains 'Permissions: explicit grants by principal' and "
+            "'Permissions: broad write access'. Distinct from 'perms' (summary "
+            "bits). macOS reads are not implemented (per-entry error, harmless). "
+            "Costs one xattr/security-descriptor read per entry."
         ),
-        "platforms": [],
-        "cost": "unknown",
+        "platforms": ["linux", "windows"],
+        "cost": "medium",
     },
     {
         "name": "placeholder",

@@ -31,6 +31,7 @@ Contract:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -43,6 +44,8 @@ from filearr.api.agents import require_agents_enabled
 from filearr.config import Settings, get_settings
 from filearr.db import get_session
 from filearr.models import Agent, AgentCommand
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -158,6 +161,15 @@ async def upload_inventory_result(
         raise HTTPException(
             status.HTTP_507_INSUFFICIENT_STORAGE, "cannot store inventory result"
         ) from err
+    # W7-T6: fan `permissions` records into permission_snapshots (fail-soft).
+    try:
+        from filearr import permission_ingest
+
+        await permission_ingest.ingest_ndjson_gz(
+            session, agent_id=agent.id, command_id=cmd.id, blob=data
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("permission ingest (blob) failed for command %s", cmd.id)
     return JSONResponse(
         {"stored": True, "result_ref": ref, "created": True},
         status_code=status.HTTP_201_CREATED,

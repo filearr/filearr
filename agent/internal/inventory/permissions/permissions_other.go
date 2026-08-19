@@ -14,3 +14,5 @@ func collectRecord(path string, info fs.FileInfo) (*Record, error) {
 	_, _ = path, info
 	return nil, ErrPermissionsScaffold
 }
+
+const supported = false

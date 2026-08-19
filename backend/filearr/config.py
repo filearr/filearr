@@ -288,6 +288,9 @@ class Settings(BaseSettings):
     # normal); it is logged at debug and the write is trusted. 0 = fire and
     # forget (the pre-2026-08-18 behaviour).
     meili_write_ack_seconds: float = 30.0
+    # W7 permission snapshots: newest N rows kept per (agent, path); an
+    # unchanged re-collection writes nothing regardless.
+    permission_snapshots_retain: int = 10
     meili_shadow_max_age_hours: int = 6
     meili_rebuild_batch: int = 1_000  # Postgres->shadow backfill page size
 

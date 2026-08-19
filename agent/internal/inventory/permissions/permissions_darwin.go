@@ -24,3 +24,5 @@ func readACL(path string, info fs.FileInfo) (*Record, error) {
 func collectRecord(path string, info fs.FileInfo) (*Record, error) {
 	return readACL(path, info)
 }
+
+const supported = false

@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"github.com/filearr/filearr/agent/internal/inventory/permissions"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -137,6 +138,9 @@ func TestCapabilitiesShape(t *testing.T) {
 		t.Fatalf("collectors wrong type: %T", caps["inventory_collectors"])
 	}
 	want := []string{"owner", "perms", "placeholder", "stat"} // sorted
+	if permissions.Supported() {
+		want = []string{"owner", "permissions", "perms", "placeholder", "stat"}
+	}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("collectors: %v want %v", names, want)
 	}

@@ -39,6 +39,8 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 | `duplicate_files` | One row **per duplicate group**: copy count, hash tier, wasted bytes. The overview. |
 | `duplicate_files_detail` | One row **per copy**. The actionable one — see [Acting on the duplicate copies export](#acting-on-duplicates). |
 | `stale_files` | Files not **modified** in *N* days (default 730) — see [Staleness](#staleness). |
+| `permissions_by_principal` | Every **explicit** (non-inherited) allow/deny from a non-system principal on paths an agent has inventoried with the `permissions` collector — one row per ACE, newest snapshot per path; owner always shown. Read agent-side (Linux mode bits + POSIX ACL xattrs; Windows owner + full DACL, local or UNC). Check `fidelity`: `synthesized_from_mode` means a cifs mount without `cifsacl` — the mount options, not the server's ACL. |
+| `permissions_broad_access` | Paths where **Everyone / Authenticated Users / Users / POSIX "other"** hold an explicit allow with write, delete, change-permissions or full control — the world-writable review list. |
 
 Run one as a paginated JSON page (this is what the Reports screen shows):
 

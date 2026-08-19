@@ -322,8 +322,6 @@ def test_diff_allow_vs_deny_same_principal_are_distinct_keys():
 # --------------------------------------------------------------------------- #
 def test_report_builders_are_inert_stubs():
     for fn in (
-        permissions.permissions_report_access_by_principal,
-        permissions._broad_access,
         permissions._explicit_ace_outliers,
         permissions._permission_drift,
     ):
@@ -331,18 +329,16 @@ def test_report_builders_are_inert_stubs():
             fn(None)  # type: ignore[arg-type] — raises before touching the arg
 
 
-def test_permission_snapshots_not_registered_on_metadata():
+def test_permission_snapshots_is_live_and_reports_registered():
+    """W7-T6/T7 (2026-08-19): the snapshot table is a real model and the two
+    v1 permission reports are in the live registry (the scaffold stubs for the
+    outlier/drift reports remain inert until W7-T9)."""
     from filearr.models import Base
-
-    assert "permission_snapshots" not in Base.metadata.tables
-    # the intended DDL is documented as an inert source string
-    assert "class PermissionSnapshot(Base)" in permissions.INTENDED_PERMISSION_SNAPSHOTS_DDL
-
-
-def test_reports_registry_has_no_permissions_report():
     from filearr.reports import CANNED_REPORTS
 
-    assert not any("perm" in rid for rid in CANNED_REPORTS)
+    assert "permission_snapshots" in Base.metadata.tables
+    assert {"permissions_by_principal", "permissions_broad_access"} <= set(CANNED_REPORTS)
+    assert not any(rid.startswith("permission_changes") for rid in CANNED_REPORTS)
 
 
 # --------------------------------------------------------------------------- #

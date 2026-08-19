@@ -21,10 +21,14 @@ Deliberately INERT in this scaffold (documented, not wired):
   AGENT's responsibility; central validates/stores the already-normalized verbs
   and preserves the raw mask verbatim (:attr:`Ace.raw_mask`).
 * **Storage** — the intended ``permission_snapshots`` table is DOCUMENTED ONLY
-  (:data:`INTENDED_PERMISSION_SNAPSHOTS_DDL`); it is NOT a live SQLAlchemy model
-  and is NOT registered on ``Base.metadata`` (no migration this phase).
-* **Reports** — the four permission-report builders are typed stubs raising
-  ``NotImplementedError``; they are NOT in the live canned-report registry.
+  (:data:`INTENDED_PERMISSION_SNAPSHOTS_DDL`) -- and since 2026-08-19 a LIVE
+  model ``filearr.models.PermissionSnapshot`` (migration d9e0f1a2b3c4) that
+  stores the AGENT's normalized record verbatim (Go ``permissions.Record``
+  shape) plus a denormalised ``principals`` array; ingestion is
+  ``filearr.permission_ingest``.
+* **Reports** — ``permissions_by_principal`` and ``permissions_broad_access``
+  are LIVE in ``filearr.reports`` (W7-T7, 2026-08-19); the outlier and drift
+  builders below remain typed stubs (W7-T9).
 
 §9.1 open storage question (unresolved, for the architect): whether a snapshot
 persists as ONE wide JSONB blob per (path, run) — simplest, mirrors the
@@ -510,15 +514,18 @@ class PermissionSnapshot(Base):
 
 
 def permissions_report_access_by_principal(params: ReportParams) -> Select:
-    """Raw ACEs + owner, latest snapshot per path (§3.4 ``permissions`` report),
-    exclusion filters (§4) applied at query time. NOT registered (scaffold)."""
-    raise NotImplementedError("permissions report: scaffold, W7-T7")
+    """LIVE since 2026-08-19 as ``filearr.reports`` report
+    ``permissions_by_principal`` (W7-T7); kept as a forwarding alias."""
+    from filearr.reports import get_report
+
+    return get_report("permissions_by_principal").build(params)  # type: ignore[union-attr]
 
 
 def _broad_access(params: ReportParams) -> Select:
-    """Paths granting a broad principal (Everyone / Authenticated Users) an
-    explicit non-inherited grant (§9.1 broad_access). NOT registered (scaffold)."""
-    raise NotImplementedError("permissions report: scaffold, W7-T7")
+    """LIVE since 2026-08-19 as ``permissions_broad_access`` (W7-T7)."""
+    from filearr.reports import get_report
+
+    return get_report("permissions_broad_access").build(params)  # type: ignore[union-attr]
 
 
 def _explicit_ace_outliers(params: ReportParams) -> Select:

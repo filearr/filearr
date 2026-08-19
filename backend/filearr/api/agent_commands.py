@@ -1091,6 +1091,19 @@ async def complete_command(
         cmd.status, "complete" if body.ok else "fail"
     )
     cmd.result = body.result
+    # W7-T6: an inventory completion carrying inline entries -> permission
+    # snapshots (only entries with a `permissions` record; fail-soft).
+    if body.ok and cmd.kind == "inventory" and isinstance(body.result, dict):
+        inline = body.result.get("entries")
+        if isinstance(inline, list) and inline:
+            try:
+                from filearr import permission_ingest
+
+                await permission_ingest.ingest_entries(
+                    session, agent_id=agent.id, command_id=cmd.id, entries=inline
+                )
+            except Exception:  # noqa: BLE001 - never fail the completion
+                log.exception("permission ingest (inline) failed for command %s", cmd.id)
     cmd.completed_at = now
     cmd.updated_at = now
     # P10-T3: reconcile a successful stat_check/rehash_check against the item IN

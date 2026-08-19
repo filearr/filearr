@@ -937,6 +937,7 @@ The collectors this release ships descriptions for:
 | `stat` | Size, timestamps and basic file attributes. The cheapest collector, and the one every other inventory answer builds on. | Linux, macOS, Windows | low |
 | `owner` | The owning user and group — uid/gid resolved to names on POSIX, the owning security principal on Windows. | Linux, macOS, Windows | low |
 | `perms` | Permission bits / ACL summary per file. Dearer than `stat`: a second syscall per entry, and an ACL read on Windows. The detailed knobs are the [`inventory.permissions`](#group-settings-schema) block below. | Linux, macOS, Windows | medium |
+| `permissions` | The **full normalized permission record** per entry (owner, group, every allow/deny ACE with native mask, inheritance flags, fidelity stamp). Linux: mode bits + POSIX ACL xattrs, pure Go; cifs-without-`cifsacl` mounts stamped `synthesized_from_mode`. Windows: owner + full DACL via the security descriptor (local and UNC). Central stores each record in `permission_snapshots` (unchanged re-collections write nothing; newest *N* per path, `FILEARR_PERMISSION_SNAPSHOTS_RETAIN`, default 10) and the Reports page gains the two `permissions_*` reports. Not implemented on macOS (per-entry error, harmless). | Linux, Windows | medium |
 | `placeholder` | Whether a file is a cloud placeholder (OneDrive / Files On-Demand and friends) rather than resident on disk. A no-op that reports nothing elsewhere. | Windows | low |
 
 !!! note "The list is a catalogue, not a whitelist"

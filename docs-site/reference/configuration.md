@@ -186,6 +186,7 @@ now*; results are cached for 6 hours.
 | `FILEARR_MEILI_SEARCH_CUTOFF_MS` | `1500` | Per-search wall-clock circuit breaker. |
 | `FILEARR_RECONCILE_MAX_FIXES` | `10000` | Cap on repairs per hourly reconcile sweep. |
 | `FILEARR_MEILI_REBUILD_WAIT_S` | `900` | Total wait budget for a shadow rebuild before it fails cleanly. |
+| `FILEARR_PERMISSION_SNAPSHOTS_RETAIN` | `10` | Newest snapshots kept per (agent, path) in `permission_snapshots` (the `permissions` inventory collector). An unchanged re-collection writes nothing regardless. |
 | `FILEARR_MEILI_WRITE_ACK_SECONDS` | `30` | Every document write (sync, reconcile, re-project, delete) waits up to this long for its Meilisearch task and **fails the job with Meili's own error** if the task finished `failed` — the write is no longer fire-and-forget. A task still queued when the budget runs out is trusted (a busy queue is normal), so this never stalls on a slow index; `0` restores fire-and-forget. |
 | `FILEARR_MEILI_SHADOW_MAX_AGE_HOURS` | `6` | Age at which an orphaned shadow index is reaped. |
 | `FILEARR_MEILI_SCOPE_FILTER_CEILING` | `4096` | Max compiled RBAC scope-filter length (over → refuse). |

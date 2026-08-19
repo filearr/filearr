@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """W6-D3 extensible inventory framework (central-side): capability persistence on
 poll, the inventory-results receiver (auth / cap / gzip roundtrip / wrong-agent /
 write-if-absent / non-inventory), and an inline inventory command completion.
@@ -8,6 +9,7 @@ Runs against the migrated pgserver Postgres (mirrors test_agent_commands' harnes
 from __future__ import annotations
 
 import gzip
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
@@ -38,6 +40,7 @@ async def db_maker(pg_uri):
     command.upgrade(cfg, "head")
     engine = create_async_engine(_psycopg3(pg_uri))
     async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM permission_snapshots"))
         await conn.execute(text("DELETE FROM agent_commands"))
         await conn.execute(text("DELETE FROM items"))
         await conn.execute(text("DELETE FROM libraries"))
@@ -360,3 +363,109 @@ async def test_poll_persists_health_and_stamps_auth_mode(client):
         agent = await s.get(Agent, agent_id)
         assert agent.health == health
         assert agent.health_at == first_at
+
+
+# --------------------------------------------------------------------------- #
+# W7-T6/T7 (2026-08-19): permission snapshots + reports                        #
+# --------------------------------------------------------------------------- #
+def _perm_record(*, owner_id="1000", extra_aces=None, fidelity="full_native"):
+    aces = [
+        {"principal": {"kind": "user", "id": owner_id, "name": "eric"}, "type": "allow",
+         "verbs": ["read", "write"], "raw_mask": "mode:user_obj=06", "inherited": False,
+         "scope": "this", "source": "local", "order_index": 0},
+        {"principal": {"kind": "group", "id": "100", "name": "users"}, "type": "allow",
+         "verbs": ["read"], "raw_mask": "mode:group_obj=04", "inherited": False,
+         "scope": "this", "source": "local", "order_index": 1},
+        {"principal": {"kind": "well_known", "id": "other", "name": "other", "well_known": "EVERYONE"},
+         "type": "allow", "verbs": ["read"], "raw_mask": "mode:other=04", "inherited": False,
+         "scope": "this", "source": "local", "order_index": 2},
+    ] + (extra_aces or [])
+    return {
+        "collected_at": "2026-08-19T10:00:00Z",
+        "owner": {"kind": "user", "id": owner_id, "name": "eric"},
+        "group": {"kind": "group", "id": "100", "name": "users"},
+        "posture": {"dacl_present": False, "dacl_canonical": False, "generic_mapping_applied": False},
+        "fidelity": fidelity,
+        "entries": aces,
+    }
+
+
+async def test_permission_snapshots_ingest_and_reports(client):
+    from filearr.models import PermissionSnapshot
+
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+
+    world_write = {"principal": {"kind": "well_known", "id": "other", "name": "other", "well_known": "EVERYONE"},
+                   "type": "allow", "verbs": ["read", "write"], "raw_mask": "mode:other=06",
+                   "inherited": False, "scope": "this", "source": "local", "order_index": 3}
+    entries = [
+        {"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()},
+        {"path": "/data/pub", "rel": "pub", "is_dir": True,
+         "permissions": _perm_record(extra_aces=[world_write], fidelity="posix_mode_only")},
+        {"path": "/data/nothing", "rel": "nothing"},  # no permissions record -> ignored
+    ]
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/{cid}/complete",
+        json={"ok": True, "result": {"summary": {"entries": 3}, "entries": entries}},
+        headers=_auth(fp),
+    )
+    assert r.status_code == 200, r.text
+    async with maker() as s:
+        rows = (await s.execute(select(PermissionSnapshot).order_by(PermissionSnapshot.path))).scalars().all()
+    assert [x.path for x in rows] == ["/data/pub", "/data/x.mkv"]
+    assert rows[0].is_dir is True and rows[0].fidelity == "posix_mode_only"
+    assert set(rows[1].principals) == {"1000", "100", "other"}
+    assert rows[1].command_id == cid
+
+    # unchanged re-collection (same digest) writes nothing; a changed one adds a row
+    from filearr import permission_ingest
+    async with maker() as s:
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None, entries=entries[:1]
+        )
+        assert out == {"seen": 1, "written": 0, "unchanged": 1, "skipped": 0}
+        changed = [{"path": "/data/x.mkv", "permissions": _perm_record(owner_id="1001")}]
+        out = await permission_ingest.ingest_entries(s, agent_id=agent_id, command_id=None, entries=changed, retain=2)
+        assert out["written"] == 1
+        n = (await s.execute(select(func.count()).select_from(PermissionSnapshot).where(PermissionSnapshot.path == "/data/x.mkv"))).scalar_one()
+        assert n == 2
+        # retention: a third change with retain=2 keeps 2
+        out = await permission_ingest.ingest_entries(s, agent_id=agent_id, command_id=None, entries=[{"path": "/data/x.mkv", "permissions": _perm_record(owner_id="1002")}], retain=2)
+        n = (await s.execute(select(func.count()).select_from(PermissionSnapshot).where(PermissionSnapshot.path == "/data/x.mkv"))).scalar_one()
+        assert n == 2
+
+    # reports: by-principal hides the well-known 'other'; broad-access finds /data/pub
+    r = await c.get("/api/v1/reports")
+    ids = {x["id"] for x in r.json()["reports"]}
+    assert {"permissions_by_principal", "permissions_broad_access"} <= ids
+    r = await c.get("/api/v1/reports/permissions_by_principal")
+    assert r.status_code == 200, r.text
+    rows_ = r.json()["rows"] if isinstance(r.json(), dict) else r.json()
+    principals = {(x["path"], x["principal_id"]) for x in rows_}
+    assert ("/data/x.mkv", "1002") in principals and ("/data/x.mkv", "100") in principals
+    assert not any(x["principal_id"] == "other" for x in rows_)
+    r = await c.get("/api/v1/reports/permissions_broad_access")
+    assert r.status_code == 200, r.text
+    rows_ = r.json()["rows"] if isinstance(r.json(), dict) else r.json()
+    assert [x["path"] for x in rows_] == ["/data/pub"] and "write" in rows_[0]["verbs"]
+
+
+async def test_permission_snapshots_from_ndjson_upload(client):
+    from filearr.models import PermissionSnapshot
+
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+    line = json.dumps({"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()})
+    blob = _gz((line + "\n" + '{"rel":"noperm"}\n' + "garbage\n").encode())
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/inventory-results",
+        content=blob,
+        headers={**_auth(fp), "X-Filearr-Command-Id": str(cid), "Content-Type": "application/gzip"},
+    )
+    assert r.status_code == 201, r.text
+    async with maker() as s:
+        n = (await s.execute(select(func.count()).select_from(PermissionSnapshot))).scalar_one()
+    assert n == 1

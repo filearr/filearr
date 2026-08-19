@@ -827,7 +827,17 @@ retrieve_passages behind the per-library chunking_enabled opt-in; M3
 ItemVersion-attributed) + the per-key tool-call dashboard (and fixed M1's
 silently-dropped facade audit events — ApiKey uuid vs principals FK).
 
-## 22. Permissions enumeration, reconciliation & audit (W7 — LOW priority, scaffold only)
+## 22. Permissions enumeration, reconciliation & audit (W7)
+
+> **v1 SHIPPED 2026-08-19** (W7-T2 Linux read, T3 Windows read, T5 fidelity,
+> T6 `permission_snapshots` + ingestion, T7 two canned reports; T2a resolved as
+> "pure Go: POSIX ACL xattr decode, no CGO/shell-out"). Rulings on the §9.1
+> questions: storage = wide JSONB per (agent, path, run) + denormalised
+> `principals text[]` (GIN); agent-only capture (no central-scanner parity);
+> exclusion applied report-side (collection stays full-fidelity); no SACL in v1;
+> Samba share-ACLs docs-only; retention 10 per path. **Still open:** T4 macOS
+> read, T8 principal canonicalisation, T9 drift report + alerting (the pure
+> `diff_records` core exists), T10 effective access. Original note follows.
 
 **Status: scaffolded on both sides 2026-07-18, inert since.** Recorded here on
 2026-08-10 because it had no roadmap entry at all — the design lived only in
