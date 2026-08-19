@@ -276,6 +276,18 @@ class Settings(BaseSettings):
     # BOTH the live and shadow copies on disk simultaneously (~2x the index
     # size) until the post-swap delete — same LMDB constraint as compaction.
     meili_rebuild_wait_s: float = 900.0
+    # Document-write acknowledgement (2026-08-18). Meili document writes are
+    # asynchronous tasks; for weeks every scan batch was FAILING inside Meili
+    # (userProvided embedder + docs without _vectors) while every write call
+    # returned success -- nothing in Filearr ever looked at the task result.
+    # upsert_docs / replace_docs / delete_docs now wait up to this many seconds
+    # for their task and RAISE MeiliWriteFailed when Meili reports 'failed'
+    # (the job then fails visibly, retries per its policy, and lands in the
+    # failed-jobs list with Meili's own error). A task still 'processing' or
+    # 'enqueued' when the budget runs out is NOT a failure (a busy queue is
+    # normal); it is logged at debug and the write is trusted. 0 = fire and
+    # forget (the pre-2026-08-18 behaviour).
+    meili_write_ack_seconds: float = 30.0
     meili_shadow_max_age_hours: int = 6
     meili_rebuild_batch: int = 1_000  # Postgres->shadow backfill page size
 

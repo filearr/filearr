@@ -708,6 +708,44 @@ async def parent_scope_map(session: Any, items: list[Item]) -> dict[Any, str | N
     return have
 
 
+class MeiliWriteFailed(RuntimeError):
+    """A document write task finished ``failed`` inside Meilisearch. Carries
+    Meili's own error code + message so the failed job says WHY."""
+
+    def __init__(self, task_uid: int | None, code: str | None, message: str) -> None:
+        self.task_uid = task_uid
+        self.code = code
+        super().__init__(f"meilisearch task {task_uid} failed [{code or '?'}]: {message}")
+
+
+async def _ack_write(c: Any, info: Any, what: str) -> None:
+    """Wait (bounded by ``meili_write_ack_seconds``) for a document-write task
+    and raise :class:`MeiliWriteFailed` on a definitive failure. A task still
+    queued/processing at the deadline is trusted (busy queue != failure).
+    Tolerates fake clients without ``wait_for_task`` (tests) and any transport
+    error while waiting (the write itself already succeeded)."""
+    budget = float(get_settings().meili_write_ack_seconds or 0)
+    if budget <= 0:
+        return
+    wait = getattr(c, "wait_for_task", None)
+    uid = getattr(info, "task_uid", None)
+    if wait is None or uid is None:
+        return
+    try:
+        res = await wait(uid, timeout_in_ms=int(budget * 1000))
+    except Exception as exc:  # noqa: BLE001 - timeout / transport: not a failure
+        logger.debug("meili %s task %s not settled within %.0fs (%s)", what, uid, budget, exc)
+        return
+    status = getattr(res, "status", None)
+    if status == "failed":
+        err = getattr(res, "error", None) or {}
+        raise MeiliWriteFailed(
+            uid,
+            err.get("code") if isinstance(err, dict) else None,
+            (err.get("message") if isinstance(err, dict) else str(err)) or "unknown error",
+        )
+
+
 async def upsert_docs(docs: list[dict[str, Any]]) -> None:
     s = get_settings()
     async with client() as c:
@@ -715,7 +753,8 @@ async def upsert_docs(docs: list[dict[str, Any]]) -> None:
         # primary key (unhealthy state ensure_index would normally have fixed),
         # this lets Meili infer "id" from the payload instead of guessing/erroring.
         # Ignored by the server once a primary key is already set.
-        await c.index(s.meili_index).update_documents(docs, primary_key="id")
+        info = await c.index(s.meili_index).update_documents(docs, primary_key="id")
+        await _ack_write(c, info, "upsert")
 
 
 async def replace_docs(docs: list[dict[str, Any]]) -> None:
@@ -740,10 +779,12 @@ async def replace_docs(docs: list[dict[str, Any]]) -> None:
         return
     s = get_settings()
     async with client() as c:
-        await c.index(s.meili_index).add_documents(docs, primary_key="id")
+        info = await c.index(s.meili_index).add_documents(docs, primary_key="id")
+        await _ack_write(c, info, "replace")
 
 
 async def delete_docs(ids: list[str]) -> None:
     s = get_settings()
     async with client() as c:
-        await c.index(s.meili_index).delete_documents(ids)
+        info = await c.index(s.meili_index).delete_documents(ids)
+        await _ack_write(c, info, "delete")
