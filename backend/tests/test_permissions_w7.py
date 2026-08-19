@@ -370,7 +370,8 @@ def test_record_from_wire_lifts_agent_shape():
         fidelity="full_native",
         posture={"dacl_present": True, "dacl_canonical": False},
     )
-    assert rec.owner is not None and rec.owner.canonical_id == "1000" and rec.owner.display == "eric"
+    assert rec.owner is not None and rec.owner.canonical_id == "1000"
+    assert rec.owner.display == "eric"
     assert rec.group is not None and rec.group.kind is permissions.PrincipalKind.group
     assert len(rec.entries) == 2  # the junk entry is dropped
     ev = rec.entries[1]

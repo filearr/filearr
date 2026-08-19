@@ -678,7 +678,9 @@ async def test_inhibition_mutes_group_while_inhibitor_recent(session, tmp_path, 
 
     # outside the window the quiet rule fires normally
     await _seed_group(session, quiet, n=1, occurred_at=t0 + timedelta(minutes=20))
-    stats = await alerts_task.run_pending_dispatch(session, now=t0 + timedelta(minutes=20, seconds=1))
+    stats = await alerts_task.run_pending_dispatch(
+        session, now=t0 + timedelta(minutes=20, seconds=1)
+    )
     assert stats["delivered"] == 1 and "quiet" in [c[1]["rule"] for c in drv.calls]
 
 
