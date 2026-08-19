@@ -855,6 +855,11 @@ into.
 
 ## 23. Staged binary-release rollout on the config tier engine
 
+> **DONE 2026-08-19.** `agent_release_rollouts` (migration b7c8d9e0f1a2), same
+> tier engine + bucket + minute tick; the manifest poll consults it; console
+> shows release rows in *Rollouts in flight* and a *Phased release rollout…*
+> form; cancel = stop offering (documented as such). Below is the original note.
+
 **Deferred from P13 (2026-08-11).** The phased-rollout engine that P13 built for
 *configuration* is generic in everything except what it targets. It already has:
 tier validation (≤5 entries, `{percent, delay_minutes}`, strictly ascending,

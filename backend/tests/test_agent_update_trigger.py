@@ -49,6 +49,7 @@ async def db_maker(pg_uri):
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM agent_commands"))
         await conn.execute(text("DELETE FROM agent_releases"))
+        await conn.execute(text("DELETE FROM agent_release_rollouts"))
         await reset_config_groups(conn)
         await conn.execute(text("DELETE FROM security_events"))
         await conn.execute(text("DELETE FROM agents"))
@@ -375,3 +376,132 @@ async def test_update_gate_keys_validated_on_group_save(client):
                                                "update_not_before": "2026-09-01T02:00"}},
     )
     assert r.status_code == 201, r.text
+
+
+# --------------------------------------------------------------------------- #
+# Phased release rollouts on the tier engine (roadmap §23, 2026-08-19)          #
+# --------------------------------------------------------------------------- #
+async def _seed_agents_by_bucket(maker, n=40, version="main-0000000"):
+    """Seed agents until we hold at least one whose bucket is < 10 and one
+    >= 50 (buckets are a stable sha256 of the id, so this is deterministic
+    per id but we don't control ids -- seed a handful and pick)."""
+    from filearr.agent_config import agent_bucket
+
+    low = high = None
+    for _ in range(n):
+        aid, fp = await _seed_agent(maker, version=version)
+        b = agent_bucket(aid)
+        if b < 10 and low is None:
+            low = (aid, fp, b)
+        if b >= 50 and high is None:
+            high = (aid, fp, b)
+        if low and high:
+            break
+    assert low and high, "could not seed both buckets"
+    return low, high
+
+
+async def test_release_rollout_gates_by_bucket_then_promotes(client):
+    from datetime import UTC, datetime
+
+    from filearr.worker import _advance_release_rollouts
+
+    c, maker, _ = client
+    (lo, lo_fp, _), (hi, hi_fp, hi_b) = await _seed_agents_by_bucket(maker)
+
+    # unknown version -> 404, bad tiers -> 422
+    r = await c.post("/api/v1/agent-releases/9.9.9-nope/rollouts", json={"tiers": [{"percent": 100}]})
+    assert r.status_code == 404, r.text
+    r = await c.post(
+        f"/api/v1/agent-releases/{DIST_VERSION}/rollouts", json={"tiers": [{"percent": 50}]}
+    )
+    assert r.status_code == 422, r.text
+
+    # 10% now, 100% after 60 min
+    r = await c.post(
+        f"/api/v1/agent-releases/{DIST_VERSION}/rollouts",
+        json={"tiers": [{"percent": 10, "delay_minutes": 0}, {"percent": 100, "delay_minutes": 60}]},
+    )
+    assert r.status_code == 201, r.text
+    rid = r.json()["id"]
+    assert r.json()["status"] == "scheduled"
+    # second live rollout of the same version -> 409
+    r = await c.post(
+        f"/api/v1/agent-releases/{DIST_VERSION}/rollouts", json={"tiers": [{"percent": 100}]}
+    )
+    assert r.status_code == 409
+
+    # scheduled = covers nobody yet: both agents 204, list explains why
+    assert (await _poll(c, lo, lo_fp, "main-0000000")).status_code == 204
+    r = await c.get("/api/v1/agents")
+    me = next(a for a in r.json()["items"] if a["id"] == str(lo))
+    assert me["update_available"] is True and "scheduled to start" in me["update_hold"]
+
+    # tick -> running at tier 0 (10%): low bucket offered, high bucket held
+    t0 = datetime.now(UTC)
+    assert await _advance_release_rollouts(t0) == [rid]
+    assert (await _poll(c, lo, lo_fp, "main-0000000")).status_code == 200
+    assert (await _poll(c, hi, hi_fp, "main-0000000")).status_code == 204
+    r = await c.get("/api/v1/agents")
+    me = next(a for a in r.json()["items"] if a["id"] == str(hi))
+    assert f"bucket ({hi_b})" in (me["update_hold"] or "")
+    r = await c.get("/api/v1/agent-release-rollouts")
+    assert [x["covered_percent"] for x in r.json()] == [10]
+
+    # the operator's click still bypasses the rollout
+    assert (await c.post(f"/api/v1/agents/{hi}/self-update")).status_code == 201
+    assert (await _poll(c, hi, hi_fp, "main-0000000")).status_code == 200
+
+    # promote -> last tier -> completed -> everyone offered
+    r = await c.post(f"/api/v1/agent-release-rollouts/{rid}/promote")
+    assert r.status_code == 200 and r.json()["status"] == "completed"
+    (lo2, lo2_fp, _), (hi2, hi2_fp, _) = await _seed_agents_by_bucket(maker)
+    assert (await _poll(c, hi2, hi2_fp, "main-0000000")).status_code == 200
+    # promote/cancel on a finished rollout -> 409
+    assert (await c.post(f"/api/v1/agent-release-rollouts/{rid}/promote")).status_code == 409
+    assert (await c.post(f"/api/v1/agent-release-rollouts/{rid}/cancel")).status_code == 409
+
+
+async def test_release_rollout_cancel_stops_offering(client):
+    from datetime import UTC, datetime
+
+    from filearr.worker import _advance_release_rollouts
+
+    c, maker, _ = client
+    (lo, lo_fp, _), _hi = await _seed_agents_by_bucket(maker)
+    r = await c.post(
+        f"/api/v1/agent-releases/{DIST_VERSION}/rollouts",
+        json={"tiers": [{"percent": 10, "delay_minutes": 0}, {"percent": 100, "delay_minutes": 60}]},
+    )
+    rid = r.json()["id"]
+    await _advance_release_rollouts(datetime.now(UTC))
+    assert (await _poll(c, lo, lo_fp, "main-0000000")).status_code == 200
+    r = await c.post(f"/api/v1/agent-release-rollouts/{rid}/cancel")
+    assert r.status_code == 200 and r.json()["status"] == "cancelled"
+    # cancelled = not live = no restriction AND no offer via the rollout: the
+    # plain channel offers again (cancel means "stop phasing", the version is
+    # still central's newest -- documented: cancel cannot un-swap binaries).
+    assert (await c.get("/api/v1/agent-release-rollouts")).json() == []
+
+
+def test_step_rollout_state_machine():
+    from datetime import UTC, datetime, timedelta
+
+    from filearr.worker import _step_rollout
+
+    class R:
+        def __init__(self, tiers, starts_at=None):
+            self.tiers, self.starts_at = tiers, starts_at
+            self.status, self.current_tier = "scheduled", -1
+            self.started_at = self.tier_started_at = self.finished_at = None
+
+    t = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+    r = R([{"percent": 10, "delay_minutes": 0}, {"percent": 100, "delay_minutes": 30}])
+    assert _step_rollout(r, t) and r.status == "running" and r.current_tier == 0
+    assert not _step_rollout(r, t + timedelta(minutes=29))
+    assert _step_rollout(r, t + timedelta(minutes=30)) and r.status == "completed"
+    # scheduled in the future waits; tier-0 delay waits at tier -1
+    r2 = R([{"percent": 100, "delay_minutes": 5}], starts_at=t + timedelta(minutes=10))
+    assert not _step_rollout(r2, t)
+    assert _step_rollout(r2, t + timedelta(minutes=10)) and r2.current_tier == -1
+    assert _step_rollout(r2, t + timedelta(minutes=15)) and r2.status == "completed"

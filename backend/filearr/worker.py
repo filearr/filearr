@@ -1573,6 +1573,84 @@ async def reconcile_report_exports(timestamp: int) -> int:
 # rule. Here "observable" is the agents' next poll, so each transition COMMITS
 # before the loop moves on; a worker that dies mid-sweep leaves every already-
 # advanced rollout advanced exactly once, and re-evaluates the rest next minute.
+def _step_rollout(rollout, tick: datetime) -> bool:
+    """One tick of the phased-rollout state machine, shared by config-group and
+    release rollouts (roadmap §23): mutates ``rollout`` in place and returns
+    whether it advanced. Transitions (all against ``tick``):
+    scheduled+due -> running (tier 0 now, or waiting on tier 0's delay);
+    running with next tier's delay elapsed -> next tier (ONE per tick);
+    reaching the last tier -> completed. The caller commits and runs its own
+    completion side effect."""
+    tiers = rollout.tiers or []
+    if not tiers:
+        return False
+    if rollout.status == "scheduled":
+        if rollout.starts_at is not None and rollout.starts_at > tick:
+            return False
+        rollout.status = "running"
+        rollout.started_at = tick
+        first_delay = int(tiers[0].get("delay_minutes", 0) or 0)
+        rollout.tier_started_at = tick
+        if first_delay <= 0:
+            rollout.current_tier = 0
+            if len(tiers) == 1:
+                rollout.status = "completed"
+                rollout.finished_at = tick
+        return True
+    nxt = rollout.current_tier + 1
+    if nxt >= len(tiers):
+        return False
+    anchor = rollout.tier_started_at or rollout.started_at or tick
+    delay = int(tiers[nxt].get("delay_minutes", 0) or 0)
+    if tick < anchor + timedelta(minutes=delay):
+        return False
+    rollout.current_tier = nxt
+    rollout.tier_started_at = tick
+    if nxt == len(tiers) - 1:
+        rollout.status = "completed"
+        rollout.finished_at = tick
+    return True
+
+
+async def _advance_release_rollouts(tick: datetime) -> list[str]:
+    """Advance every due phased RELEASE rollout (roadmap §23). Same state
+    machine as the config rollouts; completion has no version to move -- it
+    just means 'offered fleet-wide' -- so the side effect is the audit event."""
+    from sqlalchemy import select, text
+
+    from filearr import audit, maintmode
+    from filearr.db import SessionLocal
+    from filearr.models import AgentReleaseRollout
+
+    if await maintmode.is_active_standalone():
+        return []
+    advanced: list[str] = []
+    async with SessionLocal() as session:
+        reg = await session.execute(text("SELECT to_regclass('agent_release_rollouts') AS r"))
+        if reg.scalar_one() is None:
+            return []  # pre-migration DB
+        rollouts = list(
+            (
+                await session.execute(
+                    select(AgentReleaseRollout)
+                    .where(AgentReleaseRollout.status.in_(("scheduled", "running")))
+                    .order_by(AgentReleaseRollout.created_at)
+                )
+            ).scalars()
+        )
+        for r in rollouts:
+            if not _step_rollout(r, tick):
+                continue
+            await session.commit()
+            advanced.append(str(r.id))
+            if r.status == "completed":
+                await audit.emit(
+                    audit.AGENT_RELEASE_ROLLOUT_COMPLETED,
+                    details={"rollout_id": str(r.id), "release_version": r.release_version},
+                )
+    return advanced
+
+
 async def _advance_config_rollouts(tick: datetime) -> list[str]:
     """Advance every due config-group rollout; return their ids as strings.
 
@@ -1694,7 +1772,9 @@ async def advance_config_rollouts(timestamp: int) -> int:
     ``agents_enabled`` — a fleet disabled mid-rollout must still not leave a
     rollout wedged half-way when it is re-enabled)."""
     tick = datetime.fromtimestamp(timestamp, tz=UTC)
-    return len(await _advance_config_rollouts(tick))
+    n = len(await _advance_config_rollouts(tick))
+    n += len(await _advance_release_rollouts(tick))
+    return n
 
 
 @proc_app.periodic(cron="* * * * *")

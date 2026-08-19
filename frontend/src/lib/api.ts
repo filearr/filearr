@@ -3393,6 +3393,45 @@ export interface RolloutOut {
   created_at: string;
 }
 
+/** Phased BINARY release rollout (roadmap §23) — same tier engine as config
+ *  rollouts, targeting a version string central can offer (a signed release or
+ *  the central-baked agent version). */
+export interface ReleaseRolloutOut {
+  id: string;
+  release_version: string;
+  tiers: RolloutTier[];
+  status: "scheduled" | "running" | "completed" | "cancelled";
+  current_tier: number;
+  covered_percent: number;
+  next_promotion_at: string | null;
+  starts_at: string | null;
+  started_at: string | null;
+  tier_started_at: string | null;
+  finished_at: string | null;
+  actor: string | null;
+  created_at: string;
+}
+
+export const listReleaseRollouts = (status?: string, limit = 50) =>
+  request<ReleaseRolloutOut[]>(
+    `/agent-release-rollouts?limit=${limit}` +
+      (status ? `&status_filter=${encodeURIComponent(status)}` : ""),
+  );
+export const createReleaseRollout = (
+  version: string,
+  body: { tiers: RolloutTier[]; starts_at?: string | null },
+) =>
+  request<ReleaseRolloutOut>(`/agent-releases/${encodeURIComponent(version)}/rollouts`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+/** Cancel = stop OFFERING the version to agents not yet covered. Nothing rolls
+ *  back: an agent that already swapped its binary keeps it. */
+export const cancelReleaseRollout = (id: string) =>
+  request<ReleaseRolloutOut>(`/agent-release-rollouts/${id}/cancel`, { method: "POST" });
+export const promoteReleaseRollout = (id: string) =>
+  request<ReleaseRolloutOut>(`/agent-release-rollouts/${id}/promote`, { method: "POST" });
+
 /** Omitting `status` returns only the LIVE ones (scheduled + running) — which
  *  is all the console's rollouts card ever wants. */
 export const listConfigRollouts = (status?: string, limit = 50) =>

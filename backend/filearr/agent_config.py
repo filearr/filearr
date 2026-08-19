@@ -537,7 +537,14 @@ def agent_bucket(agent_id: uuid.UUID) -> int:
     return int.from_bytes(hashlib.sha256(agent_id.bytes).digest()[:4], "big") % 100
 
 
-def rollout_active_percent(rollout: AgentConfigRollout | None) -> int | None:
+def rollout_covers(rollout: Any, agent_id: uuid.UUID) -> bool:
+    """Whether a (config OR release) rollout currently covers ``agent_id``:
+    running, a tier active, and the agent's bucket below its percent."""
+    percent = rollout_active_percent(rollout)
+    return percent is not None and agent_bucket(agent_id) < percent
+
+
+def rollout_active_percent(rollout: Any) -> int | None:
     """The percentage a rollout currently covers, or ``None`` when it covers
     nobody (no rollout, not running, or running with no tier activated yet).
 

@@ -45,7 +45,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,7 +55,7 @@ from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
 from filearr.config import Settings, get_settings
 from filearr.db import get_session
-from filearr.models import Agent, AgentCommand, AgentRelease
+from filearr.models import Agent, AgentCommand, AgentRelease, AgentReleaseRollout
 from filearr.security import require_scope
 
 router = APIRouter()
@@ -539,10 +539,17 @@ async def get_update_manifest(
     # auto_update (whether) + update_not_before / update_window (when): all
     # three are the same server-side gate, all bypassed by an operator's
     # queued self_update (the click is the authorization).
-    if update_gate.hold_reason(effective.document) and not await _pending_self_update(
-        session, agent_id
-    ):
+    clicked = await _pending_self_update(session, agent_id)
+    if update_gate.hold_reason(effective.document) and not clicked:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # Phased release rollouts (roadmap §23): a version with a LIVE rollout is
+    # offered only to agents inside the active tier's bucket range. The click
+    # bypasses this too -- the operator targeted THIS agent by hand.
+    live = {} if clicked else await live_release_rollouts(session)
+
+    def _covered(version: str) -> bool:
+        r = live.get(version)
+        return r is None or agent_config.rollout_covers(r, agent.id)
 
     releases = (
         await session.execute(select(AgentRelease).order_by(AgentRelease.created_at.desc()))
@@ -556,13 +563,49 @@ async def get_update_manifest(
             # Manifest registered but artifacts not fully uploaded — do not offer
             # a manifest whose download would 404. Skip to older covering ones.
             continue
+        if not _covered(rel.version):
+            continue  # phased: this agent's bucket is not in the active tier yet
         return Response(content=_manifest_json(rel.manifest), media_type="application/json")
 
     if not key_pinned:
         dist = _dist_manifest_for(settings, current)
-        if dist is not None:
+        if dist is not None and _covered(str(dist["version"])):
             return Response(content=_manifest_json(dist), media_type="application/json")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def live_release_rollouts(session: AsyncSession) -> dict[str, AgentReleaseRollout]:
+    """``{release_version: rollout}`` for every scheduled/running release
+    rollout (one live per version, enforced by the partial unique index)."""
+    rows = (
+        await session.execute(
+            select(AgentReleaseRollout).where(
+                AgentReleaseRollout.status.in_(("scheduled", "running"))
+            )
+        )
+    ).scalars()
+    return {r.release_version: r for r in rows}
+
+
+def release_rollout_hold(rollout: AgentReleaseRollout | None, agent_id: uuid.UUID) -> str | None:
+    """Why a live rollout is NOT offering ``rollout.release_version`` to this
+    agent right now, or None when it is (or there is no rollout)."""
+    if rollout is None:
+        return None
+    if agent_config.rollout_covers(rollout, agent_id):
+        return None
+    pct = agent_config.rollout_active_percent(rollout)
+    if rollout.status == "scheduled":
+        when = "the next tick"
+        if rollout.starts_at:
+            when = rollout.starts_at.isoformat(timespec="minutes")
+        return f"phased rollout of {rollout.release_version} is scheduled to start at {when}"
+    if pct is None:
+        return f"phased rollout of {rollout.release_version} has not activated its first tier yet"
+    return (
+        f"phased rollout of {rollout.release_version} covers {pct}% of the fleet; "
+        f"this agent's bucket ({agent_config.agent_bucket(agent_id)}) is not in it yet"
+    )
 
 
 def _manifest_json(manifest: dict[str, Any]) -> bytes:
@@ -691,3 +734,217 @@ async def trigger_self_update(
     return SelfUpdateOut(
         command_id=cmd.id, agent_id=agent_id, target=target, expires_at=cmd.expires_at
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phased release rollouts (roadmap §23, 2026-08-19)                             #
+# --------------------------------------------------------------------------- #
+class ReleaseRolloutIn(BaseModel):
+    """Same shape as a config rollout: ``tiers`` (validated by
+    ``agent_config.validate_tiers``: 1..5 entries, ascending percents, last is
+    100) and an optional ``starts_at`` (NULL = the next minute tick)."""
+
+    tiers: list[dict[str, Any]] = Field(default_factory=list)
+    starts_at: datetime | None = None
+
+
+class ReleaseRolloutOut(BaseModel):
+    id: uuid.UUID
+    release_version: str
+    tiers: list[dict[str, Any]]
+    status: str
+    current_tier: int
+    covered_percent: int
+    next_promotion_at: datetime | None
+    starts_at: datetime | None
+    started_at: datetime | None
+    tier_started_at: datetime | None
+    finished_at: datetime | None
+    actor: str | None
+    created_at: datetime
+
+
+def _release_rollout_out(r: AgentReleaseRollout) -> ReleaseRolloutOut:
+    nxt_at = None
+    if r.status == "running" and r.tier_started_at is not None:
+        tiers = r.tiers or []
+        nxt = r.current_tier + 1
+        if nxt < len(tiers):
+            nxt_at = r.tier_started_at + timedelta(
+                minutes=int(tiers[nxt].get("delay_minutes", 0) or 0)
+            )
+    return ReleaseRolloutOut(
+        id=r.id,
+        release_version=r.release_version,
+        tiers=list(r.tiers or []),
+        status=r.status,
+        current_tier=r.current_tier,
+        covered_percent=agent_config.rollout_active_percent(r) or 0,
+        next_promotion_at=nxt_at,
+        starts_at=r.starts_at,
+        started_at=r.started_at,
+        tier_started_at=r.tier_started_at,
+        finished_at=r.finished_at,
+        actor=r.actor,
+        created_at=r.created_at,
+    )
+
+
+async def _known_offerable_version(session: AsyncSession, settings: Settings, version: str) -> bool:
+    """A rollout can target a REGISTERED signed release or the central-baked
+    agent-dist version -- anything else is a typo, refuse it."""
+    rel = (
+        await session.execute(select(AgentRelease.id).where(AgentRelease.version == version))
+    ).scalar_one_or_none()
+    if rel is not None:
+        return True
+    root = agent_dist._dist_root(settings)
+    return bool(agent_dist._artifacts(root)) and agent_dist._version(root) == version
+
+
+@router.post(
+    "/agent-releases/{version}/rollouts",
+    response_model=ReleaseRolloutOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def create_release_rollout(
+    version: str,
+    body: ReleaseRolloutIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> ReleaseRolloutOut:
+    """Start (or schedule) a phased rollout of ``version``: while it is live the
+    update-manifest poll offers that version only to agents whose stable
+    hash bucket is inside the active tier. ``auto_update`` / the update window /
+    ``update_not_before`` still gate first; the per-agent update action still
+    bypasses everything. 404 for a version central cannot offer, 409 when a
+    rollout of that version is already live, 422 for a bad tier list."""
+    settings = get_settings()
+    if not _SAFE_VERSION.match(version):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid version")
+    if not await _known_offerable_version(session, settings, version):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"{version!r} is neither a registered release nor the central-baked agent version",
+        )
+    try:
+        tiers = agent_config.validate_tiers(body.tiers)
+    except agent_config.RolloutValidationError as err:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(err)) from err
+    live = await live_release_rollouts(session)
+    if version in live:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"a rollout of {version} is already {live[version].status}"
+        )
+    row = AgentReleaseRollout(
+        release_version=version,
+        tiers=tiers,
+        starts_at=body.starts_at,
+        actor=audit.actor_id(request),
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    await audit.emit(
+        audit.AGENT_RELEASE_ROLLOUT_CREATED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={"rollout_id": str(row.id), "release_version": version, "tiers": tiers},
+    )
+    return _release_rollout_out(row)
+
+
+@router.get(
+    "/agent-release-rollouts",
+    response_model=list[ReleaseRolloutOut],
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def list_release_rollouts(
+    session: AsyncSession = Depends(get_session),
+    status_filter: str | None = None,
+    limit: int = 50,
+) -> list[ReleaseRolloutOut]:
+    """Release rollouts, newest first; default = only the live ones."""
+    limit = max(1, min(limit, 200))
+    q = select(AgentReleaseRollout)
+    if status_filter:
+        q = q.where(AgentReleaseRollout.status == status_filter)
+    else:
+        q = q.where(AgentReleaseRollout.status.in_(("scheduled", "running")))
+    q = q.order_by(AgentReleaseRollout.created_at.desc()).limit(limit)
+    return [_release_rollout_out(r) for r in (await session.execute(q)).scalars()]
+
+
+async def _get_release_rollout(session: AsyncSession, rollout_id: uuid.UUID) -> AgentReleaseRollout:
+    r = await session.get(AgentReleaseRollout, rollout_id)
+    if r is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such release rollout")
+    return r
+
+
+@router.post(
+    "/agent-release-rollouts/{rollout_id}/cancel",
+    response_model=ReleaseRolloutOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def cancel_release_rollout(
+    rollout_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> ReleaseRolloutOut:
+    """Stop offering the version to agents not yet covered. **This does not
+    roll anything back**: an agent that already swapped the binary in keeps
+    running it (central cannot un-swap an executable; the agent's own
+    boot-counter rollback is the only un-install path). 409 if finished."""
+    r = await _get_release_rollout(session, rollout_id)
+    if r.status not in ("scheduled", "running"):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"rollout is already {r.status}")
+    r.status = "cancelled"
+    r.finished_at = datetime.now(UTC)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_RELEASE_ROLLOUT_CANCELLED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "rollout_id": str(r.id), "release_version": r.release_version, "tier": r.current_tier,
+        },
+    )
+    return _release_rollout_out(r)
+
+
+@router.post(
+    "/agent-release-rollouts/{rollout_id}/promote",
+    response_model=ReleaseRolloutOut,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("admin"))],
+)
+async def promote_release_rollout(
+    rollout_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> ReleaseRolloutOut:
+    """Advance a RUNNING rollout to its next tier now (the last tier completes
+    it -- offered fleet-wide). 409 when not running."""
+    r = await _get_release_rollout(session, rollout_id)
+    if r.status != "running":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"rollout is {r.status}, not running")
+    now = datetime.now(UTC)
+    tiers = r.tiers or []
+    if r.current_tier + 1 < len(tiers):
+        r.current_tier += 1
+        r.tier_started_at = now
+    if r.current_tier >= len(tiers) - 1:
+        r.status = "completed"
+        r.finished_at = now
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_RELEASE_ROLLOUT_PROMOTED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "rollout_id": str(r.id), "release_version": r.release_version,
+            "tier": r.current_tier, "status": r.status,
+        },
+    )
+    return _release_rollout_out(r)

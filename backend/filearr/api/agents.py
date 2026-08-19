@@ -1010,7 +1010,11 @@ async def list_agents(
     # <=200 rows) + one grouped query for in-flight self_update commands.
     # Deferred import: agent_updates imports require_agents_enabled from here.
     from filearr import agent_config, update_gate
-    from filearr.api.agent_updates import resolve_update_target
+    from filearr.api.agent_updates import (
+        live_release_rollouts,
+        release_rollout_hold,
+        resolve_update_target,
+    )
     from filearr.models import AgentCommand, AgentConfigGroupMember, AgentRelease
 
     settings = get_settings()
@@ -1043,6 +1047,7 @@ async def list_agents(
         ).all():
             memberships.setdefault(aid, []).append(gid)
 
+    live_rollouts = await live_release_rollouts(session)
     items: list[AgentOut] = []
     for a in rows:
         out = _agent_out(a)
@@ -1053,10 +1058,13 @@ async def list_agents(
             out.update_available = target is not None
             out.update_pending = a.id in pending_ids
             if target is not None and not out.update_pending:
-                # Same evaluation the manifest poll applies (filearr.update_gate),
-                # so the badge tells the truth about WHY nothing is happening.
+                # Same evaluation the manifest poll applies (filearr.update_gate +
+                # phased release rollouts), so the badge tells the truth about
+                # WHY nothing is happening.
                 eff = await agent_config.resolve_effective_config(session, a)
-                out.update_hold = update_gate.hold_reason(eff.document)
+                out.update_hold = update_gate.hold_reason(eff.document) or release_rollout_hold(
+                    live_rollouts.get(target), a.id
+                )
         items.append(out)
     return AgentPage(items=items, total=total, limit=limit, offset=offset)
 

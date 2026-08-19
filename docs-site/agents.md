@@ -1747,8 +1747,25 @@ authorization):
 
 The Agents page shows **update held** (with the reason on hover) for a machine
 whose policy is holding an available update, so a quiet fleet is visibly
-*held*, not *up to date*. Phased tiers currently cover configuration, not
-binaries; attaching releases to the same tier engine is a roadmap item.
+*held*, not *up to date*.
+
+**Phased release rollouts.** The Agents page's **Phased release rollout…**
+button (and `POST /api/v1/agent-releases/{version}/rollouts`) puts a binary on
+the same tier engine configuration rollouts use: 1–5 tiers of `{percent,
+delay_minutes}` (ascending, last = 100), an optional start time, and coverage by
+each agent's stable id hash bucket. While the rollout is live, central offers
+that version **only to agents inside the active tier**; the rest are answered as
+if it did not exist (an older covering release, or nothing) and show *update
+held* with the tier and their bucket. Every gate above still applies first (a
+tier is "may be offered", never "must take"), and the per-agent update action
+still bypasses everything. **Promote now** widens to the next tier immediately;
+the minute tick does it on schedule; the last tier completes the rollout
+(offered fleet-wide). **Cancel means "stop offering it" and nothing more** — a
+binary an agent already swapped in cannot be pulled back by central; the
+agent's own boot-counter rollback (§ Self-update) is the only un-install path.
+The version itself stays available, so a per-agent click can still apply it.
+Rollouts appear in the *Rollouts in flight* card next to config rollouts, with
+a **release** chip.
 
 **Rollback is automatic:** a newly swapped binary is on trial — it writes a boot
 counter and runs a 60-second health window on each launch. On pass it clears the

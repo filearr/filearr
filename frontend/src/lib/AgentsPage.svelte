@@ -62,6 +62,11 @@
     listAgents,
     listConfigGroupHistory,
     listConfigRollouts,
+    listReleaseRollouts,
+    createReleaseRollout,
+    cancelReleaseRollout,
+    promoteReleaseRollout,
+    type ReleaseRolloutOut,
     listEnrollmentTokens,
     listPresets,
     mintEnrollmentToken,
@@ -380,6 +385,89 @@
       rollouts = await listConfigRollouts();
     } catch {
       /* keep last-known — an advisory card must not fail the page */
+    }
+    try {
+      relRollouts = await listReleaseRollouts();
+    } catch {
+      /* same */
+    }
+  }
+
+  // --- phased BINARY release rollouts (roadmap §23) --------------------------
+  // Same tier engine as the config rollouts; the target is a version string
+  // central can offer (its baked agent version, or an uploaded signed release).
+  let relRollouts = $state<ReleaseRolloutOut[]>([]);
+  let relFormOpen = $state(false);
+  let relVersion = $state("");
+  let relTiers = $state<RolloutTier[]>([]);
+  let relStartsAt = $state("");
+  let relBusy = $state(false);
+  const relTierError = $derived(relFormOpen ? validateTiers(relTiers) : null);
+  /** Versions central is currently offering to at least one agent — the
+   *  natural targets for a phased rollout (usually exactly one: the baked
+   *  central version every stale agent would take). */
+  const offerableVersions = $derived(
+    Array.from(new Set(agents.map((a) => a.update_target).filter((v): v is string => !!v))),
+  );
+  function openRelForm() {
+    relFormOpen = true;
+    if (!relVersion) relVersion = offerableVersions[0] ?? "";
+    if (!relTiers.length)
+      relTiers = [
+        { percent: 10, delay_minutes: 0 },
+        { percent: 50, delay_minutes: 60 },
+        { percent: 100, delay_minutes: 60 },
+      ];
+  }
+  async function submitRelRollout() {
+    if (relTierError || !relVersion.trim()) return;
+    relBusy = true;
+    error = "";
+    try {
+      await createReleaseRollout(relVersion.trim(), {
+        tiers: relTiers,
+        starts_at: relStartsAt ? new Date(relStartsAt).toISOString() : null,
+      });
+      relFormOpen = false;
+      relStartsAt = "";
+      await reloadRollouts();
+    } catch (e) {
+      error = `release rollout: ${errDetail(e)}`;
+    } finally {
+      relBusy = false;
+    }
+  }
+  async function promoteRelRollout(r: ReleaseRolloutOut) {
+    if (!confirm(`Promote the ${r.release_version} rollout to its next tier now? A tier only ever widens.`)) return;
+    rolloutBusy[r.id] = true;
+    try {
+      await promoteReleaseRollout(r.id);
+      await reloadRollouts();
+    } catch (e) {
+      error = `promote: ${errDetail(e)}`;
+    } finally {
+      rolloutBusy[r.id] = false;
+    }
+  }
+  async function cancelRelRollout(r: ReleaseRolloutOut) {
+    if (
+      !confirm(
+        `Cancel the phased rollout of ${r.release_version}?\n\n` +
+          "Central STOPS OFFERING it to agents not yet covered. Nothing rolls back: an agent " +
+          "that already swapped its binary keeps running it (only the agent's own boot-counter " +
+          "rollback can un-install a binary). The version stays available — a per-agent update " +
+          "click still applies it.",
+      )
+    )
+      return;
+    rolloutBusy[r.id] = true;
+    try {
+      await cancelReleaseRollout(r.id);
+      await reloadRollouts();
+    } catch (e) {
+      error = `cancel: ${errDetail(e)}`;
+    } finally {
+      rolloutBusy[r.id] = false;
     }
   }
 
@@ -2605,8 +2693,70 @@ ${detail}
   <!-- Live rollouts. Only rendered when something is in flight: an empty card
        would be permanent furniture for a feature most fleets use rarely, and
        "no rollouts" is already the visible state of the groups table. -->
-  {#if rollouts.length}
-    <div class="mt-8 rounded-xl border border-sky-300 p-4 dark:border-sky-800">
+  <div class="mt-8 flex flex-wrap items-center gap-3">
+    <button class="rounded border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+      title="Phase a NEW agent binary through the fleet in tiers (e.g. 10% now, 50% in an hour, everyone an hour later) instead of every agent taking it on its next poll. Uses the same stable agent-id buckets as configuration rollouts. auto_update, the update window and update_not_before still gate first; the per-agent update action still bypasses everything."
+      onclick={openRelForm}>Phased release rollout…</button>
+    {#if offerableVersions.length}
+      <span class="text-xs text-slate-500">central is currently offering: {offerableVersions.join(", ")}</span>
+    {:else}
+      <span class="text-xs text-slate-500">no agent is behind central's version right now</span>
+    {/if}
+  </div>
+  {#if relFormOpen}
+    <div class="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+      <div class="flex flex-wrap items-end gap-3">
+        <label class="text-xs text-slate-500">
+          version
+          <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+            list="offerable-versions" bind:value={relVersion}
+            title="A version central can offer: its baked agent version (shown above) or an uploaded signed release. Anything else is refused." />
+          <datalist id="offerable-versions">
+            {#each offerableVersions as v (v)}<option value={v}></option>{/each}
+          </datalist>
+        </label>
+        <label class="text-xs text-slate-500"
+          title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC.">
+          start at (optional)
+          <input type="datetime-local" class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+            bind:value={relStartsAt} />
+        </label>
+      </div>
+      {#each relTiers as t, i (i)}
+        <div class="mt-2 flex flex-wrap items-end gap-2">
+          <span class="text-xs text-slate-500">Tier {i + 1}</span>
+          <label class="text-xs text-slate-500">
+            percent
+            <input type="number" min="1" max="100"
+              class="mt-1 block w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+              bind:value={t.percent} />
+          </label>
+          <label class="text-xs text-slate-500">
+            delay (minutes)
+            <input type="number" min="0"
+              class="mt-1 block w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+              bind:value={t.delay_minutes} />
+          </label>
+          <button class="text-xs text-red-600" onclick={() => (relTiers = relTiers.filter((_, j) => j !== i))}>remove</button>
+          <span class="text-[11px] text-slate-400">≈ {tierEtaMinutes(relTiers, i)} min after start</span>
+        </div>
+      {/each}
+      <div class="mt-3 flex flex-wrap items-center gap-3">
+        <button class="rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-40 dark:border-slate-700"
+          disabled={relTiers.length >= MAX_ROLLOUT_TIERS}
+          onclick={() => { const last = relTiers[relTiers.length - 1]; relTiers = [...relTiers, { percent: Math.min(100, (last?.percent ?? 0) + 25), delay_minutes: 60 }]; }}>+ add tier</button>
+        {#if relTierError}<span class="text-xs text-red-600">{relTierError}</span>{/if}
+        <div class="grow"></div>
+        <button class="text-sm text-slate-500" onclick={() => (relFormOpen = false)}>Cancel</button>
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+          disabled={relBusy || !!relTierError || !relVersion.trim()}
+          onclick={submitRelRollout}>Start rollout</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if rollouts.length || relRollouts.length}
+    <div class="mt-4 rounded-xl border border-sky-300 p-4 dark:border-sky-800">
       <div class="flex items-center gap-3">
         <h3 class="font-medium">Rollouts in flight</h3>
         <span class="text-xs text-slate-500">
@@ -2661,6 +2811,37 @@ ${detail}
                     disabled={rolloutBusy[r.id]}
                     title="Stop the rollout. The group stays on its current version, so agents already covered roll BACK to it on their next poll."
                     onclick={() => cancelRollout(r)}>cancel</button>
+                </td>
+              </tr>
+            {/each}
+            {#each relRollouts as r (r.id)}
+              <tr>
+                <td class="py-2 pr-3 font-medium">
+                  <span class="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
+                    title="A phased BINARY rollout: while it is live, central offers this version only to agents inside the active tier's bucket range. Cancel = stop offering (nothing rolls back).">release</span>
+                </td>
+                <td class="py-2 pr-3 font-mono text-xs text-slate-500">{r.release_version}</td>
+                <td class="py-2 pr-3 text-slate-500">{describeRollout(r)}</td>
+                <td class="py-2 pr-3 tabular-nums text-slate-500">{r.covered_percent}%</td>
+                <td class="py-2 pr-3 text-slate-500">
+                  {#if r.next_promotion_at}
+                    {untilTime(r.next_promotion_at)} · {fmt(r.next_promotion_at)}
+                  {:else if r.status === "scheduled"}
+                    starts {r.starts_at ? fmt(r.starts_at) : "next tick"}
+                  {:else}
+                    —
+                  {/if}
+                </td>
+                <td class="py-2 text-right whitespace-nowrap">
+                  {#if r.status === "running"}
+                    <button class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
+                      disabled={rolloutBusy[r.id]}
+                      onclick={() => promoteRelRollout(r)}>promote now</button>
+                  {/if}
+                  <button class="ml-3 text-red-600 disabled:opacity-50"
+                    disabled={rolloutBusy[r.id]}
+                    title="Stop OFFERING this version to agents not yet covered. Nothing rolls back — a binary already swapped in stays."
+                    onclick={() => cancelRelRollout(r)}>cancel</button>
                 </td>
               </tr>
             {/each}

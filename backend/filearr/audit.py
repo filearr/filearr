@@ -101,6 +101,11 @@ AGENT_CONFIG_ROLLOUT_CREATED = "agent_config_rollout_created"
 AGENT_CONFIG_ROLLOUT_PROMOTED = "agent_config_rollout_promoted"
 AGENT_CONFIG_ROLLOUT_CANCELLED = "agent_config_rollout_cancelled"
 AGENT_CONFIG_ROLLOUT_COMPLETED = "agent_config_rollout_completed"
+# Phased binary-release rollouts (roadmap §23, 2026-08-19).
+AGENT_RELEASE_ROLLOUT_CREATED = "agent_release_rollout_created"
+AGENT_RELEASE_ROLLOUT_PROMOTED = "agent_release_rollout_promoted"
+AGENT_RELEASE_ROLLOUT_CANCELLED = "agent_release_rollout_cancelled"
+AGENT_RELEASE_ROLLOUT_COMPLETED = "agent_release_rollout_completed"
 # 2026-08-10: an operator renamed an enrolled agent via PATCH /agents/{id}.
 # (Until P13 this endpoint also moved an agent between rollout groups; that
 # column is gone — membership is edited via PUT /agents/{id}/config-groups,

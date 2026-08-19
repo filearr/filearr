@@ -1949,6 +1949,68 @@ class AgentConfigRollout(Base):
     )
 
 
+class AgentReleaseRollout(Base):
+    """A phased rollout of ONE agent binary version to a growing slice of the
+    fleet (roadmap §23, 2026-08-19) -- the release counterpart of
+    :class:`AgentConfigRollout`, on the SAME tier engine: identical ``tiers``
+    shape and validation, the same stable agent-id hash bucket
+    (:func:`filearr.agent_config.agent_bucket`), the same worker tick.
+
+    ``release_version`` is the version string central would offer -- a signed
+    release's ``AgentRelease.version`` OR the central-baked agent-dist stamp
+    ("1.5.1-b8263ee"). While a rollout for that version is live, the update-
+    manifest poll offers it ONLY to agents whose bucket is inside the active
+    tier; everyone else is answered as if the version did not exist (an older
+    covering release, or 204). ``auto_update`` / ``update_window`` /
+    ``update_not_before`` still gate first (a tier is "may be offered", never
+    "must take"), and the operator's per-agent update action still bypasses
+    everything.
+
+    Completion means "offered to 100%"; there is nothing to move (unlike a
+    config rollout's ``current_version``). CANCEL means "stop offering it" and
+    nothing more -- a binary an agent already swapped in cannot be pulled back
+    by central; the boot-counter automatic rollback is the only un-install path.
+    One live rollout per version (partial unique index)."""
+
+    __tablename__ = "agent_release_rollouts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('scheduled','running','completed','cancelled')",
+            name="agent_release_rollouts_status_valid",
+        ),
+        Index(
+            "uq_agent_release_rollouts_live",
+            "release_version",
+            unique=True,
+            postgresql_where=text("status IN ('scheduled','running')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    release_version: Mapped[str] = mapped_column(Text)
+    tiers: Mapped[list] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'scheduled'"))
+    current_tier: Mapped[int] = mapped_column(Integer, server_default=text("-1"))
+    starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    tier_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class EnrollmentToken(Base):
     """A single-use, short-TTL enrollment token (P5-T1, research §7.1, R3). The
     raw token is shown to the operator ONCE and NEVER persisted — only its
