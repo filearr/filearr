@@ -797,6 +797,7 @@ class ApiKey(Base):
         UUID(as_uuid=True),
         ForeignKey("service_accounts.principal_id", ondelete="CASCADE"),
         nullable=True,
+        index=True,
     )
     path_scope: Mapped[str | None] = mapped_column(LtreeCompat(), nullable=True)
     libraries: Mapped[list[uuid.UUID] | None] = mapped_column(
