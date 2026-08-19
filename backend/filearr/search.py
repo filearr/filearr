@@ -289,9 +289,21 @@ async def _apply_embedder_settings(
     if not s.semantic_enabled:
         return
     current = await index.get_embedders()
-    if embedder_matches(current, s.embed_dim):
+    quantize = bool(s.semantic_quantize)
+    if embedder_matches(current, s.embed_dim, quantize=quantize):
         return
-    info = await index.update_embedders(build_embedders(s.embed_dim))
+    # Un-quantizing a live index is impossible in Meili (binaryQuantized is
+    # one-way); when the live embedder is quantized and the setting turned off,
+    # the boot path logs and leaves it — rebuild-index is the un-quantize path.
+    live = (getattr(current, "embedders", None) or {}).get(DEFAULT_EMBEDDER_NAME)
+    if live is not None and bool(getattr(live, "binary_quantized", None)) and not quantize:
+        logger.warning(
+            "semantic embedder is binary-quantized but FILEARR_SEMANTIC_QUANTIZE "
+            "is off; Meili cannot un-quantize in place — run rebuild-index to "
+            "rebuild unquantized"
+        )
+        return
+    info = await index.update_embedders(build_embedders(s.embed_dim, quantize=quantize))
     if task_sink is not None:
         task_sink.append(info)
 

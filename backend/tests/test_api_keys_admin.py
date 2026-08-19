@@ -13,6 +13,18 @@ from .test_roles_account_settings import _bootstrap_admin, client, db_maker  # n
 pytestmark = pytest.mark.asyncio
 
 
+
+async def _llm_acct(c) -> str:
+    """2026-08-20: LLM keys require a service-account owner (like plain keys)."""
+    import uuid as _uuidmod
+
+    r = await c.post(
+        "/api/v1/service-accounts", json={"name": f"llm-{_uuidmod.uuid4().hex[:8]}"}
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
 async def _mk_account(c, name="sonarr-box"):
     r = await c.post("/api/v1/service-accounts", json={"name": name})
     assert r.status_code == 201, r.text
@@ -48,7 +60,10 @@ async def test_mint_list_use_revoke(client):  # noqa: F811
     assert r.status_code == 422
 
     # Listing: present, no key material, LLM keys excluded.
-    r = await c.post("/api/v1/llm-keys", json={"name": "llm", "role": "librarian"})
+    r = await c.post(
+        "/api/v1/llm-keys",
+        json={"service_account_id": await _llm_acct(c), "name": "llm", "role": "librarian"},
+    )
     assert r.status_code == 201, r.text
     r = await c.get("/api/v1/api-keys")
     rows = r.json()["keys"]
@@ -85,7 +100,10 @@ async def test_admin_scoped_key_and_non_admin_refused(client):  # noqa: F811
     assert (await c.get("/api/v1/api-keys", headers=ch)).status_code == 403
     assert (await c.post("/api/v1/api-keys", json={"name": "n", "service_account_id": acct}, headers=ch)).status_code == 403
     # revoking an LLM key through this router is a 404 (wrong family)
-    r = await c.post("/api/v1/llm-keys", json={"name": "llm", "role": "librarian"})
+    r = await c.post(
+        "/api/v1/llm-keys",
+        json={"service_account_id": await _llm_acct(c), "name": "llm", "role": "librarian"},
+    )
     assert (await c.delete(f"/api/v1/api-keys/{r.json()['id']}")).status_code == 404
 
 
@@ -113,3 +131,63 @@ async def test_service_account_disable_and_delete_take_keys_along(client):  # no
     assert (await c.delete(f"/api/v1/service-accounts/{acct}")).status_code == 204
     assert (await c.get("/api/v1/libraries", headers=hdr)).status_code == 401
     assert (await c.get("/api/v1/api-keys")).json()["keys"] == []
+
+
+async def test_llm_key_requires_and_binds_service_account(client):  # noqa: F811
+    """2026-08-20: LLM keys are owned like plain keys — mint without an owner is
+    422; disabling the account kills the key; the owner shows on the row."""
+    c, maker, _ = client
+    await _bootstrap_admin(c)
+    r = await c.post("/api/v1/llm-keys", json={"name": "orphan", "role": "librarian"})
+    assert r.status_code == 422
+    acct = await _mk_account(c, "openwebui")
+    r = await c.post(
+        "/api/v1/llm-keys",
+        json={"name": "bot", "role": "librarian", "service_account_id": acct},
+    )
+    assert r.status_code == 201, r.text
+    row = r.json()
+    assert row["service_account_id"] == acct
+    key = row["key"]
+    hdr = {"Authorization": f"Bearer {key}"}
+    assert (await c.post("/api/llm/v1/catalog_overview", headers=hdr)).status_code == 200
+    # disable the account -> the LLM key stops authenticating
+    r = await c.patch(f"/api/v1/service-accounts/{acct}", json={"disabled": True})
+    assert r.status_code == 200, r.text
+    assert (await c.post("/api/llm/v1/catalog_overview", headers=hdr)).status_code == 401
+
+
+async def test_grant_ceiling_key_and_user_creation(client):  # noqa: F811
+    """2026-08-20: a caller can only grant what they hold — an admin-scoped key
+    can mint anything; a custom role WITHOUT the write scope cannot create a
+    write key or a write/admin user even if it somehow reaches the endpoint.
+    (Today the endpoints are admin-gated, so the observable contract is: admin
+    callers pass; the pure helpers enforce subset semantics.)"""
+    from filearr.security import expand_scopes, require_grant_ceiling
+
+    c, maker, _ = client
+    await _bootstrap_admin(c)
+    acct = await _mk_account(c, "ceiling")
+    # admin session mints admin key + admin user: allowed (same access)
+    r = await c.post(
+        "/api/v1/api-keys",
+        json={"name": "adminkey", "scopes": ["admin"], "service_account_id": acct},
+    )
+    assert r.status_code == 201
+    r = await c.post(
+        "/api/v1/auth/users",
+        json={"username": "second-admin", "password": "longpassword1", "global_role": "admin"},
+    )
+    assert r.status_code == 201, r.text
+
+    # pure ceiling semantics (what a future non-admin gate would enforce)
+    import pytest as _pytest
+    from fastapi import HTTPException
+
+    require_grant_ceiling(expand_scopes(["read"]), expand_scopes(["write"]), "k")  # write ⊇ read
+    with _pytest.raises(HTTPException):
+        require_grant_ceiling(expand_scopes(["write"]), expand_scopes(["read"]), "k")
+    with _pytest.raises(HTTPException):
+        require_grant_ceiling(expand_scopes(["admin"]), expand_scopes(["write"]), "k")
+    assert expand_scopes(["admin"]) == {"read", "write", "admin"}
+    assert expand_scopes(["write"]) == {"read", "write"}

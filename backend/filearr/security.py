@@ -14,6 +14,7 @@ Phase 6 (no login wall, no cookie handling, existing key scopes untouched)."""
 
 import hashlib
 import secrets
+import uuid
 from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Request, Response, status
@@ -152,6 +153,59 @@ async def resolve_session_principal(
     if validated.rotated is not None:
         set_session_cookie(response, request, validated.rotated.raw)
     return principal
+
+
+#: Scope implication used everywhere scopes are compared: admin implies write
+#: implies read.
+_SCOPE_IMPLIES = {
+    "read": frozenset({"read"}),
+    "write": frozenset({"read", "write"}),
+    "admin": frozenset({"read", "write", "admin"}),
+}
+
+
+def expand_scopes(scopes) -> frozenset[str]:
+    """Expand a scope list through the implication chain (admin ⊇ write ⊇ read)."""
+    out: set[str] = set()
+    for s in scopes or ():
+        out |= _SCOPE_IMPLIES.get(s, frozenset())
+    return frozenset(out)
+
+
+async def caller_scopes(request: Request, session: AsyncSession) -> frozenset[str]:
+    """The EXPANDED scope set of the already-authenticated caller (2026-08-20).
+
+    Privilege-ceiling guard support: an endpoint that GRANTS access (minting an
+    API key, creating a user, changing a role) must not grant more than the
+    caller holds. Resolution rides ``request.state.actor``, which every auth
+    path stamps — no second credential verification, no session-token rotation.
+    Auth disabled ⇒ the full set (the API is deliberately open)."""
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return frozenset({"read", "write", "admin"})
+    actor = getattr(request.state, "actor", None)
+    if not actor:
+        return frozenset()
+    if actor.startswith("principal:"):
+        principal = await session.get(Principal, uuid.UUID(actor.split(":", 1)[1]))
+        if principal is None:
+            return frozenset()
+        return expand_scopes(authx.scopes_for_role(principal.global_role))
+    # else: an API key's prefix (unique)
+    row = (
+        await session.execute(select(ApiKey).where(ApiKey.prefix == actor))
+    ).scalar_one_or_none()
+    return expand_scopes(row.scopes) if row is not None else frozenset()
+
+
+def require_grant_ceiling(requested: frozenset[str], granted: frozenset[str], what: str) -> None:
+    """403 when ``requested`` exceeds ``granted`` — the same-or-less rule."""
+    missing = requested - granted
+    if missing:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"cannot grant {what} with scope(s) {sorted(missing)} you do not hold yourself",
+        )
 
 
 def require_scope(scope: str):

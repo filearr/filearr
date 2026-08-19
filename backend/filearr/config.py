@@ -787,6 +787,12 @@ class Settings(BaseSettings):
     # /config volume). ``embedder_concurrency`` stays 1 (ONE memory-capped, lowest
     # priority worker); ``embed_batch`` is the model inference batch (32).
     semantic_enabled: bool = False
+    # Roadmap §8 adopt-later (2026-08-20): store semantic vectors binary-
+    # quantized (1 bit/dimension, ~10x smaller vector index, slight recall
+    # loss). Worth flipping when the embedded corpus reaches millions.
+    # ONE-WAY on a live index: turning it back OFF requires a rebuild-index
+    # (logged at boot); turning it ON applies in place.
+    semantic_quantize: bool = False
     embed_model: str = "BAAI/bge-small-en-v1.5"
     embed_dim: int = 384
     embed_version: str = "1"  # fingerprint disambiguator for two builds of one id

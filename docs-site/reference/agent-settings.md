@@ -408,7 +408,7 @@ PDF text work here" is per binary. Install guidance per OS is in
 
 | Variable | What it controls | Default | Also settable by |
 | --- | --- | --- | --- |
-| `FILEARR_AGENT_LOG_LEVEL` | `error`, `warn`, `info`, `verbose` or `debug`. An unrecognised name prints a complaint and falls back to `info`. | `info` | `-log-level` flag; sidecar `log_level` |
+| `FILEARR_AGENT_LOG_LEVEL` | `error`, `warn`, `info`, `verbose` or `debug`. An unrecognised name prints a complaint and falls back to `info`. Since agent 1.5.3 a config-group `log_level` (delivered under the policy `group` section) **live-overrides** this on the next policy poll while set. | `info` | `-log-level` flag; sidecar `log_level`; group settings (wins while set) |
 | `FILEARR_AGENT_LOG_DIR` | Directory for a rotating `filearr-agent.log` (10 MiB × 5, gzipped). Empty means stderr only, no file. **Exception:** `run` under an OS service manager with nothing configured defaults to `<data-dir>/logs`, because a service has no stderr and would otherwise log into the void. Each command gets its own file (`filearr-agent-scan.log` and so on) — rotation is not multi-process safe on a shared path, and a container runs the daemon and scans as concurrent processes. | unset (stderr only) | `-log-dir` flag; sidecar `log_dir` |
 | `FILEARR_AGENT_LOG_STDERR` | Boolean. Forces the stderr echo alongside an active file sink even when stderr is not a terminal. The container image sets it, because its stderr *is* the `docker logs` stream and must keep carrying every line once a shared log dir is enabled. | off (stderr echo only on a tty) | — |
 

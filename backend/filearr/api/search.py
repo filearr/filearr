@@ -512,6 +512,15 @@ async def search(
     ),
     cursor: str | None = None,
     limit: int = Query(default=PAGE_SIZE, le=200),
+    search_in: str = Query(
+        default="all",
+        pattern="^(all|content|names)$",
+        description="2026-08-20: which attributes the query text matches. "
+        "'all' (default) = every searchable attribute; 'content' = the indexed "
+        "FILE CONTENT only (body/OCR text and archive member names — a path or "
+        "filename match alone no longer returns the item); 'names' = "
+        "title/filename/path/tags and the name-ish metadata only (no body text).",
+    ),
     # P6-T3 server-side RBAC scoping: None (admin / API key / auth-off) => no
     # filter (byte-identical to the pre-P6 path); else the deny-aware scope
     # expression ANDed into the Meili query so Meili does the row-level filtering.
@@ -608,6 +617,15 @@ async def search(
         highlight_pre_tag=HIGHLIGHT_PRE,
         highlight_post_tag=HIGHLIGHT_POST,
     )
+    # search_in scoping (2026-08-20): restrict which attributes the QUERY TEXT
+    # matches (filters/facets/sort untouched). Uses Meili attributesToSearchOn,
+    # so ranking still runs over the restricted set.
+    if search_in == "content":
+        search_kwargs["attributes_to_search_on"] = ["body_text", "archive_members"]
+    elif search_in == "names":
+        search_kwargs["attributes_to_search_on"] = [
+            "title", "filename", "path", "artist", "album", "author", "tags",
+        ]
     async with client() as c:
         index = c.index(s.meili_index)
         try:

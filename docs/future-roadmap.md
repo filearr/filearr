@@ -15,7 +15,7 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 | 5 | Search & findability | **All shipped** incl. P3 provenance (2026-08-19); email/mbox indexing tracked in §15; geo map filter is in the search UI (R8); federated multi-search only if indexes ever split (§8) |
 | 6 | Alerting | **shipped**; apprise in the image (P8-T3); **polish shipped 2026-08-19** — inhibition (`inhibited_by` + `inhibit_window_s`, mute semantics), `group_by` extras (folder / extension / file), `FILEARR_WEBHOOK_ALLOWED_CIDRS` |
 | 7 | Data model extensions | **shipped** |
-| 8 | Meilisearch adoption | adopt-now **done** (v1.53.0; compaction P9-T4 live weekly); adopt-later items open |
+| 8 | Meilisearch adoption | **closed 2026-08-20** — quantization opt-in shipped; dumpless upgrades already adopted (MEILI_UPGRADE_DB); task webhooks declined final |
 | 9 | License | **decided** (AGPL-3.0-or-later) |
 | 10 | Sequencing | both waves **delivered** |
 | 11 | ffprobe follow-ups | **shipped 2026-08-19** (DV profile/level/compat from the DOVI record; deep first-frames probe for HDR10+ / MaxCLL / MaxFALL / mastering display, Python + Go); pymediainfo cross-check declined |
@@ -29,7 +29,7 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 | 19 | Test suite + CI | **shipped** (+ cross-compiled images 2026-08-16) |
 | 20 | UX/preview backlog | **shipped** |
 | 21 | LLM / RAG | **shipped** (M1–M3) |
-| 22 | Permissions audit (W7) | **v1 shipped 2026-08-19** (Linux/Windows collector, snapshots, 2 reports); **T9 drift report + `permission_changed` alert shipped 2026-08-19**; T4 macOS, T8 canonicalisation, T10 effective access open |
+| 22 | Permissions audit (W7) | **CLOSED 2026-08-20** — v1 + T9 drift/alert (08-19); T4 macOS ACL read, T8 principal aliases (report-side canonicalisation), T10 effective access (pure evaluator + inspection endpoint) all shipped 08-20 |
 | 23 | Binary release rollouts on the tier engine | **shipped 2026-08-19** |
 | 24 | GPU acceleration | **declined** (assessed 2026-08-12) |
 | 25 | Insight features | **shipped 2026-08-13** |
@@ -261,13 +261,19 @@ Paperless-ngx, Immich, 2024-26 local-AI tools):
 
 ## 8. Meilisearch feature adoption plan (verified against v1.48.3)
 
-> **STATUS (2026-08-05):** adopt-now list done — tenant tokens, ≥1.48.2 pin
-> (now v1.53.0), facet search, index-swap (shadow-index reaper), per-attribute
-> typo tolerance, cutoff guard — EXCEPT **task webhooks**, which stay
-> unadopted on purpose (the v1.8–v1.34 webhook SSRF advisory made polling the
-> conservative choice; revisit deliberately). Adopt-later: hybrid/vector +
-> local embedder shipped (quantization deliberately deferred until the corpus
-> needs it); **`/similar` adopted** (P3-T9, `search_similar_documents`);
+> **STATUS (2026-08-20): SECTION CLOSED.** Adopt-now list done — tenant
+> tokens, ≥1.48.2 pin (now v1.53.0), facet search, index-swap (shadow-index
+> reaper), per-attribute typo tolerance, cutoff guard. **Binary quantization
+> shipped 2026-08-20** as opt-in `FILEARR_SEMANTIC_QUANTIZE` (embedder
+> `binaryQuantized`; one-way on a live index — un-quantize = rebuild-index,
+> logged at boot). **Dumpless upgrades were already adopted**: compose/Unraid
+> set `MEILI_UPGRADE_DB=true`, verified live on the 1.49→1.53 bump (ops
+> runbook §meili-upgrade). **Task webhooks: DECLINED, final** — the original
+> SSRF caution is moot on the ≥1.48 pin, but every document write is now
+> acked synchronously (`meili_write_ack_seconds`) and failures surface via
+> /stats + MeiliWriteFailed, so a webhook ingress would add attack surface
+> for no remaining benefit. `/similar` adopted (P3-T9,
+> `search_similar_documents`, now with ranking scores);
 > **federated multi-search + `facetsByIndex` adopted** (R8, 2026-08-10 —
 > `GET /search/federated` merges the item and chunks indexes via the SDK's
 > `multi_search(..., federation=Federation(...))`, RBAC scope filter in EVERY
@@ -947,7 +953,16 @@ silently-dropped facade audit events — ApiKey uuid vs principals FK).
 > (`alerts.ops.emit_permission_change`, hourly+digest dedup; fidelity-only
 > changes recorded, not alerted); ingest also links snapshots to catalog items
 > via the agent library root. **Still open:** T4 macOS read, T8 principal
-> canonicalisation, T10 effective access. Original note follows.
+> canonicalisation, T10 effective access. **All three shipped 2026-08-20:**
+> T4 — darwin `ls -led` reader (named perms → verbs, order preserved, BSD
+> flags as `Record.Flags`, TCC/FDA denial = collector error; parser untagged
+> and unit-tested on Linux); T8 — `principal_aliases` table + admin CRUD,
+> LEFT-JOINed into the by-principal/broad-access reports (canonical identity
+> shown, raw id kept; snapshots never rewritten); T10 —
+> `permissions.effective_access` pure evaluator (ordered deny-before-allow,
+> POSIX class selection, `full` expansion, local ∩ share intersection) +
+> `GET /permissions/effective-access` over the newest snapshot (caller
+> supplies the identity closure). **Section closed.** Original note follows.
 
 **Status: scaffolded on both sides 2026-07-18, inert since.** Recorded here on
 2026-08-10 because it had no roadmap entry at all — the design lived only in

@@ -67,7 +67,7 @@ queues. What each extractor reads and stores:
 | Video | `ffprobe` | Codecs, resolution, duration, bitrate, streams, container facts (bounded runtime + output size). HDR signalling (HDR10 / HLG / Dolby Vision incl. profile, level and base-layer compatibility from the DOVI record); for HDR streams a second, bounded first-frames probe tells **HDR10+** from HDR10 and records MaxCLL / MaxFALL / mastering display (`FILEARR_FFPROBE_DEEP_HDR`, default on; SDR files never pay it). |
 | Audio / audiobook / sample | tag libraries | Tags (artist/album/title/etc.), duration, channels, sample rate, cover art. |
 | Image | `exiftool` | Curated camera / lens / exposure / dimension fields under an `exif.` namespace. **GPS is gated — see below.** |
-| Document | pypdf / python-docx / openpyxl | Document properties; optional **body text** for search snippets (bounded, opt-in per feature). |
+| Document | pypdf / python-docx / openpyxl | Document properties; **body text** for search snippets (bounded). Plain-text families (`txt`/`text`/`md`/`rst` and standalone `.nfo`) read as-is; markup (`html`/`htm`/`xhtml`/`xml`) is reduced to visible text (tags/script/style stripped) — so text-file *content* is searchable, not just names. |
 | Spreadsheet | openpyxl | Workbook properties (metadata only; cell extraction is a future capability). |
 | 3D model | trimesh | Geometry facts for safe formats (fast `process=False` path by default; `FILEARR_MODEL3D_ACCURATE_MAX_BYTES` opts small files into vertex-merged "accurate" geometry with a true watertight flag, recorded as `geometry_tier`); a lightweight file-fact record for formats with no safe pure loader (STEP/FBX/BLEND — a native CAD kernel is out of scope). |
 | Archive | zip / tar / 7z / rar readers | **Member name listing** (searchable) *without unpacking* — stdlib for zip/tar, `py7zr` and `rarfile` header-only for 7z/rar (and `.cb7`/`.cbr`); guarded against zip/decompression bombs, declared-size bombs and encrypted headers. Agents list zip/tar only. |
@@ -103,7 +103,10 @@ guards) so a hostile or oversized file cannot stall or OOM a worker.
       text layer, bounded by page/pixel/time caps, storing capped text.
     - **Semantic search** (a local ONNX embedder) is **globally off by default**;
       when enabled it computes dense vectors locally (never a cloud API — private
-      files never leave the box) and downloads a ~130 MB model once.
+      files never leave the box) and downloads a ~130 MB model once. At large
+      scale (millions of embedded items) `FILEARR_SEMANTIC_QUANTIZE=true`
+      shrinks the vector index ~10× via binary quantization — one-way on a live
+      index; turning it off again requires a rebuild-index.
 
         That download is the only outbound call, it happens once per model into
         the persistent cache volume, and inference is local forever after.

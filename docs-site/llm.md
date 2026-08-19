@@ -8,7 +8,9 @@ and any OpenAI-compatible or MCP tool-calling client.
 
 ## Quick start
 
-1. **Mint a key**: Admin page → *LLM access keys* → Mint. Pick a role:
+1. **Mint a key**: Admin page → *LLM access keys* → Mint. Pick the owning
+   **service account** (like plain API keys — disable the account to cut all
+   its keys at once, delete it to revoke them) and a role:
    `librarian` (search/where, no content), `analyst` (adds document-text
    reading + passage retrieval for RAG), `guest` (filenames only, no
    paths), `auditor` (reports only), `curator` (analyst plus bounded

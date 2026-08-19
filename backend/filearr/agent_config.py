@@ -36,7 +36,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -365,6 +372,53 @@ class InventoryConfig(BaseModel):
     enabled: bool = False
     collectors: list[str] = Field(default_factory=list)
     permissions: PermissionsConfig | None = None
+    # 2026-08-20: central-side scheduling. When ``schedule_cron`` is set (and
+    # ``enabled``), the minutely worker tick enqueues an inventory COMMAND for
+    # every member agent on the cron's occurrences — the same command an
+    # operator fires by hand, so the whole existing pipeline (poll, run,
+    # results, permission ingest, drift alert) is reused. ``paths`` /
+    # ``preset`` say what to walk (at least one is required with a schedule;
+    # path specs use the agent's ``pathspec`` grammar, e.g. ``D:\\`` or
+    # ``home_glob:*``).
+    schedule_cron: str | None = None
+    paths: list[str] = Field(default_factory=list)
+    preset: str | None = None
+
+    @field_validator("schedule_cron")
+    @classmethod
+    def _valid_schedule_cron(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        from filearr.schedule import InvalidCronError, validate_cron
+
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("inventory.schedule_cron must be a non-empty cron expression")
+        try:
+            validate_cron(v.strip())
+        except InvalidCronError as err:
+            raise ValueError(f"invalid inventory.schedule_cron: {err}") from err
+        return v.strip()
+
+    @field_validator("paths")
+    @classmethod
+    def _valid_paths(cls, v: list[str]) -> list[str]:
+        if len(v) > 200:
+            raise ValueError(f"inventory.paths has {len(v)}; max 200")
+        for i, p in enumerate(v):
+            if not isinstance(p, str) or not p.strip():
+                raise ValueError(f"inventory.paths[{i}] must be a non-empty string")
+            if len(p) > 1024:
+                raise ValueError(f"inventory.paths[{i}] exceeds 1024 chars")
+        return v
+
+    @model_validator(mode="after")
+    def _schedule_needs_roots(self) -> InventoryConfig:
+        if self.schedule_cron and not (self.paths or self.preset):
+            raise ValueError(
+                "inventory.schedule_cron needs inventory.paths or inventory.preset "
+                "(the scheduled run must know what to walk)"
+            )
+        return self
 
     @field_validator("collectors")
     @classmethod

@@ -344,3 +344,52 @@ async def test_search_hit_without_formatted_has_no_snippet(monkeypatch):
     h = r.json()["hits"][0]
     assert "snippet" not in h
     assert "highlight" not in h
+
+
+# --- 2026-08-20: plain-text + markup family body text ------------------------
+def test_nfo_and_txt_body(tmp_path):
+    from filearr.tasks.documents import extract_body
+
+    p = tmp_path / "readme.nfo"
+    p.write_text("Release notes for the thing.\nGreets to everyone.")
+    out = extract_body(str(p), max_bytes=1 << 20)
+    assert "Release notes" in out["body_text"]
+
+
+def test_html_and_xml_body_tag_stripped(tmp_path):
+    from filearr.tasks.documents import extract_body
+
+    h = tmp_path / "page.html"
+    h.write_text(
+        "<html><head><style>p{}</style><title>T</title></head>"
+        "<body><h1>Heading</h1><p>Real &amp; visible</p><script>evil()</script></body></html>"
+    )
+    out = extract_body(str(h), max_bytes=1 << 20)
+    assert "Heading" in out["body_text"] and "Real & visible" in out["body_text"]
+    assert "evil" not in out["body_text"] and "style" not in out["body_text"]
+
+    x = tmp_path / "data.xml"
+    x.write_text("<movie><title>Heat</title><plot>Bank robbers.</plot></movie>")
+    out = extract_body(str(x), max_bytes=1 << 20)
+    assert "Heat" in out["body_text"] and "Bank robbers." in out["body_text"]
+
+
+@pytest.mark.asyncio
+async def test_search_in_scopes_attributes(monkeypatch):
+    """2026-08-20: search_in=content restricts matching to indexed file content
+    (body/OCR text + archive members); names is the inverse; all sends nothing."""
+    transport, sink = _make_app(monkeypatch, [])
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get("/api/v1/search?q=fox&search_in=content")
+        assert r.status_code == 200
+        assert sink["attributes_to_search_on"] == ["body_text", "archive_members"]
+        r = await c.get("/api/v1/search?q=fox&search_in=names")
+        assert r.status_code == 200
+        assert sink["attributes_to_search_on"] == [
+            "title", "filename", "path", "artist", "album", "author", "tags",
+        ]
+        sink.clear()
+        r = await c.get("/api/v1/search?q=fox")
+        assert r.status_code == 200
+        assert "attributes_to_search_on" not in sink
+        assert (await c.get("/api/v1/search?q=fox&search_in=bogus")).status_code == 422

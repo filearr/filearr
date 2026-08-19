@@ -71,6 +71,11 @@ curl -X PATCH http://localhost:8484/api/v1/items/<id> \
 curl -X POST http://localhost:8484/api/v1/system/rebuild-index \
   -H 'Authorization: Bearer <admin-key>'
 
+# content-only search (2026-08-20): the query text matches indexed FILE CONTENT
+# (body/OCR text, archive member names) — a filename/path hit alone no longer
+# returns the item. search_in=names is the inverse; default matches everything.
+curl "http://localhost:8484/api/v1/search?q=invoice+total&search_in=content"
+
 # the AGPL §13 source link + running version
 curl http://localhost:8484/api/v1/version
 ```

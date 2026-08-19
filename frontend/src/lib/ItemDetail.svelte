@@ -316,6 +316,29 @@
   let similarLoaded = $state(false);
   let similarLoading = $state(false);
   let similarError = $state("");
+  // 2026-08-20: grid (thumbnails) or table (name/similarity/type/size/modified)
+  // view for the similar list. Sticky per browser.
+  let similarView = $state<"grid" | "table">(
+    (localStorage.getItem("filearr.similarView") as "grid" | "table") || "grid",
+  );
+  function setSimilarView(v: "grid" | "table") {
+    similarView = v;
+    localStorage.setItem("filearr.similarView", v);
+  }
+  const simPct = (h: Record<string, unknown>): string =>
+    typeof h.similarity === "number" ? `${(h.similarity * 100).toFixed(1)}%` : "—";
+  const simSize = (h: Record<string, unknown>): string => {
+    const n = h.size;
+    if (typeof n !== "number") return "—";
+    if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GiB`;
+    if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MiB`;
+    if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KiB`;
+    return `${n} B`;
+  };
+  const simWhen = (h: Record<string, unknown>): string => {
+    const t = h.mtime;
+    return typeof t === "number" ? new Date(t * 1000).toLocaleDateString() : "—";
+  };
 
   async function toggleSimilar() {
     similarOpen = !similarOpen;
@@ -676,11 +699,42 @@
           aria-expanded={similarOpen}
           onclick={toggleSimilar}>Similar items {similarOpen ? "▲" : "▾"}</button>
         {#if similarOpen}
+          <span class="ml-2 inline-flex overflow-hidden rounded border border-slate-300 text-[10px] dark:border-slate-700">
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'grid' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+              onclick={() => setSimilarView("grid")}>grid</button>
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'table' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+              onclick={() => setSimilarView("table")}>table</button>
+          </span>
+          <span class="ml-1 cursor-help text-[10px] text-slate-400"
+            title="How this list is built: each embedded item carries a vector computed locally from its text (title/filename, tags, extracted body/OCR text). These are the nearest items by cosine similarity of those vectors — similar DESCRIBED CONTENT, not similar bytes (byte-identical copies are the Copies section). The % is the normalised similarity score the ranking sorted by: ~100% = near-duplicate text signal, ~80%+ = same topic/series.">ⓘ why these?</span>
+        {/if}
+        {#if similarOpen}
           <div class="mt-2">
             {#if similarLoading}
               <p class="text-xs text-slate-500">Loading…</p>
             {:else if similarError}
               <p class="text-xs text-slate-500">{similarError}</p>
+            {:else if similar && similar.hits.length && similarView === "table"}
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead class="text-left text-slate-500">
+                    <tr><th class="py-1 pr-2">Name</th><th class="pr-2">Similarity</th><th class="pr-2">Type</th><th class="pr-2">Size</th><th class="pr-2">Modified</th><th>Path</th></tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                    {#each similar.hits as h (h.id)}
+                      <tr class={onOpen ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900" : ""}
+                        onclick={() => onOpen?.(String(h.id))}>
+                        <td class="max-w-[16rem] truncate py-1 pr-2" title={hitLabel(h)}>{hitLabel(h)}</td>
+                        <td class="pr-2 font-mono">{simPct(h)}</td>
+                        <td class="pr-2 text-slate-500">{h.file_group ?? h.file_category ?? "—"}</td>
+                        <td class="pr-2 text-slate-500">{simSize(h)}</td>
+                        <td class="pr-2 text-slate-500">{simWhen(h)}</td>
+                        <td class="max-w-[18rem] truncate font-mono text-[10px] text-slate-400" title={hitPath(h)}>{hitPath(h)}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
             {:else if similar && similar.hits.length}
               <ul class="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {#each similar.hits as h (h.id)}
@@ -694,7 +748,8 @@
                       <div class="flex h-20 items-center justify-center overflow-hidden">
                         <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
                       </div>
-                      <p class="mt-1 truncate text-xs">{hitLabel(h)}</p>
+                      <p class="mt-1 truncate text-xs">{hitLabel(h)}
+                        {#if typeof h.similarity === "number"}<span class="ml-1 text-[10px] text-slate-400">{simPct(h)}</span>{/if}</p>
                       <p class="truncate font-mono text-[10px] text-slate-400">{hitPath(h)}</p>
                     </button>
                   </li>

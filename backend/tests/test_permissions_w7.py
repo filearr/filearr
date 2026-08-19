@@ -504,3 +504,66 @@ def test_settings_rejects_bad_permissions_block():
                 }
             }
         )
+
+
+# --------------------------------------------------------------------------- #
+# 5c. W7-T10: effective access (pure evaluator)                                #
+# --------------------------------------------------------------------------- #
+def test_effective_access_posix_class_selection():
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "1000", "name": "eric"},
+        group={"kind": "group", "id": "100", "name": "users"},
+        aces=[
+            {"principal": {"kind": "user", "id": "1000", "name": "eric"}, "type": "allow",
+             "verbs": ["read", "write"], "raw_mask": "mode:user_obj=06", "scope": "this",
+             "source": "local", "order_index": 0},
+            {"principal": {"kind": "group", "id": "100", "name": "users"}, "type": "allow",
+             "verbs": ["read"], "raw_mask": "mode:group_obj=04", "scope": "this",
+             "source": "local", "order_index": 1},
+            {"principal": {"kind": "well_known", "id": "other", "name": "other",
+                           "well_known": "EVERYONE"}, "type": "allow", "verbs": [],
+             "raw_mask": "mode:other=00", "scope": "this", "source": "local",
+             "order_index": 2},
+        ],
+        fidelity="full_native",
+    )
+    # the owner gets the OWNER class only
+    ea = permissions.effective_access(rec, {"1000"})
+    assert ea.verbs == {"read", "write"} and ea.matched == 1
+    # a group member (not owner) gets the group class
+    ea = permissions.effective_access(rec, {"100"})
+    assert ea.verbs == {"read"}
+    # everyone-else gets the (empty) other class — matched but nothing granted
+    ea = permissions.effective_access(rec, {"9999"})
+    assert ea.verbs == set() and ea.matched == 1
+
+
+def test_effective_access_deny_order_and_share_intersection():
+    def ace(pid, typ, verbs, idx, source="local", inherited=False):
+        return {"principal": {"kind": "user", "id": pid, "name": pid}, "type": typ,
+                "verbs": verbs, "raw_mask": "0x0", "inherited": inherited,
+                "scope": "this", "source": source, "order_index": idx}
+
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "S-1-5-21-1", "name": "alice"},
+        aces=[
+            ace("S-1-5-21-1", "deny", ["delete"], 0),           # deny first: wins
+            ace("S-1-5-21-1", "allow", ["read", "write", "delete"], 1),
+            ace("S-1-5-21-1", "allow", ["change_perms"], 2, source="share"),
+            ace("S-1-5-21-1", "allow", ["read", "write"], 3, source="share"),
+        ],
+        fidelity="full_native",
+    )
+    ea = permissions.effective_access(rec, {"S-1-5-21-1"})
+    # delete denied (deny before allow); share layer caps the local grant
+    assert "delete" in ea.denied
+    assert ea.verbs == {"read", "write"}  # local {read,write} ∩ share {read,write,change_perms}
+    assert set(ea.by_source) == {"local", "share"}
+    # full expands to everything
+    rec2 = permissions.record_from_wire(
+        owner={"kind": "user", "id": "u", "name": "u"},
+        aces=[ace("u", "allow", ["full"], 0)],
+        fidelity="full_native",
+    )
+    ea2 = permissions.effective_access(rec2, {"u"})
+    assert "take_ownership" in ea2.verbs and "read" in ea2.verbs

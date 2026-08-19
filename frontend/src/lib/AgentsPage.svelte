@@ -1042,6 +1042,9 @@ ${detail}
     cron: string;
     inventoryEnabled: boolean;
     collectorsText: string;
+    invScheduleCron: string;
+    invPathsText: string;
+    invPreset: string;
     selections: SelRow[];
     // tri-state local-surface gates: "" = inherit, "on" | "off" explicit
     webUI: string;
@@ -1421,6 +1424,9 @@ ${detail}
       cron: "",
       inventoryEnabled: false,
       collectorsText: "",
+      invScheduleCron: "",
+      invPathsText: "",
+      invPreset: "",
       selections: [],
       webUI: "",
       localAccess: "",
@@ -1454,6 +1460,9 @@ ${detail}
       cron: s.scan_schedule_cron ?? "",
       inventoryEnabled: s.inventory?.enabled ?? false,
       collectorsText: (s.inventory?.collectors ?? []).join(", "),
+      invScheduleCron: s.inventory?.schedule_cron ?? "",
+      invPathsText: (s.inventory?.paths ?? []).join("\n"),
+      invPreset: s.inventory?.preset ?? "",
       selections: (s.scan_selections ?? []).map((sel) => ({
         preset: sel.preset ?? "",
         pathsText: (sel.paths ?? []).join("\n"),
@@ -1505,7 +1514,7 @@ ${detail}
     if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
     if (f.authRequired) settings.auth_required = f.authRequired === "on";
     if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
-    if (f.inventoryEnabled || collectors.length || f.permsConfigured) {
+    if (f.inventoryEnabled || collectors.length || f.permsConfigured || f.invScheduleCron.trim()) {
       const inventory: InventoryConfig = {
         enabled: f.inventoryEnabled,
         // Unticking every box emits `[]`, NOT a dropped key: "inventory on,
@@ -1539,6 +1548,12 @@ ${detail}
         }
         inventory.permissions = permissions;
       }
+      // 2026-08-20: central-side scheduling — the worker tick enqueues the
+      // same inventory command an operator fires by hand.
+      if (f.invScheduleCron.trim()) inventory.schedule_cron = f.invScheduleCron.trim();
+      const invPaths = splitLines(f.invPathsText);
+      if (invPaths.length) inventory.paths = invPaths;
+      if (f.invPreset.trim()) inventory.preset = f.invPreset.trim();
       settings.inventory = inventory;
     }
     if (f.selections.length) {
@@ -3104,9 +3119,10 @@ ${detail}
         <div class="flex flex-wrap gap-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <label class="text-xs text-slate-500">
             <span class="inline-flex items-center gap-1.5">Log level
-              {@render notEnforced("Delivered under the policy document's `group` section, but the agent's log level comes only from its sidecar config, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag today. Set it in the installer sidecar to actually change an agent's logging.")}</span>
+              <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                title="Agents ≥ 1.5.3 live-retune their log threshold from this on the next policy poll; older builds keep their local flag/env/sidecar level.">agent ≥ 1.5.3</span></span>
             <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
-              title="Intended log verbosity for this group's members. STORED AND DELIVERED BUT NOT ENFORCED: no shipped agent build reads it. To actually change an agent's logging, use the installer sidecar's log level, FILEARR_AGENT_LOG_LEVEL, or the -log-level flag on the host. (unset) omits the key."
+              title="Log verbosity for this group's members. Agents ≥ 1.5.3 apply it on the next policy poll (it wins over the local default while set); (unset) omits the key and the local flag/env/sidecar resolution stands."
               bind:value={dialog.logLevel}>
               <option value="">(unset)</option>
               {#each AGENT_LOG_LEVELS as lvl}
@@ -3185,12 +3201,13 @@ ${detail}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
           <div class="flex flex-wrap items-center gap-2">
             <label class="inline-flex items-center gap-2 text-sm"
-              title="Master switch for host inventory collection (OS, hardware, installed packages, permissions) on this group's members. STORED AND DELIVERED BUT NOT ENFORCED: the collectors are agent-side scaffold and no shipped build acts on this yet.">
+              title="Master switch for scheduled host inventory collection on this group's members. With a schedule below, central enqueues the inventory command (the collectors ticked here over the paths/preset below) on each cron occurrence — the same run the per-agent Inventory button fires.">
               <input type="checkbox" bind:checked={dialog.inventoryEnabled}
-                title="Master switch for host inventory collection on this group's members. STORED AND DELIVERED BUT NOT ENFORCED: the collectors are agent-side scaffold and no shipped build acts on this yet." />
+                title="Master switch for scheduled host inventory collection on this group's members." />
               Inventory collection enabled
             </label>
-            {@render notEnforced("Central validates, stores and delivers these keys, but no shipped agent build reads them yet — the inventory collectors are agent-side scaffold. Authoring them now is safe and forward-looking; it changes nothing on the fleet today.")}
+            <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+              title="With a schedule set, central enqueues inventory commands for this group's members on each occurrence — collectors, results, permission snapshots and the drift alert all ride the existing pipeline.">scheduled by central</span>
           </div>
           <!-- Collectors. The master switch above gates whether ANY of this runs,
                so the block dims (the page-family idiom — cf. AlertsPage's
@@ -3291,6 +3308,26 @@ ${detail}
                 <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
                   title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names."
                   placeholder="stat, owner, perms" bind:value={dialog.collectorsText} />
+              </label>
+              <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                <label class="block text-xs text-slate-500"
+                  title="5-field cron (UTC). When set, central enqueues an inventory command for every member agent on each occurrence — an unfinished scheduled run suppresses the next. Blank = manual runs only (the per-agent Inventory button).">
+                  Schedule (cron, UTC; blank = manual only)
+                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm font-mono dark:border-slate-700"
+                    placeholder="0 3 * * sun" bind:value={dialog.invScheduleCron} />
+                </label>
+                <label class="block text-xs text-slate-500"
+                  title="Optional path-selection preset the scheduled run walks (e.g. user-documents). Combined with the explicit paths.">
+                  Preset (optional)
+                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+                    placeholder="user-documents" bind:value={dialog.invPreset} />
+                </label>
+              </div>
+              <label class="mt-2 block text-xs text-slate-500"
+                title="Path specs the scheduled run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). A schedule needs at least one path or a preset.">
+                Paths (one per line; a schedule needs paths or a preset)
+                <textarea class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
+                  rows="2" placeholder={"D:\\\nhome_glob:*"} bind:value={dialog.invPathsText}></textarea>
               </label>
             {/if}
           </div>

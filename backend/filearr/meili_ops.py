@@ -276,29 +276,48 @@ INDEX_SETTINGS_SPEC: dict[str, object] = {
 DEFAULT_EMBEDDER_NAME: str = "default"
 
 
-def build_embedders(dim: int, *, name: str = DEFAULT_EMBEDDER_NAME):
+def build_embedders(dim: int, *, name: str = DEFAULT_EMBEDDER_NAME, quantize: bool = False):
     """Return the typed ``Embedders`` settings for a single ``userProvided``
     embedder of ``dim`` dimensions (SDK typed models, never dicts — CLAUDE.md
     gotcha). Applied ONLY when semantic search is enabled (drift-safe: an install
-    with semantic off never carries an embedder in its settings)."""
+    with semantic off never carries an embedder in its settings).
+
+    ``quantize`` (roadmap §8 adopt-later, 2026-08-20 —
+    ``FILEARR_SEMANTIC_QUANTIZE``): sets Meili's ``binaryQuantized`` on the
+    embedder — vectors are stored as 1 bit/dimension (~10× smaller index,
+    slight recall loss). **One-way in Meili**: once quantized, the flag cannot
+    be turned back off on a live index; flipping the setting off here triggers
+    a full rebuild-and-swap (the index is disposable, so that is the supported
+    un-quantize path)."""
     from meilisearch_python_sdk.models.settings import Embedders, UserProvidedEmbedder
 
     return Embedders(
-        embedders={name: UserProvidedEmbedder(source="userProvided", dimensions=dim)}
+        embedders={
+            name: UserProvidedEmbedder(
+                source="userProvided",
+                dimensions=dim,
+                binary_quantized=quantize or None,
+            )
+        }
     )
 
 
-def embedder_matches(current, dim: int, *, name: str = DEFAULT_EMBEDDER_NAME) -> bool:
+def embedder_matches(
+    current, dim: int, *, name: str = DEFAULT_EMBEDDER_NAME, quantize: bool = False
+) -> bool:
     """True when the live ``Embedders`` already has ``name`` at ``dim`` dimensions
-    (idempotency guard so ``_apply_settings`` doesn't re-push an unchanged embedder
-    every boot). A missing embedders block / missing name / wrong dim → False."""
+    AND the requested quantization state (idempotency guard so ``_apply_settings``
+    doesn't re-push an unchanged embedder every boot). A missing embedders block /
+    missing name / wrong dim / quantization drift → False."""
     if current is None:
         return False
     embedders = getattr(current, "embedders", None) or {}
     emb = embedders.get(name)
     if emb is None:
         return False
-    return getattr(emb, "dimensions", None) == dim
+    if getattr(emb, "dimensions", None) != dim:
+        return False
+    return bool(getattr(emb, "binary_quantized", None)) == quantize
 
 
 # ---------------------------------------------------------------------------

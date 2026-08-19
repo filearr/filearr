@@ -27,6 +27,7 @@ from filearr.api import (
     metadata_profiles,
     oidc,
     presets,
+    principal_aliases,
     query,
     rbac,
     report_schedules,
@@ -50,6 +51,10 @@ v1_router.include_router(auth.router, tags=["auth"])
 v1_router.include_router(audit.router, tags=["audit"])
 v1_router.include_router(oidc.router, tags=["auth"])
 v1_router.include_router(rbac.router, tags=["rbac"])
+v1_router.include_router(
+    principal_aliases.router, prefix="/principal-aliases", tags=["principal-aliases"]
+)
+v1_router.include_router(principal_aliases.perm_router, tags=["principal-aliases"])
 v1_router.include_router(roles.router, tags=["rbac"])
 v1_router.include_router(fs.router, prefix="/fs", tags=["fs"])
 v1_router.include_router(search.router, tags=["search"])

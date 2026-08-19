@@ -24,7 +24,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library
+from filearr.models import Item, ItemStatus, Library
 from filearr.quality_score import (
     BAND_OK,
     BAND_REACQUIRE,
@@ -241,6 +241,9 @@ async def test_registry_lists_every_canned_report(api):
         "permissions_by_principal",
         "permissions_broad_access",
         "permission_changes",
+        # 2026-08-20 hygiene reports
+        "empty_files",
+        "sidecar_hygiene",
     }
 
 
@@ -688,3 +691,47 @@ async def test_csv_excludes_item_id_column(api):
     assert "item_id" not in header  # item_id is JSON/NDJSON/XML only, never CSV
     assert "native_path" in header and "share_url" in header  # path context IS in CSV
     assert "share_unc" in header  # UI-T15: UNC column rides the export too
+
+
+async def test_hygiene_reports(api):
+    """2026-08-20: empty_files + sidecar_hygiene."""
+    c, maker = api
+    async with maker() as s:
+        lib = Library(name="hyg", root_path="/data/hyg")
+        s.add(lib)
+        await s.flush()
+
+        def mk(rel, *, size, sidecar_of=None, ext=None):
+            return Item(
+                library_id=lib.id, file_category="other", file_group="other",
+                status=ItemStatus.active, path=f"/data/hyg/{rel}", rel_path=rel,
+                filename=rel.split("/")[-1],
+                extension=ext or (rel.rsplit(".", 1)[-1] if "." in rel else None),
+                size=size, mtime=datetime.now(UTC),
+                sidecar_of=sidecar_of,
+            )
+
+        video = mk("m.mkv", size=100)
+        s.add(video)
+        await s.flush()
+        s.add_all([
+            mk("m.nfo", size=0, sidecar_of=video.id),        # linked, empty
+            mk("m-thumb.jpg", size=40, sidecar_of=video.id),  # linked, tiny
+            mk("stray.xmp", size=500),                        # unlinked sidecar-shape
+            mk("zero.bin", size=0),                           # plain empty file
+            mk("fine.jpg", size=9000, sidecar_of=video.id),   # healthy sidecar
+        ])
+        await s.commit()
+
+    r = await c.get("/api/v1/reports/empty_files")
+    assert r.status_code == 200, r.text
+    rows = r.json()["rows"]
+    by_path = {x["rel_path"]: x for x in rows}
+    assert set(by_path) == {"m.nfo", "zero.bin"}
+    assert by_path["m.nfo"]["is_sidecar"] is True
+    assert by_path["zero.bin"]["is_sidecar"] is False
+
+    r = await c.get("/api/v1/reports/sidecar_hygiene")
+    rows = r.json()["rows"]
+    issues = {x["rel_path"]: x["issue"] for x in rows}
+    assert issues == {"stray.xmp": "unlinked", "m.nfo": "empty", "m-thumb.jpg": "tiny"}

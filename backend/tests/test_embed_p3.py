@@ -755,3 +755,18 @@ def test_effective_hf_token_unset(monkeypatch):
 
     monkeypatch.delenv("HF_TOKEN", raising=False)
     assert embed_mod.effective_hf_token() is None
+
+
+def test_build_embedders_quantize_flag():
+    """Roadmap §8 (2026-08-20): FILEARR_SEMANTIC_QUANTIZE -> binaryQuantized."""
+    from filearr.meili_ops import build_embedders, embedder_matches
+
+    plain = build_embedders(384)
+    assert plain.embedders["default"].binary_quantized is None
+    q = build_embedders(384, quantize=True)
+    assert q.embedders["default"].binary_quantized is True
+    # idempotency guard tracks the quantization state too
+    assert embedder_matches(plain, 384, quantize=False)
+    assert not embedder_matches(plain, 384, quantize=True)
+    assert embedder_matches(q, 384, quantize=True)
+    assert not embedder_matches(q, 384, quantize=False)

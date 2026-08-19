@@ -399,6 +399,10 @@ func (p Policy) OverlayScan(s ScanSettings) ScanSettings {
 // declared; the rest of the group document passes through unparsed.
 type GroupSettings struct {
 	ScanScheduleCron *string `json:"scan_schedule_cron"`
+	// LogLevel (2026-08-20): central management of the process log threshold.
+	// When set, the daemon live-retunes agentlog on every policy apply; absent
+	// = the local flag/env/sidecar resolution stands.
+	LogLevel *string `json:"log_level"`
 }
 
 type PolicyDoc struct {

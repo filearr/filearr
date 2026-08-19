@@ -24,6 +24,7 @@ variables, and the Proxmox deploy writes each one into the container's `.env`
 | Variable | Default | What turning it on does |
 |---|---|---|
 | `FILEARR_SEMANTIC_ENABLED` | `false` | Semantic / hybrid search. The **worker** downloads and loads a local ONNX embedding model and embeds items in the background. Off = the model is never loaded, zero cost. Details: [Semantic search](#semantic-search-opt-in). |
+| `FILEARR_SEMANTIC_QUANTIZE` | `false` | Store semantic vectors binary-quantized (1 bit/dim, ~10× smaller vector index, slight recall loss) — worth it at millions of embedded items. Turning ON applies in place; turning OFF needs a rebuild-index (Meili cannot un-quantize live). |
 | `FILEARR_CONTENT_SNIFF_ENABLED` | `false` | Unlocks the on-demand "Content-sniff extensionless files" maintenance action: libmagic MIME sniffing over a bounded prefix read, reclassifying files whose extension tells you nothing. Details: [Content sniffing](#content-sniffing-opt-in). |
 | `FILEARR_UPDATE_CHECK_AUTO` | `false` | Lets the Jobs-page Updates card refresh a stale GitHub release cache by itself. This is the only automatic outbound request the product makes; with it off, the check is manual only. Details: [Update check](#update-check-jobs-page-updates-card). |
 | `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory thumbnail-cache budget in GiB. Over budget you get an hourly log reminder and an amber note on the Jobs thumbs card — generation continues and **nothing is deleted**. `0` disables the advisory. Details: [Thumbnails](#thumbnails). |

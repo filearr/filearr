@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from filearr import audit
 from filearr.db import get_session
 from filearr.llm import DEFAULT_RATE_LIMIT, LLM_ROLES
-from filearr.models import ApiKey, SecurityEvent
+from filearr.models import ApiKey, Principal, SecurityEvent, ServiceAccount
 from filearr.security import generate_key, require_scope
 
 router = APIRouter()
@@ -26,6 +26,9 @@ router = APIRouter()
 class MintRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     role: str
+    # 2026-08-20: LLM keys are owned by a service account, exactly like plain
+    # API keys (P6-T10) — deleting/disabling the account revokes its keys.
+    service_account_id: uuidlib.UUID
     path_scope: str | None = None
     libraries: list[uuidlib.UUID] | None = None
     content_access: bool | None = None
@@ -41,6 +44,7 @@ def _key_row(k: ApiKey) -> dict:
         "name": k.name,
         "prefix": k.prefix,
         "role": k.llm_role,
+        "service_account_id": str(k.service_account_id) if k.service_account_id else None,
         "role_description": role.description if role else None,
         "path_scope": k.path_scope,
         "libraries": [str(x) for x in (k.libraries or [])] or None,
@@ -121,12 +125,19 @@ async def mint_llm_key(
         raise HTTPException(
             422, f"unknown role {body.role!r}; valid: {', '.join(LLM_ROLES)}"
         )
+    owner = await session.get(ServiceAccount, body.service_account_id)
+    if owner is None:
+        raise HTTPException(404, "service account not found")
+    owner_principal = await session.get(Principal, body.service_account_id)
+    if owner_principal is not None and owner_principal.disabled_at is not None:
+        raise HTTPException(409, "service account is disabled -- enable it first")
     full, prefix, key_hash = generate_key()
     row = ApiKey(
         name=body.name,
         prefix=prefix,
         key_hash=key_hash,
         scopes=["read"],  # facade access only; coarse scope stays read
+        service_account_id=body.service_account_id,
         llm_role=body.role,
         path_scope=body.path_scope,
         libraries=body.libraries,

@@ -24,6 +24,7 @@ from typing import NamedTuple
 from sqlalchemy import select, update
 
 from filearr.config import get_settings
+from filearr.db import scalars_where_in
 from filearr.jriver import parse_jrsidecar_bytes
 from filearr.models import Item, ItemStatus
 from filearr.nfo import parse_nfo_bytes
@@ -127,91 +128,109 @@ def resolve_links(items: list[Item]) -> dict[str, str | None]:
 
 
 async def associate_sidecars(session, library_id) -> dict[str, int]:
-    """Recompute sidecar links for a library and parse NFO metadata into parents.
+    """Recompute sidecar links for a library and parse NFO/JRiver metadata into
+    parents. Returns stats {'sidecars','linked','nfo_parsed','jriver_parsed',
+    'parents_updated','changed_ids'}.
 
-    Returns stats {'sidecars': n, 'linked': n, 'nfo_parsed': n}.
-    """
-    items = list(
-        (
-            await session.execute(
-                select(Item).where(
-                    Item.library_id == library_id,
-                    Item.status == ItemStatus.active,
-                )
-            )
-        ).scalars()
+    Memory profile (2026-08-20, same live incident as the scan's load_only fix):
+    link resolution streams COLUMN-ONLY rows (the ``_LightItem`` pattern the
+    agent pass has always used — a 500k-item library must never materialize as
+    full ORM rows with their JSONB blobs), links are applied as chunked bulk
+    UPDATEs, and only the (few) metadata sidecars (.nfo / *_JRSidecar.xml) plus
+    their parents are loaded as real rows for the parse step."""
+    rows: list[_LightItem] = []
+    result = await session.stream(
+        select(Item.id, Item.rel_path, Item.file_category, Item.size, Item.sidecar_of)
+        .where(Item.library_id == library_id, Item.status == ItemStatus.active)
+        .execution_options(yield_per=5000)
     )
-    by_id = {str(i.id): i for i in items}
-    links = resolve_links(items)
+    async for r in result:
+        rows.append(_LightItem(r.id, r.rel_path, r.file_category, r.size or 0, r.sidecar_of))
 
-    sidecars = 0
-    linked = 0
-    nfo_parsed = 0
-    touched_parents: set[str] = set()
+    links = resolve_links(rows)
+    current = {str(r.id): (str(r.sidecar_of) if r.sidecar_of else None) for r in rows}
+    changed = [(sid, pid) for sid, pid in links.items() if current.get(sid) != pid]
+    for i in range(0, len(changed), 1000):
+        chunk = changed[i : i + 1000]
+        await session.execute(
+            update(Item),
+            [
+                {"id": _as_uuid(sid), "sidecar_of": _as_uuid(pid) if pid else None}
+                for sid, pid in chunk
+            ],
+        )
 
-    changed_ids: list[str] = []
-    for sid, pid in links.items():
-        sidecar = by_id[sid]
-        sidecars += 1
-        # Update FK only on change (keeps rescans cheap / idempotent).
-        current = str(sidecar.sidecar_of) if sidecar.sidecar_of else None
-        if current != pid:
-            sidecar.sidecar_of = pid
-            changed_ids.append(sid)
-        if pid is not None:
-            linked += 1
+    sidecars = len(links)
+    linked = sum(1 for v in links.values() if v is not None)
+    changed_ids = [sid for sid, _ in changed]
 
-    # Parse metadata sidecars (Kodi NFO; JRiver *_JRSidecar.xml since
-    # 2026-08-19, roadmap §12) into their parent's extracted metadata.
-    jr_parsed = 0
+    # --- metadata sidecars: NFO + JRiver -> parent extracted metadata --------
+    # Work list from the LIGHT rows (classification is lexical), then load only
+    # those sidecars + their parents as real ORM rows, in chunks.
+    by_light = {str(r.id): r for r in rows}
+    parse_pairs: list[tuple[str, str, str]] = []  # (sidecar_id, parent_id, kind)
     for sid, pid in links.items():
         if pid is None:
             continue
-        sidecar = by_id[sid]
-        info = classify(sidecar.rel_path)
-        if info is None or info.kind not in ("nfo", "jriver"):
-            continue
-        parent = by_id.get(pid)
-        if parent is None:
-            continue
-        try:
-            # Small sidecar read; mirrors the synchronous file IO the extract
-            # task already uses. Media mounts are read-only and these are tiny.
-            with open(sidecar.path, "rb") as fh:  # noqa: ASYNC230
-                data = fh.read()
-        except OSError:
-            continue
-        if info.kind == "nfo":
-            parsed = parse_nfo_bytes(data)
-            prefix = "nfo_"
-        else:
-            parsed = parse_jrsidecar_bytes(data)
-            prefix = "jr_"
-        if not parsed:
-            continue
-        if info.kind == "nfo":
-            nfo_parsed += 1
-        else:
-            jr_parsed += 1
-        ext_ids = parsed.pop("external_ids", None)
-        # Extractors write ONLY metadata_ (never user_metadata). Merge, don't clobber
-        # sibling extracted keys; the sidecar is authoritative for the keys it
-        # provides, each source under its own namespace (nfo_* / jr_*).
-        parent.metadata_ = {
-            **parent.metadata_,
-            **{f"{prefix}{k}": v for k, v in parsed.items()},
+        info = classify(by_light[sid].rel_path)
+        if info is not None and info.kind in ("nfo", "jriver"):
+            parse_pairs.append((sid, pid, info.kind))
+
+    nfo_parsed = 0
+    jr_parsed = 0
+    touched_parents: set[str] = set()
+    for i in range(0, len(parse_pairs), 500):
+        chunk = parse_pairs[i : i + 500]
+        need = {x for sid, pid, _ in chunk for x in (sid, pid)}
+        loaded = {
+            str(row.id): row
+            for row in await scalars_where_in(
+                session, select(Item), Item.id, [_as_uuid(x) for x in need]
+            )
         }
-        # Promote a few high-value fields to typed columns: when still empty
-        # (default "fill"), or always when the operator made the sidecar the
-        # authority (FILEARR_SIDECAR_METADATA_PRIORITY=sidecar, roadmap §12).
-        override = get_settings().sidecar_metadata_priority == "sidecar"
-        if parsed.get("title") and (override or not parent.title):
-            parent.title = str(parsed["title"])
-        if parsed.get("year") and (override or not parent.year):
-            parent.year = int(parsed["year"])
-        if ext_ids:
-            parent.external_ids = {**parent.external_ids, **ext_ids}
-        touched_parents.add(pid)
+        for sid, pid, kind in chunk:
+            sidecar_row = loaded.get(sid)
+            parent = loaded.get(pid)
+            if sidecar_row is None or parent is None:
+                continue
+            try:
+                # Small sidecar read; mirrors the synchronous file IO the extract
+                # task already uses. Media mounts are read-only and these are tiny.
+                with open(sidecar_row.path, "rb") as fh:  # noqa: ASYNC230
+                    data = fh.read()
+            except OSError:
+                continue
+            if kind == "nfo":
+                parsed = parse_nfo_bytes(data)
+                prefix = "nfo_"
+            else:
+                parsed = parse_jrsidecar_bytes(data)
+                prefix = "jr_"
+            if not parsed:
+                continue
+            if kind == "nfo":
+                nfo_parsed += 1
+            else:
+                jr_parsed += 1
+            ext_ids = parsed.pop("external_ids", None)
+            # Extractors write ONLY metadata_ (never user_metadata). Merge, don't
+            # clobber sibling extracted keys; the sidecar is authoritative for the
+            # keys it provides, each source under its own namespace (nfo_*/jr_*).
+            parent.metadata_ = {
+                **parent.metadata_,
+                **{f"{prefix}{k}": v for k, v in parsed.items()},
+            }
+            # Promote a few high-value fields to typed columns: when still empty
+            # (default "fill"), or always when the operator made the sidecar the
+            # authority (FILEARR_SIDECAR_METADATA_PRIORITY=sidecar, roadmap §12).
+            override = get_settings().sidecar_metadata_priority == "sidecar"
+            if parsed.get("title") and (override or not parent.title):
+                parent.title = str(parsed["title"])
+            if parsed.get("year") and (override or not parent.year):
+                parent.year = int(parsed["year"])
+            if ext_ids:
+                parent.external_ids = {**parent.external_ids, **ext_ids}
+            touched_parents.add(pid)
 
     return {
         "sidecars": sidecars,
@@ -224,6 +243,10 @@ async def associate_sidecars(session, library_id) -> dict[str, int]:
         # this list before persisting the stats dict anywhere (ScanRun.stats).
         "changed_ids": changed_ids,
     }
+
+
+def _as_uuid(v) -> uuid_mod.UUID:
+    return v if isinstance(v, uuid_mod.UUID) else uuid_mod.UUID(str(v))
 
 
 class _LightItem(NamedTuple):

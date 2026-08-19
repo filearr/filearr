@@ -103,6 +103,15 @@ on a system rule; its match logic is fixed. System events dedupe per hour and
 per subject (a failing scan re-fires at most hourly; a disk that flaps does
 not spam).
 
+### Mass edit
+
+Select rules with the checkboxes and a bulk bar appears: switch the throttle
+(immediate with a group wait, or an hourly/daily digest) and/or change the
+channel attachment (**replace with** / **also publish to** / **stop publishing
+to**) for every selected rule in one call — the "move everything off the old
+webhook and onto ntfy" chore. System rules accept the same bulk throttle and
+channel changes as single edits.
+
 ## Events tab
 
 Newest first, filterable by status. Each row is one **batch** (group) with the

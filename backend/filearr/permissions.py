@@ -433,6 +433,114 @@ def diff_records(old: PermissionRecord | None, new: PermissionRecord | None) -> 
 
 
 # --------------------------------------------------------------------------- #
+# Effective access (W7-T10, 2026-08-20)                                         #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EffectiveAccess:
+    """The computed answer to "what can THIS principal actually do here?".
+
+    ``verbs`` is the final intersection across source layers; ``by_source``
+    keeps each layer's own verdict (local ACL vs share ACL) so a UI can say
+    WHICH layer took a right away; ``denied`` lists verbs an explicit deny
+    removed (as opposed to simply never being granted); ``matched`` counts the
+    ACEs that applied (0 = the principal set matched nothing — no access)."""
+
+    verbs: frozenset[str]
+    by_source: dict[str, frozenset[str]]
+    denied: frozenset[str]
+    matched: int
+
+
+def _ace_applies(ace: Ace, principals: set[str]) -> bool:
+    p = ace.principal
+    return (
+        p.canonical_id in principals
+        or p.source_identifier in principals
+        or (p.display or "") in principals
+    )
+
+
+def _expand_full(verbs) -> set[str]:
+    out = {v.value if hasattr(v, "value") else str(v) for v in verbs}
+    if "full" in out:
+        out |= {v.value for v in Verb}
+    return out
+
+
+def effective_access(record: PermissionRecord, principals: set[str]) -> EffectiveAccess:
+    """Pure §3.5 evaluator: fold a record's ordered ACEs into the verb set the
+    given principal identities hold, per source layer, then intersect layers.
+
+    Semantics (v1, deliberately conservative):
+
+    * **Ordered deny-before-allow** — ACEs are walked in stored order; a verb is
+      granted iff an *allow* naming it appears before any *deny* naming it
+      (NTFS/macOS/NFSv4 evaluation order). A deny seen first removes the verb
+      for good.
+    * **POSIX mode classes are exclusive** — among the synthetic ``mode:*``
+      ACEs only the FIRST class that matches the principal set applies (owner
+      beats group beats other), mirroring the kernel's class selection. Real
+      POSIX ACL entries stay additive.
+    * **Layer intersection** — when the record carries SHARE-source ACEs, the
+      final verbs are ``local ∩ share`` (access through a share is capped by
+      both). Without share ACEs the local verdict stands alone.
+    * ``well_known`` broad principals ("EVERYONE"/"other", Authenticated Users)
+      apply to every caller, so they are always considered matched.
+
+    ``principals`` should carry every identity the caller answers to (uid,
+    ``local:<host>:<uid>``, SID, group SIDs/gids, names) — the caller decides
+    the closure; this function never guesses group membership."""
+    broad = {"EVERYONE", "AUTHENTICATED_USERS", "USERS", "WORLD"}
+    layers: dict[str, dict[str, set[str]]] = {}
+    matched = 0
+    posix_class_taken = False
+    for ace in record.entries:
+        p = ace.principal
+        applies = _ace_applies(ace, principals)
+        if not applies and p.kind is PrincipalKind.well_known:
+            # broad principals apply to every caller
+            ids = {p.canonical_id, p.source_identifier, (p.display or "").upper()}
+            applies = bool(
+                ids & {"other", "S-1-1-0", "S-1-5-11", "EVERYONE"}
+                or any(b in (p.display or "").upper().replace(" ", "_") for b in broad)
+            )
+        if not applies:
+            continue
+        is_mode = ace.raw_mask.startswith("mode:")
+        if is_mode:
+            if posix_class_taken:
+                continue  # owner class beats group beats other — first match only
+            posix_class_taken = True
+        matched += 1
+        layer = layers.setdefault(ace.source.value, {"allowed": set(), "denied": set()})
+        verbs = _expand_full(ace.verbs)
+        if ace.scope is AceScope.dir_default:
+            continue  # a default ACL grants CHILDREN, not this object
+        if ace.type is AceType.deny:
+            # ordered evaluation: a deny only blocks verbs not already granted
+            # by an EARLIER allow (deny-before-allow wins; allow-before-deny
+            # keeps the grant, as NTFS canonical order produces).
+            layer["denied"] |= {v for v in verbs if v not in layer["allowed"]}
+        else:
+            layer["allowed"] |= {v for v in verbs if v not in layer["denied"]}
+    by_source = {src: frozenset(v["allowed"]) for src, v in layers.items()}
+    denied: frozenset[str] = (
+        frozenset().union(*(frozenset(v["denied"]) for v in layers.values()))
+        if layers
+        else frozenset()
+    )
+    if "share" in by_source and "local" in by_source:
+        final = by_source["local"] & by_source["share"]
+    elif by_source:
+        final = frozenset().union(*by_source.values())
+    else:
+        final = frozenset()
+    return EffectiveAccess(verbs=final, by_source=by_source, denied=denied, matched=matched)
+
+
+# --------------------------------------------------------------------------- #
 # Wire-shape adapter + human diff summary (W7-T9, 2026-08-19)                   #
 # --------------------------------------------------------------------------- #
 # The Go collector's record (``permissions.Record``) is what central STORES

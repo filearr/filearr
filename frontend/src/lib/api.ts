@@ -1765,6 +1765,14 @@ export interface AlertRule {
 
 export const listAlertRules = () => request<AlertRule[]>("/alert-rules");
 
+// 2026-08-20 mass edit: one change-set over many rules (throttle switch and/or
+// channel attachment). digest_window null + set_throttle true = immediate.
+export const bulkUpdateAlertRules = (body: Record<string, unknown>) =>
+  request<{ updated: number; missing: string[] }>("/alert-rules/bulk", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 export const createAlertRule = (body: {
   name: string;
   enabled?: boolean;
@@ -3267,6 +3275,9 @@ export interface PermissionsConfig {
 }
 
 export interface InventoryConfig {
+  schedule_cron?: string | null;
+  paths?: string[];
+  preset?: string | null;
   enabled?: boolean;
   collectors?: string[];
   permissions?: PermissionsConfig | null;
@@ -3663,6 +3674,7 @@ export interface LlmRoleInfo {
 }
 
 export interface LlmKey {
+  service_account_id: string | null;
   id: string;
   name: string;
   prefix: string;
@@ -3686,6 +3698,7 @@ export interface LlmKey {
 export interface MintLlmKeyRequest {
   name: string;
   role: string;
+  service_account_id: string;
   path_scope?: string | null;
   libraries?: string[] | null;
   content_access?: boolean | null;

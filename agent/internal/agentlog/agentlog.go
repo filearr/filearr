@@ -97,7 +97,27 @@ type Options struct {
 // New builds a *slog.Logger and an io.Closer for any file sink (nil-safe to
 // close; a no-op when only stderr is used). The custom VERBOSE level renders as
 // "VERBOSE" in the text handler rather than slog's default "DEBUG+2".
+// levelVar is the LIVE process log threshold. Handlers reference it (not a
+// frozen level), so central policy (group settings ``log_level``, 2026-08-20)
+// can retune verbosity at runtime via SetLevel without rebuilding the logger.
+var levelVar = func() *slog.LevelVar {
+	v := new(slog.LevelVar)
+	v.Set(slog.LevelInfo)
+	return v
+}()
+
+// SetLevel live-updates the process log threshold. Returns the previous level.
+func SetLevel(l slog.Level) slog.Level {
+	prev := levelVar.Level()
+	levelVar.Set(l)
+	return prev
+}
+
+// CurrentLevel reports the live threshold.
+func CurrentLevel() slog.Level { return levelVar.Level() }
+
 func New(opts Options) (*slog.Logger, io.Closer, error) {
+	levelVar.Set(opts.Level)
 	var writers []io.Writer
 	var closer io.Closer = noopCloser{}
 
@@ -139,7 +159,7 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 	w = ringWriter{inner: w}
 
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level:       opts.Level,
+		Level:       levelVar, // live: central policy log_level retunes at runtime
 		ReplaceAttr: replaceLevel,
 	})
 	return slog.New(handler), closer, nil

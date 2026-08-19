@@ -1895,6 +1895,108 @@ async def schedule_scans(timestamp: int) -> int:
     return len(deferred)
 
 
+@proc_app.periodic(cron="* * * * *")
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.schedule_agent_inventories",
+    queueing_lock="schedule-agent-inventories",  # minutely re-runs; no retry
+)
+async def schedule_agent_inventories(timestamp: int) -> int:
+    """2026-08-20: drive the config-group ``inventory.schedule_cron``.
+
+    For every enrolled, non-revoked agent whose MERGED settings enable
+    inventory with a schedule, enqueue the same inventory COMMAND an operator
+    fires by hand (collectors + paths/preset from the group document) on each
+    due occurrence. Once-per-occurrence state is derived from the newest
+    schedule-created inventory command (no new column); an unfinished
+    scheduled run suppresses the next one (no pile-ups on a slow walk).
+    Returns the number of commands enqueued."""
+    settings = get_settings()
+    if not settings.agents_enabled:
+        return 0
+    import logging as _logging
+
+    from sqlalchemy import select
+
+    from filearr.agent_config import resolve_effective_config
+    from filearr.db import SessionLocal
+    from filearr.models import Agent as AgentRow
+    from filearr.models import AgentCommand
+    from filearr.schedule import due_occurrence
+
+    log = _logging.getLogger("filearr.worker.inventory_schedule")
+
+    tick = datetime.fromtimestamp(timestamp, tz=UTC)
+    enqueued = 0
+    async with SessionLocal() as session:
+        agents = (
+            (
+                await session.execute(
+                    select(AgentRow).where(
+                        AgentRow.cert_fingerprint.is_not(None),
+                        AgentRow.revoked_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for agent in agents:
+            try:
+                cfg = await resolve_effective_config(session, agent)
+            except Exception:  # noqa: BLE001 - one agent's bad config never stalls the tick
+                log.warning("inventory schedule: config resolve failed for %s", agent.id)
+                continue
+            inv = (cfg.document.get("group") or {}).get("inventory") or {}
+            cron = inv.get("schedule_cron")
+            if not (inv.get("enabled") and cron and inv.get("collectors")):
+                continue
+            # Newest schedule-created inventory command = the once-per-occurrence
+            # cursor; an unfinished one also suppresses this tick.
+            last_row = (
+                await session.execute(
+                    select(AgentCommand.created_at, AgentCommand.status)
+                    .where(
+                        AgentCommand.agent_id == agent.id,
+                        AgentCommand.kind == "inventory",
+                        AgentCommand.requested_by.is_(None),
+                        AgentCommand.payload["scheduled"].as_boolean().is_(True),
+                    )
+                    .order_by(AgentCommand.created_at.desc())
+                    .limit(1)
+                )
+            ).first()
+            last_at = last_row[0] if last_row else None
+            if last_row and last_row[1] in ("pending", "picked_up"):
+                continue
+            try:
+                occ = due_occurrence(cron, tick, last_at)
+            except Exception:  # noqa: BLE001 - validated at write; belt only
+                continue
+            if occ is None:
+                continue
+            payload = {
+                "scheduled": True,
+                "collectors": list(inv.get("collectors") or []),
+                "paths": list(inv.get("paths") or []),
+            }
+            if inv.get("preset"):
+                payload["preset"] = inv["preset"]
+            session.add(
+                AgentCommand(
+                    agent_id=agent.id,
+                    kind="inventory",
+                    payload=payload,
+                    status="pending",
+                    expires_at=tick + timedelta(seconds=settings.agent_command_ttl_max_seconds),
+                )
+            )
+            enqueued += 1
+        if enqueued:
+            await session.commit()
+    return enqueued
+
+
 # --- Jobs-page maintenance schedules ----------------------------------------
 # The editable maintenance tasks (nightly purges, reconcilers, thumbnail GC —
 # see filearr.maintenance.TICK_SCHEDULED) lost their static @periodic

@@ -93,5 +93,8 @@ type Record struct {
 	Group       *Principal `json:"group,omitempty"` // POSIX group_obj; nil for Windows (owner group is separate/optional)
 	Posture     Posture    `json:"posture"`
 	Fidelity    string     `json:"fidelity"` // Fidelity* constants
-	Entries     []ACE      `json:"entries"`
+	// Flags (W7-T4): BSD whole-object file flags (uchg/schg/uappnd/sappnd/
+	// hidden) — a separate fact, never folded into ACE verbs (§1.3).
+	Flags   []string `json:"flags,omitempty"`
+	Entries []ACE    `json:"entries"`
 }

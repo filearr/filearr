@@ -108,6 +108,10 @@
   let extension = $state(""); // "" = any extension
   let extQuery = $state("");  // type-ahead-lite filter text over the ext facet
   let includeSidecars = $state(false); // T3 sidecars hidden by default
+  // 2026-08-20: which attributes the query text matches — "content" restricts
+  // to indexed file content (body/OCR text, archive members) so a path or
+  // filename hit alone stops returning the item; "names" is the inverse.
+  let searchIn = $state<"all" | "content" | "names">("all");
   // Roadmap §20: the Filters/Saved open-closed choice persists across visits
   // (same localStorage pattern as the theme choice) — collapsed by default.
   let filtersOpen = $state(localStorage.getItem("searchFiltersOpen") === "1");
@@ -475,6 +479,7 @@
     if (selectedGroups.length) p.file_group = selectedGroups.join(",");
     if (selectedTags.length) p.tags = selectedTags.join(",");
     if (includeSidecars) p.include_sidecars = "true";
+    if (searchIn !== "all") p.search_in = searchIn;
     // Range filters: only send a bound when the slider is narrowed off it, so a
     // full-range slider is a no-op (and lets the bounds keep refreshing).
     if (sizeBounds && sizeLo > sizeBounds.min) p.size_gte = String(Math.round(sizeLo));
@@ -547,6 +552,7 @@
     tagQuery = "";
     tagOpen = false;
     includeSidecars = p.include_sidecars === "true";
+    searchIn = (p.search_in as "content" | "names") || "all";
     sortMode = p.sort ?? "";
     view = p.view === "grid" || p.view === "map" ? p.view : "list";
     // A deep link / saved search carrying all four geo edges restores the drawn
@@ -1342,10 +1348,22 @@
       </div>
 
       <!-- Sidecar toggle (T3 sidecars hidden by default). -->
-      <label class="mt-3 flex items-center gap-2 text-xs text-slate-500">
-        <input type="checkbox" bind:checked={includeSidecars} onchange={reset} />
-        Show sidecar files (.nfo / artwork / JRiver)
-      </label>
+      <div class="mt-3 flex flex-wrap items-center gap-4">
+        <label class="flex items-center gap-2 text-xs text-slate-500">
+          <input type="checkbox" bind:checked={includeSidecars} onchange={reset} />
+          Show sidecar files (.nfo / artwork / JRiver)
+        </label>
+        <label class="flex items-center gap-1 text-xs text-slate-500"
+          title="Which parts of an item the search text matches. 'File content only' searches the extracted body/OCR text and archive member names — a filename or path match alone no longer returns the file. 'Names only' is the inverse (no body text). Filters and facets are unaffected.">
+          Match in
+          <select class="rounded border border-slate-300 bg-transparent px-1 py-0.5 dark:border-slate-700 dark:bg-slate-800"
+            bind:value={searchIn} onchange={reset}>
+            <option value="all">everything</option>
+            <option value="content">file content only</option>
+            <option value="names">names only</option>
+          </select>
+        </label>
+      </div>
 
       <!-- P3-T12 tag type-ahead: typo-tolerant, count-ordered facet search over
            the tags array. Selecting a suggestion (click / Enter) adds an AND tag. -->

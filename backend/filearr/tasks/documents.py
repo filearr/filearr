@@ -553,6 +553,32 @@ def _text_body(path: str, *, max_chars: int, max_bytes: int) -> tuple[str, bool]
     return _normalize_body_text(text, max_chars, hard_stopped=hit_cap)
 
 
+#: Read-as-is text bodies (2026-08-20, user report: txt/nfo had no indexed
+#: content). ``nfo`` here covers the STANDALONE case — an .nfo that links to a
+#: parent is a hidden sidecar whose Kodi fields already fold into the parent.
+_PLAIN_TEXT_EXTS = frozenset({"txt", "text", "md", "markdown", "rst", "nfo"})
+#: Tag-stripped bodies: markup whose raw text is mostly noise without parsing.
+_MARKUP_EXTS = frozenset({"html", "htm", "xhtml", "xml"})
+
+
+def _markup_body(path: str, *, max_chars: int, max_bytes: int) -> tuple[str, bool]:
+    """HTML/XML body: the size-capped read of ``_text_body`` reduced to visible
+    text with the stdlib parser (script/style dropped, entities resolved) —
+    the same reducer the e-mail extractor uses. Never fetches anything."""
+    from filearr.tasks.email_extract import html_to_text
+
+    _guard_size(path, max_bytes)
+    read_cap = max_chars * 8 + 8  # markup is mostly tags; read more raw bytes
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(read_cap + 1)
+    except OSError as exc:
+        raise DocumentError(f"cannot read markup file: {exc}", kind="error") from exc
+    hit_cap = len(raw) > read_cap
+    text = html_to_text(raw[:read_cap].decode("utf-8", errors="replace"))
+    return _normalize_body_text(text, max_chars, hard_stopped=hit_cap)
+
+
 def extract_body(
     path: str,
     *,
@@ -583,8 +609,10 @@ def extract_body(
             ratio_min_bytes=ratio_min_bytes,
         )
         body, truncated = _docx_body(path, max_chars=max_chars, max_bytes=max_bytes)
-    elif ext in ("txt", "md"):
+    elif ext in _PLAIN_TEXT_EXTS:
         body, truncated = _text_body(path, max_chars=max_chars, max_bytes=max_bytes)
+    elif ext in _MARKUP_EXTS:
+        body, truncated = _markup_body(path, max_chars=max_chars, max_bytes=max_bytes)
     else:
         return {}
     if not body:

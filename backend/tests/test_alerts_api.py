@@ -455,3 +455,51 @@ async def test_patch_channel_sets_webhook_format(ctx):
     )
     assert p.status_code == 200, p.text
     assert p.json()["config"]["webhook_format"] == "slack"
+
+
+async def test_bulk_rule_update(ctx):
+    """2026-08-20 mass edit: throttle switch + channel attachment over many rules."""
+    c, _, _ = ctx
+    ch1 = (await c.post("/api/v1/alert-channels", json={
+        "name": "hook1", "type": "webhook", "config": {"url": "https://h.example/1"}})).json()
+    ch2 = (await c.post("/api/v1/alert-channels", json={
+        "name": "hook2", "type": "webhook", "config": {"url": "https://h.example/2"}})).json()
+    ids = []
+    for i in range(3):
+        r = await c.post("/api/v1/alert-rules", json={
+            "name": f"bulk-{i}", "event_types": ["created"],
+            "digest_window": "daily", "group_wait_s": 0,
+            "channel_ids": [ch1["id"]],
+        })
+        assert r.status_code == 201, r.text
+        ids.append(r.json()["id"])
+
+    # switch all three to immediate w/ 45s wait, replace channels with ch2
+    r = await c.post("/api/v1/alert-rules/bulk", json={
+        "rule_ids": ids, "set_throttle": True, "digest_window": None,
+        "group_wait_s": 45, "channel_mode": "set", "channel_ids": [ch2["id"]],
+    })
+    assert r.status_code == 200, r.text
+    assert r.json() == {"updated": 3, "missing": []}
+    for rid in ids:
+        row = (await c.get(f"/api/v1/alert-rules/{rid}")).json()
+        assert row["digest_window"] is None and row["group_wait_s"] == 45
+        assert row["channel_ids"] == [ch2["id"]]
+
+    # add ch1 back to two of them; unknown id reported missing, not fatal
+    import uuid as _uuid
+    ghost = str(_uuid.uuid4())
+    r = await c.post("/api/v1/alert-rules/bulk", json={
+        "rule_ids": ids[:2] + [ghost], "channel_mode": "add", "channel_ids": [ch1["id"]],
+    })
+    assert r.json()["updated"] == 2 and r.json()["missing"] == [ghost]
+    row = (await c.get(f"/api/v1/alert-rules/{ids[0]}")).json()
+    assert set(row["channel_ids"]) == {ch1["id"], ch2["id"]}
+    # throttle untouched by the channel-only call
+    assert row["digest_window"] is None and row["group_wait_s"] == 45
+
+    # bad digest window refused
+    r = await c.post("/api/v1/alert-rules/bulk", json={
+        "rule_ids": ids, "set_throttle": True, "digest_window": "weekly",
+    })
+    assert r.status_code == 422

@@ -471,3 +471,35 @@ async def test_custom_bad_format_422(env):
         "name": "x", "query": "kind:video", "columns": ["rel_path"]})
     rid = r.json()["id"]
     assert (await client.get(f"/api/v1/custom-reports/{rid}/run?format=parquet")).status_code == 422
+
+
+async def test_meta_wildcard_matches_any_key(env):
+    """2026-08-20: meta.*:<pred> matches ANY metadata value; meta.exif.*:<pred>
+    any value under that object. cf.* is refused (must name a real field)."""
+    _client, maker = env
+    lib = await _mk_lib(maker)
+    await _mk_item(
+        maker, lib, "a.jpg", file_category="image", file_group="raster-photo",
+        extension="jpg",
+        metadata={"resolution": "1080p", "exif": {"camera": "Canon R5", "iso": 800}},
+    )
+    await _mk_item(
+        maker, lib, "b.mkv", file_category="video", file_group="video",
+        extension="mkv", metadata={"video_codec": "hevc", "height": 1080},
+    )
+    await _mk_item(maker, lib, "c.txt", file_category="document",
+                   file_group="document-text", extension="txt", metadata={})
+
+    # top-level wildcard: equality is case-insensitive, finds the value wherever it is
+    assert await _matches(maker, "meta.*:hevc") == {"b.mkv"}
+    assert await _matches(maker, "meta.*:1080p") == {"a.jpg"}
+    # numeric comparator over any top-level value
+    assert await _matches(maker, "meta.*:>=1080") == {"b.mkv"}
+    # nested wildcard under one object
+    assert await _matches(maker, 'meta.exif.*:"canon r5"') == {"a.jpg"}
+    assert await _matches(maker, "meta.exif.*:>500") == {"a.jpg"}
+    # no match at all
+    assert await _matches(maker, "meta.*:nonexistent-value") == set()
+    # cf wildcard refused
+    with pytest.raises(QueryTranslationError):
+        ast_to_where(parse("cf.*:5"), {})

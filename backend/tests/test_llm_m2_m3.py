@@ -38,6 +38,18 @@ def _psycopg3(uri: str) -> str:
     return uri.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
+
+async def _llm_acct(client) -> str:
+    """2026-08-20: LLM keys require a service-account owner (like plain keys)."""
+    import uuid as _uuidmod
+
+    r = await client.post(
+        "/api/v1/service-accounts", json={"name": f"llm-{_uuidmod.uuid4().hex[:8]}"}
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

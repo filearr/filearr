@@ -26,6 +26,10 @@
   const isAdmin = $derived(isAdminPrincipal(me));
 
   let libraries = $state<Library[]>([]);
+  // First-load flag: the libraries query joins scan/stat data and can take a
+  // few seconds on a large catalog — until it lands the table must say
+  // "loading", never "no libraries yet" (which reads as data loss).
+  let loaded = $state(false);
   // Agent-owned libraries are REPLICATED in — central never scans them, so
   // they get their own section (agent identity + replication freshness)
   // instead of rendering in the scan table with controls that only 422 and a
@@ -198,6 +202,7 @@
         listShareMap().catch(() => [] as ShareMapEntry[]),
       ]);
       libraries = libs;
+      loaded = true;
       shareMap = smap;
       scans = scs;
       errorCounts = (st.extract_errors as Record<string, number>) ?? {};
@@ -911,7 +916,18 @@
             </tr>
           {/if}
         {:else}
-          <tr><td colspan="11" class="py-4 text-slate-500">No libraries yet — add one below.</td></tr>
+          {#if loaded}
+            <tr><td colspan="11" class="py-4 text-slate-500">No libraries yet — add one below.</td></tr>
+          {:else}
+            <tr>
+              <td colspan="11" class="py-6">
+                <span class="flex items-center gap-2 text-slate-500" role="status" aria-live="polite">
+                  <span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[var(--accent)]" aria-hidden="true"></span>
+                  Loading libraries…
+                </span>
+              </td>
+            </tr>
+          {/if}
         {/each}
       </tbody>
     </table>

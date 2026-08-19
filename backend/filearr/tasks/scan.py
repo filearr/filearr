@@ -5,6 +5,8 @@ Change detection follows the researched pattern: mtime+size first-pass filter
 quick-hash tier for move detection. Deletes are tombstoned, never hard-deleted.
 """
 
+import asyncio
+import itertools
 import os
 import stat as stat_mod
 import time
@@ -14,6 +16,7 @@ from datetime import UTC, datetime
 from pathspec import GitIgnoreSpec
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from filearr import rbac, taxonomy
 from filearr.alerts import pipeline
@@ -139,6 +142,23 @@ def assert_scannable_root(root: str) -> None:
         raise ScanRootError(
             f"scan root is unreadable: {root!r} ({exc.strerror or exc})"
         ) from exc
+
+
+async def _iter_walk_threaded(gen, batch: int = 250):
+    """Async-iterate a synchronous walk generator by pulling ``batch`` entries at
+    a time in a thread (event loop stays live for heartbeats/SSE during slow
+    filesystem I/O). Exceptions from the generator propagate unchanged."""
+    it = iter(gen)
+
+    def _pull():
+        return list(itertools.islice(it, batch))
+
+    while True:
+        chunk = await asyncio.to_thread(_pull)
+        if not chunk:
+            return
+        for entry in chunk:
+            yield entry
 
 
 def walk(
@@ -460,12 +480,30 @@ async def _scan_body(
         )
         run.stats = {**(run.stats or {}), "hash_policy": resolved_policy.as_stats()}
 
-        existing = {
-            item.rel_path: item
-            for item in (
-                await session.execute(select(Item).where(Item.library_id == library.id))
-            ).scalars()
-        }
+        # Live OOM fix (2026-08-20, "pictures" 500k-item flat library): load the
+        # existing-row map COLUMN-LIMITED and STREAMED. A full ORM load pulled
+        # every metadata_/user_metadata JSONB blob (EXIF + embeddings -> multiple
+        # GB) into memory before the walk even started; the worker died with
+        # seen=0 and the reaper failed the run every night. load_only defers the
+        # fat columns (the diff below touches only identity/stat/hash columns —
+        # every one it reads is listed here, because reading a DEFERRED column on
+        # an async session raises MissingGreenlet, loudly, in tests).
+        existing: dict[str, Item] = {}
+        _stream = await session.stream_scalars(
+            select(Item)
+            .where(Item.library_id == library.id)
+            .options(
+                load_only(
+                    Item.id, Item.library_id, Item.rel_path, Item.path,
+                    Item.filename, Item.extension, Item.size, Item.mtime,
+                    Item.status, Item.last_seen, Item.quick_hash,
+                    Item.content_hash, Item.mid_hash, Item.sidecar_of,
+                )
+            )
+            .execution_options(yield_per=5000)
+        )
+        async for _row in _stream:
+            existing[_row.rel_path] = _row
 
         seen: set[str] = set()
         new = changed = 0
@@ -599,7 +637,12 @@ async def _scan_body(
                 recursive=recursive,
                 audit=audit,
             )
-        for path, rel, size, mtime_ts in scan_entries:
+        # Thread-bridged iteration: the walk is synchronous filesystem I/O, and
+        # one os.scandir over a huge directory on a slow rclone/SMB mount can
+        # block for minutes — starving the event loop (worker heartbeat dies,
+        # reaper declares the scan dead). Pull batches of entries in a worker
+        # thread; the loop stays responsive between batches.
+        async for path, rel, size, mtime_ts in _iter_walk_threaded(scan_entries):
             # Sidecars (.nfo / poster.jpg / -thumb / *_JRSidecar.xml, ...) are always
             # ingested regardless of the gate: they are bookkeeping rows that get
             # linked to a parent and hidden from default search. Skipping them here

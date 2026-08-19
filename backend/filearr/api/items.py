@@ -786,13 +786,20 @@ async def item_copies(
 
 
 
-SIMILAR_STRIP = ("body_text", "_formatted", "_vectors")
+SIMILAR_STRIP = ("body_text", "_formatted", "_vectors", "_rankingScore")
 
 
 def _shape_similar_hit(hit: dict) -> dict:
     """Drop index-side machinery (raw body, formatting, vectors) from a /similar
-    hit so the response mirrors a normal search hit's public shape."""
-    return {k: v for k, v in hit.items() if k not in SIMILAR_STRIP}
+    hit so the response mirrors a normal search hit's public shape. The Meili
+    ``_rankingScore`` (2026-08-20) is surfaced as ``similarity`` — the cosine
+    similarity of the two items' embeddings normalised to 0..1, i.e. the exact
+    number the ranking sorted by, so the UI can say WHY a hit is here."""
+    out = {k: v for k, v in hit.items() if k not in SIMILAR_STRIP}
+    score = hit.get("_rankingScore")
+    if isinstance(score, (int, float)):
+        out["similarity"] = round(float(score), 4)
+    return out
 
 
 @router.get(
@@ -807,6 +814,17 @@ async def item_similar(
     ctx: PermissionContext = Depends(require_permission("search_metadata")),
 ) -> dict:
     """Related / near-duplicate items via the item's semantic vector (P3-T9).
+
+    **How similarity is computed** (the "why is this here" answer, 2026-08-20):
+    every embedded item carries a dense vector produced by the local embedder
+    from its TEXT — title/filename, tags, and extracted body/OCR text when
+    present. Meili's ``/similar`` ranks other documents by cosine similarity of
+    those vectors; each hit's normalised score comes back as ``similarity``
+    (1.0 = practically identical text signal — near-duplicates; ~0.8+ = same
+    topic/series; lower = loose association). Items without a current-model
+    embedding never appear. So two files are "similar" because their *described
+    content* is similar — not their bytes (that is the Copies section, which is
+    hash-based).
 
     A thin wrapper over Meili's native ``/similar`` endpoint keyed on this item's
     ``userProvided`` vector: excludes sidecars (``is_sidecar = false``) and drops
@@ -844,6 +862,7 @@ async def item_similar(
             embedder=DEFAULT_EMBEDDER_NAME,
             limit=limit + 1,  # +1 headroom so excluding self still fills `limit`
             filter=similar_filter,
+            show_ranking_score=True,  # surfaced as `similarity` per hit
         )
     hits = [h for h in (res.hits or []) if str(h.get("id")) != str(item_id)][:limit]
     return {"id": str(item_id), "hits": [_shape_similar_hit(h) for h in hits]}

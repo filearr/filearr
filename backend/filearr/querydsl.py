@@ -56,7 +56,11 @@ time; the SQL translator casts per comparator)::
 
 ``<key>``/``<name>`` is a strict allow-list: lowercase ``[a-z0-9_]`` segments,
 dot-separated (a dotted key is a nested-accessor path in SQL — ``meta.a.b`` ->
-``metadata['a']['b']``), non-empty, no leading/trailing dot, <= 64 chars. An
+``metadata['a']['b']``), non-empty, no leading/trailing dot, <= 64 chars. The
+FINAL segment of a ``meta.`` key may be ``*`` (2026-08-20): ``meta.*:1080``
+matches ANY top-level metadata value, ``meta.exif.*:canon`` any value under
+that object — so a filter can target metadata without knowing the key name.
+(``cf.`` names never take a wildcard: they must be registered fields.) An
 out-of-charset key is a ``bad_meta_key`` / ``bad_cf_key`` parse error (NEVER a
 silent free-text fallthrough), because the subkey becomes part of a SQL JSONB
 accessor path. Bare ``meta``/``cf`` (no dot) is still ordinary free text.
@@ -125,7 +129,9 @@ _HEX_RE = re.compile(r"^[0-9a-f]+$")
 META_PREFIX = "meta."
 CF_PREFIX = "cf."
 MAX_DYNAMIC_KEY_LEN = 64
-_DYNAMIC_KEY_RE = re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_]+)*$")
+# 2026-08-20: the FINAL segment may be a lone ``*`` — ``meta.*:x`` matches any
+# top-level metadata value, ``meta.exif.*:x`` any value under that object.
+_DYNAMIC_KEY_RE = re.compile(r"^(?:[a-z0-9_]+\.)*(?:[a-z0-9_]+|\*)$")
 
 
 # --- Structured error -------------------------------------------------------

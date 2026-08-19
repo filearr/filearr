@@ -36,6 +36,18 @@ def _psycopg3(uri: str) -> str:
     return uri.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
+
+async def _llm_acct(client) -> str:
+    """2026-08-20: LLM keys require a service-account owner (like plain keys)."""
+    import uuid as _uuidmod
+
+    r = await client.post(
+        "/api/v1/service-accounts", json={"name": f"llm-{_uuidmod.uuid4().hex[:8]}"}
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
@@ -287,7 +299,10 @@ async def test_mint_scope_and_rate_limit(client, db_maker):
     # mint via the admin surface (auth disabled in this suite -> open)
     r = await client.post(
         "/api/v1/llm-keys",
-        json={"name": "bot", "role": "librarian", "rate_limit": 3, "expires_days": 7},
+        json={
+            "service_account_id": await _llm_acct(client),
+            "name": "bot", "role": "librarian", "rate_limit": 3, "expires_days": 7,
+        },
     )
     assert r.status_code == 201
     minted = r.json()
@@ -299,13 +314,19 @@ async def test_mint_scope_and_rate_limit(client, db_maker):
     assert "bot" in names
     assert all("key" not in k for k in r.json()["keys"])  # never re-shown
 
-    r = await client.post("/api/v1/llm-keys", json={"name": "x", "role": "wizard"})
+    r = await client.post(
+        "/api/v1/llm-keys",
+        json={"service_account_id": await _llm_acct(client), "name": "x", "role": "wizard"},
+    )
     assert r.status_code == 422
 
     # library allow-list scoping: a key locked to a nonexistent library sees nothing
     r = await client.post(
         "/api/v1/llm-keys",
-        json={"name": "scoped", "role": "librarian", "libraries": [str(uuid.uuid4())]},
+        json={
+            "service_account_id": await _llm_acct(client),
+            "name": "scoped", "role": "librarian", "libraries": [str(uuid.uuid4())],
+        },
     )
     scoped_key = r.json()["key"]
     r = await client.post(

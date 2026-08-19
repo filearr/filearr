@@ -19,6 +19,7 @@
     deleteAlertRule,
     listAlertChannels,
     listAlertEvents,
+    bulkUpdateAlertRules,
     listAlertRules,
     listLibraries,
     testAlertChannel,
@@ -257,6 +258,48 @@
   let rChannels = $state<string[]>([]);
   let rEnabled = $state(true);
   let rShowAdvanced = $state(false);
+  // 2026-08-20 mass edit: selection + one change-set applied to many rules.
+  let bulkSel = $state<Set<string>>(new Set());
+  let bulkThrottle = $state<"" | "immediate" | "hourly" | "daily">("");
+  let bulkGroupWait = $state(30);
+  let bulkChannelMode = $state<"set" | "add" | "remove">("set");
+  let bulkChannels = $state<string[]>([]);
+  let bulkTouchChannels = $state(false);
+  let bulkBusy = $state(false);
+
+  function bulkToggle(id: string) {
+    const next = new Set(bulkSel);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    bulkSel = next;
+  }
+
+  async function applyBulk() {
+    if (bulkSel.size === 0) return;
+    bulkBusy = true;
+    error = "";
+    try {
+      const body: Record<string, unknown> = { rule_ids: [...bulkSel] };
+      if (bulkThrottle) {
+        body.set_throttle = true;
+        body.digest_window = bulkThrottle === "immediate" ? null : bulkThrottle;
+        if (bulkThrottle === "immediate") body.group_wait_s = bulkGroupWait;
+      }
+      if (bulkTouchChannels) {
+        body.channel_mode = bulkChannelMode;
+        body.channel_ids = bulkChannels;
+      }
+      await bulkUpdateAlertRules(body);
+      bulkSel = new Set();
+      bulkThrottle = "";
+      bulkTouchChannels = false;
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      bulkBusy = false;
+    }
+  }
   // Roadmap §6 polish (2026-08-19): optional extra grouping keys and inhibition.
   let rGroupExtras = $state<string[]>([]);
   let rInhibitedBy = $state<string[]>([]);
@@ -621,13 +664,65 @@
       <button class="rounded-lg border px-3 py-1 text-sm dark:border-slate-700" onclick={startNewRule}>+ New rule</button>
     </div>
 
+    {#if bulkSel.size > 0}
+      <div class="mt-2 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--accent)] bg-slate-50 px-3 py-2 text-sm dark:bg-slate-900">
+        <span class="font-medium">{bulkSel.size} selected</span>
+        <label class="flex items-center gap-1 text-xs">
+          Throttle
+          <select class="rounded border px-1 py-0.5 dark:border-slate-700 dark:bg-slate-900" bind:value={bulkThrottle}>
+            <option value="">(leave)</option>
+            <option value="immediate">immediate</option>
+            <option value="hourly">hourly digest</option>
+            <option value="daily">daily digest</option>
+          </select>
+          {#if bulkThrottle === "immediate"}
+            <span>wait</span>
+            <input class="w-16 rounded border px-1 py-0.5 dark:border-slate-700 dark:bg-slate-900" type="number" min="0" bind:value={bulkGroupWait} />s
+          {/if}
+        </label>
+        <label class="flex items-center gap-1 text-xs">
+          <input type="checkbox" bind:checked={bulkTouchChannels} /> channels:
+          <select class="rounded border px-1 py-0.5 dark:border-slate-700 dark:bg-slate-900" disabled={!bulkTouchChannels} bind:value={bulkChannelMode}>
+            <option value="set">replace with</option>
+            <option value="add">also publish to</option>
+            <option value="remove">stop publishing to</option>
+          </select>
+        </label>
+        {#if bulkTouchChannels}
+          <span class="flex flex-wrap gap-2 text-xs">
+            {#each channels as c (c.id)}
+              <label class="flex items-center gap-1" class:opacity-50={!c.enabled}>
+                <input type="checkbox" checked={bulkChannels.includes(c.id)}
+                  onchange={() => (bulkChannels = toggle(bulkChannels, c.id))} />
+                {c.name}{c.enabled ? "" : " (disabled)"}
+              </label>
+            {/each}
+          </span>
+        {/if}
+        <div class="grow"></div>
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+          disabled={bulkBusy || (!bulkThrottle && !bulkTouchChannels)} onclick={applyBulk}>
+          {bulkBusy ? "Applying…" : "Apply to selected"}</button>
+        <button class="text-xs underline" onclick={() => (bulkSel = new Set())}>clear</button>
+      </div>
+    {/if}
+
     <table class="w-full text-sm">
       <thead class="text-left text-slate-500">
-        <tr><th class="py-1">Name</th><th>Scope</th><th>Events</th><th>Throttle</th><th>Channels</th><th>Enabled</th><th></th></tr>
+        <tr>
+          <th class="py-1 pr-1">
+            <input type="checkbox" title="Select all rules"
+              checked={rules.length > 0 && bulkSel.size === rules.length}
+              onchange={() => (bulkSel = bulkSel.size === rules.length ? new Set() : new Set(rules.map((x) => x.id)))} />
+          </th>
+          <th class="py-1">Name</th><th>Scope</th><th>Events</th><th>Throttle</th><th>Channels</th><th>Enabled</th><th></th></tr>
       </thead>
       <tbody>
         {#each rules as r (r.id)}
           <tr class="border-t border-slate-100 dark:border-slate-800">
+            <td class="py-1 pr-1">
+              <input type="checkbox" checked={bulkSel.has(r.id)} onchange={() => bulkToggle(r.id)} />
+            </td>
             <td class="py-1 font-medium">
               {r.name}
               {#if r.is_system}<span class="ml-1 rounded bg-slate-200 px-1 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300">system</span>{/if}

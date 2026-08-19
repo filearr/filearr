@@ -35,7 +35,7 @@ from filearr.llm import (
     tools_openai,
 )
 from filearr.meili_ops import DEFAULT_EMBEDDER_NAME
-from filearr.models import Agent, ApiKey, Item, ItemVersion, Library
+from filearr.models import Agent, ApiKey, Item, ItemVersion, Library, Principal
 from filearr.query_sql import QueryTranslationError, ast_to_where
 from filearr.rbac import PathGrant
 from filearr.rbac_sql import _covers, path_scope_uses_ltree
@@ -76,6 +76,17 @@ async def llm_principal(
         raise HTTPException(401, "unknown key")
     if row.expires_at is not None and row.expires_at < datetime.now(UTC):
         raise HTTPException(401, "key expired")
+    # 2026-08-20: LLM keys are owned by a service account (like plain keys); a
+    # disabled owner takes every key with it. The facade has its OWN auth path,
+    # so the main app's check in security.py does not cover it — enforce here.
+    if row.service_account_id is not None:
+        disabled = (
+            await session.execute(
+                select(Principal.disabled_at).where(Principal.id == row.service_account_id)
+            )
+        ).scalar_one_or_none()
+        if disabled is not None:
+            raise HTTPException(401, "service account disabled")
     principal = principal_for(row)
     if principal is None:
         raise HTTPException(

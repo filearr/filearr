@@ -51,6 +51,7 @@ from xml.sax.saxutils import quoteattr as _xml_quoteattr
 from sqlalchemy import (
     Select,
     Text,
+    and_,
     case,
     cast,
     func,
@@ -63,10 +64,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import Grouping
 
 from filearr import share_map
-from filearr.models import Agent, Item, ItemStatus, Library, PermissionSnapshot
+from filearr.models import Agent, Item, ItemStatus, Library, PermissionSnapshot, PrincipalAlias
 from filearr.quality_score import REVIEW_BAND, score_item
 
 #: Server-side cursor batch size for streaming exports (research §6.2).
@@ -1009,6 +1011,10 @@ def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = Fa
     p_wk = principal["well_known"].astext
     p_kind = principal["kind"].astext
     inherited = a["inherited"].astext.cast(_SABoolean)
+    # W7-T8 (2026-08-20): fold host-local identities into their canonical
+    # cross-host identity via principal_aliases (presentation-side; snapshots
+    # stay verbatim). The raw id remains in principal_id for forensics.
+    alias = aliased(PrincipalAlias)
     stmt = (
         select(
             ranked.c.agent_id.label("agent_id"),
@@ -1024,6 +1030,8 @@ def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = Fa
             p_name.label("principal_name"),
             p_kind.label("principal_kind"),
             p_wk.label("well_known"),
+            alias.canonical.label("principal_canonical"),
+            alias.display.label("principal_display"),
             a["type"].astext.label("ace_type"),
             a["verbs"].label("verbs"),
             a["raw_mask"].astext.label("raw_mask"),
@@ -1033,6 +1041,7 @@ def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = Fa
         .select_from(ranked)
         .join(ace, literal(True))
         .join(Agent, Agent.id == ranked.c.agent_id)
+        .outerjoin(alias, alias.alias == p_id)
         .where(ranked.c.rn == 1)
         # exclusion defaults (§4): explicit ACEs from non-well-known principals
         .where(or_(inherited.is_(None), inherited.is_(False)))
@@ -1094,7 +1103,13 @@ def _row_perm(r: Any) -> dict:
         "path": r.path,
         "is_dir": bool(r.is_dir),
         "owner": r.owner_name or r.owner_id or "",
-        "principal": r.principal_name or r.principal_id or "",
+        # canonical identity first (W7-T8 alias), else the raw resolution
+        "principal": r.principal_display
+        or r.principal_canonical
+        or r.principal_name
+        or r.principal_id
+        or "",
+        "canonical_id": r.principal_canonical,
         "principal_id": r.principal_id or "",
         "kind": r.principal_kind or "",
         "ace_type": r.ace_type or "",
@@ -1108,8 +1123,8 @@ def _row_perm(r: Any) -> dict:
 
 
 _PERM_COLUMNS = (
-    "agent", "path", "is_dir", "owner", "principal", "principal_id", "kind", "ace_type",
-    "verbs", "raw_mask", "scope", "fidelity", "collected_at",
+    "agent", "path", "is_dir", "owner", "principal", "canonical_id", "principal_id",
+    "kind", "ace_type", "verbs", "raw_mask", "scope", "fidelity", "collected_at",
 )
 
 
@@ -1258,6 +1273,96 @@ def _row_perm_change(r: Any) -> dict:
     }
 
 
+# --- 2026-08-20 hygiene reports (user request: empty files + low-info sidecars)
+# Extensions that classify as sidecars by SHAPE (filearr.sidecar): used to find
+# the UNLINKED ones (sidecar-shaped rows with no parent) that pollute search/
+# timeline — exactly the live July-2026 .xmp bar.
+_SIDECAR_EXTS = ("nfo", "xmp", "thm")
+
+
+def _build_empty_files(params: ReportParams) -> Select:
+    stmt = (
+        select(
+            Library.name.label("library"),
+            Item.id.label("item_id"),
+            Item.rel_path.label("rel_path"),
+            Item.extension.label("extension"),
+            Item.file_group.label("file_group"),
+            Item.mtime.label("mtime"),
+            (Item.sidecar_of.is_not(None)).label("is_sidecar"),
+        )
+        .join(Library, Library.id == Item.library_id)
+        .where(Item.status == ItemStatus.active, Item.size == 0)
+    )
+    if params.library_id is not None:
+        stmt = stmt.where(Item.library_id == params.library_id)
+    return stmt.order_by(Library.name, Item.rel_path)
+
+
+def _row_empty_file(r: Any) -> dict:
+    return {
+        "library": r.library,
+        "rel_path": r.rel_path,
+        "extension": r.extension or "",
+        "file_group": r.file_group or "",
+        "is_sidecar": bool(r.is_sidecar),
+        "mtime": r.mtime.isoformat() if r.mtime else "",
+        "item_id": str(r.item_id),
+    }
+
+
+def _build_sidecar_hygiene(params: ReportParams) -> Select:
+    """Sidecar-shaped rows worth attention, one ``issue`` per row:
+
+    * ``unlinked`` — a sidecar-extension file with NO parent link. It behaves
+      like a first-class item (visible in search/timeline) either because the
+      library has not had a successful scan/association pass since it landed,
+      or because no plausible parent exists next to it.
+    * ``empty`` / ``tiny`` — a LINKED sidecar of 0 / <= 64 bytes: it contributes
+      no metadata or artwork and is safe to clean up at the source."""
+    issue = case(
+        (Item.sidecar_of.is_(None), literal("unlinked")),
+        (Item.size == 0, literal("empty")),
+        else_=literal("tiny"),
+    )
+    stmt = (
+        select(
+            Library.name.label("library"),
+            Item.id.label("item_id"),
+            Item.rel_path.label("rel_path"),
+            Item.extension.label("extension"),
+            Item.size.label("size"),
+            issue.label("issue"),
+            Item.mtime.label("mtime"),
+        )
+        .join(Library, Library.id == Item.library_id)
+        .where(
+            Item.status == ItemStatus.active,
+            or_(
+                # unlinked sidecar-shaped rows
+                and_(Item.sidecar_of.is_(None), Item.extension.in_(_SIDECAR_EXTS)),
+                # linked but content-free
+                and_(Item.sidecar_of.is_not(None), Item.size <= 64),
+            ),
+        )
+    )
+    if params.library_id is not None:
+        stmt = stmt.where(Item.library_id == params.library_id)
+    return stmt.order_by(issue, Library.name, Item.rel_path)
+
+
+def _row_sidecar_hygiene(r: Any) -> dict:
+    return {
+        "library": r.library,
+        "rel_path": r.rel_path,
+        "extension": r.extension or "",
+        "size": int(r.size or 0),
+        "issue": r.issue,
+        "mtime": r.mtime.isoformat() if r.mtime else "",
+        "item_id": str(r.item_id),
+    }
+
+
 _PERM_CHANGE_COLUMNS = (
     "agent", "path", "is_dir", "changed_at", "previous_at", "owner_before", "owner_after",
     "added", "removed", "modified", "details", "fidelity",
@@ -1325,6 +1430,43 @@ _REPORTS = _REPORTS + (
         supports_threshold=True,
         threshold_label="Changes in the last (days)",
         default_threshold_days=30,
+    ),
+    CannedReport(
+        id="empty_files",
+        title="Empty files",
+        description=(
+            "Every active zero-byte file (sidecars flagged). Zero-byte files "
+            "carry no content, can never be content-hashed, and are excluded "
+            "from the duplicate reports -- this is the cleanup list. Common "
+            "sources: interrupted copies, placeholder exports, touch artifacts."
+        ),
+        columns=("library", "rel_path", "extension", "file_group", "is_sidecar",
+                 "mtime", "item_id"),
+        build=_build_empty_files,
+        row=_row_empty_file,
+        supports_library=True,
+        row_link="item",
+        default_limit=1000,
+    ),
+    CannedReport(
+        id="sidecar_hygiene",
+        title="Sidecars: unlinked / empty",
+        description=(
+            "Sidecar-shaped files that need attention. 'unlinked' = a "
+            ".nfo/.xmp/.thm with no parent link -- it behaves like a "
+            "first-class item (visible in search and the timeline) because the "
+            "library has not completed a scan/association pass since it "
+            "landed, or no plausible parent sits next to it. 'empty'/'tiny' = "
+            "a linked sidecar of 0 / <=64 bytes contributing no metadata or "
+            "artwork -- safe to delete at the source. A large 'unlinked' count "
+            "usually means: fix the library's failing scan, then rescan."
+        ),
+        columns=("library", "rel_path", "extension", "size", "issue", "mtime", "item_id"),
+        build=_build_sidecar_hygiene,
+        row=_row_sidecar_hygiene,
+        supports_library=True,
+        row_link="item",
+        default_limit=1000,
     ),
 )
 

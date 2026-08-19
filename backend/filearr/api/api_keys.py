@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit
+from filearr import audit, security
 from filearr.db import get_session
 from filearr.models import ApiKey, Principal, ServiceAccount
 from filearr.security import generate_key, require_scope
@@ -101,6 +101,13 @@ async def mint_api_key(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    # 2026-08-20 privilege ceiling: a caller may only mint keys at the same or
+    # less access than they hold (defense in depth — today the endpoint is
+    # admin-gated, but the rule must survive any future loosening, and it stops
+    # an admin-scoped KEY from being laundered into broader grants if the
+    # vocabulary ever grows).
+    granted = await security.caller_scopes(request, session)
+    security.require_grant_ceiling(security.expand_scopes(body.scopes), granted, "an API key")
     owner = await session.get(ServiceAccount, body.service_account_id)
     if owner is None:
         raise HTTPException(404, "service account not found")

@@ -3,13 +3,16 @@
   // Ollama loops, MCP). The key material is shown exactly once at mint time;
   // the panel also surfaces the per-key system-prompt / capabilities URLs.
   import {
+    createServiceAccount,
     listLlmKeys,
     listLlmRoles,
+    listServiceAccounts,
     mintLlmKey,
     revokeLlmKey,
     friendlyError,
     type LlmKey,
     type LlmRoleInfo,
+    type ServiceAccountOut,
   } from "./api";
 
   let keys = $state<LlmKey[]>([]);
@@ -19,6 +22,10 @@
 
   let showMint = $state(false);
   let mintName = $state("");
+  // 2026-08-20: LLM keys are owned by a service account like plain API keys.
+  let accounts = $state<ServiceAccountOut[]>([]);
+  let mintAccount = $state<string>("");
+  let newAccountName = $state("");
   let mintRole = $state("librarian");
   let mintExpires = $state("");
   let mintPathScope = $state("");
@@ -27,9 +34,15 @@
 
   async function load() {
     try {
-      const [k, r] = await Promise.all([listLlmKeys(), listLlmRoles()]);
+      const [k, r, a] = await Promise.all([
+        listLlmKeys(),
+        listLlmRoles(),
+        listServiceAccounts().catch(() => ({ service_accounts: [] as ServiceAccountOut[] })),
+      ]);
       keys = k.keys;
       roles = r.roles;
+      accounts = a.service_accounts;
+      if (!mintAccount && accounts.length) mintAccount = accounts[0].id;
       loaded = true;
       error = "";
     } catch (e) {
@@ -46,8 +59,22 @@
     e.preventDefault();
     error = "";
     try {
+      let owner = mintAccount;
+      if (owner === "__new__") {
+        if (!newAccountName.trim()) {
+          error = "Name the new service account.";
+          return;
+        }
+        owner = (await createServiceAccount({ name: newAccountName.trim() })).id;
+        newAccountName = "";
+      }
+      if (!owner) {
+        error = "Pick the service account this key belongs to.";
+        return;
+      }
       minted = await mintLlmKey({
         name: mintName.trim(),
+        service_account_id: owner,
         role: mintRole,
         path_scope: mintPathScope.trim() || null,
         expires_days: mintExpires ? Number(mintExpires) : null,
@@ -120,6 +147,19 @@
       <label class="grid gap-1 text-sm">
         <span>Name</span>
         <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" required bind:value={mintName} placeholder="openwebui-librarian" />
+      </label>
+      <label class="grid gap-1 text-sm">
+        <span>Service account (owner)</span>
+        <select class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={mintAccount}>
+          {#each accounts as a (a.id)}
+            <option value={a.id} disabled={a.disabled}>{a.name}{a.disabled ? " (disabled)" : ""}</option>
+          {/each}
+          <option value="__new__">+ new service account…</option>
+        </select>
+        {#if mintAccount === "__new__"}
+          <input class="mt-1 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={newAccountName} placeholder="e.g. openwebui, home-assistant" />
+        {/if}
+        <span class="text-xs text-slate-500 dark:text-slate-400">Disable the account to cut all its keys at once; delete it to revoke them (accounts are managed on the Admin tab).</span>
       </label>
       <label class="grid gap-1 text-sm">
         <span>Role</span>

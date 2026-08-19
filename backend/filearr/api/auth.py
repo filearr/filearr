@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit, authx, ratelimit
+from filearr import audit, authx, ratelimit, security
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.models import Principal, User
@@ -692,6 +692,14 @@ async def create_user(
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"User '{normalized}' already exists")
     role_name = _validate_role_name(payload.global_role)
+    # 2026-08-20 privilege ceiling: creating a user grants that user's role —
+    # the creator must hold at least the scopes the role confers.
+    granted = await security.caller_scopes(request, session)
+    security.require_grant_ceiling(
+        security.expand_scopes(authx.scopes_for_role(role_name)),
+        granted,
+        f"a user with role {role_name!r}",
+    )
     principal = Principal(kind="user", global_role=role_name)
     session.add(principal)
     await session.flush()
@@ -732,7 +740,15 @@ async def patch_user(
     role_changed_to: str | None = None
     disabled_changed_to: bool | None = None
     if payload.global_role is not None and payload.global_role != principal.global_role:
-        principal.global_role = _validate_role_name(payload.global_role)
+        new_role = _validate_role_name(payload.global_role)
+        # Same ceiling as create: raising a role grants its scopes.
+        granted = await security.caller_scopes(request, session)
+        security.require_grant_ceiling(
+            security.expand_scopes(authx.scopes_for_role(new_role)),
+            granted,
+            f"role {new_role!r}",
+        )
+        principal.global_role = new_role
         role_changed_to = principal.global_role
         privilege_change = True
     if payload.disabled is not None:

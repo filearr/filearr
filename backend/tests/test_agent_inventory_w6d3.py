@@ -573,3 +573,74 @@ async def test_permission_changes_report_and_alert(client):
     # csv export works
     r = await c.get("/api/v1/reports/permission_changes?format=csv")
     assert r.status_code == 200 and "details" in r.text.splitlines()[0]
+
+
+async def test_principal_alias_canonicalises_reports(client):
+    """W7-T8 (2026-08-20): an alias folds host-local ids into one canonical
+    identity in the by-principal report; raw ids stay for forensics."""
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+    entries = [{"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()}]
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/{cid}/complete",
+        json={"ok": True, "result": {"summary": {"entries": 1}, "entries": entries}},
+        headers=_auth(fp),
+    )
+    assert r.status_code == 200, r.text
+
+    # map uid 1000 -> the org identity
+    r = await c.put("/api/v1/principal-aliases", json=[
+        {"alias": "1000", "canonical": "org:eric", "display": "Eric H"},
+    ])
+    assert r.status_code == 200 and r.json() == {"upserted": 1}
+    r = await c.get("/api/v1/principal-aliases")
+    assert r.json()["aliases"][0]["canonical"] == "org:eric"
+
+    r = await c.get("/api/v1/reports/permissions_by_principal")
+    rows = r.json()["rows"]
+    eric = [x for x in rows if x["principal_id"] == "1000"]
+    assert eric and all(x["principal"] == "Eric H" and x["canonical_id"] == "org:eric" for x in eric)
+    other = [x for x in rows if x["principal_id"] == "100"]
+    assert other and all(x["canonical_id"] is None and x["principal"] == "users" for x in other)
+
+    # delete restores the raw resolution
+    assert (await c.delete("/api/v1/principal-aliases/1000")).status_code == 204
+    r = await c.get("/api/v1/reports/permissions_by_principal")
+    eric = [x for x in r.json()["rows"] if x["principal_id"] == "1000"]
+    assert all(x["principal"] == "eric" for x in eric)
+    assert (await c.delete("/api/v1/principal-aliases/1000")).status_code == 404
+
+
+async def test_effective_access_endpoint(client):
+    """W7-T10 (2026-08-20): the inspection endpoint over the newest snapshot."""
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+    entries = [{"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()}]
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/{cid}/complete",
+        json={"ok": True, "result": {"summary": {"entries": 1}, "entries": entries}},
+        headers=_auth(fp),
+    )
+    assert r.status_code == 200, r.text
+    r = await c.get(
+        "/api/v1/permissions/effective-access",
+        params={"agent_id": str(agent_id), "path": "/data/x.mkv", "principal": ["1000"]},
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["verbs"] == ["read", "write"] and out["matched_aces"] >= 1
+    # unknown path -> 404; no principal -> 422
+    assert (
+        await c.get(
+            "/api/v1/permissions/effective-access",
+            params={"agent_id": str(agent_id), "path": "/nope", "principal": ["1000"]},
+        )
+    ).status_code == 404
+    assert (
+        await c.get(
+            "/api/v1/permissions/effective-access",
+            params={"agent_id": str(agent_id), "path": "/data/x.mkv"},
+        )
+    ).status_code == 422

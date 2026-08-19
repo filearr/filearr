@@ -2266,6 +2266,27 @@ class AgentReconcileStaging(Base):
 # --------------------------------------------------------------------------- #
 
 
+class PrincipalAlias(Base):
+    """W7-T8 (2026-08-20): one raw permission-principal identifier mapped to a
+    canonical cross-host identity. The same person shows up as
+    ``local:<host>:1000`` on one machine and an AD SID on another; an alias row
+    per raw id (the ``alias`` PK is the VERBATIM source identifier / canonical
+    id an agent emitted) folds them into one ``canonical`` key with an optional
+    human ``display``. Applied REPORT-side (the by-principal and broad-access
+    permission reports join through this table); stored snapshots stay
+    verbatim — the mapping is presentation, never a rewrite of evidence."""
+
+    __tablename__ = "principal_aliases"
+    __table_args__ = (Index("ix_principal_aliases_canonical", "canonical"),)
+
+    alias: Mapped[str] = mapped_column(Text, primary_key=True)
+    canonical: Mapped[str] = mapped_column(Text)
+    display: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class AgentCommand(Base):
     """One on-demand instruction for a fleet agent (P10-T1, research §3.1).
 

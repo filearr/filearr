@@ -51,7 +51,7 @@ from filearr.querydsl import (
 
 # Mirror of the parser's allow-list (defense in depth — the translator never
 # trusts that its input was produced by the reference parser).
-_DYNAMIC_KEY_RE = re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_]+)*$")
+_DYNAMIC_KEY_RE = re.compile(r"^(?:[a-z0-9_]+\.)*(?:[a-z0-9_]+|\*)$")
 
 # LIKE/ILIKE metacharacters escaped so a catalog value (untrusted: filenames,
 # tags, user query text) can never smuggle a wildcard.
@@ -267,9 +267,41 @@ def _meta_compare(accessor, v: MetaValue, *, numeric: bool) -> ColumnElement:
     return _cmp(astext, v.op, v.lo)
 
 
+def _meta_wildcard_predicate(sub: str, v: MetaValue) -> ColumnElement:
+    """``meta.*`` / ``meta.a.*`` (2026-08-20): match when ANY value under the
+    (optional) prefix satisfies the predicate. Compiled as an EXISTS over
+    ``jsonb_each_text`` — the prefix path is built with the safe accessor chain
+    (never string-interpolated), and the per-value comparison reuses the exact
+    scalar rules. ``=`` on a wildcard is case-insensitive equality (the common
+    "find it wherever it is" intent)."""
+    from sqlalchemy import column as _sacolumn
+    from sqlalchemy import exists, func, select
+
+    prefix = sub[:-2]  # strip ".*" (or "" for the bare "*")
+    source = _jsonb_accessor(Item.metadata_, prefix) if prefix else Item.metadata_
+    kv = func.jsonb_each_text(source).table_valued(
+        _sacolumn("key"), _sacolumn("value")
+    ).render_derived()
+    val = kv.c.value
+    # Numeric comparisons must skip non-numeric values (a nested object / any
+    # text) instead of blowing up the cast — the wildcard scans EVERY value.
+    looks_numeric = val.op("~")(r"^-?\d+(\.\d+)?$")
+    if v.op == "range":
+        lo, hi = _numeric(v.lo), _numeric(v.hi)
+        casted = cast(val, Numeric)
+        cond = and_(looks_numeric, casted >= lo, casted <= hi)
+    elif v.op == "=":
+        cond = func.lower(val) == v.lo.lower()
+    else:
+        cond = and_(looks_numeric, _cmp(cast(val, Numeric), v.op, _numeric(v.lo)))
+    return exists(select(1).select_from(kv).where(cond))
+
+
 def _meta_predicate(f: Filter) -> ColumnElement:
     sub = _validate_key(f.key)
     v: MetaValue = f.value  # type: ignore[assignment]
+    if sub == "*" or sub.endswith(".*"):
+        return _meta_wildcard_predicate(sub if sub != "*" else ".*", v)
     accessor = _jsonb_accessor(Item.metadata_, sub)
     # ``meta.`` operand type is unknown; comparators/range imply numeric, ``=``
     # defaults to text equality.
@@ -282,6 +314,8 @@ _CF_NUMERIC_TYPES = frozenset({"integer", "float"})
 
 def _cf_predicate(f: Filter, defs: dict[str, CustomFieldDef]) -> ColumnElement:
     sub = _validate_key(f.key)
+    if sub == "*" or sub.endswith(".*"):
+        raise QueryTranslationError("cf. keys must name a registered field (no wildcard)")
     if sub not in defs:
         raise QueryTranslationError(
             f"unknown custom field {sub!r}; not a registered custom_fields.name"

@@ -42,6 +42,8 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 | `permissions_by_principal` | Every **explicit** (non-inherited) allow/deny from a non-system principal on paths an agent has inventoried with the `permissions` collector — one row per ACE, newest snapshot per path; owner always shown. Read agent-side (Linux mode bits + POSIX ACL xattrs; Windows owner + full DACL, local or UNC). Check `fidelity`: `synthesized_from_mode` means a cifs mount without `cifsacl` — the mount options, not the server's ACL. |
 | `permissions_broad_access` | Paths where **Everyone / Authenticated Users / Users / POSIX "other"** hold an explicit allow with write, delete, change-permissions or full control — the world-writable review list. |
 | `permission_changes` | **Permission drift**: what changed between consecutive permission snapshots of the same path — one row per change event, newest first, with ACEs added (`+`), removed (`-`), modified (`~ before → after`) and owner/group changes in a readable `details` column. Only re-inventoried paths appear; an unchanged re-collection writes no snapshot, so every row is real drift. Threshold input = "changes in the last *N* days" (default 30). Pair with the **System: permission change** alert rule for push notification — see [Permission drift](#permission-drift). |
+| `empty_files` | Every active **zero-byte** file (sidecars flagged). They carry no content, can never be content-hashed, and are excluded from the duplicate reports — this is the cleanup list. |
+| `sidecar_hygiene` | Sidecar-shaped files needing attention: `unlinked` (a `.nfo`/`.xmp`/`.thm` with **no parent link** — it behaves like a first-class item and shows in search/the timeline; usually a library whose scan/association hasn't completed since the files landed), and `empty`/`tiny` (a linked sidecar of 0 / ≤64 bytes contributing nothing — deletable at the source). A large `unlinked` count → fix the failing scan, rescan, and the timeline bar collapses. |
 
 Run one as a paginated JSON page (this is what the Reports screen shows):
 
@@ -190,6 +192,21 @@ the same one-line summary in its payload — attach a channel and enable it unde
 **Alerts** like any other system rule. A **fidelity-only** change (for example a
 share that started reporting `synthesized_from_mode` after a remount) is stored
 and shown in the report but does **not** raise the alert.
+
+**Cross-host identities (principal aliases).** The same person often appears
+as `local:<host>:1000` on one machine and an AD SID on another. Map the raw
+identifiers onto one canonical identity with
+`PUT /api/v1/principal-aliases` (`[{"alias": "1000", "canonical": "org:eric",
+"display": "Eric H"}]`, admin scope) — the by-principal and broad-access
+reports then show the canonical identity (the raw id stays in the
+`principal_id` column for forensics). Snapshots are never rewritten.
+
+**Effective access.** To answer "what can this identity actually *do* on this
+path", `GET /api/v1/permissions/effective-access?agent_id=…&path=…&principal=1000&principal=100`
+evaluates the newest snapshot: ordered deny-before-allow over the ACEs, POSIX
+owner/group/other class selection, and local ∩ share layer intersection.
+Supply every identity the caller answers to (uid, SID, group ids) — group
+closure is your job; nothing is guessed.
 
 !!! tip "Cadence is the inventory cadence"
     Drift is observed at the next inventory of the path, not at the moment of

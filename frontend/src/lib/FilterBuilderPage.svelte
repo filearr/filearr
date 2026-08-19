@@ -387,7 +387,7 @@
           <textarea
             class="h-40 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
             bind:value={rawQuery}
-            placeholder="kind:video meta.height:>=1080 -tag:archived"></textarea>
+            placeholder={"kind:video meta.height:>=1080 -tag:archived   (meta.*:value matches any metadata key)"}></textarea>
         </label>
       {:else}
         <div class="space-y-2">
@@ -418,7 +418,10 @@
                 <input
                   class="w-36 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
                   list={c.field === "meta" ? "meta-keys" : "cf-keys"}
-                  placeholder={c.field === "meta" ? "key (e.g. height)" : "field name"}
+                  placeholder={c.field === "meta" ? "key (e.g. height, or * for any)" : "field name"}
+                  title={c.field === "meta"
+                    ? "The extracted-metadata key. Dotted paths reach nested objects (exif.camera). The FINAL segment may be * to match ANY key: meta.*:1080p finds the value wherever it lives; meta.exif.*:canon searches every EXIF field."
+                    : "The registered custom field's name."}
                   bind:value={c.key} />
               {/if}
 

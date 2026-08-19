@@ -666,6 +666,81 @@ async def update_rule(
     return await _rule_out(session, row)
 
 
+class AlertRuleBulkIn(BaseModel):
+    """2026-08-20 mass edit: apply ONE change-set to many rules at once (the
+    'switch everything to immediate and point it at the new channel' chore).
+    Only the fields present are touched; ``digest_window: null`` explicitly
+    means IMMEDIATE (with ``group_wait_s``), matching the single-rule PATCH."""
+
+    rule_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    enabled: bool | None = None
+    digest_window: str | None = None
+    group_wait_s: int | None = Field(default=None, ge=0)
+    repeat_interval_s: int | None = Field(default=None, ge=0)
+    #: How ``channel_ids`` applies: replace the attachment list, add to it, or
+    #: remove from it. Ignored when ``channel_ids`` is absent.
+    channel_mode: str = "set"
+    channel_ids: list[uuid.UUID] | None = None
+    # pydantic can't distinguish absent from null for digest_window, so the
+    # client sends this flag when it INTENDS to change the throttle.
+    set_throttle: bool = False
+
+
+@router.post(
+    "/alert-rules/bulk",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def bulk_update_rules(
+    body: AlertRuleBulkIn, session: AsyncSession = Depends(get_session)
+) -> dict:
+    if body.channel_mode not in ("set", "add", "remove"):
+        raise HTTPException(422, "channel_mode must be set/add/remove")
+    if body.set_throttle:
+        _validate_digest_window(body.digest_window)
+    if body.channel_ids is not None:
+        await _validate_channels(session, body.channel_ids)
+    rows = (
+        (
+            await session.execute(
+                select(AlertRule).where(AlertRule.id.in_(body.rule_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    found = {r.id for r in rows}
+    missing = [str(i) for i in body.rule_ids if i not in found]
+    updated = 0
+    for row in rows:
+        if body.enabled is not None:
+            row.enabled = body.enabled
+        if body.set_throttle:
+            row.digest_window = body.digest_window
+            # switching to immediate: apply the given group wait (default 30);
+            # switching to a digest: group wait is irrelevant, zero it like the UI.
+            if body.digest_window is None:
+                row.group_wait_s = body.group_wait_s if body.group_wait_s is not None else 30
+            else:
+                row.group_wait_s = 0
+        elif body.group_wait_s is not None:
+            row.group_wait_s = body.group_wait_s
+        if body.repeat_interval_s is not None:
+            row.repeat_interval_s = body.repeat_interval_s
+        if body.channel_ids is not None:
+            current = await _rule_channel_ids(session, row.id)
+            if body.channel_mode == "set":
+                target = list(dict.fromkeys(body.channel_ids))
+            elif body.channel_mode == "add":
+                target = list(dict.fromkeys([*current, *body.channel_ids]))
+            else:
+                drop = set(body.channel_ids)
+                target = [c for c in current if c not in drop]
+            await _set_rule_channels(session, row.id, target)
+        updated += 1
+    await session.commit()
+    return {"updated": updated, "missing": missing}
+
+
 @router.delete(
     "/alert-rules/{rule_id}",
     status_code=204,

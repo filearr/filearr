@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/filearr/filearr/agent/internal/agentlog"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -40,6 +41,16 @@ func (a *daemonApplier) ApplyPolicy(p agentcfg.Policy) error {
 	if d, ok := p.ReconcileInterval(); ok {
 		a.sup.SetInterval(d)
 		a.log.Info("policy applied: reconcile interval", "interval", d.String())
+	}
+	// Central log_level (2026-08-20): group settings win when set; a bad name
+	// is ignored (logged via the ignored-settings path would be overkill for a
+	// validated-centrally field — central's Literal[] refuses typos at write).
+	if p.Group != nil && p.Group.LogLevel != nil {
+		if lvl, ok := agentlog.ParseLevel(*p.Group.LogLevel); ok {
+			if prev := agentlog.SetLevel(lvl); prev != lvl {
+				a.log.Info("policy applied: log level", "level", *p.Group.LogLevel)
+			}
+		}
 	}
 	if d, ok := p.UpdatePollInterval(); ok && a.updInterval != nil {
 		if a.updInterval.Set(d) {

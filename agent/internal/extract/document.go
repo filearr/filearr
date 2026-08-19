@@ -17,7 +17,9 @@ import (
 // xlsx gets properties + structure but explicitly NO body text, and the agent
 // keeps that asymmetry so the two sides produce the same shape for the same file.
 var (
-	textExts = map[string]bool{"txt": true, "md": true}
+	// 2026-08-20: mirrors central's _PLAIN_TEXT_EXTS / _MARKUP_EXTS (documents.py).
+	textExts   = map[string]bool{"txt": true, "text": true, "md": true, "markdown": true, "rst": true, "nfo": true}
+	markupExts = map[string]bool{"html": true, "htm": true, "xhtml": true, "xml": true}
 	// ODF part names are shared across the family; the body rule is not.
 	// Text/presentation documents get body text, spreadsheets (ods/ots) do not —
 	// the same "structure only for spreadsheets" rule as xlsx.
@@ -36,6 +38,11 @@ func extractDocument(ctx context.Context, path, ext string, opts Options, res *R
 			return nil // properties-only mode: a txt file has no properties
 		}
 		return extractTextBody(path, opts, res)
+	case markupExts[ext]:
+		if !opts.BodyText {
+			return nil
+		}
+		return extractMarkupBody(path, opts, res)
 	case ext == "docx" || ext == "docm":
 		return extractDocx(ctx, path, opts, res)
 	case ext == "xlsx" || ext == "xlsm":
