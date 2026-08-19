@@ -336,3 +336,37 @@ async def test_auth_enforced_when_enabled(wired, monkeypatch):
 
         r = await client.post(f"/api/v1/scans/{uuid.uuid4()}/events-token", headers=auth)
         assert r.status_code == 404
+
+
+async def test_sse_auth_dependency_holds_no_request_scoped_session(wired, monkeypatch):
+    """The auth dependency used to take ``Depends(get_session)`` -- a yield
+    dependency that stays open for the whole SSE response, pinning a pooled
+    connection per open stream (2026-08-18). It now opens its own short-lived
+    session. Pinned two ways: no ``session`` parameter on the dependency (so
+    FastAPI has nothing to hold open), and after a direct call with a real
+    Bearer key the pool has zero checked-out connections."""
+    import inspect
+
+    from fastapi.security import HTTPAuthorizationCredentials
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    from filearr.api import transfers as transfers_mod
+
+    for dep in (scans_mod._require_events_scope, transfers_mod._require_transfer_events_scope):
+        assert "session" not in inspect.signature(dep).parameters, dep.__name__
+
+    monkeypatch.setattr(get_settings(), "auth_enabled", True)
+    maker = wired["maker"]
+    scan_id, _ = await _mk_scan(maker, status="running", stats={"seen": 1})
+    key = await _mk_key(maker, scopes=("read",))
+    engine = maker.kw["bind"]
+    scope = {"type": "http", "method": "GET", "path": "/x", "headers": [], "query_string": b""}
+    request = Request(scope)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=key)
+    await scans_mod._require_events_scope(request, Response(), scan_id, None, creds)
+    assert engine.pool.checkedout() == 0, engine.pool.status()
+    # and a wrong key is still refused
+    with pytest.raises(Exception):  # noqa: B017 - HTTPException 401
+        bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="nope")
+        await scans_mod._require_events_scope(request, Response(), scan_id, None, bad)

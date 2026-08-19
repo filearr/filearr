@@ -316,7 +316,6 @@ async def _require_transfer_events_scope(
     transfer_id: uuid.UUID,
     stream_token: str | None = None,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-    session: AsyncSession = Depends(get_session),
 ) -> None:
     """Auth for the transfer SSE stream (mirrors the scans SSE, scans.py).
 
@@ -330,19 +329,23 @@ async def _require_transfer_events_scope(
     settings = get_settings()
     if not settings.auth_enabled:
         return
-    if creds is not None:
-        await _verify_credentials(creds.credentials, "read", session, request)
-        return
     if stream_token is not None:
         if streamtokens.consume(stream_token, "transfer-events", str(transfer_id)):
             return
         raise HTTPException(401, "Invalid or expired stream token")
-    principal = await resolve_session_principal(request, response, session)
-    if principal is not None:
-        if "read" not in authx.scopes_for_role(principal.global_role):
-            raise HTTPException(403, "Scope 'read' required")
-        request.state.actor = f"principal:{principal.id}"
-        await session.commit()
+    # Short-lived session, not Depends(get_session): a yield dependency stays
+    # open for the whole SSE response and pinned a pooled connection per open
+    # stream (see scans._require_events_scope).
+    async with db_mod.SessionLocal() as session:
+        if creds is not None:
+            await _verify_credentials(creds.credentials, "read", session, request)
+            return
+        principal = await resolve_session_principal(request, response, session)
+        if principal is not None:
+            if "read" not in authx.scopes_for_role(principal.global_role):
+                raise HTTPException(403, "Scope 'read' required")
+            request.state.actor = f"principal:{principal.id}"
+            await session.commit()
         return
     raise HTTPException(401, "Missing bearer token or stream_token")
 
