@@ -4,6 +4,40 @@ Extends the v1 single-node catalog into a centrally managed, multi-machine file
 intelligence platform. Research-verified 2026-07-06 (prior-art citations in the
 research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 
+## Status index (refreshed 2026-08-19)
+
+| § | Area | Status |
+|---|---|---|
+| 1 | Distributed agents | **shipped** (+ scheduled/held updates, phased binary rollouts 2026-08-18/19) |
+| 2 | Local query access | **shipped** |
+| 3 | Identity, auth & RBAC | **shipped** except SAML (**blocked**: pysaml2 pins pyopenssl<24.3); roles-as-data + service accounts (P6-T10) shipped 2026-08-16/19 |
+| 4 | Indexing controls | **shipped**; custom exclusion presets (P2-T7) + per-OS agent presets driving roots (P2-T8) 2026-08-19 |
+| 5 | Search & findability | P0/P1 **shipped**; long tail (federated multi-search, geo filters in UI) open |
+| 6 | Alerting | **shipped**; apprise now in the image (P8-T3 close-out); polish (inhibition/group_by/CIDR allowlist) open |
+| 7 | Data model extensions | **shipped** |
+| 8 | Meilisearch adoption | adopt-now **done** (v1.53.0; compaction P9-T4 live weekly); adopt-later items open |
+| 9 | License | **decided** (AGPL-3.0-or-later) |
+| 10 | Sequencing | both waves **delivered** |
+| 11 | ffprobe follow-ups | open tail (precise HDR10+/DoVi profiling, etc.) — low value |
+| 12 | Sidecar follow-ups | open tail |
+| 13 | Move detection follow-ups | 2 of 4 **shipped**; rest open |
+| 14 | SSE follow-ups | **shipped** |
+| 15 | Extractor follow-ups | open tail (email/mbox/PST, RAR, CAD/proprietary 3D) |
+| 16 | Hash-policy follow-ups | open tail |
+| 17 | Extraction throughput | **shipped** (adaptive backpressure) |
+| 18 | Error surfacing | **shipped** (+ traceback head/tail, Meili task ack 2026-08-18) |
+| 19 | Test suite + CI | **shipped** (+ cross-compiled images 2026-08-16) |
+| 20 | UX/preview backlog | **shipped** |
+| 21 | LLM / RAG | **shipped** (M1–M3) |
+| 22 | Permissions audit (W7) | **v1 shipped 2026-08-19** (Linux/Windows collector, snapshots, 2 reports); T4 macOS, T8 canonicalisation, T9 drift/alerts, T10 effective access open |
+| 23 | Binary release rollouts on the tier engine | **shipped 2026-08-19** |
+| 24 | GPU acceleration | **declined** (assessed 2026-08-12) |
+| 25 | Insight features | **shipped 2026-08-13** |
+| 26 | joserfc migration | **done 2026-08-14** |
+
+Everything not marked shipped/decided/declined is a small, explicitly deferred
+tail; the only sizeable open work is W7's follow-ups (§22).
+
 ---
 
 ## 1. Distributed agent architecture
@@ -288,6 +322,8 @@ replication, central policy), RBAC + LDAP/SAML/OIDC, machine groups, local
 CLI/web, hot-folder scheduling, per-agent alerting.
 
 ## 11. Deferred enhancements from T1 (ffprobe video extraction)
+
+> **Status 2026-08-19:** deferred tail; nothing here has been requested since T1 shipped.
 - **Precise HDR10+/DoVi profiling.** T1 detects HDR from stream-level colour
   signalling (transfer=smpte2084 → HDR10, arib-std-b67 → HLG, DOVI side-data →
   Dolby Vision, bt2020 primaries → generic HDR). Distinguishing HDR10 vs HDR10+
@@ -301,6 +337,8 @@ CLI/web, hot-folder scheduling, per-agent alerting.
   source of truth; consider a merge strategy later.
 
 ## 12. Sidecar follow-ups (deferred from T3, 2026-07-07)
+
+> **Status 2026-08-19:** deferred tail (T3 core shipped; the bullets below remain optional).
 T3 shipped detection + parent linking (`items.sidecar_of`, ondelete CASCADE),
 Kodi NFO → parent `metadata` parsing (defusedxml, XXE-safe), and search
 exclusion (`is_sidecar` filterable; endpoint hides sidecars unless
@@ -466,6 +504,8 @@ Follow-ups (deferred):
   it needs a faster tick or an in-process timer, not the periodic task.
 
 ## 15. Extractor follow-ups (deferred from T6, 2026-07-07)
+
+> **Status 2026-08-19:** deferred tail. Agent-side parity phases 1-3 (2026-08-09/10) cover the shipped extractors on remote hosts; email/mbox/PST, RAR and CAD/proprietary 3D remain unbuilt.
 T6 shipped the remaining per-type property extractors: **model3d** (trimesh —
 triangle/vertex counts, bbox extents + volume, watertight flag, multi-mesh scene
 aggregation for GLTF/GLB/3MF), **document** (pypdf page count + core properties +
@@ -506,6 +546,8 @@ Remaining, non-trivial:
   zip bomb. Deferred as medium — the size ceiling covers the common case.
 
 ## 16. Hash-policy follow-ups (deferred from T7, 2026-07-07)
+
+> **Status 2026-08-19:** deferred tail; the QH-T6 rehash sweep (2026-08-12) closed the quick-hash correctness item.
 T7 shipped per-library hash policy: `hash_policy` (`auto` | `full` |
 `quick_only`) + a nullable `hash_full_max_bytes` per-library ceiling override
 (null → global `FILEARR_SCAN_HASH_FULL_MAX_BYTES`). `auto` detects the root's
