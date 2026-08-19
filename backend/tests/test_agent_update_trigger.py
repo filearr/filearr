@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Central-version-driven agent updates (2026-08-05).
 
 Covers the three new behaviors layered onto the P5-T7 update plane:
