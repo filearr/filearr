@@ -287,3 +287,99 @@ async def test_fetch_cert_unreachable_returns_error(api):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False and "could not connect" in body["error"]
+
+
+# --------------------------------------------------------------------------- #
+# AIA chain completion (AD DCs commonly present only their leaf)               #
+# --------------------------------------------------------------------------- #
+def _chain_with_aia() -> dict:
+    """leaf(AIA→issuing.p7b) ← intermediate(AIA→root.cer) ← root. The AIA
+    payload map serves the intermediate as PKCS#7 DER and the root as bare DER
+    — the two formats AD CS actually publishes."""
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import pkcs7
+    from cryptography.x509.oid import AuthorityInformationAccessOID, NameOID
+
+    def _name(cn: str) -> x509.Name:
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+
+    def _build(subject, issuer, pubkey, signkey, *, ca, aia_url=None):
+        b = (
+            x509.CertificateBuilder()
+            .subject_name(subject).issuer_name(issuer).public_key(pubkey)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+        )
+        if aia_url:
+            b = b.add_extension(
+                x509.AuthorityInformationAccess([
+                    x509.AccessDescription(
+                        AuthorityInformationAccessOID.CA_ISSUERS,
+                        x509.UniformResourceIdentifier(aia_url),
+                    )
+                ]),
+                critical=False,
+            )
+        return b.sign(signkey, hashes.SHA256())
+
+    keys = [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(3)]
+    root_key, int_key, leaf_key = keys
+    root = _build(_name("corp-root"), _name("corp-root"), root_key.public_key(),
+                  root_key, ca=True)
+    inter = _build(_name("corp-issuing"), _name("corp-root"), int_key.public_key(),
+                   root_key, ca=True, aia_url="http://pki.corp/root.cer")
+    leaf = _build(_name("dc01.corp"), _name("corp-issuing"), leaf_key.public_key(),
+                  int_key, ca=False, aia_url="http://pki.corp/issuing.p7b")
+    der = serialization.Encoding.DER
+    return {
+        "leaf": leaf.public_bytes(der),
+        "payloads": {
+            "http://pki.corp/issuing.p7b": pkcs7.serialize_certificates([inter], der),
+            "http://pki.corp/root.cer": root.public_bytes(der),
+        },
+    }
+
+
+async def test_fetch_cert_completes_leaf_only_chain_via_aia(api, monkeypatch):
+    from filearr.api import authconfig as api_mod
+
+    fx = _chain_with_aia()
+    monkeypatch.setattr(api_mod, "_fetch_chain", lambda host, port, timeout: [fx["leaf"]])
+    monkeypatch.setattr(api_mod, "_http_get", lambda url, timeout: fx["payloads"][url])
+    r = await api.post(
+        "/api/v1/auth-config/ldap/fetch-cert", json={"ldap_server": "ldaps://dc01.corp:636"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+    assert [c["via_aia"] for c in body["chain"]] == [False, True, True]
+    assert body["chain"][1]["subject"] == "CN=corp-issuing"
+    assert body["chain"][2]["is_self_signed"] is True
+    # Suggested anchor = intermediate + root — the leaf is excluded.
+    assert authconfig.validate_pem_chain(body["suggested_ca_pem"]) == 2
+    assert "AIA" in body["note"]
+
+
+async def test_fetch_cert_leaf_only_unreachable_aia_falls_back_to_leaf(api, monkeypatch):
+    from filearr.api import authconfig as api_mod
+
+    fx = _chain_with_aia()
+    monkeypatch.setattr(api_mod, "_fetch_chain", lambda host, port, timeout: [fx["leaf"]])
+
+    def _unreachable(url: str, timeout: float) -> bytes:
+        raise ValueError("no route to pki host")
+
+    monkeypatch.setattr(api_mod, "_http_get", _unreachable)
+    r = await api.post(
+        "/api/v1/auth-config/ldap/fetch-cert", json={"ldap_server": "ldaps://dc01.corp:636"}
+    )
+    body = r.json()
+    assert body["ok"] is True and len(body["chain"]) == 1
+    assert authconfig.validate_pem_chain(body["suggested_ca_pem"]) == 1
+    assert "leaf" in body["note"]

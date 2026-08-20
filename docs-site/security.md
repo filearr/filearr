@@ -88,14 +88,22 @@ options besides a mounted `FILEARR_LDAP_TLS_CA_CERT_FILE` path:
   PEM form (`-----BEGIN CERTIFICATE-----`…). Filearr validates it parses, stores
   it, and hands it to ldap3 in memory (`ca_certs_data`) — no file to mount.
 - **Fetch from server** connects to the LDAPS host and pulls the certificate
-  chain it presents. Because that first connection is unvalidated
-  (trust-on-first-use), the console shows every certificate's subject, issuer
-  and **SHA-256 fingerprint** for you to verify out-of-band before trusting; it
-  then pre-fills the box with the issuing-CA chain (leaf excluded, so it
-  survives certificate renewal). Review, then Save. Verification stays on
-  (`ldap_tls_verify=true`) throughout — the fetched CA becomes the trust anchor,
-  it does not disable checking. Cross-forest endpoints can each carry their own
-  `tls_ca_cert_pem`.
+  chain it presents. AD DCs commonly present **only their leaf** — in that case
+  the console completes the chain itself by following the certificate's AIA
+  *CA Issuers* pointers (each certificate carries the URL of its issuer's
+  certificate; DER, PEM and PKCS#7 payloads are handled, bounded in depth and
+  size). Certificates obtained that way are tagged **via AIA** in the listing.
+  Because the first connection is unvalidated (trust-on-first-use), the console
+  shows every certificate's subject, issuer and **SHA-256 fingerprint** for you
+  to verify out-of-band before trusting; it then pre-fills the box with the
+  issuing-CA chain (leaf excluded, so it survives certificate renewal). Review,
+  then Save. Verification stays on (`ldap_tls_verify=true`) throughout — the
+  fetched CA becomes the trust anchor, it does not disable checking.
+  Cross-forest endpoints can each carry their own `tls_ca_cert_pem`.
+- **`scripts/fetch-ldaps-ca.sh <host[:port]> [out.pem]`** does the same from a
+  shell (openssl + curl): pulls the presented chain, walks AIA pointers until
+  rooted, prints each certificate's fingerprint for verification, and writes
+  the ready-to-paste CA bundle (leaf excluded).
 
 ### Pulling and extracting the CA chain by hand {#ldaps-ca-extract}
 
@@ -123,9 +131,9 @@ csplit -sz -f cert- -b '%02d.pem' chain.pem '/BEGIN CERTIFICATE/' '{*}'
 `cert-00.pem` is the **leaf** (the DC's own certificate — don't paste that one;
 it changes on renewal). `cert-01.pem` onward are the issuing CA and, if the DC
 sends it, the root. **Many AD DCs send only the leaf** (the schannel LDAPS
-listener frequently omits intermediates) — if `cert-00.pem` is all you got, the
-console's *Fetch from server* will see the same single certificate, so build the
-chain yourself via step 3b (no Windows box needed) or step 4.
+listener frequently omits intermediates) — the console's *Fetch from server*
+and `scripts/fetch-ldaps-ca.sh` both handle that automatically by walking the
+AIA pointers; to do it by hand, use step 3b (no Windows box needed) or step 4.
 
 **3b. Follow the leaf's AIA pointer.** The leaf certificate itself says where
 its issuing CA's certificate lives — the *Authority Information Access*

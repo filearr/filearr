@@ -3876,6 +3876,9 @@ export interface FetchedCert {
   not_after: string;
   is_ca: boolean;
   is_self_signed: boolean;
+  /** true when this CA cert was not presented by the server but retrieved by
+   *  following the chain's AIA "CA Issuers" pointers. */
+  via_aia?: boolean;
 }
 export interface FetchCertResult {
   ok: boolean;

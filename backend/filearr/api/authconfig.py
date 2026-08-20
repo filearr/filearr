@@ -118,6 +118,116 @@ def _describe_cert(der: bytes) -> dict:
     }
 
 
+# AD DCs frequently present ONLY their leaf certificate on LDAPS (schannel
+# omits intermediates), so the handshake alone often can't produce a CA anchor.
+# The leaf's Authority Information Access extension points at the issuing CA's
+# certificate — follow it, bounded. SSRF surface: this admin-only TOFU endpoint
+# already dials an arbitrary admin-supplied host; AIA URLs additionally come
+# from the (unverified) certificate, so fetches are capped in scheme
+# (http/https), size, redirects and depth, and the response is only ever parsed
+# as X.509/PKCS#7 — never echoed back raw.
+_AIA_MAX_DEPTH = 4
+_AIA_MAX_BYTES = 1024 * 1024
+
+
+def _http_get(url: str, timeout: float) -> bytes:
+    """Bounded GET for an AIA CA-Issuers payload (test seam)."""
+    import httpx
+
+    with httpx.Client(timeout=timeout, follow_redirects=True, max_redirects=3) as client:
+        resp = client.get(url)
+        resp.raise_for_status()
+        if len(resp.content) > _AIA_MAX_BYTES:
+            raise ValueError(f"AIA payload exceeds {_AIA_MAX_BYTES} bytes")
+        return resp.content
+
+
+def _aia_ca_issuer_urls(der: bytes) -> list[str]:
+    from cryptography import x509
+    from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
+
+    cert = x509.load_der_x509_certificate(der)
+    try:
+        aia = cert.extensions.get_extension_for_oid(
+            ExtensionOID.AUTHORITY_INFORMATION_ACCESS
+        ).value
+    except x509.ExtensionNotFound:
+        return []
+    urls: list[str] = []
+    for ad in aia:
+        if ad.access_method == AuthorityInformationAccessOID.CA_ISSUERS and isinstance(
+            ad.access_location, x509.UniformResourceIdentifier
+        ):
+            url = ad.access_location.value or ""
+            if url.lower().startswith(("http://", "https://")):
+                urls.append(url)
+    return urls
+
+
+def _certs_from_payload(data: bytes) -> list[bytes]:
+    """DER certificates from an AIA payload — AD CS serves bare X.509 (DER or
+    PEM) or a PKCS#7 bundle depending on how the CA was published."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.serialization import pkcs7
+
+    der = serialization.Encoding.DER
+    try:
+        return [x509.load_der_x509_certificate(data).public_bytes(der)]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return [c.public_bytes(der) for c in x509.load_pem_x509_certificates(data)]
+    except Exception:  # noqa: BLE001
+        pass
+    for loader in (pkcs7.load_der_pkcs7_certificates, pkcs7.load_pem_pkcs7_certificates):
+        try:
+            return [c.public_bytes(der) for c in loader(data)]
+        except Exception:  # noqa: BLE001
+            continue
+    return []
+
+
+def _complete_chain_via_aia(chain_der: list[bytes], timeout: float) -> list[bytes]:
+    """Missing CA certificates for ``chain_der``, fetched by walking the top
+    certificate's AIA ``CA Issuers`` pointers until the chain is rooted (top
+    cert self-signed) or nothing further is reachable. Best-effort: any fetch
+    or parse failure just stops the walk. Blocking; run in a threadpool."""
+    import hashlib
+
+    from cryptography import x509
+
+    fetched: list[bytes] = []
+    seen = {hashlib.sha256(d).hexdigest() for d in chain_der}
+    top = chain_der[-1]
+    for _ in range(_AIA_MAX_DEPTH):
+        top_cert = x509.load_der_x509_certificate(top)
+        if top_cert.subject == top_cert.issuer:
+            break  # rooted
+        nxt: bytes | None = None
+        for url in _aia_ca_issuer_urls(top):
+            try:
+                candidates = _certs_from_payload(_http_get(url, timeout))
+            except Exception:  # noqa: BLE001
+                continue
+            for cand in candidates:
+                cand_cert = x509.load_der_x509_certificate(cand)
+                if cand_cert.subject == top_cert.issuer:
+                    nxt = cand
+                    break
+            if nxt is not None:
+                break
+        if nxt is None:
+            break
+        digest = hashlib.sha256(nxt).hexdigest()
+        if digest in seen:
+            break  # loop guard (cross-signed rings)
+        seen.add(digest)
+        fetched.append(nxt)
+        top = nxt
+    return fetched
+
+
 @router.post("/ldap/fetch-cert", dependencies=[Depends(require_scope("admin"))])
 async def fetch_ldap_cert(
     body: dict[str, Any] = Body(default_factory=dict),
@@ -129,9 +239,12 @@ async def fetch_ldap_cert(
     Connects to the ``server`` (from the form, else the saved/env config) WITHOUT
     validating — this is trust-on-first-use, so the response includes every
     cert's subject/issuer/SHA-256 fingerprint for the admin to verify against a
-    known-good value before trusting. ``suggested_ca_pem`` is the chain the
-    server sent MINUS the leaf (the issuing-CA anchor — surviving leaf renewal);
-    if the server sent only its leaf, that leaf is suggested with a warning.
+    known-good value before trusting. When the server presents an incomplete
+    chain (AD DCs commonly send only their leaf), the missing CA certificates
+    are fetched by following the AIA ``CA Issuers`` pointers (marked
+    ``via_aia`` in the response). ``suggested_ca_pem`` is the completed chain
+    MINUS the leaf (the issuing-CA anchor — surviving leaf renewal); only if no
+    CA cert could be obtained at all is the leaf suggested, with a warning.
     Nothing is saved — the admin reviews, then Saves the PEM into the config."""
     from urllib.parse import urlsplit
 
@@ -153,15 +266,25 @@ async def fetch_ldap_cert(
         return {"ok": False, "error": f"could not connect to {host}:{port}: {exc}"}
     if not chain_der:
         return {"ok": False, "error": "server presented no certificate"}
-    chain = [_describe_cert(d) for d in chain_der]
+    aia_der = await run_in_threadpool(_complete_chain_via_aia, chain_der, timeout)
+    chain = [{**_describe_cert(d), "via_aia": False} for d in chain_der] + [
+        {**_describe_cert(d), "via_aia": True} for d in aia_der
+    ]
     # Prefer the issuing CA(s) — everything above the leaf — as the trust anchor.
     if len(chain) > 1:
         suggested = "".join(c["pem"] for c in chain[1:])
         note = "trusting the issuing CA chain (survives leaf-certificate renewal)"
+        if aia_der:
+            note += (
+                "; the server sent an incomplete chain — "
+                f"{len(aia_der)} CA certificate(s) were retrieved via the "
+                "certificate's AIA pointer"
+            )
     else:
         suggested = chain[0]["pem"]
-        note = ("server sent only its leaf certificate; trusting it directly will "
-                "break when that certificate is renewed — prefer importing the CA")
+        note = ("server sent only its leaf certificate and it carries no reachable "
+                "AIA pointer; trusting the leaf directly will break when that "
+                "certificate is renewed — prefer importing the CA")
     return {
         "ok": True,
         "host": host,

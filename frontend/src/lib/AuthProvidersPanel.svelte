@@ -269,7 +269,8 @@
                         </div>
                         {#each fetched.chain ?? [] as c, i}
                           <div class="mt-1 border-t border-amber-200/50 pt-1">
-                            <div><span class="text-slate-500">{i === 0 ? "leaf" : c.is_self_signed ? "root CA" : "CA"}:</span> {c.subject}</div>
+                            <div><span class="text-slate-500">{i === 0 ? "leaf" : c.is_self_signed ? "root CA" : "CA"}:</span> {c.subject}
+                              {#if c.via_aia}<span class="ml-1 rounded bg-amber-200/70 px-1 text-[10px] text-amber-900 dark:bg-amber-900/60 dark:text-amber-100" title="Not presented by the server — retrieved by following the certificate's Authority Information Access pointer">via AIA</span>{/if}</div>
                             <div class="text-slate-500">issuer: {c.issuer}</div>
                             <div class="font-mono break-all">SHA-256: {c.sha256}</div>
                             <div class="text-slate-500">expires {new Date(c.not_after).toLocaleDateString()}</div>
