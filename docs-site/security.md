@@ -97,6 +97,85 @@ options besides a mounted `FILEARR_LDAP_TLS_CA_CERT_FILE` path:
   it does not disable checking. Cross-forest endpoints can each carry their own
   `tls_ca_cert_pem`.
 
+### Pulling and extracting the CA chain by hand {#ldaps-ca-extract}
+
+If you'd rather obtain the root/intermediate certificates yourself (or need to
+verify what **Fetch from server** showed), the same chain is reachable with
+standard tools. Filearr wants **PEM** (`-----BEGIN CERTIFICATE-----`); Windows
+CAs usually hand you **DER** (`.cer`), so a conversion step is included.
+
+**1. Pull the chain the DC presents** (port 636, or 3269 for a Global Catalog):
+
+```bash
+openssl s_client -connect dc01.corp.example.com:636 -showcerts </dev/null 2>/dev/null \
+  | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' > chain.pem
+
+# What did we get? One subject/issuer pair per certificate:
+openssl crl2pkcs7 -nocrl -certfile chain.pem | openssl pkcs7 -print_certs -noout
+```
+
+**2. Split it** into individual certificates:
+
+```bash
+csplit -sz -f cert- -b '%02d.pem' chain.pem '/BEGIN CERTIFICATE/' '{*}'
+```
+
+`cert-00.pem` is the **leaf** (the DC's own certificate — don't paste that one;
+it changes on renewal). `cert-01.pem` onward are the issuing CA and, if the DC
+sends it, the root. Note many DCs send *only* the leaf — then use step 4.
+
+**3. Fingerprint** each CA cert and compare against the console's
+**Fetch from server** dialog (or your PKI documentation) before trusting:
+
+```bash
+openssl x509 -in cert-01.pem -noout -subject -issuer -fingerprint -sha256
+```
+
+**4. Pull the CA certificates from AD CS directly** (authoritative source —
+works even when the DC omits the chain). On the CA or any domain-joined box:
+
+```cmd
+:: On the CA host itself — exports the CA's own certificate (DER .cer):
+certutil -ca.cert issuing.cer
+
+:: From any domain-joined machine, naming the CA explicitly:
+certutil -config "CA01.corp.example.com\Corp-Issuing-CA" -ca.cert issuing.cer
+
+:: Root CAs the domain trusts are also published in AD:
+certutil -store -enterprise Root
+```
+
+Or export from the local trust store with PowerShell (Base64 = PEM body):
+
+```powershell
+Get-ChildItem Cert:\LocalMachine\CA |
+  Where-Object Subject -like '*Corp-Issuing-CA*' |
+  ForEach-Object { Export-Certificate -Cert $_ -FilePath issuing.cer }
+certutil -encode issuing.cer issuing.pem
+```
+
+**5. Convert DER → PEM** (skip if `certutil -encode` already did it):
+
+```bash
+openssl x509 -inform der -in issuing.cer -out issuing.pem
+```
+
+**6. Bundle** — issuing (intermediate) CA first, root last — and paste the
+result into the *CA certificate (PEM)* box (or point
+`FILEARR_LDAP_TLS_CA_CERT_FILE` at the file):
+
+```bash
+cat issuing.pem root.pem > ldaps-ca.pem
+```
+
+A bundle with only the issuing CA is sufficient for verification; including the
+root as well is harmless and survives an issuing-CA rollover review. PKCS#7
+(`.p7b`) exports can be unpacked with
+`openssl pkcs7 -inform der -in bundle.p7b -print_certs -out chain.pem`, and a
+PFX/PKCS#12 with
+`openssl pkcs12 -in bundle.pfx -cacerts -nokeys -out chain.pem` — never paste a
+private key; Filearr only wants public CA certificates.
+
 ## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
 
 The permissions collector reads Windows ACLs, which name a principal by **SID**
