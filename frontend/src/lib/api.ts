@@ -3868,3 +3868,30 @@ export const testAuthProvider = (provider: string, body: Record<string, unknown>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+
+export interface FetchedCert {
+  subject: string;
+  issuer: string;
+  sha256: string;
+  not_after: string;
+  is_ca: boolean;
+  is_self_signed: boolean;
+}
+export interface FetchCertResult {
+  ok: boolean;
+  error?: string;
+  host?: string;
+  port?: number;
+  chain?: FetchedCert[];
+  suggested_ca_pem?: string;
+  note?: string;
+}
+
+/** Pull the LDAPS server's certificate chain (trust-on-first-use) so the admin
+ *  can trust it from the console. Verify the fingerprint before saving. */
+export const fetchLdapCert = (body: Record<string, unknown>) =>
+  request<FetchCertResult>(`/auth-config/ldap/fetch-cert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });

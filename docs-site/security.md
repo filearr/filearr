@@ -80,6 +80,23 @@ sample enumeration, and an OIDC discovery + JWKS fetch — so a typo'd base DN o
 issuer surfaces immediately rather than at a user's first failed login. Writes
 are audited (`auth_config_changed`, field names only — never values).
 
+**LDAPS trust — paste or pull the CA.** For an internal AD PKI you need to trust
+the CA that signed the domain controller's LDAPS certificate. Two console
+options besides a mounted `FILEARR_LDAP_TLS_CA_CERT_FILE` path:
+
+- **Paste PEM** into the *CA certificate (PEM)* box — the issuing-CA chain in
+  PEM form (`-----BEGIN CERTIFICATE-----`…). Filearr validates it parses, stores
+  it, and hands it to ldap3 in memory (`ca_certs_data`) — no file to mount.
+- **Fetch from server** connects to the LDAPS host and pulls the certificate
+  chain it presents. Because that first connection is unvalidated
+  (trust-on-first-use), the console shows every certificate's subject, issuer
+  and **SHA-256 fingerprint** for you to verify out-of-band before trusting; it
+  then pre-fills the box with the issuing-CA chain (leaf excluded, so it
+  survives certificate renewal). Review, then Save. Verification stays on
+  (`ldap_tls_verify=true`) throughout — the fetched CA becomes the trust anchor,
+  it does not disable checking. Cross-forest endpoints can each carry their own
+  `tls_ca_cert_pem`.
+
 ## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
 
 The permissions collector reads Windows ACLs, which name a principal by **SID**

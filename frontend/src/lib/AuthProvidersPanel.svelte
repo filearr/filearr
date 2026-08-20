@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    getAuthConfig, saveAuthConfig, testAuthProvider, friendlyError,
+    getAuthConfig, saveAuthConfig, testAuthProvider, fetchLdapCert, friendlyError,
     SECRET_UNCHANGED, type AuthProviderConfig, type AuthTestResult,
+    type FetchCertResult,
   } from "./api";
 
   // Admin > Authentication (2026-08-20): GUI configuration of AD/LDAP login, the
@@ -15,7 +16,7 @@
   type Field = {
     key: string;
     label: string;
-    type: "text" | "password" | "bool" | "number" | "longtext" | "json";
+    type: "text" | "password" | "bool" | "number" | "longtext" | "json" | "pem";
     help?: string;
     secret?: boolean; // paired with a has_<key> flag from the server
   };
@@ -31,7 +32,8 @@
         { key: "ldap_server", label: "Server URL", type: "text", help: "ldaps://dc.corp.example.com (TLS-first; ldap:// on a non-loopback host needs StartTLS)" },
         { key: "ldap_start_tls", label: "StartTLS (upgrade ldap://)", type: "bool" },
         { key: "ldap_tls_verify", label: "Verify server certificate", type: "bool" },
-        { key: "ldap_tls_ca_cert_file", label: "CA cert file (optional)", type: "text" },
+        { key: "ldap_tls_ca_cert_file", label: "CA cert file path (optional)", type: "text", help: "For a mounted file. To paste or fetch instead, use the CA certificate (PEM) box below." },
+        { key: "ldap_tls_ca_cert_pem", label: "CA certificate (PEM)", type: "pem", help: "Paste the issuing-CA chain, or click 'Fetch from server' to pull it. No file mount needed." },
         { key: "ldap_allow_plaintext", label: "Allow plaintext (discouraged)", type: "bool" },
         { key: "ldap_timeout", label: "Timeout (seconds)", type: "number" },
         { key: "ldap_bind_dn", label: "Service bind DN", type: "text", help: "cn=svc,ou=…,dc=… — used for search-then-bind and directory enumeration" },
@@ -105,7 +107,27 @@
   let busy = $state<Record<string, boolean>>({});
   let msg = $state<Record<string, string>>({});
   let testResult = $state<Record<string, AuthTestResult | null>>({});
+  let fetched = $state<FetchCertResult | null>(null);
+  let fetchBusy = $state(false);
   let error = $state("");
+
+  async function fetchCert(p: Provider) {
+    error = ""; fetched = null; fetchBusy = true;
+    try {
+      fetched = await fetchLdapCert(buildBody(p));
+    } catch (e) {
+      error = friendlyError(e);
+    } finally {
+      fetchBusy = false;
+    }
+  }
+
+  function useFetchedCert(p: Provider) {
+    if (fetched?.suggested_ca_pem) {
+      form[p.id]["ldap_tls_ca_cert_pem"] = fetched.suggested_ca_pem;
+      fetched = null;
+    }
+  }
 
   async function load(p: Provider) {
     try {
@@ -212,7 +234,7 @@
         <div class="border-t border-slate-200 px-4 py-3 dark:border-slate-800">
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
             {#each p.fields as fld (fld.key)}
-              <label class="block text-sm {fld.type === 'longtext' || fld.type === 'json' ? 'md:col-span-2' : ''}">
+              <label class="block text-sm {fld.type === 'longtext' || fld.type === 'json' || fld.type === 'pem' ? 'md:col-span-2' : ''}">
                 <span class="flex items-center gap-2 text-slate-600 dark:text-slate-300">
                   {fld.label}
                   <span class="rounded px-1 text-[10px] {source(p, fld.key) === 'gui' ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'bg-slate-100 text-slate-500 dark:bg-slate-800'}">
@@ -230,6 +252,40 @@
                     class="mt-1 w-full rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800"
                     placeholder={hasSecret(p, fld.key) ? "•••••• (stored — leave blank to keep)" : "not set"}
                     bind:value={form[p.id][fld.key]} />
+                {:else if fld.type === "pem"}
+                  <textarea rows="4" placeholder="-----BEGIN CERTIFICATE-----"
+                    class="mt-1 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-800"
+                    bind:value={form[p.id][fld.key]}></textarea>
+                  <button type="button"
+                    class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-50 dark:border-slate-700"
+                    disabled={fetchBusy} onclick={() => fetchCert(p)}>
+                    {fetchBusy ? "fetching…" : "Fetch from server"}
+                  </button>
+                  {#if fetched}
+                    <div class="mt-2 rounded-lg border px-3 py-2 text-xs {fetched.ok ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40' : 'border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/40'}">
+                      {#if fetched.ok}
+                        <div class="font-medium text-amber-800 dark:text-amber-200">
+                          Verify this fingerprint out-of-band before trusting ({fetched.host}:{fetched.port})
+                        </div>
+                        {#each fetched.chain ?? [] as c, i}
+                          <div class="mt-1 border-t border-amber-200/50 pt-1">
+                            <div><span class="text-slate-500">{i === 0 ? "leaf" : c.is_self_signed ? "root CA" : "CA"}:</span> {c.subject}</div>
+                            <div class="text-slate-500">issuer: {c.issuer}</div>
+                            <div class="font-mono break-all">SHA-256: {c.sha256}</div>
+                            <div class="text-slate-500">expires {new Date(c.not_after).toLocaleDateString()}</div>
+                          </div>
+                        {/each}
+                        <div class="mt-1 text-slate-600 dark:text-slate-300">{fetched.note}</div>
+                        <button type="button"
+                          class="mt-1 rounded bg-[var(--accent)] px-2 py-0.5 text-xs font-medium text-white"
+                          onclick={() => useFetchedCert(p)}>
+                          Use this CA (fills the box — review, then Save)
+                        </button>
+                      {:else}
+                        <span class="text-red-700 dark:text-red-300">✗ {fetched.error}</span>
+                      {/if}
+                    </div>
+                  {/if}
                 {:else if fld.type === "longtext" || fld.type === "json"}
                   <textarea rows={fld.type === "json" ? 5 : 2}
                     class="mt-1 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-800"

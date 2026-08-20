@@ -223,6 +223,7 @@ def endpoints_from_settings(s: Settings | None = None) -> list[DirectoryEndpoint
             "ldap_allow_plaintext": entry.get("allow_plaintext", s.ldap_allow_plaintext),
             "ldap_tls_verify": entry.get("tls_verify", s.ldap_tls_verify),
             "ldap_tls_ca_cert_file": entry.get("tls_ca_cert_file", s.ldap_tls_ca_cert_file),
+            "ldap_tls_ca_cert_pem": entry.get("tls_ca_cert_pem", s.ldap_tls_ca_cert_pem),
             # user_base satisfies LdapConfig.from_settings' "needs a base" guard.
             "ldap_user_base": entry.get("user_base") or s.ldap_user_base or server,
             "ldap_directory_user_base": entry.get("user_base", s.ldap_directory_user_base),

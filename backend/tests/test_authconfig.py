@@ -211,3 +211,79 @@ async def test_api_oidc_test_requires_issuer(api):
     r = await api.post("/api/v1/auth-config/oidc/test", json={})
     assert r.status_code == 200
     assert r.json()["ok"] is False and "issuer" in r.json()["error"]
+
+
+# --------------------------------------------------------------------------- #
+# CA certificate paste + fetch                                                 #
+# --------------------------------------------------------------------------- #
+def _self_signed_pem() -> str:
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "corp-root-ca")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+async def test_pem_ca_paste_validates_and_flows_to_ldapconfig(maker, monkeypatch):
+    from filearr import db as db_mod
+    from filearr.ldap_auth import LdapConfig
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    pem = _self_signed_pem()
+    async with maker() as s:
+        await authconfig.set_config(s, "ldap", {
+            "ldap_enabled": True, "ldap_server": "ldaps://dc:636",
+            "ldap_user_base": "dc=corp", "ldap_tls_ca_cert_pem": pem,
+        }, updated_by=None)
+        await s.commit()
+    async with maker() as s:
+        eff = await authconfig.effective_settings(s)
+    assert eff.ldap_tls_ca_cert_pem == pem
+    # It reaches the ldap3 TLS layer via LdapConfig.tls_ca_cert_data.
+    cfg = LdapConfig.from_settings(eff)
+    assert cfg.tls_ca_cert_data == pem
+
+
+async def test_pem_ca_paste_rejects_garbage(maker, monkeypatch):
+    from filearr import db as db_mod
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    async with maker() as s:
+        with pytest.raises(authconfig.AuthConfigError):
+            await authconfig.set_config(
+                s, "ldap", {"ldap_tls_ca_cert_pem": "not a certificate"}, updated_by=None
+            )
+
+
+def test_validate_pem_counts_certs():
+    pem = _self_signed_pem() + _self_signed_pem()
+    assert authconfig.validate_pem_chain(pem) == 2
+
+
+async def test_fetch_cert_no_server(api):
+    r = await api.post("/api/v1/auth-config/ldap/fetch-cert", json={})
+    assert r.status_code == 422  # nothing configured to fetch from
+
+
+async def test_fetch_cert_unreachable_returns_error(api):
+    r = await api.post(
+        "/api/v1/auth-config/ldap/fetch-cert",
+        json={"ldap_server": "ldaps://127.0.0.1:1"},  # nothing listening
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False and "could not connect" in body["error"]

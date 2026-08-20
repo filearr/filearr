@@ -78,6 +78,101 @@ async def set_provider_config(
 
 
 # --------------------------------------------------------------------------- #
+# Fetch the server's certificate chain (so the admin doesn't hand-export it)    #
+# --------------------------------------------------------------------------- #
+def _fetch_chain(host: str, port: int, timeout: float) -> list[bytes]:
+    """The DER certificate chain a TLS server presents, WITHOUT validation
+    (trust-on-first-use — the caller must verify the fingerprint out of band).
+    Blocking; run in a threadpool."""
+    import socket
+    import ssl
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+            return list(ssock.get_unverified_chain() or [])
+
+
+def _describe_cert(der: bytes) -> dict:
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    cert = x509.load_der_x509_certificate(der)
+    try:
+        is_ca = cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+    except x509.ExtensionNotFound:
+        is_ca = False
+    pem = cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    return {
+        "subject": cert.subject.rfc4514_string(),
+        "issuer": cert.issuer.rfc4514_string(),
+        "sha256": hashlib.sha256(der).hexdigest(),
+        "not_after": cert.not_valid_after_utc.isoformat(),
+        "is_ca": bool(is_ca),
+        "is_self_signed": cert.subject == cert.issuer,
+        "pem": pem,
+    }
+
+
+@router.post("/ldap/fetch-cert", dependencies=[Depends(require_scope("admin"))])
+async def fetch_ldap_cert(
+    body: dict[str, Any] = Body(default_factory=dict),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Pull the certificate chain the LDAPS server presents so an admin can trust
+    it from the console instead of hand-exporting a CA file.
+
+    Connects to the ``server`` (from the form, else the saved/env config) WITHOUT
+    validating — this is trust-on-first-use, so the response includes every
+    cert's subject/issuer/SHA-256 fingerprint for the admin to verify against a
+    known-good value before trusting. ``suggested_ca_pem`` is the chain the
+    server sent MINUS the leaf (the issuing-CA anchor — surviving leaf renewal);
+    if the server sent only its leaf, that leaf is suggested with a warning.
+    Nothing is saved — the admin reviews, then Saves the PEM into the config."""
+    from urllib.parse import urlsplit
+
+    from starlette.concurrency import run_in_threadpool
+
+    eff = await authconfig.effective_settings_with_overlay(session, "ldap", body)
+    server = (body.get("ldap_server") or eff.ldap_server or "").strip()
+    if not server:
+        raise HTTPException(422, "no LDAP server URL to fetch from")
+    parts = urlsplit(server if "://" in server else f"ldaps://{server}")
+    host = parts.hostname or ""
+    port = parts.port or (636 if (parts.scheme or "ldaps") == "ldaps" else 389)
+    if not host:
+        raise HTTPException(422, f"could not parse a host from {server!r}")
+    timeout = float(getattr(eff, "ldap_timeout", 10) or 10)
+    try:
+        chain_der = await run_in_threadpool(_fetch_chain, host, port, timeout)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"could not connect to {host}:{port}: {exc}"}
+    if not chain_der:
+        return {"ok": False, "error": "server presented no certificate"}
+    chain = [_describe_cert(d) for d in chain_der]
+    # Prefer the issuing CA(s) — everything above the leaf — as the trust anchor.
+    if len(chain) > 1:
+        suggested = "".join(c["pem"] for c in chain[1:])
+        note = "trusting the issuing CA chain (survives leaf-certificate renewal)"
+    else:
+        suggested = chain[0]["pem"]
+        note = ("server sent only its leaf certificate; trusting it directly will "
+                "break when that certificate is renewed — prefer importing the CA")
+    return {
+        "ok": True,
+        "host": host,
+        "port": port,
+        "chain": [{k: v for k, v in c.items() if k != "pem"} for c in chain],
+        "suggested_ca_pem": suggested,
+        "note": note,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Test actions (validate the FORM values without saving)                       #
 # --------------------------------------------------------------------------- #
 @router.post("/ldap/test", dependencies=[Depends(require_scope("admin"))])

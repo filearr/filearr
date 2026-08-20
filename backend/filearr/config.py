@@ -208,6 +208,11 @@ class Settings(BaseSettings):
     ldap_allow_plaintext: bool = False  # escape hatch: ldap:// w/o TLS (warns)
     ldap_tls_verify: bool = True  # verify the server cert (default on)
     ldap_tls_ca_cert_file: str | None = None  # optional CA bundle for the server cert
+    # In-memory PEM alternative to ldap_tls_ca_cert_file: paste the issuing-CA
+    # chain (one or more PEM certificates) and Filearr passes it to ldap3 as
+    # ca_certs_data, so no file needs mounting into the container. When BOTH are
+    # set, the pasted PEM wins. Managed from Admin -> Authentication.
+    ldap_tls_ca_cert_pem: str | None = None
     ldap_timeout: int = 10  # connect + receive timeout (seconds)
     # Service account used to search for the user DN and read group membership.
     # Leave both empty for an anonymous search bind (only if the server allows it).

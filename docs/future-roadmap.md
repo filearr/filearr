@@ -1401,3 +1401,12 @@ previously env-only. Built on the existing `app_settings` KV store + the
   test_authconfig.py (store, encryption-at-rest, redaction, sentinel, endpoint
   secrets, API roundtrip). The role MAPS (group→role) are part of each provider
   blob; roles-as-data already had its own UI (RolesPanel).
+- **LDAPS CA trust from the console** (follow-up same day): `ldap_tls_ca_cert_pem`
+  — paste the issuing-CA chain (validated via `cryptography`, stored, passed to
+  ldap3 as `ca_certs_data`, no file mount) OR **Fetch from server**
+  (`/auth-config/ldap/fetch-cert`): a TOFU TLS connect that pulls the presented
+  chain via `SSLSocket.get_unverified_chain()`, shows each cert's subject/issuer/
+  SHA-256 fingerprint for out-of-band verification, and suggests the issuing-CA
+  anchor (leaf excluded → survives renewal). Per-endpoint `tls_ca_cert_pem` for
+  cross-forest. Verification stays ON — the fetched CA is the anchor, not a
+  bypass.

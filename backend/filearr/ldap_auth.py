@@ -97,6 +97,9 @@ class LdapConfig:
     default_role: str
     auto_provision: bool
     group_sync: bool
+    # In-memory PEM CA chain (pasted/fetched); default so existing keyword
+    # constructions and MOCK test connectors need not pass it.
+    tls_ca_cert_data: str | None = None
 
     @property
     def issuer(self) -> str:
@@ -155,6 +158,7 @@ class LdapConfig:
             transport=transport,
             tls_verify=s.ldap_tls_verify,
             tls_ca_cert_file=s.ldap_tls_ca_cert_file,
+            tls_ca_cert_data=(s.ldap_tls_ca_cert_pem or None),
             timeout=s.ldap_timeout,
             bind_dn=(s.ldap_bind_dn or None),
             bind_password=(s.ldap_bind_password or None),
@@ -225,6 +229,10 @@ def connect(cfg: LdapConfig, *, user: str | None, password: str | None) -> Conne
         tls = Tls(
             validate=ssl.CERT_REQUIRED if cfg.tls_verify else ssl.CERT_NONE,
             ca_certs_file=cfg.tls_ca_cert_file,
+            # Pasted/fetched PEM: ldap3 hands this to load_verify_locations(cadata=)
+            # so no file mount is needed. Both file and data may be set — every
+            # anchor in either is trusted.
+            ca_certs_data=cfg.tls_ca_cert_data or None,
             version=ssl.PROTOCOL_TLS_CLIENT if cfg.tls_verify else ssl.PROTOCOL_TLS,
         )
     server = Server(

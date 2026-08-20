@@ -42,7 +42,8 @@ SECRET_UNCHANGED = "__unchanged__"
 LDAP_FIELDS: frozenset[str] = frozenset(
     {
         "ldap_enabled", "ldap_server", "ldap_start_tls", "ldap_allow_plaintext",
-        "ldap_tls_verify", "ldap_tls_ca_cert_file", "ldap_timeout", "ldap_bind_dn",
+        "ldap_tls_verify", "ldap_tls_ca_cert_file", "ldap_tls_ca_cert_pem",
+        "ldap_timeout", "ldap_bind_dn",
         "ldap_user_dn_template", "ldap_user_base", "ldap_user_filter",
         "ldap_attr_username", "ldap_attr_email", "ldap_attr_uid", "ldap_use_memberof",
         "ldap_attr_memberof", "ldap_group_base", "ldap_group_filter", "ldap_role_map",
@@ -83,6 +84,32 @@ _PROVIDERS = {
 
 class AuthConfigError(ValueError):
     """A rejected auth-config write (unknown field, missing secret key, ...)."""
+
+
+def validate_pem_chain(pem: str) -> int:
+    """Parse a pasted/fetched CA PEM bundle; return the certificate count.
+
+    Raises :class:`AuthConfigError` if it holds no valid X.509 certificate, so a
+    typo/wrong paste is rejected at save time rather than breaking every login.
+    ldap3 loads this via ``load_verify_locations(cadata=…)``; we validate with
+    ``cryptography`` (already a dependency) which is stricter than ssl."""
+    from cryptography import x509
+
+    text = (pem or "").strip()
+    if "BEGIN CERTIFICATE" not in text:
+        raise AuthConfigError("not a PEM certificate (expected -----BEGIN CERTIFICATE-----)")
+    blocks = [b for b in text.split("-----END CERTIFICATE-----") if "BEGIN CERTIFICATE" in b]
+    count = 0
+    for b in blocks:
+        pem_one = (b + "-----END CERTIFICATE-----\n").encode("utf-8")
+        try:
+            x509.load_pem_x509_certificate(pem_one)
+            count += 1
+        except Exception as exc:  # noqa: BLE001
+            raise AuthConfigError(f"invalid certificate in PEM bundle: {exc}") from exc
+    if count == 0:
+        raise AuthConfigError("PEM contained no parseable certificate")
+    return count
 
 
 # --------------------------------------------------------------------------- #
@@ -171,6 +198,12 @@ async def set_config(
     for f, v in incoming.items():
         if f in secrets:
             _apply_secret(new_blob, f, v)
+        elif f == "ldap_tls_ca_cert_pem":
+            if v:
+                validate_pem_chain(str(v))
+                new_blob[f] = str(v)
+            else:
+                new_blob.pop(f, None)
         elif f == "ldap_directories":
             new_blob[f] = _merge_endpoints(stored.get(f) or [], v)
         else:
