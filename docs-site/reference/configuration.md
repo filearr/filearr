@@ -99,6 +99,7 @@ into named identities — see [directory sync](../security.md#directory-sync)):
 | `FILEARR_LDAP_DIRECTORY_DOMAIN` | (derived from the DN's first `dc=`) | NetBIOS/DNS domain rendered into `DOMAIN\name` canonical ids. |
 | `FILEARR_LDAP_DIRECTORY_PAGE_SIZE` | `500` | Paged-search page size (AD caps at 1000). |
 | `FILEARR_LDAP_DIRECTORY_MAX_OBJECTS` | `500000` | Backstop against a runaway base DN. |
+| `FILEARR_LDAP_DIRECTORIES` | `[]` | **Cross-forest / multi-domain.** JSON list of additional directory endpoints, each its own bind: `[{"server":"ldaps://dc.acme:636","bind_dn":"…","bind_password":"…","user_base":"dc=acme,dc=com","domain":"ACME","label":"acme"}]`. Omitted keys fall back to the globals. Empty = the single global config is the one endpoint. Multi-domain within a forest: point one endpoint at a Global Catalog (`:3269`). See [multi-domain and cross-forest](../security.md#directory-multiforest). |
 
 The sync task **Sync AD/LDAP directory** (Jobs page, default cron `40 3 * * *`,
 editable) and `POST /api/v1/directory/sync` run it; `GET /api/v1/directory/status`

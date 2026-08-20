@@ -61,6 +61,10 @@ class LDAPError(Exception):
 
     def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
+        # Kept as an attribute (not just folded into the message) so the
+        # directory-sync path can surface a per-endpoint diagnostic; the LOGIN
+        # path still maps reason -> a generic 401 and never leaks detail.
+        self.detail = detail
         super().__init__(detail or reason)
 
 

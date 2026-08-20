@@ -285,6 +285,27 @@ class Settings(BaseSettings):
     # Hard cap on objects pulled per sync (backstop against a runaway base DN).
     ldap_directory_max_objects: int = 500_000
 
+    # CROSS-FOREST / MULTI-DOMAIN. A single bind reaches ONE forest; a separate
+    # trusted forest needs its OWN bind (no transitive enumeration). Multi-domain
+    # WITHIN a forest is covered by pointing `ldap_server` at a Global Catalog
+    # (ldaps://dc:3269), whose subtree spans every child domain — but each domain
+    # can still carry its own NetBIOS name. This is the list of ADDITIONAL /
+    # alternative directory endpoints, as JSON. Each entry overrides the global
+    # ldap_* config for its own endpoint; omitted keys fall back to the globals:
+    #   [{"server":"ldaps://dc.corp:3269","bind_dn":"...","bind_password":"...",
+    #     "user_base":"dc=corp,dc=example,dc=com","domain":"CORP"},
+    #    {"server":"ldaps://dc.acme:636","bind_dn":"...","bind_password":"...",
+    #     "user_base":"dc=acme,dc=com","domain":"ACME"}]
+    # Keys per entry (all optional except `server`): server, bind_dn,
+    # bind_password, user_base, group_base, user_filter, group_filter, domain,
+    # start_tls, allow_plaintext, tls_verify, tls_ca_cert_file, page_size,
+    # label. When EMPTY (default), the single global ldap_directory_* config is
+    # the one endpoint (back-compat). Every endpoint feeds the one
+    # directory_objects table; SIDs are globally unique so there is no collision,
+    # and tombstoning is scoped per endpoint (an unreachable forest never
+    # tombstones another's rows).
+    ldap_directories: list[dict] = []
+
     # UI-T4: server-side folder browser allowlist. GET /api/v1/fs/browse may only
     # list directories at or under one of these roots; any request that normalizes
     # or symlink-resolves OUTSIDE every root is rejected (422). Default is the

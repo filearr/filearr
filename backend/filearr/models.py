@@ -2344,6 +2344,7 @@ class DirectoryObject(Base):
         Index("ix_directory_objects_kind", "kind"),
         # Group-membership expansion queries scan member_of_sids by containment.
         Index("ix_directory_objects_member_of", "member_of_sids", postgresql_using="gin"),
+        Index("ix_directory_objects_source", "source_directory"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2370,6 +2371,12 @@ class DirectoryObject(Base):
     # userAccountControl ACCOUNTDISABLE bit (users) — a disabled account still
     # holds ACL grants, so it is reported, but flagged.
     disabled: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Which configured directory endpoint (forest/domain) produced this row — the
+    # endpoint label (its host). Cross-forest + multi-domain: several endpoints
+    # feed this one table, and tombstoning is SCOPED to the endpoints actually
+    # synced this run, so an unreachable forest never tombstones another's
+    # objects. NULL on rows written before multi-directory support.
+    source_directory: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_synced_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

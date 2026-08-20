@@ -173,6 +173,80 @@ class DirectoryConfig:
         )
 
 
+@dataclass(slots=True)
+class DirectoryEndpoint:
+    """One directory to enumerate: its transport/bind (:class:`LdapConfig`), its
+    directory knobs (:class:`DirectoryConfig`), and a ``label`` (the host) used
+    as ``directory_objects.source_directory`` so tombstoning stays per-endpoint.
+
+    Cross-forest = several endpoints, each its own bind. Multi-domain within a
+    forest = one endpoint pointed at a Global Catalog (whose subtree spans child
+    domains); each object's own DN still yields its domain."""
+
+    label: str
+    ldap: LdapConfig
+    dcfg: DirectoryConfig
+
+
+def endpoints_from_settings(s: Settings | None = None) -> list[DirectoryEndpoint]:
+    """Resolve the configured directory endpoints.
+
+    ``ldap_directories`` (JSON list) → one endpoint per entry, each overriding
+    the global ``ldap_*`` config for its own server/bind/bases/domain (omitted
+    keys fall back to the globals). EMPTY → a single endpoint from the global
+    ``ldap_directory_*`` config (back-compat). A malformed entry (no ``server``,
+    or an ``LdapConfig`` the transport policy rejects) raises :class:`LDAPError`
+    naming the offending endpoint, rather than silently dropping a forest."""
+    s = s or get_settings()
+    entries = s.ldap_directories or []
+    if not entries:
+        return [
+            DirectoryEndpoint(
+                label=LdapConfig.from_settings(s).host,
+                ldap=LdapConfig.from_settings(s),
+                dcfg=DirectoryConfig.from_settings(s),
+            )
+        ]
+    out: list[DirectoryEndpoint] = []
+    for i, entry in enumerate(entries):
+        server = (entry.get("server") or "").strip()
+        if not server:
+            raise LDAPError("bad_directory", f"ldap_directories[{i}] has no 'server'")
+        # Build a per-endpoint Settings overlay so LdapConfig.from_settings keeps
+        # owning the (security-critical) transport policy — no duplicate of it.
+        overlay = {
+            "ldap_enabled": True,
+            "ldap_server": server,
+            "ldap_bind_dn": entry.get("bind_dn", s.ldap_bind_dn),
+            "ldap_bind_password": entry.get("bind_password", s.ldap_bind_password),
+            "ldap_start_tls": entry.get("start_tls", s.ldap_start_tls),
+            "ldap_allow_plaintext": entry.get("allow_plaintext", s.ldap_allow_plaintext),
+            "ldap_tls_verify": entry.get("tls_verify", s.ldap_tls_verify),
+            "ldap_tls_ca_cert_file": entry.get("tls_ca_cert_file", s.ldap_tls_ca_cert_file),
+            # user_base satisfies LdapConfig.from_settings' "needs a base" guard.
+            "ldap_user_base": entry.get("user_base") or s.ldap_user_base or server,
+            "ldap_directory_user_base": entry.get("user_base", s.ldap_directory_user_base),
+            "ldap_directory_group_base": entry.get("group_base", s.ldap_directory_group_base),
+            "ldap_directory_user_filter": entry.get("user_filter", s.ldap_directory_user_filter),
+            "ldap_directory_group_filter": entry.get("group_filter", s.ldap_directory_group_filter),
+            "ldap_directory_domain": entry.get("domain", s.ldap_directory_domain),
+            "ldap_directory_page_size": int(entry.get("page_size", s.ldap_directory_page_size)),
+        }
+        try:
+            ep_settings = s.model_copy(update=overlay)
+            ldap_cfg = LdapConfig.from_settings(ep_settings)
+        except LDAPError as exc:
+            raise LDAPError(exc.reason, f"ldap_directories[{i}] ({server}): {exc.detail}") from exc
+        out.append(
+            DirectoryEndpoint(
+                label=(entry.get("label") or ldap_cfg.host),
+                ldap=ldap_cfg,
+                dcfg=DirectoryConfig.from_settings(ep_settings),
+            )
+        )
+    return out
+
+
 def _raw_first(entry, name: str) -> bytes | None:
     """First RAW (bytes) value of an attribute, or None. Binary AD attributes
     (objectSid/objectGUID) must be read from raw_attributes to stay bytes."""

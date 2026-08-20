@@ -96,12 +96,31 @@ SID. To turn those SIDs into named identities, central runs a **directory sync**
 The sync runs on a schedule (**Sync AD/LDAP directory**, default 03:40 daily,
 editable on the Jobs page) and on demand (`POST /api/v1/directory/sync`).
 `GET /api/v1/directory/status` reports how many snapshot SIDs resolve vs remain
-unresolved (an unresolved count points at a missing base DN, a foreign domain,
+unresolved (an unresolved count points at a missing base DN, a foreign forest,
 or a deleted account); `GET /api/v1/directory/objects` browses the directory.
 AD groups also map to Filearr roles at login via
 [`FILEARR_LDAP_ROLE_MAP`](#roles), so directory membership drives both access
 attribution *and* RBAC. All of it fails **closed**: disabled by default, and a
 missing service bind refuses enumeration rather than pulling a partial tree.
+
+### Multi-domain and cross-forest {#directory-multiforest}
+
+- **Multiple domains in one forest** are covered by pointing the endpoint's
+  `server` at a **Global Catalog** (`ldaps://dc:3269`), whose subtree spans every
+  child domain; each object's own DN yields its domain, so `CORP\a` and
+  `SALES\b` come out correctly attributed from a single bind.
+- **Separate (cross-forest) directories** each need their **own bind** — there is
+  no transitive enumeration across a trust. Configure a list of endpoints in
+  `FILEARR_LDAP_DIRECTORIES` (JSON), each with its own `server`, `bind_dn`,
+  `bind_password`, bases and `domain`; omitted keys fall back to the global
+  `ldap_*` config. Every endpoint feeds the one `directory_objects` table —
+  Windows SIDs are globally unique, so there is no collision, and each row is
+  tagged with the endpoint that produced it.
+- **Fault isolation:** an unreachable forest records a per-endpoint error and is
+  skipped; the others still sync, and — critically — **tombstoning is scoped to
+  the endpoints that actually synced**, so a DC outage in forest B never marks
+  forest A's (or B's own) objects deleted. `POST /api/v1/directory/sync` returns
+  `status: done` with a non-empty `errors[]` in that partial case.
 
 ## RBAC: groups, path grants, and ltree scoping
 

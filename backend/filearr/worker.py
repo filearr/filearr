@@ -1405,53 +1405,57 @@ async def sync_directory_now(*, connector=None) -> dict:
 
     from filearr import ldap_directory
     from filearr.db import SessionLocal, scalars_where_in
-    from filearr.ldap_auth import LdapConfig, LDAPError, connect
+    from filearr.ldap_auth import LDAPError, connect
     from filearr.models import DirectoryObject, PrincipalAlias
 
     settings = get_settings()
     if not settings.ldap_directory_sync_enabled:
         return {"status": "skipped", "reason": "directory_sync_disabled"}
     try:
-        cfg = LdapConfig.from_settings(settings)
+        endpoints = ldap_directory.endpoints_from_settings(settings)
     except LDAPError as exc:
         return {"status": "skipped", "reason": f"ldap_not_configured: {exc.reason}"}
-    dcfg = ldap_directory.DirectoryConfig.from_settings(settings)
     conn_factory = connector or connect
 
     res = ldap_directory.ReconcileResult()
-    try:
-        entries = await asyncio.to_thread(
-            ldap_directory.enumerate_directory, cfg, dcfg, connector=conn_factory
-        )
-    except LDAPError as exc:
-        return {"status": "failed", "reason": f"{exc.reason}: {exc.detail}"}
-
-    # DN -> SID map for resolving memberOf DNs to group SIDs (expansion).
-    dn_to_sid = {
-        (e.distinguished_name or "").lower(): e.object_sid
-        for e in entries
-        if e.distinguished_name and e.object_sid
-    }
     now = datetime.now(UTC)
+    synced_labels: list[str] = []
     async with SessionLocal() as session:
-        for e in entries:
-            res.objects += 1
-            if e.kind == "user":
-                res.users += 1
-            elif e.kind == "group":
-                res.groups += 1
-            member_sids = sorted(
-                {
-                    dn_to_sid[dn.lower()]
-                    for dn in e.member_of_dns
-                    if dn.lower() in dn_to_sid and dn_to_sid[dn.lower()]
-                }
-            )
-            if member_sids:
-                res.memberships_expanded += 1
-            stmt = (
-                pg_insert(DirectoryObject)
-                .values(
+        for ep in endpoints:
+            # Cross-forest: one unreachable endpoint records an error and is
+            # skipped (its label is NOT added to synced_labels, so its objects
+            # are never tombstoned this run) — the other forests still sync.
+            try:
+                entries = await asyncio.to_thread(
+                    ldap_directory.enumerate_directory,
+                    ep.ldap, ep.dcfg, connector=conn_factory,
+                )
+            except LDAPError as exc:
+                res.errors.append(f"{ep.label}: {exc.reason}: {exc.detail}")
+                continue
+            # memberOf DNs reference same-forest groups → resolve within this
+            # endpoint's own entries.
+            dn_to_sid = {
+                (e.distinguished_name or "").lower(): e.object_sid
+                for e in entries
+                if e.distinguished_name and e.object_sid
+            }
+            for e in entries:
+                res.objects += 1
+                if e.kind == "user":
+                    res.users += 1
+                elif e.kind == "group":
+                    res.groups += 1
+                member_sids = sorted(
+                    {
+                        dn_to_sid[dn.lower()]
+                        for dn in e.member_of_dns
+                        if dn.lower() in dn_to_sid and dn_to_sid[dn.lower()]
+                    }
+                )
+                if member_sids:
+                    res.memberships_expanded += 1
+                values = dict(
                     object_guid=e.object_guid,
                     object_sid=e.object_sid,
                     sam_account_name=e.sam_account_name,
@@ -1462,36 +1466,37 @@ async def sync_directory_now(*, connector=None) -> dict:
                     domain=e.domain,
                     member_of_sids=member_sids,
                     disabled=e.disabled,
+                    source_directory=ep.label,
                     last_synced_at=now,
                     deleted_at=None,
                 )
-                .on_conflict_do_update(
+                stmt = pg_insert(DirectoryObject).values(**values).on_conflict_do_update(
                     index_elements=[DirectoryObject.object_guid],
-                    set_={
-                        "object_sid": e.object_sid,
-                        "sam_account_name": e.sam_account_name,
-                        "display_name": e.display_name,
-                        "user_principal_name": e.user_principal_name,
-                        "distinguished_name": e.distinguished_name,
-                        "kind": e.kind,
-                        "domain": e.domain,
-                        "member_of_sids": member_sids,
-                        "disabled": e.disabled,
-                        "last_synced_at": now,
-                        "deleted_at": None,
-                    },
+                    set_={k: v for k, v in values.items() if k != "object_guid"},
                 )
-            )
-            await session.execute(stmt)
+                await session.execute(stmt)
+            synced_labels.append(ep.label)
         await session.commit()
 
-        # Tombstone objects not seen this run (removed from AD). Kept for audit.
+        if not synced_labels:
+            # Every endpoint failed — surface it as a failure, tombstone nothing.
+            return {"status": "failed", "reason": "; ".join(res.errors), **res.as_dict()}
+
+        # Tombstone objects from the endpoints ACTUALLY synced this run that were
+        # not re-seen (removed from that directory). Scoped by source_directory
+        # so an unreachable forest never tombstones another's rows. Legacy rows
+        # (NULL source_directory, from a pre-multiforest sync) are only swept when
+        # a SINGLE endpoint is configured — with several forests we cannot know
+        # which owned a NULL row, so we leave it until its next successful sync
+        # re-labels it (then a genuine removal tombstones correctly).
+        null_clause = " OR source_directory IS NULL" if len(endpoints) == 1 else ""
         tomb = await session.execute(
             sql_text(
                 "UPDATE directory_objects SET deleted_at = :now "
-                "WHERE last_synced_at < :now AND deleted_at IS NULL"
+                f"WHERE (source_directory = ANY(:labels){null_clause}) "
+                "AND last_synced_at < :now AND deleted_at IS NULL"
             ),
-            {"now": now},
+            {"now": now, "labels": synced_labels},
         )
         res.tombstoned = tomb.rowcount or 0
         await session.commit()

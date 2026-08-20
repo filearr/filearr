@@ -1341,9 +1341,33 @@ existed (§3, P6-T6). This adds the CENTRAL directory-of-record + SID resolution
   assertion in test_agent_inventory_w6d3 (hardcoded collected_at vs a relative
   threshold window; surfaced when the clock rolled to 2026-08-20).
 
+**Cross-forest + multi-domain (added 2026-08-20):** `FILEARR_LDAP_DIRECTORIES`
+is a JSON list of endpoints, each its own bind (overriding the global `ldap_*`);
+all feed the one `directory_objects` table (SIDs are globally unique — no
+collision), tagged with `source_directory`. Multi-domain within a forest is
+covered by a Global Catalog (`:3269`) endpoint. `endpoints_from_settings`
+overlays a per-endpoint `Settings` and reuses `LdapConfig.from_settings` so the
+transport-security policy is never duplicated. **Fault isolation:** an
+unreachable forest records a per-endpoint error and is skipped, and tombstoning
+is scoped to the endpoints that synced — a DC outage never mass-tombstones
+another forest (or its own) objects. Tests: multi-forest enumeration,
+unreachable-forest-does-not-tombstone, bad-endpoint-config-skipped.
+
 **Deferred tail:** transitive-group closure is direct-membership-per-sync-hop
 (bounded depth), which resolves nested groups but re-reads memberOf each level —
 fine for typical directories; an `LDAP_MATCHING_RULE_IN_CHAIN` single-query
-variant is a possible optimisation. Foreign-domain / cross-forest SIDs need
-their own bind (one directory config today). Agent-side AD lookup is unchanged
-(it still resolves what it can locally; central fills the rest).
+variant is a possible optimisation. Agent-side AD lookup is unchanged (it still
+resolves what it can locally; central fills the rest).
+
+## 31. Console error triage (2026-08-20)
+
+- **Benign shadow-delete race surfaced as "Latest Meili failure"** (user report):
+  an `indexDeletion` failing `index_not_found` on an `items_rebuild_<epoch>`
+  shadow is the swap-rebuild's post-swap delete racing the stale-shadow reaper
+  (or a retried rebuild) over the same throwaway index — the index being gone is
+  the *desired* end state. `meili_stats._recent_failed_tasks` now filters these
+  (`_is_benign_failed_task`) out of both the surfaced `last_failed_task` and the
+  failed-task counts (over a bounded recent window), so a self-healing race no
+  longer reads as an operational failure. We never delete the LIVE index, so any
+  `indexDeletion` there is a shadow delete and `index_not_found` on it is always
+  benign. Tests: test_meili_failed_task_surface.py.

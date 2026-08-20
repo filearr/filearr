@@ -284,6 +284,146 @@ async def test_group_membership_expansion(maker, monkeypatch):
     assert ALICE_SID_STR in expanded and GROUP_SID_STR in expanded
 
 
+def _forest_b_dit() -> dict:
+    """A SECOND, independent forest (ACME) with its own bind + SID space."""
+    return {
+        "cn=svcb,dc=acme,dc=com": {"userPassword": "bpw", "objectClass": ["user"]},
+        "cn=Bob,ou=staff,dc=acme,dc=com": {
+            "objectClass": ["user", "person"],
+            "sAMAccountName": "bob",
+            "displayName": "Bob Baker",
+            "objectSid": BOB_SID,
+            "objectGUID": BOB_GUID.bytes_le,
+        },
+    }
+
+
+# ACME\bob: a different domain identifier (7777) so it never collides with CORP.
+BOB_SID = bytes([1, 4, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0,
+                 97, 30, 0, 0, 98, 30, 0, 0, 99, 30, 0, 0])
+BOB_SID_STR = decode_sid(BOB_SID)
+BOB_GUID = uuid.UUID("cccc1111-2222-3333-4444-555566667777")
+
+
+def _multi_connector():
+    """Route each endpoint's bind to its own forest DIT by bind DN."""
+    forest_a = _connector(_dit())
+    forest_b = _connector(_forest_b_dit())
+
+    def connector(cfg, *, user, password):
+        if user and "dc=acme" in user:
+            return forest_b(cfg, user=user, password=password)
+        return forest_a(cfg, user=user, password=password)
+
+    return connector
+
+
+def _multi_settings(**over) -> Settings:
+    return _settings(
+        ldap_directories=[
+            {"server": "ldaps://dc.corp.example.com", "bind_dn": SVC_DN,
+             "bind_password": "svcpw", "user_base": "ou=people,dc=corp,dc=example,dc=com",
+             "domain": "CORP", "label": "corp"},
+            {"server": "ldaps://dc.acme.com", "bind_dn": "cn=svcb,dc=acme,dc=com",
+             "bind_password": "bpw", "user_base": "ou=staff,dc=acme,dc=com",
+             "domain": "ACME", "label": "acme"},
+        ],
+        **over,
+    )
+
+
+async def test_multi_forest_enumerates_both(maker, monkeypatch):
+    from filearr import db as db_mod
+    from filearr import worker as worker_mod
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    s = _multi_settings()
+    monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
+
+    async with maker() as session:
+        await _seed_snapshot(session, ALICE_SID_STR)  # a CORP SID
+        # plus a raw ACME SID on another path
+        from filearr.models import Agent
+        agent = (await session.execute(select(Agent))).scalars().first()
+        session.add(
+            PermissionSnapshot(
+                agent_id=agent.id, path="/data/acme/y", is_dir=False,
+                owner={"kind": "user", "id": BOB_SID_STR, "name": BOB_SID_STR},
+                group_=None,
+                aces=[{"principal": {"kind": "user", "id": BOB_SID_STR, "name": BOB_SID_STR},
+                       "type": "allow", "verbs": ["read"], "raw_mask": "0x1",
+                       "inherited": False, "scope": "this", "source": "local", "order_index": 0}],
+                fidelity="full_native", posture={}, principals=[BOB_SID_STR],
+                digest="d2", collected_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    out = await worker_mod.sync_directory_now(connector=_multi_connector())
+    assert out["status"] == "done"
+    # CORP: alice + MediaAdmins group; ACME: bob.
+    assert out["objects"] == 3 and out["users"] == 2 and out["groups"] == 1
+    # Only the two SIDs actually referenced by a snapshot get an alias.
+    assert out["aliases_written"] == 2 and out["unresolved_sids"] == 0
+
+    async with maker() as session:
+        aliases = {
+            a.alias: a for a in
+            (await session.execute(select(PrincipalAlias))).scalars()
+        }
+        assert aliases[ALICE_SID_STR].canonical == "CORP\\alice"
+        assert aliases[BOB_SID_STR].canonical == "ACME\\bob"
+        objs = {
+            o.object_sid: o for o in
+            (await session.execute(select(DirectoryObject))).scalars()
+        }
+        assert objs[ALICE_SID_STR].source_directory == "corp"
+        assert objs[BOB_SID_STR].source_directory == "acme"
+
+
+async def test_unreachable_forest_does_not_tombstone_the_other(maker, monkeypatch):
+    from filearr import db as db_mod
+    from filearr import worker as worker_mod
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    s = _multi_settings()
+    monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
+
+    # First: both forests reachable -> both populated.
+    await worker_mod.sync_directory_now(connector=_multi_connector())
+
+    # Now ACME is unreachable (its bind returns None); CORP still syncs.
+    def flaky(cfg, *, user, password):
+        if user and "dc=acme" in user:
+            from filearr.ldap_auth import LDAPError
+            raise LDAPError("connection_failed", "acme dc down")
+        return _connector(_dit())(cfg, user=user, password=password)
+
+    out = await worker_mod.sync_directory_now(connector=flaky)
+    assert out["status"] == "done"
+    assert any("acme" in e for e in out["errors"])
+    async with maker() as session:
+        bob = (
+            await session.execute(
+                select(DirectoryObject).where(DirectoryObject.object_sid == BOB_SID_STR)
+            )
+        ).scalar_one()
+        # ACME failed to sync, so bob must NOT be tombstoned.
+        assert bob.deleted_at is None
+
+
+async def test_bad_endpoint_config_is_skipped(maker, monkeypatch):
+    from filearr import worker as worker_mod
+
+    s = _settings(ldap_directories=[{"bind_dn": "x"}])  # no 'server'
+    monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
+    out = await worker_mod.sync_directory_now(connector=_multi_connector())
+    assert out["status"] == "skipped" and "ldap_not_configured" in out["reason"]
+
+
 async def test_sync_disabled_is_skipped(maker, monkeypatch):
     from filearr import worker as worker_mod
 

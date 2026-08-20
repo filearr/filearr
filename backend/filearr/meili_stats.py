@@ -86,36 +86,74 @@ async def meili_snapshot(session: AsyncSession) -> dict:
     }
 
 
+def _is_benign_failed_task(t: dict) -> bool:
+    """A self-healing task failure that must NOT alarm the operator.
+
+    An ``indexDeletion`` that failed ``index_not_found`` is the shadow-swap
+    rebuild's post-swap delete racing the stale-shadow reaper (or a retried
+    rebuild) over the same ``<index>_rebuild_<epoch>`` shadow: whichever loses
+    finds the index already gone — which is exactly the desired end state. We
+    never delete the LIVE index, so any ``indexDeletion`` here is a shadow
+    delete, and ``index_not_found`` on it is always benign. Surfacing it as
+    "Latest Meili failure" (live report 2026-08-19) is a false alarm."""
+    err = t.get("error") or {}
+    return t.get("type") == "indexDeletion" and err.get("code") == "index_not_found"
+
+
 async def _recent_failed_tasks(
     c, index_uid: str
 ) -> tuple[int | None, int | None, dict | None]:
     """``(failed_last_24h, failed_total, newest_failed)`` for ``index_uid`` from
-    Meili's task list. Meili keeps failed tasks until they are deleted, so the
-    total is HISTORY (270k on a box that hit the _vectors bug for a day, and
-    still 270k a day after the fix) -- the 24 h count is the live signal, the
-    total is what "Clear failed search-index tasks" removes. The SDK's
-    ``get_tasks`` has no status/date filter, so this uses its raw HTTP layer.
-    Best-effort: any error -> ``(None, None, None)``."""
+    Meili's task list, with self-healing failures (see ``_is_benign_failed_task``)
+    excluded so they never alarm the operator. Meili keeps failed tasks until
+    they are deleted, so the total is HISTORY (270k on a box that hit the
+    _vectors bug for a day, and still 270k a day after the fix) -- the 24 h count
+    is the live signal, the total is what "Clear failed search-index tasks"
+    removes. The SDK's ``get_tasks`` has no status/date filter, so this uses its
+    raw HTTP layer. Best-effort: any error -> ``(None, None, None)``.
+
+    Both counts and the surfaced newest are taken over a bounded recent window
+    (``_WINDOW``) so a burst of benign shadow-delete races cannot mask a real
+    failure NOR inflate the surfaced count; the raw Meili totals still back the
+    "clear failed tasks" action via ``purge_failed_tasks``."""
     from datetime import UTC, datetime, timedelta
 
+    _WINDOW = 50
     try:
         since = (datetime.now(UTC) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
         recent = (
             await c._http_requests.get(  # noqa: SLF001 - SDK has no status filter
-                f"tasks?statuses=failed&indexUids={index_uid}&limit=1&afterFinishedAt={since}"
+                f"tasks?statuses=failed&indexUids={index_uid}&limit={_WINDOW}"
+                f"&afterFinishedAt={since}"
             )
         ).json()
         total = (
             await c._http_requests.get(  # noqa: SLF001
-                f"tasks?statuses=failed&indexUids={index_uid}&limit=1"
+                f"tasks?statuses=failed&indexUids={index_uid}&limit={_WINDOW}"
             )
         ).json()
     except Exception:  # noqa: BLE001
         return None, None, None
-    results = total.get("results") or []
+
+    # 24 h count: Meili's raw total minus the benign entries seen in the window
+    # (the window caps how many benign we can discount, which is the right bias —
+    # never under-report a real backlog).
+    recent_results = recent.get("results") or []
+    recent_benign = sum(1 for t in recent_results if _is_benign_failed_task(t))
+    recent_count = recent.get("total")
+    if recent_count is not None:
+        recent_count = max(0, recent_count - recent_benign)
+
+    total_results = total.get("results") or []
+    total_benign = sum(1 for t in total_results if _is_benign_failed_task(t))
+    total_count = total.get("total")
+    if total_count is not None:
+        total_count = max(0, total_count - total_benign)
+
     newest = None
-    if results:
-        t = results[0]
+    for t in total_results:  # newest-first
+        if _is_benign_failed_task(t):
+            continue
         err = t.get("error") or {}
         newest = {
             "uid": t.get("uid"),
@@ -124,4 +162,5 @@ async def _recent_failed_tasks(
             "code": err.get("code"),
             "message": (err.get("message") or "")[:500],
         }
-    return recent.get("total"), total.get("total"), newest
+        break
+    return recent_count, total_count, newest
