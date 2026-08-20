@@ -107,6 +107,39 @@ minutes instead of seconds is an early signal worth investigating.
     window (e.g. `0 2 * * *`) and it converges over a few nights, then
     no-ops. It never touches agent libraries or files above the hash ceiling.
 
+## Stale hashes after a hashing change {#hash-staleness}
+
+Every item's stored quick/mid/content hashes are stamped with the hashing
+scheme that produced them (`policy_version`). If a Filearr upgrade ever changes
+what the hashers *compute* — a fixed algorithm bug, or an xxhash library bump
+that alters output — the scheme version bumps and every already-stored row
+becomes visibly stale. When that happens the **Libraries page prompts**: a
+banner plus a per-library **`N stale` / update hashes** chip in the Hash
+column.
+
+**Update hashes** queues a deliberately *light* per-library job
+(`rehash_library`): it re-reads file bytes to recompute the hashes and
+re-stamp the scheme — **no metadata extraction, no thumbnails, no embeddings,
+no chunking**. That makes it far cheaper than a full rescan (which also
+converges the hashes, at full extract-pipeline cost). It is throttled by the
+same `FILEARR_HASH_BACKFILL_RATE_MBPS` cap as the backfill task, skips under
+maintenance mode, and refreshes the search index for the rows it touches.
+One caveat: on a quick-hash-only (network) library, an old-scheme whole-file
+hash the current policy would not recompute is **cleared** rather than kept
+(a stale-algorithm digest must not pose as a current one); the *Backfill
+content hashes* task above restores those under the new scheme.
+
+Agent-hosted libraries never show the prompt — central cannot read their
+files. Their equivalent is the agent's **re-hash sweep** (Agents page), which
+tracks its own scheme version and becomes real work again automatically after
+an agent upgrade that changes hashing.
+
+Dependency bumps that do **not** change digests need none of this: the suite
+pins known-answer digest vectors (`tests/test_hash_vectors.py`, mirrored in
+the Go agent), so a bump that would alter output fails CI instead of shipping.
+The xxhash 3.8.1 → 4.0.1 bump (2026-08-20) was verified byte-identical this
+way — no rescan, no re-hash.
+
 ## Maintenance mode (Jobs page) {#maintenance-mode}
 
 **Enter maintenance mode** (Jobs page header, admin) suspends all *regular*

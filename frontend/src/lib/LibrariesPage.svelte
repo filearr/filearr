@@ -2,11 +2,12 @@
   import { onDestroy, onMount } from "svelte";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
-    listLibraries, listPresets, listScans, listShareMap,
+    libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
+    rehashLibrary,
     retryExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     libraryStats,
-    type FailedJob, type FailingItem, type Library, type LibraryStatsResponse,
+    type FailedJob, type FailingItem, type Library, type LibraryHashStatus, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
   } from "./api";
   import LibraryEditModal from "./LibraryEditModal.svelte";
@@ -36,6 +37,28 @@
   // forever-empty "Last scan" column.
   const centralLibraries = $derived(libraries.filter((l) => !l.source_agent_id));
   const agentLibraries = $derived(libraries.filter((l) => !!l.source_agent_id));
+
+  // Hash staleness (per library): items whose stored hashes were computed by an
+  // older algorithm (provenance scheme mismatch). Non-zero counts surface a
+  // prompt offering the LIGHT re-hash — hashes only, no metadata extraction /
+  // thumbnails / embeddings — as the cheap alternative to a full rescan.
+  let hashStatus = $state<Record<string, LibraryHashStatus>>({});
+  let rehashing = $state<Record<string, boolean>>({});
+  const staleHashRows = $derived(Object.values(hashStatus).filter((r) => r.stale > 0));
+  const staleHashTotal = $derived(staleHashRows.reduce((n, r) => n + r.stale, 0));
+
+  async function runRehash(id: string) {
+    if (rehashing[id]) return;
+    rehashing[id] = true;
+    try {
+      await rehashLibrary(id);
+      if (hashStatus[id]) hashStatus[id] = { ...hashStatus[id], rehash_pending: true };
+    } catch (e) {
+      error = String(e);
+    } finally {
+      rehashing[id] = false;
+    }
+  }
 
   // Catalog footprint (file count + bytes per library, catalog totals). One
   // grouped aggregate over `items` — loaded once on mount + on demand via the
@@ -196,12 +219,14 @@
   async function refresh() {
     try {
       error = "";
-      const [libs, scs, st, jobs, smap] = await Promise.all([
+      const [libs, scs, st, jobs, smap, hs] = await Promise.all([
         listLibraries(), listScans(), fetchStats(),
         failedJobs(FAILED_PAGE, failedOffset).catch(() => null),
         listShareMap().catch(() => [] as ShareMapEntry[]),
+        libraryHashStatus().catch(() => null),
       ]);
       libraries = libs;
+      if (hs) hashStatus = Object.fromEntries(hs.map((r) => [r.library_id, r]));
       loaded = true;
       shareMap = smap;
       scans = scs;
@@ -673,6 +698,22 @@
       there are none.
     </p>
   {/if}
+  {#if staleHashRows.length}
+    <div
+      class="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+      role="alert">
+      <div class="font-semibold">Stored hashes need updating</div>
+      <p class="mt-0.5 text-xs">
+        {staleHashTotal.toLocaleString()} item{staleHashTotal === 1 ? "" : "s"} across
+        {staleHashRows.length} librar{staleHashRows.length === 1 ? "y" : "ies"}
+        ({staleHashRows.map((r) => r.name).join(", ")}) still carry hashes computed by an
+        older algorithm. Use <span class="font-medium">update hashes</span> in the Hash
+        column below — it re-reads the files to refresh their hashes only (no metadata
+        extraction, thumbnails or embeddings), far lighter than a full rescan. A full
+        rescan also converges them, at full extract cost.
+      </p>
+    </div>
+  {/if}
 
   <div class="mt-3 overflow-x-auto">
     <table class="w-full min-w-[64rem] text-sm">
@@ -727,6 +768,23 @@
             </td>
             <td class="py-2 pr-3 text-xs text-slate-500">
               {lib.hash_policy === "quick_only" ? "quick only" : lib.hash_policy}
+              {#if hashStatus[lib.id]?.stale}
+                {@const hsr = hashStatus[lib.id]}
+                <div class="mt-1 whitespace-nowrap">
+                  <span
+                    class="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                    title="Items whose stored hashes were computed by an older algorithm">
+                    {hsr.stale.toLocaleString()} stale
+                  </span>
+                  <button
+                    class="ml-1 rounded border border-amber-400 px-1.5 py-0.5 text-[10px] text-amber-700 disabled:opacity-50 dark:text-amber-300"
+                    title="Recompute this library's file hashes only — no metadata extraction, thumbnails or embeddings"
+                    disabled={hsr.rehash_pending || rehashing[lib.id]}
+                    onclick={() => runRehash(lib.id)}>
+                    {hsr.rehash_pending ? "updating…" : "update hashes"}
+                  </button>
+                </div>
+              {/if}
             </td>
             <td class="py-2 pr-3 font-mono text-xs text-slate-500">{lib.scan_cron ?? "—"}</td>
             <td class="py-2 pr-3 text-xs text-slate-500">{lib.watch_mode ? "on" : "—"}</td>

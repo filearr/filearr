@@ -1015,6 +1015,28 @@ export const retryExtracts = (id: string) =>
     { method: "POST" },
   );
 
+/** Per-library count of items whose stored hashes were computed under an older
+ *  hashing scheme, plus whether a light re-hash job is already queued/running.
+ *  Drives the Libraries-page "update hashes" prompt. */
+export interface LibraryHashStatus {
+  library_id: string;
+  name: string;
+  agent_owned: boolean;
+  stale: number;
+  rehash_pending: boolean;
+  hash_scheme: string;
+}
+export const libraryHashStatus = () =>
+  request<LibraryHashStatus[]>("/libraries/hash-status");
+
+/** Queue the light per-library hash refresh: recomputes quick/mid/content
+ *  hashes only — no metadata extraction, thumbnails or embeddings. */
+export const rehashLibrary = (id: string) =>
+  request<{ job_id: number | null; already_queued?: boolean }>(
+    `/libraries/${id}/rehash`,
+    { method: "POST" },
+  );
+
 /** Paginated failed Procrastinate jobs (read scope; page capped server-side at
  *  100). Returns {items, total, limit, offset} so the caller can render a pager
  *  (FIX-8 — the list used to grow unbounded on screen). */

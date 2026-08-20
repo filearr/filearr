@@ -12,7 +12,7 @@ from filearr import audit, share_map
 from filearr.api.scan_paths import _normalize_rel_path
 from filearr.db import get_session
 from filearr.errors import extract_error_count, failing_items
-from filearr.models import Item, Library, ScanRun
+from filearr.models import Item, ItemStatus, Library, ScanRun
 from filearr.presets import PRESET_BUNDLES, validate_extension_group_names
 from filearr.schedule import InvalidCronError, is_network_path, validate_cron
 from filearr.schemas import (
@@ -28,6 +28,7 @@ from filearr.search import delete_docs
 from filearr.security import PermissionContext, require_permission, require_scope
 from filearr.worker import (
     defer_extract,
+    defer_rehash_library,
     defer_scan,
     open_pool_if_needed,
     scan_job_pending,
@@ -282,6 +283,68 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
             lo.agent_last_reconcile_at = agent.last_reconcile_at
         out.append(lo)
     return out
+
+
+@router.get("/hash-status", dependencies=[Depends(require_scope("read"))])
+async def libraries_hash_status(session: AsyncSession = Depends(get_session)) -> list[dict]:
+    """Per-library hash-staleness report — the data behind the Libraries-page
+    re-hash prompt.
+
+    ``stale`` counts active items whose ``policy_version`` was stamped under an
+    OLD provenance scheme (``NOT LIKE '<current>:%'``) — i.e. their stored
+    quick/mid/content hashes predate the current hashing behaviour
+    (``provenance.HASH_IMPL_VERSION``). NULL ``policy_version`` rows are
+    excluded: those are simply not-yet-extracted and the normal extract
+    pipeline owns them. Agent-owned libraries always report ``stale: 0`` here
+    (agentsync never stamps ``policy_version``); their hash currency is the
+    agent's own concern (``HashSchemeVersion`` + the ``rehash_sweep`` command
+    on the Agents page), which ``agent_owned`` lets the UI say.
+
+    ``rehash_pending`` is true while a light re-hash job for the library is
+    queued or running, so the UI can show progress instead of a second button.
+    """
+    from filearr.provenance import _SCHEME
+
+    libs = (await session.execute(select(Library))).scalars().all()
+    counts = dict(
+        (
+            await session.execute(
+                select(Item.library_id, func.count())
+                .where(
+                    Item.status == ItemStatus.active,
+                    Item.policy_version.isnot(None),
+                    ~Item.policy_version.like(f"{_SCHEME}:%"),
+                )
+                .group_by(Item.library_id)
+            )
+        ).all()
+    )
+    # to_regclass guards a DB without the procrastinate schema (fresh DB / unit
+    # tests without the queue) — same convention as retry_extracts below.
+    has_jobs = (
+        await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
+    ).scalar()
+    pending: set[str] = set()
+    if has_jobs is not None:
+        rows = await session.execute(
+            text(
+                "SELECT DISTINCT args->>'library_id' FROM procrastinate_jobs "
+                "WHERE task_name = 'filearr.worker.rehash_library' "
+                "AND status IN ('todo', 'doing')"
+            )
+        )
+        pending = {r[0] for r in rows if r[0]}
+    return [
+        {
+            "library_id": str(lib.id),
+            "name": lib.name,
+            "agent_owned": lib.source_agent_id is not None,
+            "stale": int(counts.get(lib.id, 0)),
+            "rehash_pending": str(lib.id) in pending,
+            "hash_scheme": _SCHEME,
+        }
+        for lib in libs
+    ]
 
 
 @router.post("", response_model=LibraryOut, status_code=201,
@@ -809,6 +872,45 @@ async def trigger_scan(
     # that sees ZERO files over a previously-populated library — bypasses the
     # N->0 empty-mount guard for a deliberate everything-was-deleted rescan.
     job_id = await defer_scan(str(library_id), force=True, force_empty=force_empty)
+    return {"job_id": job_id}
+
+
+@router.post(
+    "/{library_id}/rehash",
+    status_code=202,
+    dependencies=[Depends(require_scope("write"))],
+)
+async def trigger_rehash(
+    library_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """Queue the LIGHT per-library hash refresh (``worker.rehash_library``).
+
+    Re-reads file bytes to recompute quick/mid/content hashes and re-stamp
+    ``policy_version`` for items hashed under an old scheme — no metadata
+    extraction, no thumbnails, no embeddings, no chunking. This is the action
+    behind the hash-status prompt (see ``GET /libraries/hash-status``); a full
+    rescan also converges the hashes but re-runs the whole extract pipeline.
+
+    Refused for agent-owned libraries (422 — central cannot open their files;
+    run the agent's re-hash sweep from the Agents page) and under maintenance
+    mode (409). At most one job is queued per library; a duplicate trigger
+    returns ``{"already_queued": true}``.
+    """
+    await _refuse_during_maintenance(session)
+    library = (
+        await session.execute(select(Library).where(Library.id == library_id))
+    ).scalar_one_or_none()
+    if library is None:
+        raise HTTPException(404, "Library not found")
+    if library.source_agent_id is not None:
+        raise HTTPException(
+            422,
+            "this library is owned by a remote agent; central cannot read its "
+            "files — run the agent's re-hash sweep from the Agents page instead",
+        )
+    job_id = await defer_rehash_library(str(library_id))
+    if job_id is None:
+        return {"job_id": None, "already_queued": True}
     return {"job_id": job_id}
 
 

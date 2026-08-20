@@ -71,6 +71,14 @@ curl -X PATCH http://localhost:8484/api/v1/items/<id> \
 curl -X POST http://localhost:8484/api/v1/system/rebuild-index \
   -H 'Authorization: Bearer <admin-key>'
 
+# hash staleness (2026-08-20): per-library count of items hashed under an
+# older scheme, and the LIGHT re-hash trigger (hashes only — no metadata
+# extraction, thumbnails or embeddings; agent-owned libraries 422 and use the
+# agent's re-hash sweep instead). See operations.md#hash-staleness.
+curl http://localhost:8484/api/v1/libraries/hash-status
+curl -X POST http://localhost:8484/api/v1/libraries/<id>/rehash \
+  -H 'Authorization: Bearer <write-key>'
+
 # content-only search (2026-08-20): the query text matches indexed FILE CONTENT
 # (body/OCR text, archive member names) — a filename/path hit alone no longer
 # returns the item. search_in=names is the inverse; default matches everything.

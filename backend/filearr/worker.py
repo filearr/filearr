@@ -139,6 +139,7 @@ AGE_NET_EXEMPT_TASKS: tuple[str, ...] = (
     "filearr.worker.content_sniff",
     "filearr.worker.rehash_small_files",
     "filearr.worker.backfill_content_hashes",
+    "filearr.worker.rehash_library",
 )
 
 
@@ -1345,6 +1346,177 @@ async def backfill_content_hashes(timestamp: int) -> dict:
     if await maintmode.is_active_standalone():
         return {"status": "skipped", "reason": "maintenance_mode", "hashed": 0}
     return await backfill_content_hashes_now()
+
+
+# --- Light per-library hash refresh (hash-scheme migration path) -------------
+# The operator-facing half of the HASH_IMPL_VERSION contract (provenance.py):
+# when a hashing-behaviour change ships, the scheme prefix bumps, every stored
+# row becomes visibly stale (`policy_version NOT LIKE '<scheme>:%'`), the
+# Libraries page prompts, and THIS task refreshes the hashes. It is deliberately
+# LIGHT: it re-reads file bytes to recompute quick/mid/content hashes and
+# re-stamps policy_version — it never touches metadata_/user_metadata and never
+# defers extract/embed/chunk/thumbnail work, so converging a million-row library
+# costs hash I/O only (unlike rehash_small_files, which rides the full extract
+# path and re-parses every file). Verified 2026-08-20 that the xxhash 3.8.1 ->
+# 4.0.1 bump did NOT need this (digests byte-identical; tests/test_hash_vectors
+# .py is the tripwire) — the mechanism exists so the next bump that DOES change
+# output is a button, not a full rescan.
+
+
+async def rehash_library_now(library_id: str) -> dict:
+    """Recompute hashes for a central library's active items stamped under an
+    OLD provenance scheme; re-stamp ``policy_version``; sync the index docs.
+
+    Per item: ``quick_hash`` always, ``mid_hash`` (>128 KiB), ``content_hash``
+    under the same rule the extract path uses (small band always; larger files
+    per the resolved T7 policy + ceiling). A stored ``content_hash`` the current
+    policy would NOT recompute is set to NULL rather than kept: an old-scheme
+    digest surviving next to a current-scheme stamp would masquerade as
+    comparable (same length under a same-width algorithm change), silently
+    breaking dedupe/move/verify comparisons — the opt-in
+    ``backfill_content_hashes`` task restores dropped ones under the current
+    scheme. Agent-owned libraries are refused (central cannot open their files;
+    the agent's ``rehash_sweep`` command is the equivalent there). Throttled by
+    ``FILEARR_HASH_BACKFILL_RATE_MBPS`` like the backfill. Unreadable files are
+    counted and skipped (the next scan tombstones them).
+    """
+    import asyncio
+    import time
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import load_only
+
+    from filearr.db import SessionLocal
+    from filearr.hashpolicy import resolve_hash_policy
+    from filearr.models import Item, ItemStatus, Library
+    from filearr.provenance import _SCHEME, policy_version
+    from filearr.tasks.extract import QUICK_CHUNK, full_hash, mid_hash, quick_hash
+
+    settings = get_settings()
+    rate = float(settings.hash_backfill_rate_mbps) * 1_000_000.0  # <=0 = unthrottled
+    rehashed = failed = dropped = 0
+    read_bytes = 0
+    started = time.monotonic()
+    changed: list[str] = []
+    async with SessionLocal() as session:
+        lib = (
+            await session.execute(select(Library).where(Library.id == library_id))
+        ).scalar_one_or_none()
+        if lib is None:
+            return {"status": "skipped", "reason": "library_not_found", "rehashed": 0}
+        if lib.source_agent_id is not None:
+            return {"status": "skipped", "reason": "agent_owned", "rehashed": 0}
+        resolved = resolve_hash_policy(
+            declared=lib.hash_policy or "auto",
+            root_path=lib.root_path or "",
+            hash_full_max_bytes=lib.hash_full_max_bytes,
+            global_max_bytes=settings.scan_hash_full_max_bytes,
+        )
+        stamp = policy_version(lib, settings)
+        # load_only the exact columns this loop reads/writes — streaming full ORM
+        # rows materialises metadata_ JSONB (EXIF/embeddings) and is the OOM that
+        # killed the live pictures scans (2026-08-20 fix in tasks/scan.py).
+        stream = await session.stream_scalars(
+            select(Item)
+            .options(
+                load_only(
+                    Item.id,
+                    Item.path,
+                    Item.size,
+                    Item.quick_hash,
+                    Item.mid_hash,
+                    Item.content_hash,
+                    Item.policy_version,
+                )
+            )
+            .where(
+                Item.library_id == lib.id,
+                Item.status == ItemStatus.active,
+                Item.policy_version.isnot(None),
+                ~Item.policy_version.like(f"{_SCHEME}:%"),
+            )
+            .order_by(Item.id)
+            .execution_options(yield_per=200)
+        )
+        batch = 0
+        async for item in stream:
+            if item.size is None or item.path is None:
+                continue
+            want_content = item.size <= QUICK_CHUNK * 2 or (
+                resolved.compute_content and item.size <= resolved.full_max_bytes
+            )
+            try:
+                qh = await asyncio.to_thread(quick_hash, item.path, item.size)
+                mh = await asyncio.to_thread(mid_hash, item.path, item.size)
+                ch = (
+                    await asyncio.to_thread(full_hash, item.path, item.size)
+                    if want_content
+                    else None
+                )
+            except OSError:
+                failed += 1
+                continue
+            item.quick_hash = qh
+            item.mid_hash = mh
+            if ch is not None:
+                item.content_hash = ch
+            elif item.content_hash is not None:
+                item.content_hash = None
+                dropped += 1
+            item.policy_version = stamp
+            changed.append(str(item.id))
+            rehashed += 1
+            # Throttle on approximate bytes actually read (whole file when the
+            # content hash streamed it; head+tail+mid samples otherwise).
+            read_bytes += int(item.size) if ch is not None else min(int(item.size), QUICK_CHUNK * 3)
+            batch += 1
+            if batch >= 200:
+                await session.commit()
+                batch = 0
+            if rate > 0:
+                ahead = read_bytes / rate - (time.monotonic() - started)
+                if ahead > 0:
+                    await asyncio.sleep(min(ahead, 5.0))
+        await session.commit()
+    # quick_hash/content_hash are searchable/filterable doc fields — refresh the
+    # projection for the touched rows instead of waiting for the nightly rebuild.
+    for i in range(0, len(changed), 1000):
+        await defer_index_sync(changed[i : i + 1000])
+    return {
+        "status": "done",
+        "library_id": library_id,
+        "rehashed": rehashed,
+        "failed": failed,
+        "content_dropped": dropped,
+    }
+
+
+@proc_app.task(queue="maintenance", name="filearr.worker.rehash_library")
+async def rehash_library(library_id: str) -> dict:
+    """Operator-triggered light hash refresh for one library (see
+    ``rehash_library_now``). Skips under maintenance mode — it is exactly the
+    sustained disk/network I/O that mode exists to stop."""
+    from filearr import maintmode
+
+    if await maintmode.is_active_standalone():
+        return {"status": "skipped", "reason": "maintenance_mode", "rehashed": 0}
+    return await rehash_library_now(library_id)
+
+
+async def defer_rehash_library(library_id: str) -> int | None:
+    """Enqueue a light re-hash; at most one *queued* job per library (the
+    queueing_lock frees when the job starts — same contract as defer_scan).
+    Returns the job id, or ``None`` on an already-queued collision."""
+    async with open_pool_if_needed():
+        try:
+            job = await proc_app.configure_task(
+                "filearr.worker.rehash_library",
+                queue="maintenance",
+                queueing_lock=f"rehash-library:{library_id}",
+            ).defer_async(library_id=library_id)
+        except AlreadyEnqueued:
+            return None
+    return job
 
 
 # Scheduled by maintenance_tick (registry default "30 4 * * *" in
