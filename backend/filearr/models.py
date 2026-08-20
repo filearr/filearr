@@ -2304,8 +2304,79 @@ class PrincipalAlias(Base):
     alias: Mapped[str] = mapped_column(Text, primary_key=True)
     canonical: Mapped[str] = mapped_column(Text)
     display: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance: 'manual' (admin CRUD, the original W7-T8 source) or 'ldap' (the
+    # directory sync auto-resolves an agent-pushed SID/GUID against AD). Kept so a
+    # directory resync only ever touches its OWN rows and never clobbers a manual
+    # override, and vice-versa (the manual API refuses to overwrite an 'ldap' row
+    # unless forced). Default 'manual' so pre-existing rows keep their meaning.
+    source: Mapped[str] = mapped_column(Text, server_default=text("'manual'"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class DirectoryObject(Base):
+    """A synced Active Directory / LDAP object (user, group, computer), the
+    directory-of-record central resolves agent-pushed permission principals
+    against (LDAP-T1, 2026-08-20).
+
+    Windows ACL entries carry a **SID** (``S-1-5-21-…``); a domain-joined agent
+    resolves it to ``DOMAIN\\name`` where it can, but a non-joined agent, or one
+    that cannot reach a DC, pushes the bare SID. Central runs a periodic
+    directory sync (``worker.sync_directory``) that enumerates AD and stores one
+    row per object here, then reconciles: every ``object_sid`` present in a
+    permission snapshot gets a ``principal_aliases`` row (``source='ldap'``)
+    mapping the raw SID → the canonical ``DOMAIN\\sam`` identity + a human
+    ``display_name``, so the existing permission reports resolve it with no
+    report change. ``member_of_sids`` (direct group SIDs) lets
+    ``permissions.effective_access`` expand a caller's group membership.
+
+    Identity: ``object_guid`` is the STABLE key (survives a rename/move, unlike
+    the DN); ``object_sid`` is the ACL-facing key the reconcile matches on. A row
+    whose ``deleted_at`` is set was in a prior sync but not the latest — kept as a
+    tombstone so a permission still attributed to a since-deleted account
+    resolves to ``name (deleted)`` rather than a bare SID (audit value)."""
+
+    __tablename__ = "directory_objects"
+    __table_args__ = (
+        Index("ix_directory_objects_sid", "object_sid"),
+        Index("ix_directory_objects_sam", "sam_account_name"),
+        Index("ix_directory_objects_kind", "kind"),
+        # Group-membership expansion queries scan member_of_sids by containment.
+        Index("ix_directory_objects_member_of", "member_of_sids", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    # objectGUID (36-char string form) — the stable natural key; UNIQUE upsert seam.
+    object_guid: Mapped[str] = mapped_column(Text, unique=True)
+    # objectSid (S-1-5-… string). Nullable: a few AD object classes (contacts,
+    # some groups) have no SID; those never match an ACL but are still catalogued.
+    object_sid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sam_account_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_principal_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    distinguished_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 'user' | 'group' | 'computer' | 'other' (derived from objectClass).
+    kind: Mapped[str] = mapped_column(Text, server_default=text("'other'"))
+    # NetBIOS or DNS domain the object belongs to (the DOMAIN in DOMAIN\name).
+    domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Direct group memberships as SIDs (resolved during sync from memberOf DNs),
+    # for effective-access expansion. Transitive closure is a documented follow-up.
+    member_of_sids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), server_default=text("'{}'")
+    )
+    # userAccountControl ACCOUNTDISABLE bit (users) — a disabled account still
+    # holds ACL grants, so it is reported, but flagged.
+    disabled: Mapped[bool] = mapped_column(server_default=text("false"))
+    last_synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    # Set when a sync no longer sees the object (removed from AD). Tombstone, not
+    # a hard delete: an ACL may still reference the SID and deserves attribution.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

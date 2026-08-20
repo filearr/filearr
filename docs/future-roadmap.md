@@ -10,7 +10,7 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 |---|---|---|
 | 1 | Distributed agents | **shipped** (+ scheduled/held updates, phased binary rollouts 2026-08-18/19) |
 | 2 | Local query access | **shipped** |
-| 3 | Identity, auth & RBAC | **shipped** except SAML (**blocked**: pysaml2 pins pyopenssl<24.3); roles-as-data + service accounts (P6-T10) shipped 2026-08-16/19 |
+| 3 | Identity, auth & RBAC | **shipped** except SAML (**blocked**: pysaml2 pins pyopenssl<24.3); roles-as-data + service accounts (P6-T10) shipped 2026-08-16/19; AD/LDAP directory sync — SID→identity resolution + group expansion (§30) shipped 2026-08-20 |
 | 4 | Indexing controls | **shipped**; custom exclusion presets (P2-T7) + per-OS agent presets driving roots (P2-T8) 2026-08-19 |
 | 5 | Search & findability | **All shipped** incl. P3 provenance (2026-08-19); email/mbox indexing tracked in §15; geo map filter is in the search UI (R8); federated multi-search only if indexes ever split (§8) |
 | 6 | Alerting | **shipped**; apprise in the image (P8-T3); **polish shipped 2026-08-19** — inhibition (`inhibited_by` + `inhibit_window_s`, mute semantics), `group_by` extras (folder / extension / file), `FILEARR_WEBHOOK_ALLOWED_CIDRS` |
@@ -1304,3 +1304,46 @@ shipped surface:
 Remaining research-assist candidates (deferred, not requested): a
 `hardlink_groups` report; a saved-search → alert bridge; agent USN-journal
 change feed (§27).
+
+## 30. AD/LDAP directory sync — permission attribution (LDAP-T1, 2026-08-20)
+
+User request: "add LDAP discovery and authentication with RBAC so permissions
+attribute to accounts and AD objects; setup + reconcile on central; agents push
+the SIDs, resolved on central." Bind auth + group→role login mapping already
+existed (§3, P6-T6). This adds the CENTRAL directory-of-record + SID resolution:
+
+- **Enumeration** (`ldap_directory.py`, reuses the login stack's TLS transport +
+  injected-connector seam): paged AD search of users + groups capturing
+  objectSid/objectGUID (decoded from binary), sAMAccountName, displayName, UPN,
+  memberOf. Requires a service bind; bounded by `max_objects`.
+- **Storage**: `directory_objects` table (guid PK, sid, sam, display, dn, kind,
+  domain, member_of_sids, disabled, tombstone on removal). Migration
+  a3f6c1d84b29, which also adds `principal_aliases.source` ('manual' | 'ldap').
+- **Reconciliation** (`worker.sync_directory`, scheduled 03:40 + on-demand): for
+  every SID actually present in a permission snapshot, upsert a
+  `principal_aliases` row (source='ldap') mapping SID → `DOMAIN\name (Full Name)`
+  — the existing permission reports resolve through that table unchanged. A
+  manual override is never clobbered (conflict update gated on source='ldap');
+  the manual PUT is symmetric (won't overwrite an ldap row without ?force). A
+  since-deleted account tombstones and still attributes as `name (deleted)`.
+- **Group expansion**: `member_of_sids` (resolved DN→SID during sync) lets
+  `GET /permissions/effective-access?expand_groups=true` (default) grow a
+  caller's closure by nested AD group membership, so a group grant attributes to
+  members. This is the "RBAC so permissions attribute to AD objects" half.
+- **API**: `/directory/objects` (browse), `/directory/status` (resolved vs
+  unresolved snapshot SIDs — the operator's reconciliation health), `POST
+  /directory/sync` (trigger, 422 when disabled).
+- Config: `FILEARR_LDAP_DIRECTORY_*`, reusing the `ldap_*` transport/bind. OFF
+  by default; fails closed (no service bind → refuse, not a partial tree).
+- Tests: `tests/test_ldap_directory.py` (SID/GUID decoders, MOCK_SYNC
+  enumeration, reconcile→alias, unresolved+tombstone, group expansion,
+  manual-not-clobbered, API endpoints). Also fixed a pre-existing date-brittle
+  assertion in test_agent_inventory_w6d3 (hardcoded collected_at vs a relative
+  threshold window; surfaced when the clock rolled to 2026-08-20).
+
+**Deferred tail:** transitive-group closure is direct-membership-per-sync-hop
+(bounded depth), which resolves nested groups but re-reads memberOf each level —
+fine for typical directories; an `LDAP_MATCHING_RULE_IN_CHAIN` single-query
+variant is a possible optimisation. Foreign-domain / cross-forest SIDs need
+their own bind (one directory config today). Agent-side AD lookup is unchanged
+(it still resolves what it can locally; central fills the rest).

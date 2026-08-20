@@ -86,6 +86,24 @@ OIDC (`FILEARR_OIDC_*`) and LDAP (`FILEARR_LDAP_*`) are extensive, env-only
 provider configs; both default **off**. See [Security](../security.md) for the
 model and the source `config.py` for every field.
 
+**AD/LDAP directory sync** (central-only; resolves agent-pushed permission SIDs
+into named identities — see [directory sync](../security.md#directory-sync)):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FILEARR_LDAP_DIRECTORY_SYNC_ENABLED` | `false` | Master switch for the directory enumeration + SID reconciliation. Needs a service bind (`FILEARR_LDAP_BIND_DN`/`_PASSWORD`). |
+| `FILEARR_LDAP_DIRECTORY_USER_BASE` / `_GROUP_BASE` | (falls back to `FILEARR_LDAP_USER_BASE`/`_GROUP_BASE`) | Search bases for the user and group enumeration passes. |
+| `FILEARR_LDAP_DIRECTORY_USER_FILTER` / `_GROUP_FILTER` | `(objectClass=user)` / `(objectClass=group)` | Object-class filters (AD defaults; OpenLDAP: `posixAccount`/`posixGroup`). |
+| `FILEARR_LDAP_ATTR_OBJECT_SID` / `_OBJECT_GUID` | `objectSid` / `objectGUID` | Binary identity attributes (decoded to canonical string forms). |
+| `FILEARR_LDAP_ATTR_DISPLAY_NAME` / `_SAM` / `_UPN` / `_MEMBER_OF_DIR` | `displayName` / `sAMAccountName` / `userPrincipalName` / `memberOf` | Attribute names. |
+| `FILEARR_LDAP_DIRECTORY_DOMAIN` | (derived from the DN's first `dc=`) | NetBIOS/DNS domain rendered into `DOMAIN\name` canonical ids. |
+| `FILEARR_LDAP_DIRECTORY_PAGE_SIZE` | `500` | Paged-search page size (AD caps at 1000). |
+| `FILEARR_LDAP_DIRECTORY_MAX_OBJECTS` | `500000` | Backstop against a runaway base DN. |
+
+The sync task **Sync AD/LDAP directory** (Jobs page, default cron `40 3 * * *`,
+editable) and `POST /api/v1/directory/sync` run it; `GET /api/v1/directory/status`
+shows reconciliation health.
+
 ## Scanning & hashing
 
 | Variable | Default | Purpose |

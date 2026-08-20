@@ -140,6 +140,7 @@ AGE_NET_EXEMPT_TASKS: tuple[str, ...] = (
     "filearr.worker.rehash_small_files",
     "filearr.worker.backfill_content_hashes",
     "filearr.worker.rehash_library",
+    "filearr.worker.sync_directory",
 )
 
 
@@ -1366,6 +1367,192 @@ async def backfill_content_hashes(timestamp: int) -> dict:
     if await maintmode.is_active_standalone():
         return {"status": "skipped", "reason": "maintenance_mode", "hashed": 0}
     return await backfill_content_hashes_now()
+
+
+# --- LDAP-T1: AD/LDAP directory sync + SID reconciliation --------------------
+# Enumerate the directory (users + groups), upsert directory_objects, tombstone
+# objects gone from AD, then RECONCILE: every SID an agent pushed into a
+# permission snapshot that matches a directory object gets a principal_aliases
+# row (source='ldap') mapping the raw SID -> DOMAIN\name (Full Name), so the
+# existing permission reports resolve it. Enumeration is blocking ldap3 I/O run
+# off-loop; the reconcile is pure SQL. Central-only.
+
+
+def _sids_in_snapshots_sql() -> str:
+    """Distinct principal ids shaped like a Windows SID across every permission
+    snapshot's ACEs + owner + group. A GIN-friendly-enough scan; the snapshot
+    table is bounded (N per path)."""
+    return (
+        "SELECT DISTINCT v FROM ("
+        "  SELECT ace->'principal'->>'id' AS v "
+        "    FROM permission_snapshots, jsonb_array_elements(aces) AS ace "
+        "  UNION SELECT owner->>'id' FROM permission_snapshots "
+        '  UNION SELECT "group"->>\'id\' FROM permission_snapshots'
+        ") t WHERE v LIKE 'S-%'"
+    )
+
+
+async def sync_directory_now(*, connector=None) -> dict:
+    """Run one directory enumeration + reconcile. ``connector`` overrides the
+    LDAP connection factory (tests inject an offline MOCK_SYNC one). Returns the
+    :class:`ldap_directory.ReconcileResult` as a dict. A disabled/misconfigured
+    directory returns a ``skipped`` status rather than raising."""
+    import asyncio
+
+    from sqlalchemy import select
+    from sqlalchemy import text as sql_text
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from filearr import ldap_directory
+    from filearr.db import SessionLocal, scalars_where_in
+    from filearr.ldap_auth import LdapConfig, LDAPError, connect
+    from filearr.models import DirectoryObject, PrincipalAlias
+
+    settings = get_settings()
+    if not settings.ldap_directory_sync_enabled:
+        return {"status": "skipped", "reason": "directory_sync_disabled"}
+    try:
+        cfg = LdapConfig.from_settings(settings)
+    except LDAPError as exc:
+        return {"status": "skipped", "reason": f"ldap_not_configured: {exc.reason}"}
+    dcfg = ldap_directory.DirectoryConfig.from_settings(settings)
+    conn_factory = connector or connect
+
+    res = ldap_directory.ReconcileResult()
+    try:
+        entries = await asyncio.to_thread(
+            ldap_directory.enumerate_directory, cfg, dcfg, connector=conn_factory
+        )
+    except LDAPError as exc:
+        return {"status": "failed", "reason": f"{exc.reason}: {exc.detail}"}
+
+    # DN -> SID map for resolving memberOf DNs to group SIDs (expansion).
+    dn_to_sid = {
+        (e.distinguished_name or "").lower(): e.object_sid
+        for e in entries
+        if e.distinguished_name and e.object_sid
+    }
+    now = datetime.now(UTC)
+    async with SessionLocal() as session:
+        for e in entries:
+            res.objects += 1
+            if e.kind == "user":
+                res.users += 1
+            elif e.kind == "group":
+                res.groups += 1
+            member_sids = sorted(
+                {
+                    dn_to_sid[dn.lower()]
+                    for dn in e.member_of_dns
+                    if dn.lower() in dn_to_sid and dn_to_sid[dn.lower()]
+                }
+            )
+            if member_sids:
+                res.memberships_expanded += 1
+            stmt = (
+                pg_insert(DirectoryObject)
+                .values(
+                    object_guid=e.object_guid,
+                    object_sid=e.object_sid,
+                    sam_account_name=e.sam_account_name,
+                    display_name=e.display_name,
+                    user_principal_name=e.user_principal_name,
+                    distinguished_name=e.distinguished_name,
+                    kind=e.kind,
+                    domain=e.domain,
+                    member_of_sids=member_sids,
+                    disabled=e.disabled,
+                    last_synced_at=now,
+                    deleted_at=None,
+                )
+                .on_conflict_do_update(
+                    index_elements=[DirectoryObject.object_guid],
+                    set_={
+                        "object_sid": e.object_sid,
+                        "sam_account_name": e.sam_account_name,
+                        "display_name": e.display_name,
+                        "user_principal_name": e.user_principal_name,
+                        "distinguished_name": e.distinguished_name,
+                        "kind": e.kind,
+                        "domain": e.domain,
+                        "member_of_sids": member_sids,
+                        "disabled": e.disabled,
+                        "last_synced_at": now,
+                        "deleted_at": None,
+                    },
+                )
+            )
+            await session.execute(stmt)
+        await session.commit()
+
+        # Tombstone objects not seen this run (removed from AD). Kept for audit.
+        tomb = await session.execute(
+            sql_text(
+                "UPDATE directory_objects SET deleted_at = :now "
+                "WHERE last_synced_at < :now AND deleted_at IS NULL"
+            ),
+            {"now": now},
+        )
+        res.tombstoned = tomb.rowcount or 0
+        await session.commit()
+
+        # Reconcile: resolve the SIDs agents actually pushed.
+        sids = [
+            r[0] for r in (await session.execute(sql_text(_sids_in_snapshots_sql()))).all()
+        ]
+        # Load the directory rows for exactly those SIDs in one pass.
+        by_sid: dict[str, DirectoryObject] = {}
+        if sids:
+            rows = await scalars_where_in(
+                session, select(DirectoryObject), DirectoryObject.object_sid, sids
+            )
+            for d in rows:
+                if d.object_sid:
+                    by_sid[d.object_sid] = d
+        for sid in sids:
+            d = by_sid.get(sid)
+            if d is None:
+                res.unresolved_sids += 1
+                continue
+            canonical = (
+                f"{d.domain}\\{d.sam_account_name}"
+                if d.domain and d.sam_account_name
+                else (d.user_principal_name or d.sam_account_name or sid)
+            )
+            display = d.display_name or d.sam_account_name or d.user_principal_name
+            if d.deleted_at is not None and display:
+                display = f"{display} (deleted)"
+            # Upsert ONLY our own ('ldap') rows: never clobber a manual override.
+            alias_stmt = (
+                pg_insert(PrincipalAlias)
+                .values(
+                    alias=sid, canonical=canonical, display=display, source="ldap"
+                )
+                .on_conflict_do_update(
+                    index_elements=[PrincipalAlias.alias],
+                    set_={"canonical": canonical, "display": display, "source": "ldap"},
+                    where=(PrincipalAlias.source == "ldap"),
+                )
+            )
+            await session.execute(alias_stmt)
+            res.aliases_written += 1
+        await session.commit()
+    return {"status": "done", **res.as_dict()}
+
+
+@proc_app.task(
+    queue="maintenance",
+    name="filearr.worker.sync_directory",
+    queueing_lock="sync-directory",
+)
+async def sync_directory(timestamp: int) -> dict:
+    """Scheduled/on-demand AD/LDAP directory sync (see ``sync_directory_now``).
+    Skipped under maintenance mode."""
+    from filearr import maintmode
+
+    if await maintmode.is_active_standalone():
+        return {"status": "skipped", "reason": "maintenance_mode"}
+    return await sync_directory_now()
 
 
 # --- Light per-library hash refresh (hash-scheme migration path) -------------

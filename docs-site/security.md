@@ -66,6 +66,43 @@ break-glass path if a federated provider locks everyone out. See
 Both fail **closed**: a half-configured provider's endpoints 404 rather than
 500ing, and an unmapped user is refused when you leave the default role empty.
 
+## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
+
+The permissions collector reads Windows ACLs, which name a principal by **SID**
+(`S-1-5-21-…`). A domain-joined agent resolves the SID to `DOMAIN\name` where it
+can, but a non-joined agent — or one that can't reach a DC — pushes the bare
+SID. To turn those SIDs into named identities, central runs a **directory sync**
+(this is a central-only feature; agents never talk to your DC for this):
+
+1. **Enumeration.** With `FILEARR_LDAP_DIRECTORY_SYNC_ENABLED=true` and a service
+   bind, central enumerates AD users and groups (reusing the same TLS-first
+   `ldap_*` transport as login), capturing each object's `objectSid`,
+   `objectGUID`, `sAMAccountName`, `displayName`, `userPrincipalName` and
+   `memberOf`. Stored in `directory_objects` (the directory of record).
+2. **Reconciliation.** Every SID that actually appears in a permission snapshot
+   is matched against the directory and, on a hit, written to `principal_aliases`
+   (tagged `source='ldap'`) as `SID → DOMAIN\name (Full Name)`. The permission
+   reports already resolve through that table, so an ACE now reads
+   `CORP\jsmith (John Smith)` instead of a raw SID — **no report change, and the
+   stored snapshot stays verbatim** (the mapping is presentation, never a rewrite
+   of evidence). A manual alias override (`source='manual'`) is never clobbered
+   by a sync; a since-deleted account is kept as a tombstone so its ACLs still
+   attribute to `name (deleted)`.
+3. **Group expansion.** `directory_objects.member_of_sids` (resolved during the
+   sync) lets `GET /permissions/effective-access?expand_groups=true` (default)
+   grow a caller's identity closure by their AD group membership — nested groups
+   included — so a grant to a group correctly attributes to its members.
+
+The sync runs on a schedule (**Sync AD/LDAP directory**, default 03:40 daily,
+editable on the Jobs page) and on demand (`POST /api/v1/directory/sync`).
+`GET /api/v1/directory/status` reports how many snapshot SIDs resolve vs remain
+unresolved (an unresolved count points at a missing base DN, a foreign domain,
+or a deleted account); `GET /api/v1/directory/objects` browses the directory.
+AD groups also map to Filearr roles at login via
+[`FILEARR_LDAP_ROLE_MAP`](#roles), so directory membership drives both access
+attribution *and* RBAC. All of it fails **closed**: disabled by default, and a
+missing service bind refuses enumeration rather than pulling a partial tree.
+
 ## RBAC: groups, path grants, and ltree scoping
 
 Beyond the coarse read/write/admin scopes, Filearr has **path-scoped RBAC**:

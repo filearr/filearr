@@ -41,6 +41,10 @@ async def list_aliases(session: AsyncSession = Depends(get_session)) -> dict:
                 "alias": r.alias,
                 "canonical": r.canonical,
                 "display": r.display,
+                # 'manual' (this API) or 'ldap' (the directory sync). An 'ldap'
+                # row is overwritten by the next sync unless a manual PUT with
+                # ?force=true claims it (source flips to 'manual', pinning it).
+                "source": r.source,
                 "created_at": r.created_at.isoformat(),
             }
             for r in rows
@@ -49,28 +53,50 @@ async def list_aliases(session: AsyncSession = Depends(get_session)) -> dict:
 
 
 @router.put("", dependencies=[Depends(require_scope("admin"))], status_code=200)
-async def upsert_aliases(body: list[AliasIn], session: AsyncSession = Depends(get_session)) -> dict:
-    """Upsert one or many mappings (idempotent — re-PUT to edit)."""
+async def upsert_aliases(
+    body: list[AliasIn],
+    force: bool = Query(
+        default=False,
+        description="overwrite an alias currently owned by the directory sync "
+        "(source='ldap'); the row's source flips to 'manual' and future syncs "
+        "leave it alone",
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Upsert one or many MANUAL mappings (idempotent — re-PUT to edit).
+
+    A manual PUT never silently overwrites an LDAP-synced alias: the conflict
+    update is gated on ``source = 'manual'`` unless ``?force=true`` (which claims
+    the row as manual so the sync stops touching it). ``skipped`` counts rows
+    left untouched because they belong to the directory sync."""
     if len(body) > 500:
         raise HTTPException(422, "at most 500 aliases per request")
+    upserted = skipped = 0
     for row in body:
-        await session.execute(
-            pg_insert(PrincipalAlias)
-            .values(
-                alias=row.alias.strip(),
-                canonical=row.canonical.strip(),
-                display=(row.display or "").strip() or None,
-            )
-            .on_conflict_do_update(
-                index_elements=[PrincipalAlias.alias],
-                set_={
-                    "canonical": row.canonical.strip(),
-                    "display": (row.display or "").strip() or None,
-                },
-            )
+        set_ = {
+            "canonical": row.canonical.strip(),
+            "display": (row.display or "").strip() or None,
+            "source": "manual",
+        }
+        stmt = pg_insert(PrincipalAlias).values(
+            alias=row.alias.strip(),
+            canonical=row.canonical.strip(),
+            display=(row.display or "").strip() or None,
+            source="manual",
         )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[PrincipalAlias.alias],
+            set_=set_,
+            # Only claim the row when it is already manual, unless forced.
+            where=None if force else (PrincipalAlias.source == "manual"),
+        )
+        result = await session.execute(stmt)
+        if result.rowcount:
+            upserted += 1
+        else:
+            skipped += 1
     await session.commit()
-    return {"upserted": len(body)}
+    return {"upserted": upserted, "skipped": skipped}
 
 
 @router.delete("/{alias:path}", dependencies=[Depends(require_scope("admin"))], status_code=204)
@@ -96,6 +122,13 @@ async def effective_access_endpoint(
     agent_id: str,
     path: str,
     principal: list[str] | None = Query(default=None),
+    expand_groups: bool = Query(
+        default=True,
+        description="expand the supplied SIDs with their AD group memberships "
+        "from the synced directory (nested groups included), so a grant to a "
+        "group attributes to its members; set false to evaluate only the "
+        "identities you passed",
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """What can these principal identities actually DO on this path?
@@ -104,10 +137,13 @@ async def effective_access_endpoint(
     pure §3.5 evaluator (``permissions.effective_access``): ordered
     deny-before-allow over the ACEs, POSIX owner/group/other class selection,
     and local ∩ share layer intersection. ``principal`` is repeatable and
-    should carry every identity the caller answers to (uid, SID, group ids,
-    names) — group closure is the CALLER's job; nothing is guessed."""
+    should carry every identity the caller answers to (uid, SID, names). With
+    ``expand_groups`` (default on) the AD group closure is added automatically
+    from the synced directory (LDAP-T1) — otherwise group membership is the
+    CALLER's job and nothing is guessed."""
     import uuid as _uuid
 
+    from filearr.ldap_directory import expand_principals_with_groups
     from filearr.models import PermissionSnapshot
     from filearr.permissions import effective_access, record_from_wire
 
@@ -118,6 +154,9 @@ async def effective_access_endpoint(
     principals = {p for p in (principal or []) if p.strip()}
     if not principals:
         raise HTTPException(422, "at least one principal identity is required")
+    supplied = sorted(principals)
+    if expand_groups:
+        principals = await expand_principals_with_groups(session, principals)
     snap = (
         await session.execute(
             select(PermissionSnapshot)
@@ -139,7 +178,9 @@ async def effective_access_endpoint(
     return {
         "agent_id": agent_id,
         "path": path,
-        "principals": sorted(principals),
+        "principals": supplied,
+        "principals_effective": sorted(principals),
+        "group_expansion": expand_groups,
         "collected_at": snap.collected_at.isoformat(),
         "fidelity": snap.fidelity,
         "verbs": sorted(result.verbs),

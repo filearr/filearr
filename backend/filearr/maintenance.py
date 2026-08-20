@@ -255,6 +255,26 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         category="integrity", default_cron=None,
         lock="backfill-content-hashes", editable=True,
     ),
+    # LDAP-T1: AD/LDAP directory sync — enumerate users/groups and reconcile the
+    # SIDs agents pushed in permission snapshots into named identities +
+    # group-membership expansion. Default daily off-peak (03:40, clear of the
+    # 04:xx purge/rehash window); editable, and a manual "run now" trigger. A
+    # no-op unless FILEARR_LDAP_DIRECTORY_SYNC_ENABLED is on.
+    MaintTaskSpec(
+        key="sync_directory",
+        task_name="filearr.worker.sync_directory",
+        title="Sync AD/LDAP directory",
+        description=(
+            "Enumerates the configured AD/LDAP directory (users + groups) and "
+            "reconciles the SIDs agents push in permission snapshots into named "
+            "identities, so the permission reports attribute an ACE to "
+            "DOMAIN\\name (Full Name) and effective-access expands group "
+            "membership. Central-only; needs a service bind. No effect unless "
+            "FILEARR_LDAP_DIRECTORY_SYNC_ENABLED is set."
+        ),
+        category="integrity", default_cron="40 3 * * *",
+        lock="sync-directory", editable=True,
+    ),
     # BK-T3. Category `integrity` rather than `cleanup`: it produces state
     # rather than reclaiming it, and it is the only task here whose failure
     # means an operator has no recovery path. NO default cron, on purpose —

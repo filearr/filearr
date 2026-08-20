@@ -254,6 +254,37 @@ class Settings(BaseSettings):
     # add-only). Unset => no group sync.
     ldap_group_sync: bool = False
 
+    # --- LDAP-T1 (2026-08-20): AD/LDAP DIRECTORY sync (central-only) ----------
+    # A periodic (+ on-demand) enumeration of AD users/groups that resolves the
+    # SIDs agents push in permission snapshots into named identities, so the
+    # permission reports attribute an ACE to "DOMAIN\jsmith (John Smith)" and
+    # effective-access can expand a caller's group membership. Reuses the same
+    # ldap_* transport/bind config as login. OFF by default; a service bind
+    # (ldap_bind_dn/password) is required for enumeration.
+    ldap_directory_sync_enabled: bool = False
+    # Search bases for the two enumeration passes. Fall back to ldap_user_base /
+    # ldap_group_base when unset. A single base covering both is fine.
+    ldap_directory_user_base: str | None = None
+    ldap_directory_group_base: str | None = None
+    # Object-class filters. AD defaults; OpenLDAP would use posixAccount/posixGroup.
+    ldap_directory_user_filter: str = "(objectClass=user)"
+    ldap_directory_group_filter: str = "(objectClass=group)"
+    # Attribute names (AD defaults). objectSid/objectGUID come back as RAW BYTES
+    # and are decoded to the canonical string forms by ldap_directory.
+    ldap_attr_object_sid: str = "objectSid"
+    ldap_attr_object_guid: str = "objectGUID"
+    ldap_attr_display_name: str = "displayName"
+    ldap_attr_sam: str = "sAMAccountName"
+    ldap_attr_upn: str = "userPrincipalName"
+    ldap_attr_member_of_dir: str = "memberOf"
+    # NetBIOS/DNS domain rendered into DOMAIN\name canonical ids when the object
+    # itself does not carry one (unset => derive from the DN's dc= components).
+    ldap_directory_domain: str | None = None
+    # Paged-search page size (AD caps server-side at 1000; keep <= that).
+    ldap_directory_page_size: int = 500
+    # Hard cap on objects pulled per sync (backstop against a runaway base DN).
+    ldap_directory_max_objects: int = 500_000
+
     # UI-T4: server-side folder browser allowlist. GET /api/v1/fs/browse may only
     # list directories at or under one of these roots; any request that normalizes
     # or symlink-resolves OUTSIDE every root is rejected (422). Default is the

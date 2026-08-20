@@ -368,7 +368,7 @@ async def test_poll_persists_health_and_stamps_auth_mode(client):
 # --------------------------------------------------------------------------- #
 # W7-T6/T7 (2026-08-19): permission snapshots + reports                        #
 # --------------------------------------------------------------------------- #
-def _perm_record(*, owner_id="1000", extra_aces=None, fidelity="full_native"):
+def _perm_record(*, owner_id="1000", extra_aces=None, fidelity="full_native", collected_at=None):
     aces = [
         {"principal": {"kind": "user", "id": owner_id, "name": "eric"}, "type": "allow",
          "verbs": ["read", "write"], "raw_mask": "mode:user_obj=06", "inherited": False,
@@ -381,7 +381,9 @@ def _perm_record(*, owner_id="1000", extra_aces=None, fidelity="full_native"):
          "scope": "this", "source": "local", "order_index": 2},
     ] + (extra_aces or [])
     return {
-        "collected_at": "2026-08-19T10:00:00Z",
+        # Relative to now (digest excludes it) so the change-report's
+        # threshold_days window is not brittle to the wall-clock date.
+        "collected_at": collected_at or datetime.now(UTC).isoformat(),
         "owner": {"kind": "user", "id": owner_id, "name": "eric"},
         "group": {"kind": "group", "id": "100", "name": "users"},
         "posture": {"dacl_present": False, "dacl_canonical": False, "generic_mapping_applied": False},
@@ -629,9 +631,10 @@ async def test_principal_alias_canonicalises_reports(client):
     r = await c.put("/api/v1/principal-aliases", json=[
         {"alias": "1000", "canonical": "org:eric", "display": "Eric H"},
     ])
-    assert r.status_code == 200 and r.json() == {"upserted": 1}
+    assert r.status_code == 200 and r.json() == {"upserted": 1, "skipped": 0}
     r = await c.get("/api/v1/principal-aliases")
     assert r.json()["aliases"][0]["canonical"] == "org:eric"
+    assert r.json()["aliases"][0]["source"] == "manual"
 
     r = await c.get("/api/v1/reports/permissions_by_principal")
     rows = r.json()["rows"]
