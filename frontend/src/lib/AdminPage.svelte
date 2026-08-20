@@ -7,6 +7,7 @@
   import LlmKeysPanel from "./LlmKeysPanel.svelte";
   import ApiKeysPanel from "./ApiKeysPanel.svelte";
   import ServiceAccountsPanel from "./ServiceAccountsPanel.svelte";
+  import AuthProvidersPanel from "./AuthProvidersPanel.svelte";
   import { isAdminPrincipal, type AuthPrincipal } from "./api";
 
   // Admin tab (2026-08-19): access control and platform administration only.
@@ -47,6 +48,7 @@
 
   {#if isAdmin}
     <UsersPanel />
+    <AuthProvidersPanel />
     <SessionsPanel view="admin" />
     <AuditPanel />
   {/if}

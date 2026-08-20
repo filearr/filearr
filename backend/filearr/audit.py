@@ -49,6 +49,8 @@ GROUP_MEMBERSHIP_CHANGED = "group_membership_changed"
 SESSION_REVOKED = "session_revoked"
 PROFILE_UPDATED = "profile_updated"
 SESSION_SETTINGS_CHANGED = "session_settings_changed"
+# Auth-provider config edited from the console (LDAP / directory / OIDC).
+AUTH_CONFIG_CHANGED = "auth_config_changed"
 ROLE_CREATED = "role_created"
 ROLE_UPDATED = "role_updated"
 ROLE_DELETED = "role_deleted"

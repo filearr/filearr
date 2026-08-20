@@ -3827,3 +3827,44 @@ export async function revokeApiKey(id: string): Promise<void> {
   });
   if (!res.ok) throw new ApiError(res.status, await res.text());
 }
+
+// --- GUI auth-provider config (2026-08-20) --------------------------------- //
+// LDAP login / AD directory sync / OIDC SSO, managed from the Admin >
+// Authentication section. Secrets are never returned (has_* flags); send
+// SECRET_UNCHANGED to keep an existing one. See docs/security.md.
+export const SECRET_UNCHANGED = "__unchanged__";
+
+/** provider ∈ {ldap, directory, oidc}. Values plus a per-field _source map. */
+export type AuthProviderConfig = Record<string, unknown> & {
+  _source: Record<string, "gui" | "env" | "unset">;
+};
+
+export const getAuthConfig = (provider: string) =>
+  request<AuthProviderConfig>(`/auth-config/${provider}`);
+
+export const saveAuthConfig = (provider: string, body: Record<string, unknown>) =>
+  request<AuthProviderConfig>(`/auth-config/${provider}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+export interface AuthTestResult {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  users?: number;
+  groups?: number;
+  issuer?: string;
+  authorization_endpoint?: string;
+  token_endpoint?: string;
+  jwks_uri?: string;
+  endpoints?: { label: string; ok: boolean; users?: number; groups?: number; error?: string }[];
+}
+
+export const testAuthProvider = (provider: string, body: Record<string, unknown>) =>
+  request<AuthTestResult>(`/auth-config/${provider}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });

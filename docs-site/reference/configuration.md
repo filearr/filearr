@@ -82,9 +82,16 @@ to confirm a change actually reached the containers.
 | `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | Legacy: trust the leftmost `X-Forwarded-For` unconditionally. Prefer the two mechanisms above. |
 | `FILEARR_AUDIT_READS` | `false` | Record a per-query search event (high volume). |
 
-OIDC (`FILEARR_OIDC_*`) and LDAP (`FILEARR_LDAP_*`) are extensive, env-only
-provider configs; both default **off**. See [Security](../security.md) for the
-model and the source `config.py` for every field.
+OIDC (`FILEARR_OIDC_*`) and LDAP (`FILEARR_LDAP_*`) are extensive provider
+configs; both default **off**. As of 2026-08-20 they are also configurable from
+the console (**Admin → Authentication**) — a value saved in the GUI **overrides**
+the matching env var per field, and each field shows its source (gui | env). The
+env vars remain the bootstrap/fallback (so the first admin can still sign in) and
+are ideal for infrastructure-as-code; the GUI is the day-to-day surface, with
+pre-save **Test** actions (LDAP bind + sample enumeration, OIDC discovery fetch).
+Secrets saved via the GUI are encrypted at rest under `FILEARR_SECRET_KEY`. See
+[Security](../security.md) for the model and the source `config.py` for every
+field.
 
 **AD/LDAP directory sync** (central-only; resolves agent-pushed permission SIDs
 into named identities — see [directory sync](../security.md#directory-sync)):

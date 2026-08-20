@@ -44,6 +44,9 @@ from filearr.api import (
     taxonomy,
     transfers,
 )
+from filearr.api import (
+    authconfig as authconfig_api,
+)
 
 v1_router = APIRouter()
 v1_router.include_router(system.router, tags=["system"])
@@ -57,6 +60,9 @@ v1_router.include_router(
 )
 v1_router.include_router(principal_aliases.perm_router, tags=["principal-aliases"])
 v1_router.include_router(directory.router, prefix="/directory", tags=["directory"])
+v1_router.include_router(
+    authconfig_api.router, prefix="/auth-config", tags=["auth-config"]
+)
 v1_router.include_router(roles.router, tags=["rbac"])
 v1_router.include_router(fs.router, prefix="/fs", tags=["fs"])
 v1_router.include_router(search.router, tags=["search"])

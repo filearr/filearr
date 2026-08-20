@@ -1403,12 +1403,15 @@ async def sync_directory_now(*, connector=None) -> dict:
     from sqlalchemy import text as sql_text
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    from filearr import ldap_directory
+    from filearr import authconfig, ldap_directory
     from filearr.db import SessionLocal, scalars_where_in
     from filearr.ldap_auth import LDAPError, connect
     from filearr.models import DirectoryObject, PrincipalAlias
 
-    settings = get_settings()
+    # GUI config overlays env (2026-08-20): a directory config saved in the
+    # console is honoured, secrets decrypted.
+    async with SessionLocal() as _s:
+        settings = await authconfig.effective_settings(_s)
     if not settings.ldap_directory_sync_enabled:
         return {"status": "skipped", "reason": "directory_sync_disabled"}
     try:

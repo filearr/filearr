@@ -1371,3 +1371,33 @@ resolves what it can locally; central fills the rest).
   longer reads as an operational failure. We never delete the LIVE index, so any
   `indexDeletion` there is a shadow delete and `index_not_found` on it is always
   benign. Tests: test_meili_failed_task_surface.py.
+
+## 32. GUI configuration of auth providers (2026-08-20)
+
+User request: GUI-based config of AD/LDAP sync, auth and roles, and OIDC SSO —
+previously env-only. Built on the existing `app_settings` KV store + the
+`alerts/crypto` secret-encryption scheme:
+
+- `authconfig.py` owns three config blobs (`ldap_config` /
+  `ldap_directory_config` / `oidc_config`) with strict per-provider field
+  allow-lists (the injection guard). `effective_settings(session)` overlays the
+  decrypted blobs onto the env `Settings` via `model_copy` — **GUI overrides env
+  per field** — and EVERY auth reader now sources config through it: login
+  (`authenticate_ldap`, `auth_status`), OIDC (`oidc_login`/`callback`), and the
+  directory sync. Env stays the bootstrap/fallback; a DB-read failure falls back
+  to pure env so a blip never locks everyone out.
+- Secrets (`ldap_bind_password`, `oidc_client_secret`, per-endpoint
+  `bind_password`) AES-GCM encrypted at rest; write-only over the API (`has_*`
+  flags), `SECRET_UNCHANGED` sentinel keeps a stored secret, `""` clears it.
+- API `/auth-config/{provider}` GET/PUT (redacted, per-field `_source` map) +
+  pre-save Test actions: `/ldap/test` (service bind + sample enumeration),
+  `/directory/test` (per-endpoint, cross-forest), `/oidc/test` (discovery +
+  JWKS fetch) — all run against the FORM values, never persisting. Audited
+  (`auth_config_changed`, field names only).
+- Frontend: **Admin → Authentication** (AuthProvidersPanel) — metadata-driven
+  collapsible forms for the three providers, source badges, write-only secret
+  fields, and the Test buttons. Cross-forest endpoints edited as a JSON list.
+- No migration (the `app_settings` table already existed). Tests:
+  test_authconfig.py (store, encryption-at-rest, redaction, sentinel, endpoint
+  secrets, API roundtrip). The role MAPS (group→role) are part of each provider
+  blob; roles-as-data already had its own UI (RolesPanel).

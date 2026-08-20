@@ -250,7 +250,12 @@ def _https_warning(request: Request) -> str | None:
 # --------------------------------------------------------------------------- #
 @router.get("/auth/status", response_model=AuthStatus)
 async def auth_status(session: AsyncSession = Depends(get_session)) -> AuthStatus:
+    from filearr import authconfig
+
     settings = get_settings()
+    # GUI config overlays env: the login page must offer SSO/LDAP whenever they
+    # are configured EITHER way.
+    eff = await authconfig.effective_settings(session)
     exists = await _users_exist(session)
     if not settings.auth_enabled:
         mode: Literal["disabled", "bootstrap", "enabled"] = "disabled"
@@ -262,8 +267,8 @@ async def auth_status(session: AsyncSession = Depends(get_session)) -> AuthStatu
         auth_enabled=settings.auth_enabled,
         users_exist=exists,
         mode=mode,
-        oidc_enabled=settings.oidc_is_configured,
-        ldap_enabled=settings.ldap_is_configured,
+        oidc_enabled=eff.oidc_is_configured,
+        ldap_enabled=eff.ldap_is_configured,
     )
 
 
@@ -316,7 +321,6 @@ async def login(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> LoginOut:
-    settings = get_settings()
     ip = ratelimit.client_ip(request)
     # P6-T8: reject a locked username/IP BEFORE the slow argon2 verify runs. The
     # 429 is byte-identical for an unknown vs a known username (anti-enumeration).
@@ -334,7 +338,10 @@ async def login(
     # succeed AND the username is unknown or ldap-sourced. Same login form; the
     # directory verifies the password via a real bind.
     if principal is None:
-        if settings.ldap_is_configured and await _ldap_eligible(session, payload.username):
+        from filearr import authconfig
+
+        eff = await authconfig.effective_settings(session)
+        if eff.ldap_is_configured and await _ldap_eligible(session, payload.username):
             from filearr import ldap_auth
 
             try:

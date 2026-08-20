@@ -23,25 +23,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import RedirectResponse
 
 from filearr import audit, authx, oidc, ratelimit, roles
-from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.security import set_session_cookie
 
 router = APIRouter()
 
 
-def _require_enabled() -> None:
-    if not get_settings().oidc_is_configured:
+def _require_enabled(settings) -> None:
+    if not settings.oidc_is_configured:
         # Fail closed: the feature is off / half-configured — behave as if the
         # route does not exist.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "OIDC is not enabled")
 
 
-def _callback_url(request: Request) -> str:
+def _callback_url(request: Request, settings) -> str:
     """The redirect_uri handed to the IdP. Prefers the explicit
     ``FILEARR_OIDC_REDIRECT_URI``; otherwise derives it from the request base
     (honouring the TLS front's X-Forwarded-Proto/Host)."""
-    settings = get_settings()
     if settings.oidc_redirect_uri:
         return settings.oidc_redirect_uri
     proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
@@ -79,9 +77,12 @@ async def oidc_login(
     return_to: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
-    _require_enabled()
+    from filearr import authconfig
+
+    eff = await authconfig.effective_settings(session)
+    _require_enabled(eff)
     try:
-        cfg = oidc.OidcConfig.from_settings()
+        cfg = oidc.OidcConfig.from_settings(eff)
         meta = await oidc.fetch_metadata(cfg)
         state = oidc.random_token()
         nonce = oidc.random_token()
@@ -100,7 +101,7 @@ async def oidc_login(
             state=state,
             nonce=nonce,
             code_challenge=challenge,
-            redirect_uri=_callback_url(request),
+            redirect_uri=_callback_url(request, eff),
         )
     except oidc.OIDCError as exc:
         await session.rollback()
@@ -121,7 +122,10 @@ async def oidc_callback(
     error: str | None = None,
     error_description: str | None = None,
 ) -> RedirectResponse:
-    _require_enabled()
+    from filearr import authconfig
+
+    eff = await authconfig.effective_settings(session)
+    _require_enabled(eff)
 
     def _fail(reason: str, return_to: str = "/") -> RedirectResponse:
         sep = "&" if "?" in return_to else "?"
@@ -136,7 +140,7 @@ async def oidc_callback(
         return _fail("missing_code")
 
     try:
-        cfg = oidc.OidcConfig.from_settings()
+        cfg = oidc.OidcConfig.from_settings(eff)
         nonce, verifier, return_to = await oidc.consume_login_state(session, state)
         # Persist the state consumption even if a later step fails (single-use).
         await session.commit()
@@ -150,7 +154,7 @@ async def oidc_callback(
             meta,
             cfg,
             code=code,
-            redirect_uri=_callback_url(request),
+            redirect_uri=_callback_url(request, eff),
             code_verifier=verifier,
         )
         jwks = await oidc.fetch_jwks(cfg, meta["jwks_uri"])

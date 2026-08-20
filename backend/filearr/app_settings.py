@@ -29,7 +29,21 @@ from filearr.config import get_settings
 
 KEY_SESSION_INACTIVITY_HOURS = "session_inactivity_hours"
 KEY_SESSION_TTL_HOURS = "session_ttl_hours"
-KNOWN_KEYS = frozenset({KEY_SESSION_INACTIVITY_HOURS, KEY_SESSION_TTL_HOURS})
+# GUI-editable auth-provider config blobs (2026-08-20). Each holds a dict of
+# Settings-field overrides (secrets encrypted); filearr.authconfig owns their
+# vocabulary + validation and overlays them onto the env Settings.
+KEY_LDAP_CONFIG = "ldap_config"
+KEY_LDAP_DIRECTORY_CONFIG = "ldap_directory_config"
+KEY_OIDC_CONFIG = "oidc_config"
+KNOWN_KEYS = frozenset(
+    {
+        KEY_SESSION_INACTIVITY_HOURS,
+        KEY_SESSION_TTL_HOURS,
+        KEY_LDAP_CONFIG,
+        KEY_LDAP_DIRECTORY_CONFIG,
+        KEY_OIDC_CONFIG,
+    }
+)
 
 # Sane bands, in hours: 5 minutes .. 1 year. Below/above is a typo, not policy.
 MIN_HOURS = 1 / 12
@@ -80,6 +94,14 @@ def _num(v: object) -> float | None:
     if not (MIN_HOURS <= f <= MAX_HOURS):
         return None
     return f
+
+
+async def get_value(session: AsyncSession, key: str) -> object | None:
+    """The stored value for ``key`` (env-independent), or ``None`` when unset.
+    Shares the process cache/generation with the session-timeout readers, so an
+    auth-config blob is loaded at most once per TTL like everything else."""
+    await _ensure_loaded(session)
+    return _values.get(key)
 
 
 async def global_session_timeouts(session: AsyncSession) -> SessionTimeouts:

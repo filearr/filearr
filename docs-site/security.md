@@ -66,6 +66,20 @@ break-glass path if a federated provider locks everyone out. See
 Both fail **closed**: a half-configured provider's endpoints 404 rather than
 500ing, and an unmapped user is refused when you leave the default role empty.
 
+**Configure from the console or from env.** As of 2026-08-20, LDAP login, the AD
+directory sync, and OIDC SSO — including the group→role maps — are editable at
+**Admin → Authentication**, not only via `FILEARR_LDAP_*` / `FILEARR_OIDC_*`. A
+value saved in the GUI **overrides** the matching env var per field (env stays
+the bootstrap/fallback, and every field shows its source). Secrets (bind
+password, client secret, each cross-forest endpoint's password) are AES-GCM
+encrypted at rest under `FILEARR_SECRET_KEY` — the same scheme as alert-channel
+secrets — and are **write-only**: the API returns a `has_*` flag, never the
+value, and an untouched field keeps the stored secret. Each screen has a **Test**
+action that validates the *form* values before you save — an LDAP service-bind +
+sample enumeration, and an OIDC discovery + JWKS fetch — so a typo'd base DN or
+issuer surfaces immediately rather than at a user's first failed login. Writes
+are audited (`auth_config_changed`, field names only — never values).
+
 ## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
 
 The permissions collector reads Windows ACLs, which name a principal by **SID**

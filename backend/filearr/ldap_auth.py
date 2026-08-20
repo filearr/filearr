@@ -539,7 +539,10 @@ async def authenticate_ldap(
     the login endpoint maps every one to a generic 401."""
     from starlette.concurrency import run_in_threadpool
 
-    cfg = LdapConfig.from_settings()
+    from filearr import authconfig
+
+    # GUI config overlays env (2026-08-20): an admin-saved LDAP config wins.
+    cfg = LdapConfig.from_settings(await authconfig.effective_settings(session))
     identity = await run_in_threadpool(
         resolve_ldap_identity, cfg, username, password, connector=connector
     )

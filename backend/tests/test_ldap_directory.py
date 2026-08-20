@@ -20,13 +20,23 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr import ldap_directory
+from filearr import authconfig, ldap_directory
 from filearr.config import Settings
 from filearr.ldap_auth import LdapConfig
 from filearr.ldap_directory import decode_guid, decode_sid
 from filearr.models import DirectoryObject, PermissionSnapshot, PrincipalAlias
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
+def _async_settings(s):
+    """An async stand-in for authconfig.effective_settings that returns the test
+    Settings directly (the sync now sources config through that overlay)."""
+
+    async def _f(_session):
+        return s
+
+    return _f
 
 SVC_DN = "cn=svc,dc=corp,dc=example,dc=com"
 # S-1-5-21-1001-2002-3003-1104 (alice), -513 (Domain Users group)
@@ -205,6 +215,7 @@ async def test_sync_reconciles_agent_pushed_sid_to_alias(maker, monkeypatch):
     get_settings.cache_clear()
     s = _settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     async with maker() as session:
@@ -240,6 +251,7 @@ async def test_sync_counts_unresolved_and_tombstones(maker, monkeypatch):
     monkeypatch.setattr(db_mod, "SessionLocal", maker)
     s = _settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     async with maker() as session:
@@ -268,6 +280,7 @@ async def test_group_membership_expansion(maker, monkeypatch):
 
     s = _settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     async with maker() as session:
@@ -339,6 +352,7 @@ async def test_multi_forest_enumerates_both(maker, monkeypatch):
     monkeypatch.setattr(db_mod, "SessionLocal", maker)
     s = _multi_settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     async with maker() as session:
@@ -389,6 +403,7 @@ async def test_unreachable_forest_does_not_tombstone_the_other(maker, monkeypatc
     monkeypatch.setattr(db_mod, "SessionLocal", maker)
     s = _multi_settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     # First: both forests reachable -> both populated.
@@ -419,6 +434,7 @@ async def test_bad_endpoint_config_is_skipped(maker, monkeypatch):
 
     s = _settings(ldap_directories=[{"bind_dn": "x"}])  # no 'server'
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
     out = await worker_mod.sync_directory_now(connector=_multi_connector())
     assert out["status"] == "skipped" and "ldap_not_configured" in out["reason"]
@@ -429,6 +445,7 @@ async def test_sync_disabled_is_skipped(maker, monkeypatch):
 
     s = _settings(ldap_directory_sync_enabled=False)
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     out = await worker_mod.sync_directory_now(connector=_connector())
     assert out["status"] == "skipped" and out["reason"] == "directory_sync_disabled"
 
@@ -440,6 +457,7 @@ async def test_sync_does_not_clobber_a_manual_alias(maker, monkeypatch):
     monkeypatch.setattr(db_mod, "SessionLocal", maker)
     s = _settings()
     monkeypatch.setattr(worker_mod, "get_settings", lambda: s)
+    monkeypatch.setattr(authconfig, "effective_settings", _async_settings(s))
     monkeypatch.setattr(ldap_directory, "get_settings", lambda: s)
 
     async with maker() as session:
