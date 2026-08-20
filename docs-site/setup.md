@@ -56,7 +56,7 @@ The stack is version-pinned. These are the current pins:
 |---|---|---|
 | Python | 3.14 | Backend runtime (the image uses `python:3.14-slim`). |
 | PostgreSQL | 18.x (18.4 pinned) | Source of truth **and** job queue; uses native `uuidv7()` primary keys and PG18 async I/O. |
-| Meilisearch | v1.53.0 (pin **≥ 1.48.2**) | Search projection. See the security note below. |
+| Meilisearch | v1.53.1 (pin **≥ 1.48.2**) | Search projection. See the security note below. |
 | FastAPI | 0.141 | Native Server-Sent Events (requires ≥ 0.135). |
 | SQLAlchemy | 2.x + psycopg3 | Async database access. |
 | Procrastinate | 3.9 | Postgres-native job queue — **no Redis** anywhere in the stack. |
@@ -71,7 +71,7 @@ PDFium binding is bundled in a Python wheel).
 
 !!! warning "Why Meilisearch is pinned to ≥ 1.48.2"
     The Meilisearch pin floor exists for a reason: **CVE-2026-57823 / CVE-2026-57824**
-    (a tenant-token pair) are fixed at 1.48.2. The stack ships **v1.53.0**.
+    (a tenant-token pair) are fixed at 1.48.2. The stack ships **v1.53.1**.
     Self-hosted Meilisearch also had an authenticated blind SSRF (v1.8–v1.34.0,
     fixed 1.34.1) via task-webhook / remote-source features — moot for the
     current pin, but catalogued so any future version bump re-checks the **full**

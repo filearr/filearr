@@ -34,6 +34,7 @@ class LlmRole:
 
 _READ_TOOLS = (
     "search_files",
+    "find_similar",
     "get_file",
     "where_is",
     "filter_files",
@@ -196,8 +197,33 @@ TOOL_SPECS: dict[str, dict] = {
                 },
                 "library": {"type": "string", "description": "library name or id"},
                 "limit": {"type": "integer", "maximum": 50},
+                "search_in": {
+                    "type": "string",
+                    "enum": ["all", "content", "names"],
+                    "description": (
+                        "what the query text matches: 'content' = indexed file "
+                        "content only (a filename hit alone will not return the "
+                        "file), 'names' = names/tags only, 'all' = everything"
+                    ),
+                },
             },
             "required": ["query"],
+        },
+    },
+    "find_similar": {
+        "description": (
+            "Files similar in CONTENT to one citation (nearest neighbours of "
+            "its locally-computed text embedding — title/filename/tags/body). "
+            "Each hit carries 'similarity' 0..1: ~1.0 near-duplicate text "
+            "signal, ~0.8+ same topic/series. Needs semantic search enabled."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "citation": _STR,
+                "limit": {"type": "integer", "maximum": 25},
+            },
+            "required": ["citation"],
         },
     },
     "get_file": {

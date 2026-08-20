@@ -68,7 +68,15 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import Grouping
 
 from filearr import share_map
-from filearr.models import Agent, Item, ItemStatus, Library, PermissionSnapshot, PrincipalAlias
+from filearr.models import (
+    Agent,
+    Item,
+    ItemStatus,
+    Library,
+    PermissionSnapshot,
+    PrincipalAlias,
+    ScanRun,
+)
 from filearr.quality_score import REVIEW_BAND, score_item
 
 #: Server-side cursor batch size for streaming exports (research §6.2).
@@ -1273,6 +1281,136 @@ def _row_perm_change(r: Any) -> dict:
     }
 
 
+# --- 2026-08-20 library health digest ----------------------------------------
+def _build_library_health(params: ReportParams) -> Select:
+    """One row per library: the at-a-glance health view (scan trouble + the two
+    hygiene signals + extract errors). Every count is a correlated scalar
+    subquery over an indexed column set — one round trip, no N+1."""
+    from datetime import timedelta
+
+    now = datetime.now(UTC)
+    items_active = (
+        select(func.count())
+        .select_from(Item)
+        .where(Item.library_id == Library.id, Item.status == ItemStatus.active)
+        .scalar_subquery()
+    )
+    unlinked_sidecars = (
+        select(func.count())
+        .select_from(Item)
+        .where(
+            Item.library_id == Library.id,
+            Item.status == ItemStatus.active,
+            Item.sidecar_of.is_(None),
+            Item.extension.in_(_SIDECAR_EXTS),
+        )
+        .scalar_subquery()
+    )
+    empty_files = (
+        select(func.count())
+        .select_from(Item)
+        .where(
+            Item.library_id == Library.id,
+            Item.status == ItemStatus.active,
+            Item.size == 0,
+        )
+        .scalar_subquery()
+    )
+    missing_items = (
+        select(func.count())
+        .select_from(Item)
+        .where(Item.library_id == Library.id, Item.status == ItemStatus.missing)
+        .scalar_subquery()
+    )
+    extract_errors = (
+        select(func.count())
+        .select_from(Item)
+        .where(
+            Item.library_id == Library.id,
+            Item.status == ItemStatus.active,
+            Item.metadata_.has_key("_extract_error"),
+        )
+        .scalar_subquery()
+    )
+    last_scan_status = (
+        select(ScanRun.status)
+        .where(ScanRun.library_id == Library.id)
+        .order_by(ScanRun.started_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    last_scan_at = (
+        select(func.max(ScanRun.started_at))
+        .where(ScanRun.library_id == Library.id)
+        .scalar_subquery()
+    )
+    last_success_at = (
+        select(func.max(ScanRun.started_at))
+        .where(ScanRun.library_id == Library.id, ScanRun.status == "completed")
+        .scalar_subquery()
+    )
+    failed_7d = (
+        select(func.count())
+        .select_from(ScanRun)
+        .where(
+            ScanRun.library_id == Library.id,
+            ScanRun.status == "failed",
+            ScanRun.started_at >= now - timedelta(days=7),
+        )
+        .scalar_subquery()
+    )
+    stmt = select(
+        Library.id.label("library_id"),
+        Library.name.label("library"),
+        Library.source_agent_id.label("source_agent_id"),
+        items_active.label("items"),
+        missing_items.label("missing_items"),
+        last_scan_status.label("last_scan_status"),
+        last_scan_at.label("last_scan_at"),
+        last_success_at.label("last_success_at"),
+        failed_7d.label("failed_scans_7d"),
+        unlinked_sidecars.label("unlinked_sidecars"),
+        empty_files.label("empty_files"),
+        extract_errors.label("extract_errors"),
+    )
+    if params.library_id is not None:
+        stmt = stmt.where(Library.id == params.library_id)
+    return stmt.order_by(Library.name)
+
+
+def _row_library_health(r: Any) -> dict:
+    # A one-word verdict so the digest e-mail's first column says it all.
+    agent_owned = r.source_agent_id is not None
+    problems = []
+    if not agent_owned:
+        if r.last_scan_status is None:
+            problems.append("never scanned")
+        elif r.last_scan_status == "failed":
+            problems.append("last scan FAILED")
+        if (r.failed_scans_7d or 0) >= 3:
+            problems.append(f"{r.failed_scans_7d} failed scans in 7d")
+    if (r.unlinked_sidecars or 0) > 0:
+        problems.append(f"{r.unlinked_sidecars} unlinked sidecars")
+    if (r.empty_files or 0) > 0:
+        problems.append(f"{r.empty_files} empty files")
+    if (r.extract_errors or 0) > 0:
+        problems.append(f"{r.extract_errors} extract errors")
+    return {
+        "library": r.library,
+        "status": "OK" if not problems else "; ".join(problems),
+        "kind": "agent" if agent_owned else "central",
+        "items": int(r.items or 0),
+        "missing_items": int(r.missing_items or 0),
+        "last_scan_status": r.last_scan_status or ("n/a" if agent_owned else "never"),
+        "last_scan_at": r.last_scan_at.isoformat() if r.last_scan_at else "",
+        "last_success_at": r.last_success_at.isoformat() if r.last_success_at else "",
+        "failed_scans_7d": int(r.failed_scans_7d or 0),
+        "unlinked_sidecars": int(r.unlinked_sidecars or 0),
+        "empty_files": int(r.empty_files or 0),
+        "extract_errors": int(r.extract_errors or 0),
+    }
+
+
 # --- 2026-08-20 hygiene reports (user request: empty files + low-info sidecars)
 # Extensions that classify as sidecars by SHAPE (filearr.sidecar): used to find
 # the UNLINKED ones (sidecar-shaped rows with no parent) that pollute search/
@@ -1430,6 +1568,26 @@ _REPORTS = _REPORTS + (
         supports_threshold=True,
         threshold_label="Changes in the last (days)",
         default_threshold_days=30,
+    ),
+    CannedReport(
+        id="library_health",
+        title="Library health digest",
+        description=(
+            "One row per library with a one-word verdict and the signals "
+            "behind it: last scan status and age, failed scans in the last 7 "
+            "days, active/missing item counts, unlinked sidecars, empty files "
+            "and extract errors. The at-a-glance view (and the natural weekly "
+            "scheduled e-mail); each count has a detail report -- "
+            "sidecar_hygiene, empty_files, and the Jobs/Libraries pages."
+        ),
+        columns=("library", "status", "kind", "items", "missing_items",
+                 "last_scan_status", "last_scan_at", "last_success_at",
+                 "failed_scans_7d", "unlinked_sidecars", "empty_files",
+                 "extract_errors"),
+        build=_build_library_health,
+        row=_row_library_health,
+        supports_library=True,
+        default_limit=1000,
     ),
     CannedReport(
         id="empty_files",

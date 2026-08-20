@@ -212,6 +212,10 @@ class SearchArgs(BaseModel):
     kind: str | None = None
     library: str | None = None
     limit: int | None = None
+    # 2026-08-20 parity with /api/v1/search: restrict what the query text
+    # matches — "content" = indexed file content only (body/OCR text, archive
+    # member names), "names" = title/filename/path/tags only.
+    search_in: str = Field(default="all", pattern="^(all|content|names)$")
 
 
 class CitationArgs(BaseModel):
@@ -303,6 +307,12 @@ async def search_files(
             "file_category", "size", "mtime",
         ],
     )
+    if args.search_in == "content":
+        kwargs["attributes_to_search_on"] = ["body_text", "archive_members"]
+    elif args.search_in == "names":
+        kwargs["attributes_to_search_on"] = [
+            "title", "filename", "path", "artist", "album", "author", "tags",
+        ]
     if principal.role.snippets:
         kwargs["attributes_to_crop"] = ["body_text"]
         kwargs["crop_length"] = 30
@@ -333,6 +343,67 @@ async def search_files(
                 row["snippet"] = snippet[:400]
         rows.append(row)
     await _audit_tool(request, principal, "search_files", len(rows))
+    return {"rows": rows, "role": principal.role.name}
+
+
+class SimilarArgs(BaseModel):
+    citation: str
+    limit: int | None = None
+
+
+@llm_app.post("/find_similar", operation_id="find_similar")
+async def find_similar(
+    args: SimilarArgs,
+    request: Request,
+    principal: LlmPrincipal = Depends(llm_principal),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Files similar in CONTENT to one citation (2026-08-20 parity with the
+    console's Similar section): Meili ``/similar`` over the item's locally-
+    computed text embedding, with each hit's normalised cosine ``similarity``.
+    409s explain a disabled/semantic-less deployment instead of an empty list."""
+    _require(principal, "find_similar")
+    s = get_settings()
+    if not s.semantic_enabled:
+        raise HTTPException(409, "semantic search is disabled on this deployment")
+    item = await _get_item(args.citation, principal, session)
+    from filearr.embed import has_current_embedding
+
+    if not has_current_embedding(item.metadata_, s.embedder_config):
+        raise HTTPException(409, "this file has no current embedding yet")
+    limit = _cap(args.limit, 10, 25)
+    filters = list(_meili_scope(principal)) + ["is_sidecar = false"]
+    async with meili_client() as c:
+        res = await c.index(s.meili_index).search_similar_documents(
+            str(item.id),
+            embedder=DEFAULT_EMBEDDER_NAME,
+            limit=limit + 1,
+            filter=" AND ".join(f"({f})" for f in filters),
+            show_ranking_score=True,
+        )
+    lib_names = {
+        str(lid): name
+        for lid, name in (await session.execute(select(Library.id, Library.name))).all()
+    }
+    rows = []
+    for hit in res.hits or []:
+        if str(hit.get("id")) == str(item.id):
+            continue
+        row = {
+            "citation": hit.get("id"),
+            "filename": hit.get("filename") or hit.get("title"),
+            "kind": hit.get("file_category"),
+            "library": lib_names.get(str(hit.get("library_id"))),
+            "size": hit.get("size"),
+        }
+        score = hit.get("_rankingScore")
+        if isinstance(score, (int, float)):
+            row["similarity"] = round(float(score), 4)
+        if principal.reveal_paths:
+            row["rel_path"] = hit.get("rel_path")
+        rows.append(row)
+    rows = rows[:limit]
+    await _audit_tool(request, principal, "find_similar", len(rows))
     return {"rows": rows, "role": principal.role.name}
 
 
@@ -702,6 +773,7 @@ async def retrieve_passages(
                 limit=k,
                 hybrid=hybrid,
                 vector=vector,
+                show_ranking_score=True,
             )
     except MeilisearchApiError as err:
         # No chunks index yet = nothing has ever been chunked. A friendly note
@@ -726,6 +798,9 @@ async def retrieve_passages(
             "filename": hit.get("filename"),
             "text": (hit.get("text") or "")[:2000],
         }
+        score = hit.get("_rankingScore")
+        if isinstance(score, (int, float)):
+            row["score"] = round(float(score), 4)  # relevance 0..1 (see tool doc)
         if principal.reveal_paths:
             row["rel_path"] = hit.get("rel_path")
         passages.append(row)
@@ -900,7 +975,8 @@ async def _capabilities(principal: LlmPrincipal, session: AsyncSession) -> dict:
         "tools_openai": tools_openai(principal),
         "dsl_cheatsheet": (
             'kind:video size:>1G modified:<7d ext:mp4;mkv -tag:archived "two words" '
-            "meta.height:>=1080 (AND-combined; ~term = fuzzy)"
+            "meta.height:>=1080 meta.*:1080p meta.exif.*:canon "
+            "(AND-combined; ~term = fuzzy; meta.* matches ANY metadata key)"
         ),
     }
 

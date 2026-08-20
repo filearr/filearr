@@ -11,8 +11,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/smallstep/certificates v0.30.2
 	github.com/zeebo/xxh3 v1.1.0
-	go.step.sm/crypto v0.87.0
-	modernc.org/sqlite v1.56.0
+	go.step.sm/crypto v0.89.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
@@ -22,10 +22,10 @@ require (
 	github.com/fogleman/fauxgl v0.0.0-20250110135958-abf826acbbbd
 	github.com/kardianos/service v1.3.0
 	github.com/muesli/termenv v0.16.0
-	github.com/urfave/cli/v3 v3.10.1
-	golang.org/x/crypto v0.54.0
-	golang.org/x/image v0.44.0
-	golang.org/x/net v0.57.0
+	github.com/urfave/cli/v3 v3.11.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/image v0.45.0
+	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	golang.org/x/time v0.15.0
@@ -33,7 +33,7 @@ require (
 )
 
 require (
-	cloud.google.com/go/auth v0.20.0 // indirect
+	cloud.google.com/go/auth v0.22.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
@@ -77,7 +77,7 @@ require (
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/go-tspi v0.3.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
-	github.com/googleapis/enterprise-certificate-proxy v0.3.18 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.3.19 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -111,7 +111,7 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/slackhq/nebula v1.10.3 // indirect
 	github.com/smallstep/cli-utils v0.12.2 // indirect
-	github.com/smallstep/go-attestation v0.4.4-0.20260603212853-e1a87a0b07d9 // indirect
+	github.com/smallstep/go-attestation v0.4.4-0.20260814222900-a849f4e2cd68 // indirect
 	github.com/smallstep/linkedca v0.25.0 // indirect
 	github.com/smallstep/nosql v0.8.0 // indirect
 	github.com/smallstep/pkcs7 v0.2.1 // indirect
@@ -129,10 +129,10 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/api v0.290.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
-	google.golang.org/grpc v1.82.1 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/api v0.292.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
+	google.golang.org/grpc v1.83.0 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.74.4 // indirect

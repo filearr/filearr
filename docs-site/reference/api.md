@@ -188,7 +188,11 @@ item detail panel.
 
 `GET /api/v1/search/federated` searches the **item** index and the **passage**
 (chunk) index in one Meilisearch federated query and returns **one merged,
-ranked list** instead of two the caller has to interleave.
+ranked list** instead of two the caller has to interleave. Every hit carries a
+`score` — the normalised **weighted ranking score** (0..1) the federation
+sorted by, comparable across the two indexes (for passage hits under a
+semantic/hybrid query it is effectively query similarity). Cut weak tails
+client-side; below ~0.5 is loose association.
 
 | Parameter | Default | Purpose |
 |---|---|---|

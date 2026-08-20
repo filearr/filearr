@@ -241,9 +241,10 @@ async def test_registry_lists_every_canned_report(api):
         "permissions_by_principal",
         "permissions_broad_access",
         "permission_changes",
-        # 2026-08-20 hygiene reports
+        # 2026-08-20 hygiene reports + health digest
         "empty_files",
         "sidecar_hygiene",
+        "library_health",
     }
 
 
@@ -735,3 +736,58 @@ async def test_hygiene_reports(api):
     rows = r.json()["rows"]
     issues = {x["rel_path"]: x["issue"] for x in rows}
     assert issues == {"stray.xmp": "unlinked", "m.nfo": "empty", "m-thumb.jpg": "tiny"}
+
+
+async def test_library_health_digest(api):
+    """2026-08-20: one row per library with the health verdict."""
+    from datetime import timedelta
+
+    from filearr.models import ScanRun
+
+    c, maker = api
+    async with maker() as s:
+        good = Library(name="good", root_path="/data/good")
+        bad = Library(name="bad", root_path="/data/bad")
+        s.add_all([good, bad])
+        await s.flush()
+        now = datetime.now(UTC)
+        s.add_all([
+            ScanRun(library_id=good.id, status="completed", started_at=now - timedelta(hours=2),
+                    finished_at=now - timedelta(hours=1), stats={}),
+            *[
+                ScanRun(
+                    library_id=bad.id, status="failed",
+                    started_at=now - timedelta(days=d), stats={},
+                )
+                for d in (1, 2, 3)
+            ],
+        ])
+        item = Item(
+            library_id=good.id, file_category="video", file_group="video",
+            status=ItemStatus.active, path="/data/good/a.mkv", rel_path="a.mkv",
+            filename="a.mkv", extension="mkv", size=10, mtime=now,
+        )
+        s.add(item)
+        s.add(Item(
+            library_id=bad.id, file_category="other", file_group="other",
+            status=ItemStatus.active, path="/data/bad/x.xmp", rel_path="x.xmp",
+            filename="x.xmp", extension="xmp", size=5, mtime=now,
+        ))
+        s.add(Item(
+            library_id=bad.id, file_category="other", file_group="other",
+            status=ItemStatus.active, path="/data/bad/zero.bin", rel_path="zero.bin",
+            filename="zero.bin", extension="bin", size=0, mtime=now,
+        ))
+        await s.commit()
+
+    r = await c.get("/api/v1/reports/library_health")
+    assert r.status_code == 200, r.text
+    rows = {x["library"]: x for x in r.json()["rows"]}
+    assert rows["good"]["status"] == "OK"
+    assert rows["good"]["last_scan_status"] == "completed" and rows["good"]["items"] == 1
+    b = rows["bad"]
+    assert "last scan FAILED" in b["status"]
+    assert "3 failed scans in 7d" in b["status"]
+    assert "1 unlinked sidecars" in b["status"] and b["unlinked_sidecars"] == 1
+    assert "1 empty files" in b["status"] and b["empty_files"] == 1
+    assert b["failed_scans_7d"] == 3

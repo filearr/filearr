@@ -1,14 +1,14 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>filearr-meilisearch</Name>
-  <Repository>getmeili/meilisearch:v1.53.0</Repository>
+  <Repository>getmeili/meilisearch:v1.53.1</Repository>
   <Registry>https://hub.docker.com/r/getmeili/meilisearch</Registry>
   <Network>filearr</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support>https://github.com/pwsh/filearr/discussions</Support>
   <Project>https://www.meilisearch.com/</Project>
-  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.53.0 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;UPGRADING from an older pin: leave MEILI_UPGRADE_DB=true. A newer Meilisearch REFUSES to open an older database and the container will restart-loop without it; with it, the database is migrated in place on first start (verified 1.49.0 -&gt; 1.53.0). It is a no-op once the database is current, so it is safe to leave on.&#13;&#10;&#13;&#10;Install before the filearr container.&#13;&#10;&#13;&#10;NETWORKING: two topologies are supported. DEFAULT — every container on one user-defined Docker network, addressing each other by NAME; create it once with  docker network create filearr. ALTERNATIVE — every container fully bridged (Network Type: Custom br0) with its own fixed LAN IP, and IPs in place of names. Pick one before installing anything: https://pwsh.github.io/filearr/deployment/unraid/#step-0-networking</Overview>
+  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.53.1 (&#8805;1.48.2 required for the CVE-2026-57823/57824 tenant-token fixes — do not run older versions or floating 'latest').&#13;&#10;&#13;&#10;UPGRADING from an older pin: leave MEILI_UPGRADE_DB=true. A newer Meilisearch REFUSES to open an older database and the container will restart-loop without it; with it, the database is migrated in place on first start (verified 1.49.0 -&gt; 1.53.0). It is a no-op once the database is current, so it is safe to leave on.&#13;&#10;&#13;&#10;Install before the filearr container.&#13;&#10;&#13;&#10;NETWORKING: two topologies are supported. DEFAULT — every container on one user-defined Docker network, addressing each other by NAME; create it once with  docker network create filearr. ALTERNATIVE — every container fully bridged (Network Type: Custom br0) with its own fixed LAN IP, and IPs in place of names. Pick one before installing anything: https://pwsh.github.io/filearr/deployment/unraid/#step-0-networking</Overview>
   <Category>Other:</Category>
   <TemplateURL>https://raw.githubusercontent.com/pwsh/filearr/main/unraid/filearr-meilisearch.xml</TemplateURL>
   <!-- PNG, not SVG: Unraid's Docker-page icon pipeline (and the CA submission

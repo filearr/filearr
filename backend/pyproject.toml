@@ -8,12 +8,12 @@ requires-python = ">=3.14,<3.15"
 dependencies = [
     # Web — FastAPI >=0.135 for native SSE (fastapi.sse), pinned current stable
     "fastapi==0.141.1",
-    "uvicorn[standard]==0.52.1",
+    "uvicorn[standard]==0.52.4",
     # Validation / config
     "pydantic==2.13.4",
     "pydantic-settings==2.15.0",
     # Database — psycopg3 (recommended async driver for new SQLAlchemy projects)
-    "sqlalchemy[asyncio]==2.0.51",
+    "sqlalchemy[asyncio]==2.0.52",
     "psycopg[binary]==3.3.4",
     "alembic==1.19.1",
     # Jobs — Postgres-native queue (no Redis); 3.9 adds middleware, priorities, cron
@@ -21,7 +21,7 @@ dependencies = [
     # Cron evaluation for per-library scan_cron (croniter is EOL — do not use it)
     "cronsim==2.7",
     # Search — async-first community SDK (official client is sync-only)
-    "meilisearch-python-sdk==7.4.1",
+    "meilisearch-python-sdk==7.5.0",
     # Extraction
     "mutagen==1.48.1",
     "pillow==12.3.0",
@@ -44,7 +44,7 @@ dependencies = [
     "networkx>=3.4",
     "charset-normalizer>=3.4",
     "numpy-stl==4.0.0",
-    "pypdf==6.15.0",
+    "pypdf==6.16.1",
     # P12-T5 PDF first-page thumbnails: pypdfium2 is the Apache-2.0 / BSD-3-Clause
     # Python binding over Google PDFium (bundled libpdfium is BSD-style) -- both
     # AGPL-compatible, no copyleft obligation. Chosen over pdftoppm (GPL

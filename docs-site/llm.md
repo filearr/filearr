@@ -37,7 +37,9 @@ and any OpenAI-compatible or MCP tool-calling client.
 
 ## The tools
 
-`search_files` (keyword/semantic/hybrid), `get_file`, `where_is` (library,
+`search_files` (keyword/semantic/hybrid; `search_in=content|names` restricts
+what the query text matches), `find_similar` (content-similar files by local
+text embedding, each with a 0..1 `similarity`), `get_file`, `where_is` (library,
 host, share URL), `read_content` (extracted document text, content roles
 only), `retrieve_passages` (ranked in-document passages — see below),
 `filter_files` (the same query grammar the console uses), `run_report`,

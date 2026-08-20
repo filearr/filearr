@@ -33,6 +33,7 @@ from filearr.main import create_app
 from filearr.models import (
     AlertChannel,
     Item,
+    ItemStatus,
     Library,
     ReportExport,
     ReportSchedule,
@@ -669,3 +670,32 @@ async def test_export_download_is_audited(env, monkeypatch):
             )
         ).scalars().all()
     assert any((e.details or {}).get("export_id") == export_id for e in rows)
+
+
+async def test_hygiene_reports_exportable_for_weekly_schedule(env):
+    """2026-08-20: the hygiene + health reports run through the export engine —
+    i.e. a weekly report SCHEDULE (canned_report_key + cron + email channel)
+    can deliver them. Exercises the exact export path a schedule fires."""
+    _client, maker, settings = env
+    async with maker() as s:
+        lib = Library(name="wk", root_path="/data/wk")
+        s.add(lib)
+        await s.flush()
+        s.add(Item(
+            library_id=lib.id, file_category="other", file_group="other",
+            status=ItemStatus.active, path="/data/wk/l.xmp", rel_path="l.xmp",
+            filename="l.xmp", extension="xmp", size=3, mtime=datetime.now(UTC),
+        ))
+        await s.commit()
+    for key in ("sidecar_hygiene", "empty_files", "library_health"):
+        async with maker() as s:
+            ex = ReportExport(canned_report_key=key, format="csv", params={}, status="queued")
+            s.add(ex)
+            await s.commit()
+            ex_id = ex.id
+        async with maker() as s:
+            res = await exports_mod.run_export(s, ex_id, settings)
+        assert res["status"] == "complete", (key, res)
+        async with maker() as s:
+            ex = await s.get(ReportExport, ex_id)
+            assert ex.status == "complete" and ex.row_count is not None, key

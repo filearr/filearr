@@ -42,6 +42,7 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 | `permissions_by_principal` | Every **explicit** (non-inherited) allow/deny from a non-system principal on paths an agent has inventoried with the `permissions` collector — one row per ACE, newest snapshot per path; owner always shown. Read agent-side (Linux mode bits + POSIX ACL xattrs; Windows owner + full DACL, local or UNC). Check `fidelity`: `synthesized_from_mode` means a cifs mount without `cifsacl` — the mount options, not the server's ACL. |
 | `permissions_broad_access` | Paths where **Everyone / Authenticated Users / Users / POSIX "other"** hold an explicit allow with write, delete, change-permissions or full control — the world-writable review list. |
 | `permission_changes` | **Permission drift**: what changed between consecutive permission snapshots of the same path — one row per change event, newest first, with ACEs added (`+`), removed (`-`), modified (`~ before → after`) and owner/group changes in a readable `details` column. Only re-inventoried paths appear; an unchanged re-collection writes no snapshot, so every row is real drift. Threshold input = "changes in the last *N* days" (default 30). Pair with the **System: permission change** alert rule for push notification — see [Permission drift](#permission-drift). |
+| `library_health` | **One row per library** with a one-word verdict and the signals behind it: last scan status/age, failed scans in 7 days, item/missing counts, unlinked sidecars, empty files, extract errors. The at-a-glance view — and the natural [weekly e-mail](#weekly-hygiene-email). |
 | `empty_files` | Every active **zero-byte** file (sidecars flagged). They carry no content, can never be content-hashed, and are excluded from the duplicate reports — this is the cleanup list. |
 | `sidecar_hygiene` | Sidecar-shaped files needing attention: `unlinked` (a `.nfo`/`.xmp`/`.thm` with **no parent link** — it behaves like a first-class item and shows in search/the timeline; usually a library whose scan/association hasn't completed since the files landed), and `empty`/`tiny` (a linked sidecar of 0 / ≤64 bytes contributing nothing — deletable at the source). A large `unlinked` count → fix the failing scan, rescan, and the timeline bar collapses. |
 
@@ -171,6 +172,29 @@ back with a `'` in front of it**. If you parse the CSV, strip that quote when th
 character after it is one of the guarded set — the PowerShell script below does
 exactly this. NDJSON is not affected (JSON needs no such guard), which is the
 main reason the shell examples use NDJSON.
+
+## A weekly hygiene e-mail {#weekly-hygiene-email}
+
+The report **schedules** deliver any canned report to an alert channel on a
+cron. The recommended housekeeping digest:
+
+1. **Alerts → Channels** — create (or reuse) an `email` channel.
+2. Create three schedules (Reports page → Schedules, or the API):
+
+```bash
+for r in library_health sidecar_hygiene empty_files; do
+  curl -X POST "http://filearr.example.com:8484/api/v1/report-schedules" \
+    -H "Authorization: Bearer $FILEARR_ADMIN_KEY" -H 'Content-Type: application/json' \
+    -d "{\"canned_report_key\": \"$r\", \"cron\": \"0 7 * * mon\",
+         \"format\": \"csv\", \"channel_id\": \"<email-channel-id>\"}"
+done
+```
+
+Every Monday at 07:00 UTC you get the health digest (one row per library with
+its verdict) plus the two cleanup lists as CSV attachments. A delivery that
+fails past its retry budget raises the *System: scheduled report delivery
+failure* alert — enable that rule so a broken SMTP password can't silently
+stop the digest.
 
 ## Permission drift {#permission-drift}
 

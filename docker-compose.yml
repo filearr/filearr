@@ -289,12 +289,18 @@ services:
     # healthcheck below polls /health every 5s. Not a regression — 1.49.0 lacks
     # it too — but re-check whether the 1.5x lines have merged at the next bump.
     #
+    # 1.53.0 -> 1.53.1 bump (2026-08-20): full-notes re-check done. 1.53.1
+    # carries ONLY the MEILI_EXPERIMENTAL_TASK_QUEUE_MAX_READERS env knob and a
+    # mini-dashboard bump; 1.52.1..1.52.3 are bug fixes/reverts with no
+    # security items. The 1.52.1 blocking-health-route fix has STILL not
+    # converged into 1.53.x — unchanged posture (5s /health polling below).
+    #
     # Breaking changes in the span are confined to the dynamicSearchRules and
     # network EXPERIMENTAL features; this stack sets no MEILI_EXPERIMENTAL_* at
     # all. meilisearch-python-sdk 7.2.3 and the frontend's meilisearch 0.59.0
     # both stay compatible (new 1.5x response fields are additive and ignored).
     # Upgrade is in-place and dumpless, but NOT atomic — snapshot first.
-    image: getmeili/meilisearch:v1.53.0
+    image: getmeili/meilisearch:v1.53.1
     restart: unless-stopped
     environment:
       MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}

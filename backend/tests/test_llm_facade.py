@@ -349,3 +349,21 @@ async def test_mint_scope_and_rate_limit(client, db_maker):
     assert r.status_code == 204
     r = await client.post("/api/llm/v1/catalog_overview", headers=_h(key))
     assert r.status_code == 401
+
+
+async def test_find_similar_tool_gating_and_409(client, db_maker):
+    """2026-08-20: find_similar is a read tool; 409s explain semantic-off."""
+    seeded = await _seed(db_maker)
+    key = seeded["keys"]["librarian"]
+    r = await client.post(
+        "/api/llm/v1/find_similar", headers=_h(key), json={"citation": "not-a-uuid"}
+    )
+    # semantic disabled in the unit env -> the 409 fires before citation parsing
+    assert r.status_code == 409 and "semantic" in r.json()["detail"]
+    # tool exposure: the librarian (read tier) carries it
+    r = await client.get("/api/llm/v1/capabilities", headers=_h(key))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "find_similar" in body["role"]["tools"]
+    # the new hygiene/health reports ride run_report automatically
+    assert {"library_health", "sidecar_hygiene", "empty_files"} <= set(body["reports"])
