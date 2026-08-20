@@ -1262,6 +1262,7 @@ async def backfill_content_hashes_now(*, max_bytes: int | None = None) -> dict:
     import time
 
     from sqlalchemy import func, select
+    from sqlalchemy.orm import load_only
 
     from filearr.db import SessionLocal
     from filearr.hashpolicy import resolve_hash_policy
@@ -1299,36 +1300,55 @@ async def backfill_content_hashes_now(*, max_bytes: int | None = None) -> dict:
                 ).scalar_one()
                 remaining += int(n or 0)
                 continue
-            stream = await session.stream_scalars(
-                select(Item).where(*cond).order_by(Item.id).execution_options(yield_per=200)
-            )
-            batch = 0
-            async for item in stream:
-                if spent >= budget:
-                    remaining += 1
-                    continue
-                if item.size is None or item.path is None:
-                    continue
-                try:
-                    digest = await asyncio.to_thread(full_hash, item.path, item.size)
-                    mid = await asyncio.to_thread(mid_hash, item.path, item.size)
-                except OSError:
-                    continue  # gone / unreadable: the next scan tombstones it
-                item.content_hash = digest
-                if mid is not None:
-                    item.mid_hash = mid
-                hashed += 1
-                spent += int(item.size)
-                batch += 1
-                if batch >= 100:
-                    await session.commit()
-                    batch = 0
-                if rate > 0:
-                    # sleep-throttle to the configured average throughput
-                    ahead = spent / rate - (time.monotonic() - started)
-                    if ahead > 0:
-                        await asyncio.sleep(min(ahead, 5.0))
-            await session.commit()
+            # Collect IDs first (no commit): committing inside a server-side
+            # cursor stream invalidates it after the first yield_per buffer, so
+            # the whole-library backfill would die at row ~201. IDs are cheap and
+            # bounded; process them in chunks, each chunk its own transaction.
+            todo_ids = [
+                r
+                for r in (
+                    await session.execute(
+                        select(Item.id).where(*cond).order_by(Item.id)
+                    )
+                ).scalars()
+            ]
+            done = False
+            for start in range(0, len(todo_ids), 100):
+                if done:
+                    remaining += len(todo_ids) - start
+                    break
+                chunk = todo_ids[start : start + 100]
+                items = (
+                    await session.execute(
+                        select(Item)
+                        .options(load_only(Item.id, Item.path, Item.size,
+                                           Item.content_hash, Item.mid_hash))
+                        .where(Item.id.in_(chunk))
+                    )
+                ).scalars().all()
+                for item in items:
+                    if spent >= budget:
+                        remaining += 1
+                        done = True
+                        continue
+                    if item.size is None or item.path is None:
+                        continue
+                    try:
+                        digest = await asyncio.to_thread(full_hash, item.path, item.size)
+                        mid = await asyncio.to_thread(mid_hash, item.path, item.size)
+                    except OSError:
+                        continue  # gone / unreadable: the next scan tombstones it
+                    item.content_hash = digest
+                    if mid is not None:
+                        item.mid_hash = mid
+                    hashed += 1
+                    spent += int(item.size)
+                    if rate > 0:
+                        # sleep-throttle to the configured average throughput
+                        ahead = spent / rate - (time.monotonic() - started)
+                        if ahead > 0:
+                            await asyncio.sleep(min(ahead, 5.0))
+                await session.commit()
     return {"hashed": hashed, "bytes": spent, "remaining": remaining, "budget_bytes": budget}
 
 
@@ -1413,71 +1433,86 @@ async def rehash_library_now(library_id: str) -> dict:
             global_max_bytes=settings.scan_hash_full_max_bytes,
         )
         stamp = policy_version(lib, settings)
-        # load_only the exact columns this loop reads/writes — streaming full ORM
-        # rows materialises metadata_ JSONB (EXIF/embeddings) and is the OOM that
-        # killed the live pictures scans (2026-08-20 fix in tasks/scan.py).
-        stream = await session.stream_scalars(
-            select(Item)
-            .options(
-                load_only(
-                    Item.id,
-                    Item.path,
-                    Item.size,
-                    Item.quick_hash,
-                    Item.mid_hash,
-                    Item.content_hash,
-                    Item.policy_version,
+        lib_id = lib.id
+        # Collect the stale-scheme IDs FIRST, to exhaustion, with NO commit — a
+        # server-side cursor does not survive a transaction end, so committing
+        # inside the stream would invalidate it and the job would die on the
+        # 201st row (yield_per buffer + commit-every-200). IDs are lightweight
+        # (~16 B each): a million-row library is ~16 MB, bounded, and never
+        # materialises the metadata_ JSONB that OOM'd the pictures scan.
+        stale_ids = [
+            row
+            for row in (
+                await session.execute(
+                    select(Item.id)
+                    .where(
+                        Item.library_id == lib_id,
+                        Item.status == ItemStatus.active,
+                        Item.policy_version.isnot(None),
+                        ~Item.policy_version.like(f"{_SCHEME}:%"),
+                    )
+                    .order_by(Item.id)
                 )
-            )
-            .where(
-                Item.library_id == lib.id,
-                Item.status == ItemStatus.active,
-                Item.policy_version.isnot(None),
-                ~Item.policy_version.like(f"{_SCHEME}:%"),
-            )
-            .order_by(Item.id)
-            .execution_options(yield_per=200)
-        )
-        batch = 0
-        async for item in stream:
-            if item.size is None or item.path is None:
-                continue
-            want_content = item.size <= QUICK_CHUNK * 2 or (
-                resolved.compute_content and item.size <= resolved.full_max_bytes
-            )
-            try:
-                qh = await asyncio.to_thread(quick_hash, item.path, item.size)
-                mh = await asyncio.to_thread(mid_hash, item.path, item.size)
-                ch = (
-                    await asyncio.to_thread(full_hash, item.path, item.size)
-                    if want_content
-                    else None
+            ).scalars()
+        ]
+        # Then process in ID chunks, each its own transaction: load exactly the
+        # columns this loop reads/writes (load_only), mutate, commit.
+        for start in range(0, len(stale_ids), 200):
+            chunk = stale_ids[start : start + 200]
+            items = (
+                await session.execute(
+                    select(Item)
+                    .options(
+                        load_only(
+                            Item.id,
+                            Item.path,
+                            Item.size,
+                            Item.quick_hash,
+                            Item.mid_hash,
+                            Item.content_hash,
+                            Item.policy_version,
+                        )
+                    )
+                    .where(Item.id.in_(chunk))
                 )
-            except OSError:
-                failed += 1
-                continue
-            item.quick_hash = qh
-            item.mid_hash = mh
-            if ch is not None:
-                item.content_hash = ch
-            elif item.content_hash is not None:
-                item.content_hash = None
-                dropped += 1
-            item.policy_version = stamp
-            changed.append(str(item.id))
-            rehashed += 1
-            # Throttle on approximate bytes actually read (whole file when the
-            # content hash streamed it; head+tail+mid samples otherwise).
-            read_bytes += int(item.size) if ch is not None else min(int(item.size), QUICK_CHUNK * 3)
-            batch += 1
-            if batch >= 200:
-                await session.commit()
-                batch = 0
-            if rate > 0:
-                ahead = read_bytes / rate - (time.monotonic() - started)
-                if ahead > 0:
-                    await asyncio.sleep(min(ahead, 5.0))
-        await session.commit()
+            ).scalars().all()
+            for item in items:
+                if item.size is None or item.path is None:
+                    continue
+                want_content = item.size <= QUICK_CHUNK * 2 or (
+                    resolved.compute_content and item.size <= resolved.full_max_bytes
+                )
+                try:
+                    qh = await asyncio.to_thread(quick_hash, item.path, item.size)
+                    mh = await asyncio.to_thread(mid_hash, item.path, item.size)
+                    ch = (
+                        await asyncio.to_thread(full_hash, item.path, item.size)
+                        if want_content
+                        else None
+                    )
+                except OSError:
+                    failed += 1
+                    continue
+                item.quick_hash = qh
+                item.mid_hash = mh
+                if ch is not None:
+                    item.content_hash = ch
+                elif item.content_hash is not None:
+                    item.content_hash = None
+                    dropped += 1
+                item.policy_version = stamp
+                changed.append(str(item.id))
+                rehashed += 1
+                # Throttle on approximate bytes actually read (whole file when the
+                # content hash streamed it; head+tail+mid samples otherwise).
+                read_bytes += (
+                    int(item.size) if ch is not None else min(int(item.size), QUICK_CHUNK * 3)
+                )
+                if rate > 0:
+                    ahead = read_bytes / rate - (time.monotonic() - started)
+                    if ahead > 0:
+                        await asyncio.sleep(min(ahead, 5.0))
+            await session.commit()
     # quick_hash/content_hash are searchable/filterable doc fields — refresh the
     # projection for the touched rows instead of waiting for the nightly rebuild.
     for i in range(0, len(changed), 1000):

@@ -62,7 +62,7 @@ def test_walk_non_recursive_emits_direct_children_only(tmp_path):
 
     spec = GitIgnoreSpec.from_lines([])
     rels = {
-        rel for _p, rel, _s, _m in walk(
+        rel for _p, rel, _s, _m, _fsid in walk(
             str(tmp_path), spec, start_rel="Downloads", recursive=False
         )
     }
@@ -79,7 +79,7 @@ def test_walk_recursive_default_descends(tmp_path):
     (tmp_path / "Downloads" / "Sub" / "deep.mkv").write_bytes(b"c")
 
     spec = GitIgnoreSpec.from_lines([])
-    rels = {rel for _p, rel, _s, _m in walk(str(tmp_path), spec, start_rel="Downloads")}
+    rels = {rel for _p, rel, _s, _m, _fsid in walk(str(tmp_path), spec, start_rel="Downloads")}
     # Default recursive=True still descends (byte-for-byte prior behaviour).
     assert rels == {"Downloads/a.mkv", "Downloads/Sub/deep.mkv"}
 

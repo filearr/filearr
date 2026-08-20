@@ -241,6 +241,8 @@ async def test_registry_lists_every_canned_report(api):
         "permissions_by_principal",
         "permissions_broad_access",
         "permission_changes",
+        # W7-T7 §4 outliers view (2026-08-20): the last W7 scaffold, closed
+        "permissions_explicit_outliers",
         # 2026-08-20 hygiene reports + health digest
         "empty_files",
         "sidecar_hygiene",
@@ -721,6 +723,12 @@ async def test_hygiene_reports(api):
             mk("stray.xmp", size=500),                        # unlinked sidecar-shape
             mk("zero.bin", size=0),                           # plain empty file
             mk("fine.jpg", size=9000, sidecar_of=video.id),   # healthy sidecar
+            # Artwork sidecars a bare-extension match missed (#12): dir artwork,
+            # stem-suffixed artwork, and JRiver — all unlinked, all jpg/png/xml.
+            mk("poster.jpg", size=8000),                      # dir artwork
+            mk("Movie-fanart.png", size=8000),                # stem-suffixed artwork
+            mk("track_JRSidecar.xml", size=300),              # JRiver
+            mk("realphoto.jpg", size=800000),                 # NOT a sidecar shape
         ])
         await s.commit()
 
@@ -735,7 +743,16 @@ async def test_hygiene_reports(api):
     r = await c.get("/api/v1/reports/sidecar_hygiene")
     rows = r.json()["rows"]
     issues = {x["rel_path"]: x["issue"] for x in rows}
-    assert issues == {"stray.xmp": "unlinked", "m.nfo": "empty", "m-thumb.jpg": "tiny"}
+    assert issues == {
+        "stray.xmp": "unlinked",
+        "poster.jpg": "unlinked",
+        "Movie-fanart.png": "unlinked",
+        "track_JRSidecar.xml": "unlinked",
+        "m.nfo": "empty",
+        "m-thumb.jpg": "tiny",
+    }
+    # A genuine unlinked photo is NOT a sidecar shape and must not be flagged.
+    assert "realphoto.jpg" not in issues
 
 
 async def test_library_health_digest(api):
@@ -752,7 +769,7 @@ async def test_library_health_digest(api):
         await s.flush()
         now = datetime.now(UTC)
         s.add_all([
-            ScanRun(library_id=good.id, status="completed", started_at=now - timedelta(hours=2),
+            ScanRun(library_id=good.id, status="finished", started_at=now - timedelta(hours=2),
                     finished_at=now - timedelta(hours=1), stats={}),
             *[
                 ScanRun(
@@ -784,7 +801,10 @@ async def test_library_health_digest(api):
     assert r.status_code == 200, r.text
     rows = {x["library"]: x for x in r.json()["rows"]}
     assert rows["good"]["status"] == "OK"
-    assert rows["good"]["last_scan_status"] == "completed" and rows["good"]["items"] == 1
+    assert rows["good"]["last_scan_status"] == "finished" and rows["good"]["items"] == 1
+    # Regression (#2): last_success_at matched "completed" (a rollout status, never
+    # a scan status) so it was always NULL; a "finished" scan must populate it.
+    assert rows["good"]["last_success_at"]
     b = rows["bad"]
     assert "last scan FAILED" in b["status"]
     assert "3 failed scans in 7d" in b["status"]

@@ -85,8 +85,9 @@ func DefaultRegistry() *Registry {
 		Register(permsCollector{}).
 		Register(placeholderCollector{})
 	// W7 (2026-08-19): the full-ACE permissions collector, advertised only on
-	// platforms with a real read (Linux, Windows) so central never offers it
-	// where every entry would be a per-file scaffold error.
+	// platforms with a real read (Linux, Windows, macOS since W7-T4 2026-08-20)
+	// so central never offers it where every entry would be a per-file scaffold
+	// error.
 	if permissions.Supported() {
 		r = r.Register(permissions.Collector{})
 	}

@@ -28,7 +28,7 @@ import (
 const envShareHost = "FILEARR_AGENT_SHARE_HOST"
 
 // envShareMap (Docker/NAS agents) statically maps scan roots to the network
-// locations they are shared at: comma-separated ``localpath=location`` pairs,
+// locations they are shared at: comma-separated “localpath=location“ pairs,
 // where location is smb://host/share[/sub], \\host\share[\sub], or
 // nfs://host/export. Inside a container, share DISCOVERY sees nothing (no
 // smb.conf; the NAS exports the paths under ITS name, not the container's), so
@@ -107,6 +107,7 @@ func runScan(args []string) error {
 	fs.Var(&roots, "root", "root directory to scan (repeatable)")
 	watch := fs.Bool("watch", false, "keep watching the roots and rescan on change (settle-coalesced)")
 	settle := fs.Duration("settle", scan.DefaultSettle, "watch settle window before a coalesced rescan")
+	forceEmpty := fs.Bool("force-empty", false, "consent to a full scan that sees ZERO files over a previously-populated library (bypasses the dead-mount guard for a deliberate everything-was-deleted rescan)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -187,7 +188,8 @@ func runScan(args []string) error {
 		// Agent-side extraction (2026-08-09 parity contract), gated on the cached
 		// policy's extract_enabled. Nil when disabled — the default — so a fleet
 		// that has not opted in never reads file CONTENT for metadata.
-		Extract: scanExtractFn(cfg.DataDir),
+		Extract:    scanExtractFn(cfg.DataDir),
+		ForceEmpty: *forceEmpty,
 	}
 
 	scanAll := func() {

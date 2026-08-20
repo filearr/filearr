@@ -39,6 +39,40 @@ def test_range_filters_absent_when_none():
     assert not any(c.startswith(("size ", "mtime ")) for c in f)
 
 
+# --------------------------------------------------------------------------- #
+# SECURITY (2026-08-20): free-string filter params are escaped so an embedded  #
+# quote can't dangle an OR outside the AND-chain and bypass the RBAC scope.    #
+# --------------------------------------------------------------------------- #
+def test_free_string_filter_params_are_quote_escaped():
+    from filearr.api.search import meili_quote
+
+    # The classic bypass payload: close the literal, dangle an OR.
+    payload = "active' OR status = 'active"
+    f = build_filters(status=payload)
+    # The whole payload stays INSIDE one quoted literal — the embedded quote is
+    # backslash-escaped, so it cannot terminate the literal and start new syntax.
+    assert f == [f"status = '{meili_quote(payload)}'", "is_sidecar = false"]
+    assert "\\'" in f[0]
+    # A backslash is escaped first so it can't neutralise the quote escape.
+    assert meili_quote("a\\'b") == "a\\\\\\'b"
+
+
+def test_tags_and_extension_and_library_are_escaped():
+    f = build_filters(status=None, tags="a'b,c", extension="x'y", library="l'z")
+    assert "tags = 'a\\'b'" in f and "tags = 'c'" in f
+    assert "extension = 'x\\'y'" in f
+    assert "library_id = 'l\\'z'" in f
+
+
+def test_llm_kind_must_be_a_known_category():
+    from filearr.file_groups import FILE_CATEGORIES
+
+    # The LLM facade validates `kind` against this closed vocabulary before
+    # interpolating it (unknown values are dropped, never interpolated raw).
+    assert "video" in FILE_CATEGORIES
+    assert 'video" OR status = "active' not in FILE_CATEGORIES
+
+
 def test_facets_include_size_and_mtime():
     # Required for Meili to emit facetStats on these numeric fields.
     assert "size" in FACETS

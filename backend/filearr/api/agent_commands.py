@@ -255,7 +255,9 @@ async def _authenticate_agent_bearer(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "agent revoked")
     if not agent.cert_fingerprint:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "agent not active")
-    if not secrets.compare_digest(token, agent.cert_fingerprint):
+    # Byte-compare: a non-ASCII bearer (Starlette decodes headers latin-1) makes
+    # secrets.compare_digest raise TypeError -> 500 instead of a clean 401.
+    if not secrets.compare_digest(token.encode("utf-8"), agent.cert_fingerprint.encode("utf-8")):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid agent credential")
     # Central-observed transport truth for the fleet console ("is this agent
     # actually on mTLS?"). Write only on change — rides the caller's commit.
@@ -283,7 +285,9 @@ async def _authenticate_agent_mtls(
     provided = request.headers.get(_HDR_PROXY_AUTH) or ""
     # Fail closed when the secret is unconfigured: an empty configured secret must
     # never authenticate (else the whole plane is open).
-    if not secret or not provided or not secrets.compare_digest(provided, secret):
+    if not secret or not provided or not secrets.compare_digest(
+        provided.encode("utf-8"), secret.encode("utf-8")
+    ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "proxy authentication required")
     san = request.headers.get(_HDR_AGENT_SAN) or ""
     if not san or san != str(agent_id):
@@ -304,7 +308,9 @@ async def _authenticate_agent_mtls(
     # fingerprint-mode bearer auth and the console current too). The /rebind
     # endpoint is the mode-agnostic cure; this is defence-in-depth for mtls.
     fp = request.headers.get(_HDR_AGENT_FP) or ""
-    if agent.cert_fingerprint and fp and not secrets.compare_digest(fp, agent.cert_fingerprint):
+    if agent.cert_fingerprint and fp and not secrets.compare_digest(
+        fp.encode("utf-8"), agent.cert_fingerprint.encode("utf-8")
+    ):
         agent.cert_fingerprint = fp
         await session.commit()
     # Central-observed transport truth for the fleet console ("is this agent

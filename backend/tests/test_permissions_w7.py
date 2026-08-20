@@ -320,11 +320,19 @@ def test_diff_allow_vs_deny_same_principal_are_distinct_keys():
 # --------------------------------------------------------------------------- #
 # 5. scaffold invariants: reports inert + DDL documented-only                   #
 # --------------------------------------------------------------------------- #
-def test_report_builders_are_inert_stubs():
-    # Only the explicit-ACE-outlier builder is still a scaffold stub; the drift
-    # builder went live as ``permission_changes`` (W7-T9, 2026-08-19).
-    with pytest.raises(NotImplementedError, match="scaffold, W7-"):
-        permissions._explicit_ace_outliers(None)  # type: ignore[arg-type]
+def test_permission_report_aliases_forward_to_registry():
+    # All four W7-T7 builders are now live forwarding aliases (the last scaffold,
+    # _explicit_ace_outliers, went live as permissions_explicit_outliers on
+    # 2026-08-20). Each returns a real SQLAlchemy Select, not a NotImplementedError.
+    from sqlalchemy import Select
+
+    from filearr.reports import ReportParams
+
+    params = ReportParams()
+    assert isinstance(permissions._explicit_ace_outliers(params), Select)
+    assert isinstance(permissions.permissions_report_access_by_principal(params), Select)
+    assert isinstance(permissions._broad_access(params), Select)
+    assert isinstance(permissions._permission_drift(params), Select)
 
 
 def test_permission_snapshots_is_live_and_reports_registered():
@@ -567,3 +575,65 @@ def test_effective_access_deny_order_and_share_intersection():
     )
     ea2 = permissions.effective_access(rec2, {"u"})
     assert "take_ownership" in ea2.verbs and "read" in ea2.verbs
+
+
+def test_effective_access_dir_default_does_not_steal_posix_class():
+    """Regression (2026-08-20): a POSIX default-ACL entry (scope=dir_default)
+    templates CHILDREN and must be skipped BEFORE it consumes the owner class
+    slot or materialises an empty source layer. Previously the effective owner
+    ACE that followed was dropped and the record reported zero verbs."""
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "1000", "name": "eric"},
+        aces=[
+            # a default ACL entry for the owner class, listed FIRST
+            {"principal": {"kind": "user", "id": "1000", "name": "eric"}, "type": "allow",
+             "verbs": ["read"], "raw_mask": "mode:user_obj=04", "scope": "dir_default",
+             "source": "local", "order_index": 0},
+            # the EFFECTIVE owner-class entry for this object
+            {"principal": {"kind": "user", "id": "1000", "name": "eric"}, "type": "allow",
+             "verbs": ["read", "write", "execute"], "raw_mask": "mode:user_obj=07",
+             "scope": "this", "source": "local", "order_index": 1},
+        ],
+        fidelity="full_native",
+    )
+    ea = permissions.effective_access(rec, {"1000"})
+    assert ea.verbs == {"read", "write", "execute"}
+
+
+def test_effective_access_dir_default_only_share_layer_is_ignored():
+    """A share layer consisting ONLY of dir_default entries must not materialise
+    as an empty layer that intersects away every local grant."""
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "u", "name": "u"},
+        aces=[
+            {"principal": {"kind": "user", "id": "u", "name": "u"}, "type": "allow",
+             "verbs": ["read", "write"], "raw_mask": "0x0", "scope": "this",
+             "source": "local", "order_index": 0},
+            {"principal": {"kind": "user", "id": "u", "name": "u"}, "type": "allow",
+             "verbs": ["read"], "raw_mask": "0x0", "scope": "dir_default",
+             "source": "share", "order_index": 1},
+        ],
+        fidelity="full_native",
+    )
+    ea = permissions.effective_access(rec, {"u"})
+    # share layer never materialises (its only ACE is a template) -> local stands
+    assert ea.verbs == {"read", "write"}
+    assert set(ea.by_source) == {"local"}
+
+
+def test_effective_access_power_users_is_not_treated_as_broad():
+    """Regression: 'Power Users' -> 'POWER_USERS' contains 'USERS' but is NOT the
+    broad 'Users' group; a substring match wrongly applied it to every caller."""
+    rec = permissions.record_from_wire(
+        owner={"kind": "user", "id": "S-1-5-21-9", "name": "svc"},
+        aces=[
+            {"principal": {"kind": "well_known", "id": "S-1-5-32-547",
+                           "name": "Power Users", "well_known": "POWER_USERS"},
+             "type": "allow", "verbs": ["write"], "raw_mask": "0x0", "scope": "this",
+             "source": "local", "order_index": 0},
+        ],
+        fidelity="full_native",
+    )
+    # a caller who is NOT a power user gets nothing (the ACE does not apply)
+    ea = permissions.effective_access(rec, {"S-1-5-21-otheruser"})
+    assert ea.verbs == set() and ea.matched == 0

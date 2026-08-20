@@ -76,12 +76,18 @@ async def session(pg_uri):
 # --------------------------------------------------------------------------- #
 
 async def _run_scan(session, library, *, force_empty=False):
+    from unittest.mock import patch
+
+    from filearr.tasks import index_sync
     from filearr.tasks import scan as scan_mod
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
 
     async def _noop_reindex(sess, lib_id):
+        return None
+
+    async def _noop_sync(**_kw):
         return None
 
     orig_defer = scan_mod._defer_extract_batch
@@ -92,7 +98,10 @@ async def _run_scan(session, library, *, force_empty=False):
         run = ScanRun(library_id=library.id, stats={})
         session.add(run)
         await session.commit()
-        return await scan_mod._scan_body(session, library, run, force_empty=force_empty)
+        with patch.object(index_sync.sync_items, "defer_async", _noop_sync):
+            return await scan_mod._scan_body(
+                session, library, run, force_empty=force_empty
+            )
     finally:
         scan_mod._defer_extract_batch = orig_defer
         scan_mod._reindex_library = orig_reindex

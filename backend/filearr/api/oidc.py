@@ -55,8 +55,20 @@ def _callback_url(request: Request) -> str:
 
 def _safe_return_to(raw: str | None) -> str:
     """Only a local, single-slash absolute path is allowed as a post-login target
-    (blocks open-redirect via ``//evil`` or an absolute URL). Default ``/``."""
-    if not raw or not raw.startswith("/") or raw.startswith("//"):
+    (blocks open-redirect via ``//evil`` or an absolute URL). Default ``/``.
+
+    ``raw[1]`` must be neither ``/`` NOR ``\\``: browsers normalise ``\\`` to
+    ``/`` in special-scheme URLs, so ``/\\evil.example`` resolves to
+    ``//evil.example`` — an off-site redirect that a bare ``startswith("//")``
+    check misses. A lone ``/`` (the root) has no ``raw[1]`` and is fine. The
+    leading ``/`` already prevents a scheme, so an in-path ``:`` is harmless
+    (a legitimate query string may contain one); a control char is refused
+    (defence against a smuggled CR/LF in the Location header)."""
+    if not raw or not raw.startswith("/"):
+        return "/"
+    if len(raw) > 1 and raw[1] in "/\\":
+        return "/"
+    if any(ord(c) < 0x20 for c in raw):
         return "/"
     return raw
 

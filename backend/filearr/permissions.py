@@ -30,7 +30,8 @@ Deliberately INERT in this scaffold (documented, not wired):
   are LIVE in ``filearr.reports`` (W7-T7, 2026-08-19), as is the
   ``permission_changes`` drift report (W7-T9, same day: consecutive snapshot
   pairs diffed with :func:`diff_records`, plus the ``permission_changed`` system
-  alert emitted at ingest). The explicit-ACE-outlier builder remains a stub.
+  alert emitted at ingest). ``permissions_explicit_outliers`` (the §4
+  meaningful-deviation view) went LIVE 2026-08-20 — no scaffold remains.
 
 §9.1 open storage question (unresolved, for the architect): whether a snapshot
 persists as ONE wide JSONB blob per (path, run) — simplest, mirrors the
@@ -500,13 +501,21 @@ def effective_access(record: PermissionRecord, principals: set[str]) -> Effectiv
         p = ace.principal
         applies = _ace_applies(ace, principals)
         if not applies and p.kind is PrincipalKind.well_known:
-            # broad principals apply to every caller
+            # broad principals apply to every caller. EXACT name match (not
+            # substring): a substring test let "Power Users" -> "POWER_USERS"
+            # contain "USERS" and be treated as applying to everyone.
+            norm = (p.display or "").upper().replace(" ", "_")
             ids = {p.canonical_id, p.source_identifier, (p.display or "").upper()}
             applies = bool(
-                ids & {"other", "S-1-1-0", "S-1-5-11", "EVERYONE"}
-                or any(b in (p.display or "").upper().replace(" ", "_") for b in broad)
+                ids & {"other", "S-1-1-0", "S-1-5-11", "EVERYONE"} or norm in broad
             )
         if not applies:
+            continue
+        # A default ACL entry templates CHILDREN, never this object: skip it
+        # BEFORE it can consume the POSIX class slot or materialise an empty
+        # source layer (either would corrupt the class-exclusivity or the
+        # local ∩ share intersection below).
+        if ace.scope is AceScope.dir_default:
             continue
         is_mode = ace.raw_mask.startswith("mode:")
         if is_mode:
@@ -516,8 +525,6 @@ def effective_access(record: PermissionRecord, principals: set[str]) -> Effectiv
         matched += 1
         layer = layers.setdefault(ace.source.value, {"allowed": set(), "denied": set()})
         verbs = _expand_full(ace.verbs)
-        if ace.scope is AceScope.dir_default:
-            continue  # a default ACL grants CHILDREN, not this object
         if ace.type is AceType.deny:
             # ordered evaluation: a deny only blocks verbs not already granted
             # by an EARLIER allow (deny-before-allow wins; allow-before-deny
@@ -752,17 +759,18 @@ class PermissionSnapshot(Base):
 
 
 # --------------------------------------------------------------------------- #
-# REPORT BUILDER STUBS (§3.4 / §5) — typed, INERT, NOT in the live registry      #
+# REPORT BUILDERS (§3.4 / §5) — all LIVE, kept as forwarding aliases            #
 # --------------------------------------------------------------------------- #
-# Registration seam: to go live, each builder below is paired with a row
-# serializer into a ``filearr.reports.CannedReport(id=..., build=..., row=...,
-# supports_library=True)`` and appended to ``filearr.reports._REPORTS`` (so it
-# appears in ``list_reports()`` / ``GET /api/v1/reports`` and is RBAC-gated by the
-# existing ``api/reports.py`` machinery). They are intentionally NOT registered in
-# this scaffold — raising here keeps them off the runnable surface (W7-T7/T9).
+# Every builder below is now registered in ``filearr.reports`` and paired with a
+# row serializer + ``CannedReport`` (so each appears in ``list_reports()`` /
+# ``GET /api/v1/reports`` and is RBAC-gated by ``api/reports.py``). What remains
+# here are thin forwarding aliases into that registry — the original scaffold
+# import sites kept working without a churn. As of 2026-08-20 NONE raise: the
+# last stub (``_explicit_ace_outliers``) went live as
+# ``permissions_explicit_outliers``.
 #
 # Each takes the existing ``ReportParams`` (library_id + limit) and returns a
-# single streamable SQLAlchemy ``Select`` over the future ``permission_snapshots``
+# single streamable SQLAlchemy ``Select`` over the ``permission_snapshots``
 # table, so it slots into ``stream_report_rows`` / ``render_rows`` unchanged.
 
 
@@ -782,9 +790,14 @@ def _broad_access(params: ReportParams) -> Select:
 
 
 def _explicit_ace_outliers(params: ReportParams) -> Select:
-    """Explicit (non-inherited) ACEs that deviate from a path's inherited
-    baseline — the meaningful-deviation view (§4). NOT registered (scaffold)."""
-    raise NotImplementedError("permissions report: scaffold, W7-T7")
+    """LIVE since 2026-08-20 as ``permissions_explicit_outliers`` (§4): the
+    by-principal view minus explicit ACEs that merely RESTATE the parent
+    path's ACE for the same (principal, type, verbs), with a ``baseline``
+    column ('deviates' / 'unknown' when the parent has no snapshot). Kept as a
+    forwarding alias — this was the last W7 scaffold."""
+    from filearr.reports import get_report
+
+    return get_report("permissions_explicit_outliers").build(params)  # type: ignore[union-attr]
 
 
 def _permission_drift(params: ReportParams) -> Select:

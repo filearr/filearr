@@ -237,6 +237,14 @@ class Item(Base):
         Index("ix_items_metadata", "metadata", postgresql_using="gin"),
         Index("ix_items_tags", "tags", postgresql_using="gin"),
         Index("ix_items_sidecar_of", "sidecar_of"),
+        # §27: hardlink-group lookups only ever scan rows that CAN be in a group
+        # (nlink > 1) — a partial index keeps the 99%-singleton catalog out.
+        Index(
+            "ix_items_hardlink",
+            "dev",
+            "inode",
+            postgresql_where=text("nlink > 1"),
+        ),
         # P4-T5: GIN over the user-edit overlay (custom-field filtering) + a
         # native, no-extension structural guard that user_metadata is always a
         # JSON object (defense-in-depth; the API/ORM already enforce a dict).
@@ -274,6 +282,20 @@ class Item(Base):
     # NULL for files <=128 KiB (quick_hash already covers every byte) and for
     # rows hashed before this column existed (backfilled lazily by extraction).
     mid_hash: Mapped[str | None] = mapped_column(Text)
+
+    # Filesystem identity (roadmap §27, 2026-08-20): captured from the walk's
+    # existing lstat at zero extra syscall cost (readlink only for symlinks).
+    # NULL on rows scanned before this shipped and on agent-replicated rows
+    # (agent parity is a §27 follow-up). ``nlink > 1`` + shared ``(dev, inode)``
+    # identifies hardlink groups (files sharing storage — NOT true duplicates);
+    # ``symlink_target`` non-NULL marks a symlink, which is catalogued but never
+    # hashed/extracted (hashing would follow the link and stamp the TARGET's
+    # bytes onto the LINK's size/mtime — inconsistent identity). ``inode`` is
+    # the signed-wrapped st_ino (uint64 → int64; group identity preserved).
+    nlink: Mapped[int | None] = mapped_column(Integer)
+    inode: Mapped[int | None] = mapped_column(BigInteger)
+    dev: Mapped[int | None] = mapped_column(BigInteger)
+    symlink_target: Mapped[str | None] = mapped_column(Text)
 
     title: Mapped[str | None] = mapped_column(Text)
     year: Mapped[int | None] = mapped_column(Integer)

@@ -80,6 +80,19 @@ func TestNFSv4MaskToVerbs(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NFSv4MaskToVerbs dir = %v, want %v", got, want)
 	}
+	// RFC 8881 completion: named-attribute bits fold into read_attr/write_attr
+	// (the NFSv4 EA analog, mirroring FILE_READ_EA/FILE_WRITE_EA on NTFS).
+	got = NFSv4MaskToVerbs(nfs4ReadNamedAttrs|nfs4WriteNamedAttrs, false)
+	want = []string{VerbReadAttr, VerbWriteAttr}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NFSv4MaskToVerbs named attrs = %v, want %v", got, want)
+	}
+	// Deliberately verb-less bits: retention + synchronize map to NO verbs
+	// (RawMask preserves them) — an ACE carrying only these yields an empty set.
+	got = NFSv4MaskToVerbs(nfs4WriteRetention|nfs4WriteRetentionHold|nfs4Synchronize, false)
+	if len(got) != 0 {
+		t.Fatalf("NFSv4MaskToVerbs verb-less bits = %v, want empty", got)
+	}
 }
 
 func TestOrderVerbsIsStable(t *testing.T) {

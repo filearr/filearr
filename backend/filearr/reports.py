@@ -987,8 +987,9 @@ from sqlalchemy import Integer as _SAInteger  # noqa: E402
 from sqlalchemy.dialects.postgresql import JSONB as _JSONB  # noqa: E402
 
 
-def _latest_snapshots_subq():
-    """One row per (agent, path): the newest snapshot."""
+def _latest_snapshots_subq(name: str = "ps_ranked"):
+    """One row per (agent, path): the newest snapshot. ``name`` lets a query
+    embed two independent instances (the outliers report joins child → parent)."""
     ranked = (
         select(
             PermissionSnapshot,
@@ -999,11 +1000,17 @@ def _latest_snapshots_subq():
             )
             .label("rn"),
         )
-    ).subquery("ps_ranked")
+    ).subquery(name)
     return ranked
 
 
-def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = False) -> Select:
+def _perm_base(
+    params: ReportParams,
+    scope_clause=None,
+    *,
+    broad_only: bool = False,
+    outliers: bool = False,
+) -> Select:
     ranked = _latest_snapshots_subq()
     from sqlalchemy import column as _sacolumn
 
@@ -1079,6 +1086,51 @@ def _perm_base(params: ReportParams, scope_clause=None, *, broad_only: bool = Fa
         stmt = stmt.where(broad, a["type"].astext == "allow", writes)
     else:
         stmt = stmt.where(or_(p_wk.is_(None), p_wk == ""))
+    if outliers:
+        # W7-T7 §4 outliers view (closes the last W7 scaffold, 2026-08-20): keep
+        # only explicit ACEs that DEVIATE from the parent path's baseline — an
+        # explicit entry that merely RESTATES an ACE the parent already carries
+        # for the same (principal, type, verbs) is inheritance re-applied by a
+        # tool (robocopy /SEC, icacls reset, cp -p ...), not a hand-made grant,
+        # and it drowns the review list. Parent = the newest snapshot of the
+        # path with the last /- or \-separated segment removed (agent-native
+        # separators — both are handled; a drive root like "C:\" has no parent
+        # match). No parent snapshot inventoried => baseline "unknown": the row
+        # is KEPT (an explicit grant with no known baseline is still worth
+        # review) and the baseline column says so.
+        from sqlalchemy import column as _sacolumn2
+
+        parent = _latest_snapshots_subq("ps_parent")
+        parent_path = func.regexp_replace(ranked.c.path, r"[/\\]+[^/\\]+$", "")
+        stmt = stmt.outerjoin(
+            parent,
+            and_(
+                parent.c.agent_id == ranked.c.agent_id,
+                parent.c.path == parent_path,
+                parent.c.rn == 1,
+            ),
+        )
+        pa = (
+            func.jsonb_array_elements(parent.c.aces)
+            .table_valued(_sacolumn2("value", _JSONB))
+            .render_derived()
+        )
+        restates = (
+            select(literal(1))
+            .select_from(pa)
+            .where(
+                pa.c.value["principal"]["id"].astext == p_id,
+                pa.c.value["type"].astext == a["type"].astext,
+                pa.c.value["verbs"] == a["verbs"],
+            )
+            .exists()
+        )
+        stmt = stmt.where(or_(parent.c.id.is_(None), ~restates))
+        stmt = stmt.add_columns(
+            case((parent.c.id.is_(None), literal("unknown")), else_=literal("deviates")).label(
+                "baseline"
+            )
+        )
     if params.library_id is not None or scope_clause is not None:
         stmt = stmt.join(Item, Item.id == ranked.c.item_id)
         if params.library_id is not None:
@@ -1102,6 +1154,14 @@ def _build_perm_broad(params: ReportParams) -> Select:
 
 def _scoped_perm_broad(params: ReportParams, scope_clause) -> Select:
     return _perm_base(params, scope_clause, broad_only=True)
+
+
+def _build_perm_outliers(params: ReportParams) -> Select:
+    return _perm_base(params, outliers=True)
+
+
+def _scoped_perm_outliers(params: ReportParams, scope_clause) -> Select:
+    return _perm_base(params, scope_clause, outliers=True)
 
 
 def _row_perm(r: Any) -> dict:
@@ -1134,6 +1194,13 @@ _PERM_COLUMNS = (
     "agent", "path", "is_dir", "owner", "principal", "canonical_id", "principal_id",
     "kind", "ace_type", "verbs", "raw_mask", "scope", "fidelity", "collected_at",
 )
+
+
+def _row_perm_outlier(r: Any) -> dict:
+    return {**_row_perm(r), "baseline": r.baseline}
+
+
+_PERM_OUTLIER_COLUMNS = _PERM_COLUMNS + ("baseline",)
 
 
 # --- W7-T9 (2026-08-19): permission drift -----------------------------------
@@ -1302,7 +1369,7 @@ def _build_library_health(params: ReportParams) -> Select:
             Item.library_id == Library.id,
             Item.status == ItemStatus.active,
             Item.sidecar_of.is_(None),
-            Item.extension.in_(_SIDECAR_EXTS),
+            _sidecar_shape_predicate(),
         )
         .scalar_subquery()
     )
@@ -1346,7 +1413,14 @@ def _build_library_health(params: ReportParams) -> Select:
     )
     last_success_at = (
         select(func.max(ScanRun.started_at))
-        .where(ScanRun.library_id == Library.id, ScanRun.status == "completed")
+        # A scan SUCCEEDS as "finished" (full walk) or "stopped" (graceful stop
+        # kept its progress) -- both walked cleanly. "completed" is a ROLLOUT
+        # status, never a ScanRun one, so it matched nothing and this column read
+        # "" for every library (fixed 2026-08-20).
+        .where(
+            ScanRun.library_id == Library.id,
+            ScanRun.status.in_(("finished", "stopped")),
+        )
         .scalar_subquery()
     )
     failed_7d = (
@@ -1412,10 +1486,35 @@ def _row_library_health(r: Any) -> dict:
 
 
 # --- 2026-08-20 hygiene reports (user request: empty files + low-info sidecars)
-# Extensions that classify as sidecars by SHAPE (filearr.sidecar): used to find
-# the UNLINKED ones (sidecar-shaped rows with no parent) that pollute search/
-# timeline — exactly the live July-2026 .xmp bar.
+# Whole-file sidecar extensions (filearr.sidecar._ALWAYS_SIDECAR_EXTS /
+# _STEM_SIDECAR_EXTS). Kept as a fallback name; the full shape match below also
+# covers directory/stem artwork + JRiver, which a bare extension list misses.
 _SIDECAR_EXTS = ("nfo", "xmp", "thm")
+
+# A SQL predicate mirroring filearr.sidecar.classify's PATH SHAPE, so the hygiene
+# reports flag the SAME files the scan links (or fails to link). A bare extension
+# list missed the dominant pollution class — directory artwork (poster.jpg,
+# folder.jpg, ...) and stem-suffixed artwork (Movie-thumb.jpg) — which are jpg/png
+# and can't be matched by extension alone (that would flag every real photo). The
+# constants are imported from the sidecar module so the two never drift.
+
+
+def _sidecar_shape_predicate():
+    """OR of: whole-file sidecar extensions; directory-artwork filenames; JRiver
+    ``*_JRSidecar.xml``; stem-suffixed artwork (``-thumb``/``-poster``/... over an
+    image extension). Case-insensitive on the filename."""
+    from filearr.sidecar import _ART_EXTS, _DIR_ARTWORK_NAMES, _STEM_SUFFIXES
+
+    fname = func.lower(Item.filename)
+    suffixes = "|".join(s.lstrip("-") for s in _STEM_SUFFIXES)
+    exts = "|".join(e.lstrip(".") for e in _ART_EXTS)
+    stem_art_re = rf"-({suffixes})\.({exts})$"
+    return or_(
+        Item.extension.in_(_SIDECAR_EXTS),
+        fname.in_(sorted(_DIR_ARTWORK_NAMES)),
+        fname.like("%\\_jrsidecar.xml", escape="\\"),
+        fname.op("~")(stem_art_re),
+    )
 
 
 def _build_empty_files(params: ReportParams) -> Select:
@@ -1477,8 +1576,8 @@ def _build_sidecar_hygiene(params: ReportParams) -> Select:
         .where(
             Item.status == ItemStatus.active,
             or_(
-                # unlinked sidecar-shaped rows
-                and_(Item.sidecar_of.is_(None), Item.extension.in_(_SIDECAR_EXTS)),
+                # unlinked sidecar-shaped rows (full classify shape, not just ext)
+                and_(Item.sidecar_of.is_(None), _sidecar_shape_predicate()),
                 # linked but content-free
                 and_(Item.sidecar_of.is_not(None), Item.size <= 64),
             ),
@@ -1543,6 +1642,29 @@ _REPORTS = _REPORTS + (
         row=_row_perm,
         supports_library=True,
         scoped_build=_scoped_perm_broad,
+        default_limit=1000,
+    ),
+    CannedReport(
+        id="permissions_explicit_outliers",
+        title="Permissions: explicit outliers vs parent",
+        description=(
+            "Explicit (non-inherited) ACEs that DEVIATE from the parent "
+            "directory's baseline -- the by-principal list minus entries that "
+            "merely restate an ACE the parent already carries for the same "
+            "principal, type and verbs (inheritance re-applied by robocopy "
+            "/SEC, icacls reset, cp -p and friends). What remains is the "
+            "hand-granted deviation an audit actually cares about. 'baseline' "
+            "is 'deviates' when the parent path has a snapshot to compare "
+            "against, 'unknown' when it does not (inventory the parent "
+            "directory too for a definitive verdict). Same well-known/"
+            "inherited exclusions and fidelity caveat as the by-principal "
+            "report."
+        ),
+        columns=_PERM_OUTLIER_COLUMNS,
+        build=_build_perm_outliers,
+        row=_row_perm_outlier,
+        supports_library=True,
+        scoped_build=_scoped_perm_outliers,
         default_limit=1000,
     ),
     CannedReport(

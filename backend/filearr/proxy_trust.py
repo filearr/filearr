@@ -80,7 +80,15 @@ def peer_is_trusted(peer: str | None, networks: tuple[_Net, ...]) -> bool:
 def _proxy_header_ok(request: Request) -> bool:
     secret = get_settings().proxy_shared_secret or ""
     provided = request.headers.get(HDR_PROXY_TRUST) or ""
-    return bool(secret) and bool(provided) and secrets.compare_digest(provided, secret)
+    # Compare as BYTES: Starlette decodes headers as latin-1, so a byte > 0x7F
+    # yields a non-ASCII str and secrets.compare_digest raises TypeError on it
+    # (→ an unhandled 500 instead of a clean reject). Encoding first keeps the
+    # comparison constant-time and makes a non-matching header return False.
+    return (
+        bool(secret)
+        and bool(provided)
+        and secrets.compare_digest(provided.encode("utf-8"), secret.encode("utf-8"))
+    )
 
 
 def forwarded_client(xff: str, *, trusted: tuple[_Net, ...]) -> str | None:

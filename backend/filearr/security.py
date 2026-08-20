@@ -59,6 +59,18 @@ async def _verify_credentials(
     now = datetime.now(UTC)
     if api_key is None or (api_key.expires_at and api_key.expires_at < now):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired API key")
+    # An LLM facade key (llm_role set) is scope-confined ONLY inside /api/llm/v1
+    # (path_scope, libraries, reveal_paths, role tool-gating live in
+    # api/llm.llm_principal). Its coarse `scopes=["read"]` would otherwise make
+    # it a FULL, unrestricted read key on the main /api/v1/* surface — bypassing
+    # every facade confinement (bulk item/thumb/export reads over the whole
+    # catalog). The facade has its own auth path and never reaches here, so
+    # refusing these keys on the main API is safe and closes the bypass.
+    if api_key.llm_role is not None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "LLM keys are only valid on the /api/llm/v1 facade, not the main API",
+        )
     # P6-T10: a DISABLED service account takes every key it owns with it
     # (soft-disable, instant: checked per request, no cache).
     if api_key.service_account_id is not None:

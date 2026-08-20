@@ -34,9 +34,12 @@ research transcripts; Meilisearch inventory verified against v1.48.3 releases).
 | 24 | GPU acceleration | **declined** (assessed 2026-08-12) |
 | 25 | Insight features | **shipped 2026-08-13** |
 | 26 | joserfc migration | **done 2026-08-14** |
+| 27 | Filesystem identity (symlinks/hardlinks) | **shipped 2026-08-20** — central scan captures nlink/inode/dev + symlink_target from the walk's existing lstat; symlinks catalogued but never hashed/extracted; partial hardlink index. Agent-side parity + a duplicate-vs-hardlink report are the deferred tail |
 
 Everything not marked shipped/decided/declined is a small, explicitly deferred
-tail; the only sizeable open work is W7's follow-ups (§22).
+tail. W7 (§22) is fully closed (the last scaffold, `permissions_explicit_
+outliers`, went live 2026-08-20). The 2026-08-20 code review also fixed a batch
+of security + correctness defects (see §28) and closed the remaining stubs.
 
 ---
 
@@ -1173,3 +1176,131 @@ defence-in-depth check). Security-sensitive; do it deliberately with the OIDC
 test suite as the gate, not as part of a routine bump. The suppression-ordering
 gotcha (authlib.deprecate's module body installs an "always" filter that
 defeats callers' ignores) dies with the migration.
+
+---
+
+## 27. Filesystem identity — symlinks & hardlinks (shipped 2026-08-20)
+
+Central scans now record filesystem identity for every item, captured from the
+walk's already-taken `lstat` (nlink/inode/dev cost nothing extra; a `readlink`
+fires only for symlinks):
+
+- `nlink` / `inode` / `dev` — a hardlink group is `nlink > 1` plus a shared
+  `(dev, inode)`. These are files sharing storage, NOT independent duplicates,
+  so a future duplicate report can exclude them (or surface them as their own
+  "reclaimable via dedup already done" class). `inode`/`dev` are the signed
+  wrap of the unsigned stat fields (bijection preserves group identity). A
+  partial index `ix_items_hardlink WHERE nlink > 1` keeps the singleton
+  majority out.
+- `symlink_target` — non-NULL marks a symlink. A symlink is catalogued but
+  NEVER hashed or extracted: opening it follows the link and would stamp the
+  target's bytes/metadata onto the link's row (wrong identity).
+
+Nullable, no default → an instant metadata-only migration
+(`8f3b6a1d92c7`); backfilled on the next full scan (the diff's unchanged-branch
+fills identity onto pre-§27 rows without re-extraction).
+
+**Deferred tail:** (a) agent-side parity — the Go walker does not yet capture
+these (agentsync never sets them, so agent-replicated rows stay NULL); (b) a
+`hardlink_groups` / duplicate-vs-hardlink report; (c) NTFS/ReFS hardlink
+(`nNumberOfLinks`) and reparse-point/junction capture on Windows agents. None
+blocks the central catalog; each is worth doing when a user needs the answer.
+
+**FAT/NTFS table reading (assessed, not built):** parsing the raw FAT/MFT
+would let an agent enumerate files without a per-file `stat` (the MFT already
+holds size/timestamps/nlink, and `$J`/USN journal is a ready-made change
+feed). It is a real speedup for a cold walk of millions of files on a local
+NTFS volume, but: it is Windows/local-volume only (useless over the SMB/FUSE
+mounts that dominate this project's deployments, where there is no raw device
+to read), needs raw volume access (Administrator + `\\.\C:` handle), and
+duplicates what `os.scandir`+`lstat` already deliver portably. The USN change
+journal is the genuinely differentiated piece — a v3 candidate for
+near-real-time change detection on Windows agents, tracked next to the
+Event-Log SACL idea in §22's audit-over-time discussion. Not worth the
+platform-specific raw-filesystem parser today.
+
+## 28. 2026-08-20 code review — security + correctness fixes
+
+A full Fable review (security sweep + logic sweep, each adversarially verified)
+landed the following. Security:
+
+- **LLM keys were full-privilege `read` keys on the MAIN API.** An LLM facade
+  key (scope-confined only inside `/api/llm/v1`) also authenticated against
+  `/api/v1/*` as an unrestricted read key — bulk item/thumb/export reads over
+  the whole catalog. `security._verify_credentials` now refuses any key whose
+  `llm_role` is set (the facade has its own auth path).
+- **Transfer SSE auth bypass** — a mis-indented `return` authorised a
+  no-credential request; the 401 was unreachable (a copy divergence from the
+  correct `scans.py`).
+- **Meili filter injection** — five free-string `/search` params (`library`,
+  `status`, `extension`, `tags`, `sidecar_of`) and the LLM `kind` arg were
+  interpolated into single-quoted Meili filter literals unescaped; because
+  clauses join with `AND` (binds tighter than `OR`), an embedded quote dangled
+  an `OR` outside the AND-chain and bypassed the RBAC scope filter. Added
+  `search.meili_quote` (escape `\` then `'`) on every string interpolation;
+  `kind` is validated against the closed category vocabulary.
+- **LLM facade scope leaks** — `run_report` passed `scope_clause=None` (a
+  library-scoped key read every library's report rows); `where_is`/`get_file`
+  duplicate-copy lookups ignored the key's scope (leaking out-of-scope library
+  names, hosts, absolute paths). Both now apply the key's `_sql_scope`.
+- **OIDC open redirect** via `/\evil` (browsers normalise `\`→`/`); the
+  `return_to` guard now rejects `raw[1] in "/\\"` and control chars.
+- **`secrets.compare_digest` TypeError → 500** on a non-ASCII header (proxy
+  trust secret, agent bearer/fingerprint) — now byte-compared.
+- Webhook-allowlist docstring corrected to match the code (an explicit CIDR
+  admits any class except unspecified — a documented metadata-SSRF footgun).
+
+Correctness:
+
+- **`rehash_library_now` / `backfill_content_hashes_now` committed inside a
+  server-side cursor stream** → the cursor died after the first `yield_per`
+  buffer, so a library over ~200 rows failed mid-run. Both now collect IDs
+  first, then process in per-chunk transactions.
+- **`library_health.last_success_at`** matched `status == "completed"` (a
+  rollout status, never a scan status) → always NULL. Now `("finished",
+  "stopped")`.
+- **Intra-library rename survivors were never re-indexed** — the search doc
+  kept the old path until the nightly rebuild (id unchanged, so the reconcile
+  sweep saw no drift). A `sync_items` is now deferred for move survivors.
+- **`effective_access`** — a `dir_default` ACE consumed the POSIX class slot
+  and materialised an empty source layer before being skipped (owner reported
+  zero verbs; local∩share wiped local grants); and broad-principal matching was
+  substring (`Power Users` → contains `USERS` → applied to everyone). Both
+  fixed (skip-first; exact-name match).
+- **Hygiene reports missed artwork** — `sidecar_hygiene` / `library_health`
+  `unlinked_sidecars` matched only `nfo/xmp/thm`, missing directory + stem
+  artwork (`poster.jpg`, `Movie-thumb.jpg`) and JRiver — the dominant search
+  pollution. Now use a shared shape predicate mirroring `sidecar.classify`.
+- **Go agent:** a transient read error / hash timeout on a CHANGED file
+  clobbered the good digests with `""` (removing the item from move detection
+  and shipping blank hashes to central) — now keeps the prior value; and the
+  agent gained the N→0 empty-mount guard (parity with central §19) so a dead
+  FUSE/SMB bind can no longer tombstone a whole replicated library.
+
+**Explicitly deferred** (noted, not yet done): agent-side mid_hash move tier
+(central refuses an ambiguous move Go would transfer); several alert-pipeline
+nuances (partial multi-channel retry re-notifies delivered channels;
+per-path permission-change dedup keys defeat grouping on a recursive chmod;
+inhibited groups consume the hourly ceiling); an agent-side rename tombstones
+the central row losing its edits (needs an identity-transfer decision). These
+are tracked here rather than silently carried.
+
+## 29. Research & automation coverage (2026-08-20)
+
+Closing the "gaps that assist research/automation" ask, verified against the
+shipped surface:
+
+- **LLM facade parity** — `run_report` now scope-safe; `find_similar`,
+  `search_in` (content-only / names-only), per-passage scores all present; the
+  facade tracks the report + filter-DSL registries automatically, so new canned
+  reports (incl. `permissions_explicit_outliers`) appear without facade edits.
+- **Permissions audit is complete** — by-principal, broad-access, drift, and
+  now explicit-vs-parent **outliers** (the meaningful-deviation view) are all
+  live canned reports, schedulable to e-mail; effective-access is a queryable
+  endpoint; macOS ACL read shipped (agent ≥ 1.5.3), so all three OSes report.
+- **Hygiene automation** — `library_health` digest + `sidecar_hygiene` +
+  `empty_files`, weekly-emailable via report schedules, now catch artwork too.
+
+Remaining research-assist candidates (deferred, not requested): a
+`hardlink_groups` report; a saved-search → alert bridge; agent USN-journal
+change feed (§27).

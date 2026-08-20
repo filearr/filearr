@@ -35,7 +35,7 @@ def _walk_with_scandir_count(root, library, monkeypatch):
 
     monkeypatch.setattr(scan_mod.os, "scandir", counting)
     spec = build_library_spec(library)
-    rels = {rel for _p, rel, _s, _m in walk(str(root), spec)}
+    rels = {rel for _p, rel, _s, _m, _fsid in walk(str(root), spec)}
     return rels, scanned
 
 

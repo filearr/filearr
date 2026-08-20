@@ -208,8 +208,15 @@ async def scan_env(pg_uri, monkeypatch):
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
 
+    async def _noop_sync(**_kw):
+        return None
+
+    from filearr.tasks import index_sync
+
     monkeypatch.setattr(scan_mod, "_reindex_library", _noop_reindex)
     monkeypatch.setattr(scan_mod, "_defer_extract_batch", _noop_defer)
+    # A rename defers a sync_items for the survivor's doc (no Procrastinate here).
+    monkeypatch.setattr(index_sync.sync_items, "defer_async", _noop_sync)
     yield {"maker": maker, "scan": scan_mod}
     await engine.dispose()
 

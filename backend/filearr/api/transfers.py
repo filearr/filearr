@@ -346,7 +346,7 @@ async def _require_transfer_events_scope(
                 raise HTTPException(403, "Scope 'read' required")
             request.state.actor = f"principal:{principal.id}"
             await session.commit()
-        return
+            return
     raise HTTPException(401, "Missing bearer token or stream_token")
 
 

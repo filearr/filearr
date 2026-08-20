@@ -452,6 +452,42 @@ async def test_permission_snapshots_ingest_and_reports(client):
     assert [x["path"] for x in rows_] == ["/data/pub"] and "write" in rows_[0]["verbs"]
 
 
+async def test_permissions_explicit_outliers_report(client):
+    """§4 outliers (2026-08-20): an explicit child ACE that RESTATES the parent
+    directory's ACE for the same (principal, type, verbs) is hidden; a deviating
+    explicit ACE shows with baseline='deviates'; paths whose parent has no
+    snapshot are kept with baseline='unknown'."""
+    from filearr import permission_ingest
+
+    c, maker, _, _tmp = client
+    agent_id, item_id, fp = await _seed(maker)
+    dev = {"principal": {"kind": "user", "id": "555", "name": "svc"}, "type": "allow",
+           "verbs": ["full"], "raw_mask": "0x1f01ff", "inherited": False,
+           "scope": "this", "source": "local", "order_index": 3}
+    async with maker() as s:
+        await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None, entries=[
+                {"path": "/data", "is_dir": True, "permissions": _perm_record()},
+                {"path": "/data/x.mkv", "permissions": _perm_record(extra_aces=[dev])},
+                {"path": "/lone/file", "permissions": _perm_record()},
+            ],
+        )
+
+    r = await c.get("/api/v1/reports/permissions_explicit_outliers")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    rows = body["rows"] if isinstance(body, dict) else body
+    got = {(x["path"], x["principal_id"], x["baseline"]) for x in rows}
+    # The deviating grant survives; the restating 1000/100 ACEs on the child do not.
+    assert ("/data/x.mkv", "555", "deviates") in got
+    assert not any(p == "/data/x.mkv" and pid in ("1000", "100") for (p, pid, _b) in got)
+    # No parent snapshot -> kept, honestly marked unknown.
+    assert ("/lone/file", "1000", "unknown") in got
+    assert ("/data", "1000", "unknown") in got
+    # Well-known principals stay hidden (same exclusion as by-principal).
+    assert not any(pid == "other" for (_p, pid, _b) in got)
+
+
 async def test_permission_snapshots_from_ndjson_upload(client):
     from filearr.models import PermissionSnapshot
 

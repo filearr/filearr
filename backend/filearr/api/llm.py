@@ -19,13 +19,14 @@ from datetime import UTC, datetime
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from meilisearch_python_sdk.models.search import Hybrid
 from pydantic import BaseModel, Field
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit, querydsl
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.embed import embed_query
+from filearr.file_groups import FILE_CATEGORIES
 from filearr.llm import (
     RATE_LIMITER,
     TOOL_SPECS,
@@ -280,7 +281,14 @@ async def search_files(
 
     filters = list(_meili_scope(principal)) + ['status = "active"']
     if args.kind:
-        filters.append(f'file_category = "{args.kind.strip().lower()}"')
+        # SECURITY (2026-08-20): validate against the closed file-category
+        # vocabulary before interpolating (same posture as the main /search
+        # endpoint) — a raw value like `video" OR status = "active` would else
+        # dangle an OR outside the AND-chain and defeat _meili_scope's library/
+        # path confinement for a scoped LLM key. Unknown kinds are dropped.
+        kind = args.kind.strip().lower()
+        if kind in FILE_CATEGORIES:
+            filters.append(f'file_category = "{kind}"')
     if args.library:
         lib = (
             await session.execute(
@@ -418,6 +426,9 @@ async def get_file(
     it = await _get_item(args.citation, principal, session)
     lib = await session.get(Library, it.library_id)
 
+    # SECURITY (2026-08-20): scope the duplicate count to the key's allow-list
+    # so it never reveals the existence of out-of-scope copies (see where_is).
+    dup_scope = await _sql_scope(principal, session)
     dup_count = 0
     if it.content_hash:
         dup_count = (
@@ -426,6 +437,7 @@ async def get_file(
                     Item.content_hash == it.content_hash,
                     Item.status == "active",
                     Item.id != it.id,
+                    *dup_scope,
                 )
             )
         ).scalar_one()
@@ -472,6 +484,11 @@ async def where_is(
     it = await _get_item(args.citation, principal, session)
 
     # The item itself + every active byte-identical copy (content hash).
+    # SECURITY (2026-08-20): confine the copy lookup to the key's scope. Without
+    # it, a key scoped to lib_A citing a file that also exists in lib_B leaked
+    # lib_B's library name, agent host, absolute path, share_url and unc. The
+    # cited item is already scope-checked by _get_item; this closes the copies.
+    scope_preds = await _sql_scope(principal, session)
     ids = [it.id]
     copies: list[Item] = [it]
     if it.content_hash:
@@ -482,6 +499,7 @@ async def where_is(
                         Item.content_hash == it.content_hash,
                         Item.status == "active",
                         Item.id != it.id,
+                        *scope_preds,
                     ).limit(20)
                 )
             )
@@ -613,11 +631,14 @@ async def run_report(
         )
     limit = _cap(args.limit, 100, 200)
     offset = max(0, args.offset)
-    # statement(..., None) rather than build(): identical result today, but it
-    # routes through the one place that knows how a report applies a scope
-    # predicate, so a subquery-topped report (IN-T1) cannot be mis-scoped here if
-    # this path ever grows RBAC filtering.
-    stmt = report.statement(ReportParams(limit=limit + offset + 1), None)
+    # SECURITY (2026-08-20): apply the key's library/path scope, exactly as the
+    # main /reports endpoint applies ctx.sql_clause(). Passing None here let a
+    # library-scoped key read filenames/paths/sizes from EVERY library via a
+    # canned report. An unrestricted key (no libraries, no path_scope) yields no
+    # predicates -> None -> full access, same as an admin.
+    scope_preds = await _sql_scope(principal, session)
+    scope_clause = and_(*scope_preds) if scope_preds else None
+    stmt = report.statement(ReportParams(limit=limit + offset + 1), scope_clause)
     result = await session.execute(stmt)
     fetched = [report.row(r) for r in result.all()]
     page = fetched[offset : offset + limit]

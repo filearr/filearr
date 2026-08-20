@@ -983,9 +983,13 @@ async def reap_stale_shadows(
 
 
 async def ensure_webhook() -> None:
-    """P9-T6: idempotently register the failure-observability webhook.
-
-    Wiring: ``get_webhooks()`` → if the target URL is absent, ``create_webhook``
-    with ``WebhookTarget.auth_headers()``.
-    """
-    raise NotImplementedError("P9-T6: ensure_webhook registration")
+    """P9-T6 — DECLINED FINAL (roadmap §8, closed 2026-08-20): Meili task
+    webhooks were rejected because every document write now ACKS its own task
+    (``meili_write_ack_seconds`` / ``MeiliWriteFailed``), which covers the same
+    failure-observability need with delivery guarantees webhooks lack (Meili
+    webhooks have NO retry). Kept only so a future re-evaluation lands here
+    with the design note intact; nothing calls it."""
+    raise NotImplementedError(
+        "P9-T6 task webhooks were declined final (roadmap §8): doc writes are "
+        "acked per-task instead — see meili_write_ack_seconds/MeiliWriteFailed"
+    )

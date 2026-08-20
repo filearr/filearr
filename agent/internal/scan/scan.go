@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path"
 	"path/filepath"
 	"time"
@@ -58,6 +59,13 @@ type Options struct {
 	// with no transaction open, for the same reason hashing does — an extraction
 	// over a FUSE mount must never hold the SQLite write lock.
 	Extract ExtractFn
+	// ForceEmpty (roadmap §19 parity, 2026-08-20) is the operator's consent to a
+	// FULL walk that observed literally zero entries over a library that
+	// previously held active items — a deliberate everything-was-deleted rescan.
+	// Without it, such a walk is REFUSED (a dead/stale FUSE/SMB bind presenting as
+	// a readable-but-empty mountpoint would otherwise tombstone the whole library
+	// and replicate those deletes to central). Mirrors central's force_empty flag.
+	ForceEmpty bool
 }
 
 // Result summarises a completed scan. Stopped marks a graceful stop (Missing and
@@ -170,10 +178,12 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 	}
 
 	stopRequested := false
+	walked := 0 // entries the walk yielded, BEFORE the category gate (§19 guard)
 	walkErr := Walk(root, scope, spec, func(e WalkEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err // hard cancel
 		}
+		walked++
 		sidecar := isSidecar(e.Rel)
 		category, group := classifier.Classify(e.Path)
 		if !sidecar && !categoryEnabled(enabledCats, enabledGroups, category, group) {
@@ -211,6 +221,27 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 		// A hard cancel or a genuine walk error: committed batches persist, but no
 		// move detection or tombstoning runs (the visited set is unreliable).
 		return res, walkErr
+	}
+
+	// Roadmap §19 N->0 empty-mount guard (parity with tasks/scan.py). A FULL
+	// walk (scope == "") that yielded literally NO entries — not merely
+	// everything-excluded (walked counts pre-gate) — over a library that still
+	// holds active rows is the dead/stale-mount signature. Refuse rather than
+	// tombstone the whole library; the crashed scan leaves everything intact.
+	if !stopRequested && scope == "" && walked == 0 && !opts.ForceEmpty {
+		priorActive := 0
+		for _, it := range existing {
+			if it.Status == index.StatusActive {
+				priorActive++
+			}
+		}
+		if priorActive > 0 {
+			return Result{}, &ScanRootError{msg: fmt.Sprintf(
+				"walk saw an empty tree but the library holds %d active items — "+
+					"suspected dead/stale mount at %q; nothing was tombstoned. If the "+
+					"library really was emptied, rescan with force_empty.",
+				priorActive, root)}
+		}
 	}
 
 	if !stopRequested {
@@ -305,7 +336,15 @@ func diffEntry(
 		item.LastSeen = now
 		var extracted *outbox.Extracted
 		if !sidecar {
-			item.QuickHash, item.ContentHash = hashFile(e.Path, e.Size, policy)
+			// hashFile returns ("","") on an open/read error OR a wall-clock
+			// timeout (a locked/hung file on a FUSE/SMB mount). Do NOT clobber the
+			// prior digests with empty in that case: an empty hash removes the
+			// item from move detection and ships blank hashes to central. Keeping
+			// the prior (now-stale) value matches Python's non-clobber behaviour;
+			// the next scan re-hashes once the file is readable again.
+			if q, c := hashFile(e.Path, e.Size, policy); q != "" {
+				item.QuickHash, item.ContentHash = q, c
+			}
 			// The bytes changed, so any prior extraction for this item is stale;
 			// re-extract so central overwrites it with the newer result.
 			extracted = runExtract(ctx, ex, e.Path, category)
@@ -327,8 +366,12 @@ func diffEntry(
 		needHeal = true
 	}
 	if item.QuickHash == "" && !sidecar {
-		item.QuickHash, item.ContentHash = hashFile(e.Path, e.Size, policy)
-		needHeal = true
+		// Only heal (and emit) if we actually got a hash — a still-unreadable
+		// file must not churn a modified event every scan with empty hashes.
+		if q, c := hashFile(e.Path, e.Size, policy); q != "" {
+			item.QuickHash, item.ContentHash = q, c
+			needHeal = true
+		}
 	}
 	if !needHeal {
 		return nil // truly unchanged healthy row: no write, no emit

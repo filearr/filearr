@@ -370,7 +370,7 @@ def test_walk_audit_tallies_spec_exclusions_and_prunes(tmp_path):
     _audit_tree(tmp_path)
     spec = GitIgnoreSpec.from_lines(["*.tmp", ".*", "node_modules/"])
     audit = WalkAudit()
-    rels = {rel for _p, rel, _s, _m in walk(str(tmp_path), spec, audit=audit)}
+    rels = {rel for _p, rel, _s, _m, _fsid in walk(str(tmp_path), spec, audit=audit)}
 
     assert rels == {"keep.mkv"}
     assert audit.excluded_filtered == 2            # skip.tmp + .hidden
@@ -396,7 +396,7 @@ def test_walk_audit_counts_pruned_files_when_opted_in(tmp_path):
     _audit_tree(tmp_path)
     spec = GitIgnoreSpec.from_lines(["*.tmp", ".*", "node_modules/"])
     audit = WalkAudit(count_pruned=True)
-    rels = {rel for _p, rel, _s, _m in walk(str(tmp_path), spec, audit=audit)}
+    rels = {rel for _p, rel, _s, _m, _fsid in walk(str(tmp_path), spec, audit=audit)}
 
     assert rels == {"keep.mkv"}
     # Recursive: buried.mkv + deep/a.js + deep/b.js.

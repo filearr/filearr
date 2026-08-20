@@ -15,14 +15,23 @@ surface (brief §7.1). This module is the pure classification + verdict core:
 The resolver is injected so tests run with a fake (no network) and the
 implementing task (P8-T2) wires a real one that re-validates the IP **at
 socket-connect time**, closing the DNS-rebinding TOCTOU gap the brief calls out.
-``allow_private`` corresponds to the single boolean
-``FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS`` (R5) and flips **only** the ``private``
-class; ``allowed_cidrs`` (``FILEARR_WEBHOOK_ALLOWED_CIDRS``, 2026-08-19) is the
-finer per-target allowlist that admits listed addresses of any class except
-unspecified. It flips **only** the ``private``
-class — loopback, link-local (cloud metadata: 169.254.169.254) and
-reserved/unspecified stay denied regardless, since those are never a legitimate
-LAN webhook target.
+Two distinct opt-ins, deliberately different in blast radius:
+
+* ``allow_private`` (``FILEARR_WEBHOOK_ALLOW_PRIVATE_CIDRS``, R5) is the blunt
+  switch: it flips **only** the ``private`` class (RFC 1918 / ULA LAN ranges).
+  Loopback, link-local (cloud metadata 169.254.169.254 / fd00:ec2::254),
+  reserved and unspecified stay denied under it.
+* ``allowed_cidrs`` (``FILEARR_WEBHOOK_ALLOWED_CIDRS``, 2026-08-19) is the finer
+  **explicit per-target allowlist**: an IP matching a listed CIDR is admitted
+  regardless of class — *including* loopback and link-local — with the sole
+  exception of the unspecified address (0.0.0.0 / ::), which never passes. This
+  is intentional (an operator's "my ntfy on 127.0.0.1:8080" needs it) and is
+  the behaviour enforced in :func:`check_webhook_url`.
+
+  **Footgun:** because it admits any listed class, adding a link-local range
+  such as ``169.254.0.0/16`` re-opens the cloud-metadata SSRF this guard exists
+  to stop. List the narrowest CIDR you actually need (``127.0.0.1/32``, a
+  specific ``/32`` on the LAN), never a broad link-local or metadata range.
 """
 
 from __future__ import annotations

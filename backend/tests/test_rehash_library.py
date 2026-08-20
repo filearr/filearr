@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pytest
 from alembic.config import Config
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
@@ -166,6 +166,45 @@ async def test_rehash_quick_only_drops_unrecomputable_content_hash(
     assert row.content_hash is None
     assert row.quick_hash == quick_hash(str(tmp_path / "n.bin"), big)
     assert row.mid_hash == mid_hash(str(tmp_path / "n.bin"), big)
+
+
+async def test_rehash_crosses_commit_boundary(maker, monkeypatch, tmp_path):
+    """Regression: rehash_library_now commits every 200 rows. It must NOT do so
+    inside a live server-side cursor (that invalidates the cursor and the job
+    dies at row ~201). 450 stale rows force three commit boundaries; all must be
+    rehashed and re-stamped."""
+    from filearr import worker as worker_mod
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "hash_backfill_rate_mbps", 0.0)
+
+    async def _noop(ids):
+        return None
+
+    monkeypatch.setattr(worker_mod, "defer_index_sync", _noop)
+
+    n = 450
+    async with maker() as s:
+        lib = Library(name="big", root_path=str(tmp_path), hash_policy="full")
+        s.add(lib)
+        await s.flush()
+        for i in range(n):
+            await _mk(s, lib.id, tmp_path / f"f{i}.bin", size=100 + i, pv=OLD, quick_hash="old")
+        await s.commit()
+        lib_id = lib.id
+
+    out = await worker_mod.rehash_library_now(str(lib_id))
+    assert out["rehashed"] == n and out["failed"] == 0
+    async with maker() as s:
+        stale = (
+            await s.execute(
+                select(func.count()).select_from(Item).where(
+                    Item.library_id == lib_id, ~Item.policy_version.like(f"{_SCHEME}:%")
+                )
+            )
+        ).scalar_one()
+    assert stale == 0
 
 
 async def test_rehash_refuses_agent_owned_library(maker, monkeypatch):

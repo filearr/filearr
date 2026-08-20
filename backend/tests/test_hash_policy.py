@@ -223,12 +223,18 @@ async def _run_scan(session, library):
     """Drive _scan_body with extract-defer + reindex stubbed out (as the T2 tests
     do), so we exercise the in-scan hashing path (move detection) deterministically
     without a live worker."""
+    from unittest.mock import patch
+
+    from filearr.tasks import index_sync
     from filearr.tasks import scan as scan_mod
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
 
     async def _noop_reindex(sess, lib_id):
+        return None
+
+    async def _noop_sync(**_kw):
         return None
 
     orig_defer = scan_mod._defer_extract_batch
@@ -239,7 +245,9 @@ async def _run_scan(session, library):
         run = ScanRun(library_id=library.id, stats={})
         session.add(run)
         await session.commit()
-        stats = await scan_mod._scan_body(session, library, run)
+        # A rename defers a sync_items for the survivor's doc (no Procrastinate).
+        with patch.object(index_sync.sync_items, "defer_async", _noop_sync):
+            stats = await scan_mod._scan_body(session, library, run)
         return stats, run
     finally:
         scan_mod._defer_extract_batch = orig_defer

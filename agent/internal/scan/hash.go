@@ -164,7 +164,7 @@ func HashFile(pathStr string, size int64, policy HashPolicy) (quick, content str
 // policy + ceiling gate.
 func hashFile(pathStr string, size int64, policy HashPolicy) (quick, content string) {
 	if policy.Timeout <= 0 {
-		return hashFileSync(pathStr, size, policy)
+		return hashSyncFn(pathStr, size, policy)
 	}
 	// Bounded: hash in a goroutine and give up at the deadline. A blocked
 	// read(2) cannot be cancelled, so on timeout the goroutine (and its fd) is

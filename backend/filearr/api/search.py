@@ -92,6 +92,24 @@ def _decode_cursor(cursor: str | None) -> int:
 HASH_RE = re.compile(r"^[0-9a-f]{8,64}$")
 
 
+def meili_quote(value: str) -> str:
+    """Escape a string for interpolation inside a SINGLE-QUOTED Meilisearch
+    filter literal.
+
+    SECURITY (2026-08-20): the free-string filter params (``library``,
+    ``status``, ``extension``, ``tags``, ``sidecar_of``) used to be interpolated
+    raw. Because clauses are joined with ``" AND "`` and Meili binds ``AND``
+    tighter than ``OR``, a value like ``active' OR status = 'active`` dangled an
+    ``OR`` outside the AND-chain and matched every document — bypassing the
+    RBAC ``scope_filter`` that is appended last. Escaping the backslash first
+    (so it can't neutralise the quote escape) then the single quote makes the
+    value an inert string literal: an embedded quote can never terminate the
+    literal and start new filter syntax. Meili's grammar unescapes ``\\'`` back
+    to a literal quote, so a legitimate tag/filename containing an apostrophe
+    still matches exactly."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def build_filters(
     *,
     file_category: list[str] | None = None,
@@ -145,11 +163,11 @@ def build_filters(
                 "(" + " OR ".join(f"file_group = '{g}'" for g in valid) + ")"
             )
     if library:
-        filters.append(f"library_id = '{library}'")
+        filters.append(f"library_id = '{meili_quote(library)}'")
     if status:
-        filters.append(f"status = '{status}'")
+        filters.append(f"status = '{meili_quote(status)}'")
     if extension:
-        filters.append(f"extension = '{extension}'")
+        filters.append(f"extension = '{meili_quote(extension)}'")
     if year_gte is not None:
         filters.append(f"year >= {year_gte}")
     if year_lte is not None:
@@ -165,10 +183,10 @@ def build_filters(
     if mtime_lte is not None:
         filters.append(f"mtime <= {int(mtime_lte)}")
     if tags:
-        filters.extend(f"tags = '{t.strip()}'" for t in tags.split(","))
+        filters.extend(f"tags = '{meili_quote(t.strip())}'" for t in tags.split(","))
     if sidecar_of:
         # Explicitly requesting a parent's sidecars implies including sidecars.
-        filters.append(f"sidecar_of = '{sidecar_of}'")
+        filters.append(f"sidecar_of = '{meili_quote(sidecar_of)}'")
     elif not include_sidecars:
         # T3 default: hide sidecar files (episode .nfo/thumb, poster.jpg, ...).
         filters.append("is_sidecar = false")

@@ -23,9 +23,9 @@ var ErrPermissionsScaffold = errors.New(
 // importing it, so registering it later creates no import cycle.
 //
 // Registered in inventory.DefaultRegistry() since 2026-08-19 (Linux + Windows
-// reads real; darwin/other still return ErrPermissionsScaffold per file, which
-// the runner records as a per-entry error -- the collector is advertised only
-// where it can read: see inventory.DefaultRegistry).
+// reads real; darwin real since W7-T4 2026-08-20 via ls -led). Only the
+// !windows/!linux/!darwin build still returns ErrPermissionsScaffold per file,
+// and the collector is never advertised there: see inventory.DefaultRegistry.
 type Collector struct{}
 
 // Supported reports whether this build/OS has a real read behind Collect.

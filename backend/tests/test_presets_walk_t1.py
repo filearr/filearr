@@ -40,7 +40,7 @@ def _mktree(root, files: list[str]) -> None:
 
 def _walk_rels(root, library) -> set[str]:
     spec = build_library_spec(library)
-    return {rel for _p, rel, _s, _m in walk(str(root), spec)}
+    return {rel for _p, rel, _s, _m, _fsid in walk(str(root), spec)}
 
 
 # --- Accept #1: pruning is provable via scandir-call counting ---------------

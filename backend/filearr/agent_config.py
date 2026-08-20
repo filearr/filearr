@@ -135,10 +135,11 @@ COLLECTOR_CATALOGUE: tuple[dict[str, Any], ...] = (
             "record in permission_snapshots (digest-gated, N per path) and the "
             "Reports page gains 'Permissions: explicit grants by principal' and "
             "'Permissions: broad write access'. Distinct from 'perms' (summary "
-            "bits). macOS reads are not implemented (per-entry error, harmless). "
-            "Costs one xattr/security-descriptor read per entry."
+            "bits). macOS (agent >= 1.5.3): named ACL entries + BSD flags via "
+            "ls -led; a TCC/Full-Disk-Access denial surfaces as a collector "
+            "error. Costs one xattr/security-descriptor/ls read per entry."
         ),
-        "platforms": ["linux", "windows"],
+        "platforms": ["linux", "darwin", "windows"],
         "cost": "medium",
     },
     {

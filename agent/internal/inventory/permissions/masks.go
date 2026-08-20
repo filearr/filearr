@@ -158,26 +158,36 @@ func PosixRWXToVerbs(rwx uint16, isDir bool) []string {
 	return orderVerbs(set)
 }
 
-// --- NFSv4 / macOS extended-ACL mask (brief §3.2 — STUB, documented, partial) ---
+// --- NFSv4 / macOS extended-ACL mask (brief §3.2) ---
 //
-// TODO(W7-T4): flesh out and verify against RFC 8881 §6.2.1.3.2 (NFSv4) and
-// macOS <sys/acl.h> before the darwin/nfs4 reads land. The NFSv4 ACE mask bit
-// positions closely parallel the Windows FILE_* lineage BY DESIGN, but the
-// values below are the NFSv4 canonical bits, NOT the winnt.h ones, and this
-// table is intentionally PARTIAL: RawMask preservation is the guarantee, verb
-// coverage here is best-effort until T4 verifies every bit.
+// COMPLETE per RFC 8881 §6.2.1.3.1 (verified 2026-08-20, closing the W7-T4
+// TODO): every ACE4_* access-mask bit the RFC defines is present below. The bit
+// positions parallel the Windows FILE_* lineage BY DESIGN, but these are the
+// NFSv4 canonical values, NOT the winnt.h ones. Verb policy mirrors the NTFS
+// table: named-attribute bits fold into read_attr/write_attr (exactly as
+// FILE_READ_EA/FILE_WRITE_EA do — named attrs ARE the NFSv4 EA analog);
+// ACE4_SYNCHRONIZE is deliberately verb-less (same ruling as ntfsSynchronize —
+// not a meaningful access grant for reporting); the two retention bits are
+// deliberately verb-less too (WORM retention administration has no honest
+// cross-OS verb, and inventing "write" would misrepresent the model). RawMask
+// on every ACE preserves the verbatim bits regardless, so nothing is lost.
 const (
-	nfs4ReadData        uint32 = 0x00000001 // also ListDirectory on a dir
-	nfs4WriteData       uint32 = 0x00000002 // also AddFile on a dir
-	nfs4AppendData      uint32 = 0x00000004 // also AddSubdirectory on a dir
-	nfs4Execute         uint32 = 0x00000020
-	nfs4DeleteChild     uint32 = 0x00000040
-	nfs4ReadAttributes  uint32 = 0x00000080
-	nfs4WriteAttributes uint32 = 0x00000100
-	nfs4Delete          uint32 = 0x00010000
-	nfs4ReadACL         uint32 = 0x00020000
-	nfs4WriteACL        uint32 = 0x00040000
-	nfs4WriteOwner      uint32 = 0x00080000
+	nfs4ReadData           uint32 = 0x00000001 // ACE4_LIST_DIRECTORY on a dir
+	nfs4WriteData          uint32 = 0x00000002 // ACE4_ADD_FILE on a dir
+	nfs4AppendData         uint32 = 0x00000004 // ACE4_ADD_SUBDIRECTORY on a dir
+	nfs4ReadNamedAttrs     uint32 = 0x00000008
+	nfs4WriteNamedAttrs    uint32 = 0x00000010
+	nfs4Execute            uint32 = 0x00000020
+	nfs4DeleteChild        uint32 = 0x00000040
+	nfs4ReadAttributes     uint32 = 0x00000080
+	nfs4WriteAttributes    uint32 = 0x00000100
+	nfs4WriteRetention     uint32 = 0x00000200 // verb-less by design (see above)
+	nfs4WriteRetentionHold uint32 = 0x00000400 // verb-less by design (see above)
+	nfs4Delete             uint32 = 0x00010000
+	nfs4ReadACL            uint32 = 0x00020000
+	nfs4WriteACL           uint32 = 0x00040000
+	nfs4WriteOwner         uint32 = 0x00080000
+	nfs4Synchronize        uint32 = 0x00100000 // verb-less by design (see above)
 )
 
 var nfs4Bits = []struct {
@@ -187,6 +197,8 @@ var nfs4Bits = []struct {
 	{nfs4ReadData, VerbRead},
 	{nfs4WriteData, VerbWrite},
 	{nfs4AppendData, VerbAppend},
+	{nfs4ReadNamedAttrs, VerbReadAttr},
+	{nfs4WriteNamedAttrs, VerbWriteAttr},
 	{nfs4Execute, VerbExecute},
 	{nfs4DeleteChild, VerbDeleteChild},
 	{nfs4ReadAttributes, VerbReadAttr},
@@ -198,8 +210,8 @@ var nfs4Bits = []struct {
 }
 
 // NFSv4MaskToVerbs maps an NFSv4/macOS-extended ACE mask to normalized verbs.
-// STUB (see nfs4Bits TODO): correct for the common bits, intentionally partial.
-// isDir selects the list alias of nfs4ReadData.
+// Complete per RFC 8881 §6.2.1.3.1 (see the table's doc for the three
+// deliberately verb-less bits). isDir selects the list alias of nfs4ReadData.
 func NFSv4MaskToVerbs(mask uint32, isDir bool) []string {
 	set := map[string]bool{}
 	for _, m := range nfs4Bits {

@@ -267,6 +267,13 @@ class ItemOut(BaseModel):
     # Content-identity hashes (P4-T11: the Raw tab surfaces every stored column).
     quick_hash: str | None = None
     content_hash: str | None = None
+    # §27 filesystem identity (nullable: NULL on rows scanned before it shipped
+    # and on agent-replicated rows). nlink>1 + shared (dev,inode) = a hardlink
+    # group; symlink_target non-NULL = a symlink (never hashed/extracted).
+    nlink: int | None = None
+    inode: int | None = None
+    dev: int | None = None
+    symlink_target: str | None = None
     title: str | None
     year: int | None
     external_ids: dict[str, Any]

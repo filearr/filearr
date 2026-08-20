@@ -161,6 +161,35 @@ async def _iter_walk_threaded(gen, batch: int = 250):
             yield entry
 
 
+def _int64(v: int | None) -> int | None:
+    """Wrap an unsigned 64-bit stat field (st_ino / st_dev) into signed int64 so
+    it fits Postgres BIGINT. The wrap is a bijection, so hardlink-group identity
+    — equality of ``(dev, inode)`` — is preserved."""
+    if v is None:
+        return None
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
+def _fs_identity(entry_or_path, st) -> tuple[int, int | None, int | None, str | None]:
+    """``(nlink, inode, dev, symlink_target)`` from an already-taken lstat.
+
+    ``st`` is the ``follow_symlinks=False`` stat the walk already performs, so
+    nlink/ino/dev cost nothing extra. ``symlink_target`` is read (one readlink)
+    ONLY when the entry is a symlink — a symlink is catalogued but never hashed
+    or extracted (that would follow the link and stamp the TARGET's bytes onto
+    the LINK's row). ``entry_or_path`` is an ``os.DirEntry`` (dir walk, cached
+    is_symlink) or a path str (single-file walk)."""
+    is_link = stat_mod.S_ISLNK(st.st_mode)
+    target = None
+    if is_link:
+        path = entry_or_path.path if hasattr(entry_or_path, "path") else entry_or_path
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = ""  # a symlink we can't read is still a symlink (non-null marks it)
+    return st.st_nlink, _int64(st.st_ino), _int64(st.st_dev), target
+
+
 def walk(
     root: str,
     spec: GitIgnoreSpec,
@@ -168,7 +197,7 @@ def walk(
     recursive: bool = True,
     audit: "WalkAudit | None" = None,
 ):
-    """Parallel-friendly scandir walk. Yields (path, rel, size, mtime).
+    """Parallel-friendly scandir walk. Yields (path, rel, size, mtime, fsid).
 
     Exclusion is driven by a single ``GitIgnoreSpec`` (P2-T1), replacing the old
     two-list ``fnmatch`` AND the hard-coded ``entry.name.startswith(".")`` skip
@@ -239,7 +268,13 @@ def walk(
                             audit.excluded_filtered += 1
                         continue
                     stat = entry.stat(follow_symlinks=False)
-                    yield entry.path, rel, stat.st_size, stat.st_mtime
+                    yield (
+                        entry.path,
+                        rel,
+                        stat.st_size,
+                        stat.st_mtime,
+                        _fs_identity(entry, stat),
+                    )
         except PermissionError:
             if audit is not None:
                 audit.permission_denied += 1
@@ -295,7 +330,7 @@ def _walk_one_file(root: str, rel: str, spec: GitIgnoreSpec):
         return
     if spec.match_file(rel) and classify(rel) is None:
         return
-    yield path, rel, st.st_size, st.st_mtime
+    yield path, rel, st.st_size, st.st_mtime, _fs_identity(path, st)
 
 
 def _in_scanned_set(rel: str, scope: str, *, is_file: bool, recursive: bool) -> bool:
@@ -498,6 +533,8 @@ async def _scan_body(
                     Item.filename, Item.extension, Item.size, Item.mtime,
                     Item.status, Item.last_seen, Item.quick_hash,
                     Item.content_hash, Item.mid_hash, Item.sidecar_of,
+                    # §27: the diff branch reads/writes these on existing rows.
+                    Item.nlink, Item.inode, Item.dev, Item.symlink_target,
                 )
             )
             .execution_options(yield_per=5000)
@@ -642,7 +679,9 @@ async def _scan_body(
         # block for minutes — starving the event loop (worker heartbeat dies,
         # reaper declares the scan dead). Pull batches of entries in a worker
         # thread; the loop stays responsive between batches.
-        async for path, rel, size, mtime_ts in _iter_walk_threaded(scan_entries):
+        async for path, rel, size, mtime_ts, fsid in _iter_walk_threaded(scan_entries):
+            nlink, inode, dev, symlink_target = fsid
+            is_symlink = symlink_target is not None
             # Sidecars (.nfo / poster.jpg / -thumb / *_JRSidecar.xml, ...) are always
             # ingested regardless of the gate: they are bookkeeping rows that get
             # linked to a parent and hidden from default search. Skipping them here
@@ -675,6 +714,11 @@ async def _scan_body(
                     extension=os.path.splitext(path)[1].lstrip(".").lower() or None,
                     size=size,
                     mtime=mtime,
+                    # §27 filesystem identity, captured from the walk's lstat.
+                    nlink=nlink,
+                    inode=inode,
+                    dev=dev,
+                    symlink_target=symlink_target,
                     # P6-T2: stamp the ltree RBAC scope key on create (the single
                     # natural place; moves restamp it in tasks.move).
                     path_scope=rbac.path_to_ltree(rel, library_id=library.id),
@@ -682,17 +726,27 @@ async def _scan_body(
                 session.add(item)
                 new += 1
                 await session.flush()
-                if not is_sidecar:
+                # A symlink is catalogued but never hashed/extracted — extraction
+                # opens the path and would stamp the TARGET's bytes/metadata onto
+                # the link's row (wrong identity, §27).
+                if not is_sidecar and not is_symlink:
                     pending_extract.append(str(item.id))
                     new_item_ids.append(str(item.id))
                     _capture("created", rel, str(item.id))
-            elif item.size != size or item.mtime != mtime:
+            elif (
+                item.size != size
+                or item.mtime != mtime
+                or item.nlink != nlink
+                or item.symlink_target != symlink_target
+            ):
                 item.size, item.mtime = size, mtime
                 item.path = path  # refresh absolute path (mount may have moved)
+                item.nlink, item.inode, item.dev = nlink, inode, dev
+                item.symlink_target = symlink_target
                 item.status = ItemStatus.active
                 item.last_seen = datetime.now(UTC)
                 changed += 1
-                if not is_sidecar:
+                if not is_sidecar and not is_symlink:
                     pending_extract.append(str(item.id))
                     # old_hash = the prior stored quick_hash; new_hash stays None
                     # (re-hashed async) so hash_change_only rules don't fire here.
@@ -700,10 +754,15 @@ async def _scan_body(
             else:
                 item.last_seen = datetime.now(UTC)
                 item.path = path  # keep absolute path current
+                # Backfill fs-identity onto rows scanned before §27 shipped
+                # (unchanged size/mtime means the diff branch above was skipped).
+                if item.inode is None and inode is not None:
+                    item.nlink, item.inode, item.dev = nlink, inode, dev
+                    item.symlink_target = symlink_target
                 if item.status == ItemStatus.missing:
                     item.status = ItemStatus.active
-                # committed but never extracted — self-heal (skip sidecars)
-                if item.quick_hash is None and not is_sidecar:
+                # committed but never extracted — self-heal (skip sidecars/symlinks)
+                if item.quick_hash is None and not is_sidecar and not is_symlink:
                     pending_extract.append(str(item.id))
 
             if len(seen) % FLUSH_EVERY == 0:
@@ -828,6 +887,15 @@ async def _scan_body(
                     _capture("moved", mo.survivor_rel_path, mo.survivor_id)
             except Exception:  # noqa: BLE001
                 pass
+        # A rename transfers identity onto the SURVIVING row: its id is unchanged
+        # (so the reconcile sweep, which compares id sets, sees no drift) but its
+        # rel_path/filename/path/path_scope all changed. Nothing re-extracts it
+        # (it was never new/changed, and its duplicate — which WAS queued — is
+        # deleted), so without an explicit re-index the search doc keeps the OLD
+        # path until the nightly full rebuild. Collect the survivor ids and defer
+        # a sync_items after the move commit (cross-library survivors already
+        # ride pending_extract -> extract -> index, so only intra moves need this).
+        move_survivor_ids = [mo.survivor_id for mo in moved_out]
 
         # --- Cross-library move identity (roadmap §13), after the intra pass --
         # New rows the intra-library pass left unmatched are compared against
@@ -991,6 +1059,16 @@ async def _scan_body(
 
             for start in range(0, len(changed_ids), 1000):
                 await sync_items.defer_async(item_ids=changed_ids[start : start + 1000])
+        # Re-index intra-library rename survivors (their location fields changed
+        # but id did not, so nothing else refreshes their doc). After the commits
+        # above, so the new rel_path/filename is what the projection reads.
+        if move_survivor_ids:
+            from filearr.tasks.index_sync import sync_items as _sync_moved
+
+            for start in range(0, len(move_survivor_ids), 1000):
+                await _sync_moved.defer_async(
+                    item_ids=move_survivor_ids[start : start + 1000]
+                )
         run.stats = {**run.stats, "sidecars": sidecar_stats}
         await notify_scan_progress(session, run.id)
         await session.commit()
