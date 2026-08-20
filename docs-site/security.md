@@ -122,7 +122,30 @@ csplit -sz -f cert- -b '%02d.pem' chain.pem '/BEGIN CERTIFICATE/' '{*}'
 
 `cert-00.pem` is the **leaf** (the DC's own certificate — don't paste that one;
 it changes on renewal). `cert-01.pem` onward are the issuing CA and, if the DC
-sends it, the root. Note many DCs send *only* the leaf — then use step 4.
+sends it, the root. **Many AD DCs send only the leaf** (the schannel LDAPS
+listener frequently omits intermediates) — if `cert-00.pem` is all you got, the
+console's *Fetch from server* will see the same single certificate, so build the
+chain yourself via step 3b (no Windows box needed) or step 4.
+
+**3b. Follow the leaf's AIA pointer.** The leaf certificate itself says where
+its issuing CA's certificate lives — the *Authority Information Access*
+extension's `CA Issuers` URI:
+
+```bash
+openssl x509 -in cert-00.pem -noout -issuer -ext authorityInfoAccess
+
+curl -o issuing.cer "http://<the CA Issuers URI printed above>"
+# AIA files may be DER, PKCS#7 or already-PEM — try in order:
+openssl x509 -inform der -in issuing.cer -out issuing.pem 2>/dev/null \
+  || openssl pkcs7 -print_certs -inform der -in issuing.cer -out issuing.pem 2>/dev/null \
+  || cp issuing.cer issuing.pem
+openssl x509 -in issuing.pem -noout -subject -issuer -fingerprint -sha256
+```
+
+If that certificate's `subject` ≠ `issuer` there's another tier above it —
+repeat the AIA extraction on `issuing.pem` until you reach the self-signed
+root. If the leaf carries no AIA extension (or the URI is internal-only and
+unreachable), use step 4.
 
 **3. Fingerprint** each CA cert and compare against the console's
 **Fetch from server** dialog (or your PKI documentation) before trusting:
