@@ -90,9 +90,16 @@ options besides a mounted `FILEARR_LDAP_TLS_CA_CERT_FILE` path:
 - **Fetch from server** connects to the LDAPS host and pulls the certificate
   chain it presents. AD DCs commonly present **only their leaf** — in that case
   the console completes the chain itself by following the certificate's AIA
-  *CA Issuers* pointers (each certificate carries the URL of its issuer's
-  certificate; DER, PEM and PKCS#7 payloads are handled, bounded in depth and
-  size). Certificates obtained that way are tagged **via AIA** in the listing.
+  *CA Issuers* pointers (each certificate carries the location of its issuer's
+  certificate). Three strategies per hop: **http(s)** AIA URIs (DER, PEM and
+  PKCS#7 payloads, bounded in depth and size); **`ldap:///`** AIA URIs — the
+  AD CS *default* publication — resolved against the same DC using the
+  service-bind credentials from the form (AD refuses anonymous directory
+  reads, so fill in the bind DN/password before fetching); and the AD CS
+  **CertEnroll** web-enrollment convention guessed from the issuer DN
+  (`http://<caHost>/CertEnroll/<caHost>_<CAName>.crt`), which needs no
+  credentials at all. Certificates obtained any of these ways are tagged
+  **via AIA** in the listing.
   Because the first connection is unvalidated (trust-on-first-use), the console
   shows every certificate's subject, issuer and **SHA-256 fingerprint** for you
   to verify out-of-band before trusting; it then pre-fills the box with the
@@ -100,10 +107,13 @@ options besides a mounted `FILEARR_LDAP_TLS_CA_CERT_FILE` path:
   then Save. Verification stays on (`ldap_tls_verify=true`) throughout — the
   fetched CA becomes the trust anchor, it does not disable checking.
   Cross-forest endpoints can each carry their own `tls_ca_cert_pem`.
-- **`scripts/fetch-ldaps-ca.sh <host[:port]> [out.pem]`** does the same from a
-  shell (openssl + curl): pulls the presented chain, walks AIA pointers until
-  rooted, prints each certificate's fingerprint for verification, and writes
-  the ready-to-paste CA bundle (leaf excluded).
+- **`scripts/fetch-ldaps-ca.sh [-D bind_dn -w password] <host[:port]> [out.pem]`**
+  does the same from a shell (openssl + curl, ldapsearch for the ldap path):
+  pulls the presented chain, walks AIA pointers (all three strategies above)
+  until rooted, prints each certificate's fingerprint for verification, and
+  writes the ready-to-paste CA bundle (leaf excluded). `-D`/`-w` supply the
+  service bind for `ldap:///` AIA URIs; without them the CertEnroll fallback
+  still resolves a stock AD CS PKI credential-free.
 
 ### Pulling and extracting the CA chain by hand {#ldaps-ca-extract}
 
@@ -152,8 +162,22 @@ openssl x509 -in issuing.pem -noout -subject -issuer -fingerprint -sha256
 
 If that certificate's `subject` ≠ `issuer` there's another tier above it —
 repeat the AIA extraction on `issuing.pem` until you reach the self-signed
-root. If the leaf carries no AIA extension (or the URI is internal-only and
-unreachable), use step 4.
+root. **If the URI printed is `ldap:///…?cACertificate?…`** (the AD CS
+default), curl can't help anonymously — AD refuses unauthenticated directory
+reads. Either read it with a service bind:
+
+```bash
+LDAPTLS_REQCERT=never ldapsearch -LLL -o ldif-wrap=no -x \
+  -H ldaps://dc01.corp.example.com:636 -D "cn=svc,dc=corp" -w '…' \
+  -b "<the DN from the URI, percent-decoded>" -s base cACertificate \
+  | awk -F':: ' '/^cACertificate/ {print $2}' | base64 -d > issuing.cer
+```
+
+or try the credential-free AD CS web-enrollment convention —
+`http://<caHost>/CertEnroll/<caHostFQDN>_<CAName>.crt` (the CA name is the
+issuer CN; with default `<Domain>-<HOST>-CA` naming the host is embedded in
+it). If the leaf carries no AIA extension at all (or nothing is reachable),
+use step 4.
 
 **3. Fingerprint** each CA cert and compare against the console's
 **Fetch from server** dialog (or your PKI documentation) before trusting:

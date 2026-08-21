@@ -383,3 +383,136 @@ async def test_fetch_cert_leaf_only_unreachable_aia_falls_back_to_leaf(api, monk
     assert body["ok"] is True and len(body["chain"]) == 1
     assert authconfig.validate_pem_chain(body["suggested_ca_pem"]) == 1
     assert "leaf" in body["note"]
+
+
+def _ad_leaf_and_root(aia_url: str | None) -> dict:
+    """An AD-style pair: self-signed root named CN=CORP-ATOM-CA,DC=corp,
+    DC=example and a leaf signed by it, optionally carrying an AIA pointer.
+    Mirrors a stock AD CS PKI where the DC presents only the leaf and the AIA
+    is an ldap:/// URI (or absent)."""
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import AuthorityInformationAccessOID, NameOID
+
+    ca_name = x509.Name([
+        # DER order: most-significant DC first (example → corp.example).
+        x509.NameAttribute(NameOID.DOMAIN_COMPONENT, "example"),
+        x509.NameAttribute(NameOID.DOMAIN_COMPONENT, "corp"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "CORP-ATOM-CA"),
+    ])
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dc01.corp.example")])
+    root_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def _build(subject, issuer, pubkey, signkey, *, ca, aia=None):
+        b = (
+            x509.CertificateBuilder()
+            .subject_name(subject).issuer_name(issuer).public_key(pubkey)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+        )
+        if aia:
+            b = b.add_extension(
+                x509.AuthorityInformationAccess([
+                    x509.AccessDescription(
+                        AuthorityInformationAccessOID.CA_ISSUERS,
+                        x509.UniformResourceIdentifier(aia),
+                    )
+                ]),
+                critical=False,
+            )
+        return b.sign(signkey, hashes.SHA256())
+
+    root = _build(ca_name, ca_name, root_key.public_key(), root_key, ca=True)
+    leaf = _build(leaf_name, ca_name, leaf_key.public_key(), root_key, ca=False,
+                  aia=aia_url)
+    der = serialization.Encoding.DER
+    return {"leaf": leaf.public_bytes(der), "root": root.public_bytes(der)}
+
+
+async def test_fetch_cert_resolves_ldap_aia_with_service_bind(api, monkeypatch):
+    from filearr.api import authconfig as api_mod
+
+    fx = _ad_leaf_and_root(
+        "ldap:///CN=CORP-ATOM-CA,CN=AIA,CN=Public%20Key%20Services,CN=Services,"
+        "CN=Configuration,DC=corp,DC=example?cACertificate?base"
+        "?objectClass=certificationAuthority"
+    )
+    monkeypatch.setattr(api_mod, "_fetch_chain", lambda host, port, timeout: [fx["leaf"]])
+    calls: list[tuple] = []
+
+    def _ldap_seam(host, dn, timeout, bind_dn, bind_password):
+        calls.append((host, dn, bind_dn, bind_password))
+        return [fx["root"]]
+
+    monkeypatch.setattr(api_mod, "_ldap_get_ca_certs", _ldap_seam)
+
+    def _no_http(url, timeout):
+        raise ValueError("no http route")
+
+    monkeypatch.setattr(api_mod, "_http_get", _no_http)
+    r = await api.post("/api/v1/auth-config/ldap/fetch-cert", json={
+        "ldap_server": "ldaps://dc01.corp.example:636",
+        "ldap_bind_dn": "cn=svc,dc=corp,dc=example",
+        "ldap_bind_password": "pw",
+    })
+    body = r.json()
+    assert body["ok"] is True, body
+    assert [c["via_aia"] for c in body["chain"]] == [False, True]
+    assert body["chain"][1]["is_self_signed"] is True
+    host, dn, bind_dn, bind_password = calls[0]
+    # The hostless ldap:/// URI resolves against the DC we fetched from, with
+    # the service bind, and the DN is percent-decoded.
+    assert host == "dc01.corp.example"
+    assert dn.startswith("CN=CORP-ATOM-CA,CN=AIA,CN=Public Key Services,")
+    assert (bind_dn, bind_password) == ("cn=svc,dc=corp,dc=example", "pw")
+    assert authconfig.validate_pem_chain(body["suggested_ca_pem"]) == 1
+
+
+async def test_fetch_cert_certenroll_fallback_no_credentials(api, monkeypatch):
+    from filearr.api import authconfig as api_mod
+
+    fx = _ad_leaf_and_root(None)  # no AIA at all — CertEnroll guess is the only path
+    monkeypatch.setattr(api_mod, "_fetch_chain", lambda host, port, timeout: [fx["leaf"]])
+    hits: list[str] = []
+
+    def _http_seam(url, timeout):
+        hits.append(url)
+        if url == "http://atom.corp.example/CertEnroll/atom.corp.example_CORP-ATOM-CA.crt":
+            return fx["root"]
+        raise ValueError("404")
+
+    monkeypatch.setattr(api_mod, "_http_get", _http_seam)
+    r = await api.post(
+        "/api/v1/auth-config/ldap/fetch-cert", json={"ldap_server": "ldaps://dc01.corp.example"}
+    )
+    body = r.json()
+    assert body["ok"] is True, body
+    assert [c["via_aia"] for c in body["chain"]] == [False, True]
+    # Host candidates derive from the issuer CN tokens + DC-components domain.
+    assert "http://corp.corp.example/CertEnroll/corp.corp.example_CORP-ATOM-CA.crt" in hits
+    assert authconfig.validate_pem_chain(body["suggested_ca_pem"]) == 1
+
+
+async def test_fetch_cert_ldap_aia_without_creds_notes_bind_needed(api, monkeypatch):
+    from filearr.api import authconfig as api_mod
+
+    fx = _ad_leaf_and_root("ldap:///CN=CORP-ATOM-CA,CN=AIA,DC=corp,DC=example?cACertificate")
+    monkeypatch.setattr(api_mod, "_fetch_chain", lambda host, port, timeout: [fx["leaf"]])
+
+    def _fail(*a, **k):
+        raise ValueError("unreachable")
+
+    monkeypatch.setattr(api_mod, "_http_get", _fail)
+    monkeypatch.setattr(api_mod, "_ldap_get_ca_certs", _fail)
+    r = await api.post(
+        "/api/v1/auth-config/ldap/fetch-cert", json={"ldap_server": "ldaps://dc01.corp.example"}
+    )
+    body = r.json()
+    assert body["ok"] is True and len(body["chain"]) == 1
+    assert "bind DN" in body["note"]

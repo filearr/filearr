@@ -143,6 +143,10 @@ def _http_get(url: str, timeout: float) -> bytes:
 
 
 def _aia_ca_issuer_urls(der: bytes) -> list[str]:
+    """CA-Issuers URIs from the AIA extension — http(s) AND ldap. AD CS
+    publishes ``ldap:///CN=<CA>,CN=AIA,...?cACertificate?...`` by DEFAULT and
+    an HTTP URL only when explicitly configured, so ldap URIs are the common
+    case on a stock AD PKI."""
     from cryptography import x509
     from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
 
@@ -159,8 +163,78 @@ def _aia_ca_issuer_urls(der: bytes) -> list[str]:
             ad.access_location, x509.UniformResourceIdentifier
         ):
             url = ad.access_location.value or ""
-            if url.lower().startswith(("http://", "https://")):
+            if url.lower().startswith(("http://", "https://", "ldap://")):
                 urls.append(url)
+    return urls
+
+
+def _ldap_get_ca_certs(
+    host: str, dn: str, timeout: float, bind_dn: str | None, bind_password: str | None
+) -> list[bytes]:
+    """``cACertificate`` values (DER) for one AIA ldap URI's DN, read from the
+    LDAPS host we are already talking to (a DC replicates the Configuration NC,
+    so a hostless ``ldap:///`` URI resolves against it). Uses the service bind
+    when given — AD refuses anonymous reads beyond the rootDSE. TLS is
+    deliberately unvalidated: this runs INSIDE the TOFU fetch whose purpose is
+    obtaining the trust anchor. Blocking; run in a threadpool (test seam)."""
+    import ssl
+
+    from ldap3 import BASE, Connection, Server, Tls
+
+    server = Server(
+        host, port=636, use_ssl=True, tls=Tls(validate=ssl.CERT_NONE),
+        connect_timeout=timeout,
+    )
+    conn = Connection(
+        server, user=bind_dn or None, password=bind_password or None,
+        auto_bind=True, receive_timeout=timeout,
+    )
+    try:
+        if not conn.search(dn, "(objectClass=*)", search_scope=BASE,
+                           attributes=["cACertificate"]):
+            return []
+        out: list[bytes] = []
+        for entry in conn.entries:
+            out.extend(
+                v for v in entry.entry_raw_attributes.get("cACertificate", []) if v
+            )
+        return out
+    finally:
+        conn.unbind()
+
+
+def _certenroll_urls(top_der: bytes, ldap_host: str) -> list[str]:
+    """Guessed AD CS web-enrollment URLs for the issuer's CA certificate —
+    the no-credential fallback when AIA is ldap-only and no service bind is
+    available. AD CS publishes ``http://<caHost>/CertEnroll/<caHostFQDN>_
+    <CAName>.crt`` (IIS paths are case-insensitive). The CA name comes from the
+    issuer CN; candidate hosts come from the default ``<Domain>-<HOST>-CA``
+    naming convention plus the DC we're already talking to; the DNS domain
+    comes from the issuer's DC components."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    cert = x509.load_der_x509_certificate(top_der)
+    cn = next(
+        (a.value for a in cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)), ""
+    )
+    if not isinstance(cn, str) or not cn:
+        return []
+    dcs = [
+        a.value
+        for a in cert.issuer.get_attributes_for_oid(NameOID.DOMAIN_COMPONENT)
+        if isinstance(a.value, str)
+    ]
+    domain = ".".join(reversed(dcs)).lower() if dcs else ""
+    hosts: list[str] = []
+    for token in cn.split("-"):
+        if token and token.upper() != "CA" and domain:
+            hosts.append(f"{token.lower()}.{domain}")
+    if ldap_host:
+        hosts.append(ldap_host)
+    urls: list[str] = []
+    for h in dict.fromkeys(hosts):
+        urls.append(f"http://{h}/CertEnroll/{h}_{cn}.crt")
     return urls
 
 
@@ -188,14 +262,37 @@ def _certs_from_payload(data: bytes) -> list[bytes]:
     return []
 
 
-def _complete_chain_via_aia(chain_der: list[bytes], timeout: float) -> list[bytes]:
+def _complete_chain_via_aia(
+    chain_der: list[bytes],
+    timeout: float,
+    ldap_host: str = "",
+    bind_dn: str | None = None,
+    bind_password: str | None = None,
+) -> list[bytes]:
     """Missing CA certificates for ``chain_der``, fetched by walking the top
     certificate's AIA ``CA Issuers`` pointers until the chain is rooted (top
-    cert self-signed) or nothing further is reachable. Best-effort: any fetch
-    or parse failure just stops the walk. Blocking; run in a threadpool."""
+    cert self-signed) or nothing further is reachable. Three strategies per
+    hop, in order: http(s) AIA URIs; ldap AIA URIs resolved against
+    ``ldap_host`` with the service bind (AD CS's default publication); and the
+    AD CS CertEnroll HTTP convention guessed from the issuer DN (works with no
+    credentials at all). Best-effort: any fetch or parse failure just moves to
+    the next candidate. Blocking; run in a threadpool."""
     import hashlib
+    from urllib.parse import unquote, urlsplit
 
     from cryptography import x509
+
+    def _candidates(url: str) -> list[bytes]:
+        if url.lower().startswith("ldap://"):
+            # ldap:///<DN>?<attrs>?<scope>?<filter> — hostless means "any DC";
+            # resolve against the server we are fetching from.
+            parts = urlsplit(url)
+            dn = unquote(parts.path.lstrip("/"))
+            host = parts.hostname or ldap_host
+            if not (dn and host):
+                return []
+            return _ldap_get_ca_certs(host, dn, timeout, bind_dn, bind_password)
+        return _certs_from_payload(_http_get(url, timeout))
 
     fetched: list[bytes] = []
     seen = {hashlib.sha256(d).hexdigest() for d in chain_der}
@@ -205,13 +302,16 @@ def _complete_chain_via_aia(chain_der: list[bytes], timeout: float) -> list[byte
         if top_cert.subject == top_cert.issuer:
             break  # rooted
         nxt: bytes | None = None
-        for url in _aia_ca_issuer_urls(top):
+        for url in _aia_ca_issuer_urls(top) + _certenroll_urls(top, ldap_host):
             try:
-                candidates = _certs_from_payload(_http_get(url, timeout))
+                candidates = _candidates(url)
             except Exception:  # noqa: BLE001
                 continue
             for cand in candidates:
-                cand_cert = x509.load_der_x509_certificate(cand)
+                try:
+                    cand_cert = x509.load_der_x509_certificate(cand)
+                except Exception:  # noqa: BLE001
+                    continue
                 if cand_cert.subject == top_cert.issuer:
                     nxt = cand
                     break
@@ -266,7 +366,10 @@ async def fetch_ldap_cert(
         return {"ok": False, "error": f"could not connect to {host}:{port}: {exc}"}
     if not chain_der:
         return {"ok": False, "error": "server presented no certificate"}
-    aia_der = await run_in_threadpool(_complete_chain_via_aia, chain_der, timeout)
+    aia_der = await run_in_threadpool(
+        _complete_chain_via_aia, chain_der, timeout, host,
+        eff.ldap_bind_dn, eff.ldap_bind_password,
+    )
     chain = [{**_describe_cert(d), "via_aia": False} for d in chain_der] + [
         {**_describe_cert(d), "via_aia": True} for d in aia_der
     ]
@@ -285,6 +388,11 @@ async def fetch_ldap_cert(
         note = ("server sent only its leaf certificate and it carries no reachable "
                 "AIA pointer; trusting the leaf directly will break when that "
                 "certificate is renewed — prefer importing the CA")
+        if any(u.lower().startswith("ldap://") for u in _aia_ca_issuer_urls(chain_der[0])) \
+                and not eff.ldap_bind_dn:
+            note = ("the certificate's CA pointer is an ldap:// URI, which needs "
+                    "credentials to read (AD refuses anonymous directory reads) — "
+                    "fill in the bind DN and password above, then fetch again")
     return {
         "ok": True,
         "host": host,
