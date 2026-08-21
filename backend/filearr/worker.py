@@ -1130,6 +1130,27 @@ async def purge_job_history(timestamp: int) -> int:
 
 @proc_app.task(
     queue="maintenance",
+    name="filearr.worker.taxonomy_upkeep",
+    queueing_lock="taxonomy-upkeep",  # FIX-8: no retry (periodic re-runs)
+)
+async def taxonomy_upkeep(timestamp: int) -> dict:
+    """Watermark-guarded taxonomy upkeep (2026-08-21): adopt a changed shipped
+    seed (add-only; once per deploy that widened it) and reconverge item
+    classifications when the taxonomy version moved (once per edit burst).
+    Both checks are two cheap reads — the expensive passes run only on actual
+    drift, never on the bare timer. See :mod:`filearr.taxonomy_ops`."""
+    return await taxonomy_upkeep_now()
+
+
+async def taxonomy_upkeep_now() -> dict:
+    from filearr import taxonomy_ops
+
+    async with SessionLocal() as session:
+        return await taxonomy_ops.upkeep_now(session)
+
+
+@proc_app.task(
+    queue="maintenance",
     name="filearr.worker.purge_app_logs",
     queueing_lock="purge-app-logs",  # FIX-8: no retry (periodic re-runs)
 )

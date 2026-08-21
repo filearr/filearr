@@ -35,6 +35,13 @@ KEY_SESSION_TTL_HOURS = "session_ttl_hours"
 KEY_LDAP_CONFIG = "ldap_config"
 KEY_LDAP_DIRECTORY_CONFIG = "ldap_directory_config"
 KEY_OIDC_CONFIG = "oidc_config"
+# Taxonomy-upkeep watermarks (2026-08-21, filearr.taxonomy_ops): the shipped-seed
+# fingerprint last adopted, and the taxonomy version the catalogue was last
+# reclassified under. They make the periodic upkeep task event-driven — the
+# expensive passes run only when a deploy changed the seed / an edit bumped the
+# version, never on a bare timer.
+KEY_TAXONOMY_SEED_FINGERPRINT = "taxonomy_seed_fingerprint"
+KEY_TAXONOMY_RECLASSIFIED_VERSION = "taxonomy_reclassified_version"
 KNOWN_KEYS = frozenset(
     {
         KEY_SESSION_INACTIVITY_HOURS,
@@ -42,6 +49,8 @@ KNOWN_KEYS = frozenset(
         KEY_LDAP_CONFIG,
         KEY_LDAP_DIRECTORY_CONFIG,
         KEY_OIDC_CONFIG,
+        KEY_TAXONOMY_SEED_FINGERPRINT,
+        KEY_TAXONOMY_RECLASSIFIED_VERSION,
     }
 )
 

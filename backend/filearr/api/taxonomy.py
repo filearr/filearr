@@ -230,124 +230,24 @@ async def sync_seed(
     Existing ITEMS keep their stored classification either way; run
     ``POST /system/reclassify-extensions`` afterwards to apply the widened
     taxonomy to rows already in the catalogue (no rescan needed)."""
-    from filearr import file_groups
+    from filearr import taxonomy_ops
 
-    # Current DB state. An unseeded DB (no version row) still answers here — its
-    # tables are simply empty, and this endpoint is then the thing that seeds it.
-    db_exts = {
-        row.ext: row
-        for row in (await session.execute(select(FileGroupExtension))).scalars().all()
-    }
-    db_groups = {
-        g.key: g for g in (await session.execute(select(FileGroupModel))).scalars().all()
-    }
-    db_cats = {
-        c.key: c
-        for c in (await session.execute(select(FileCategoryModel))).scalars().all()
-    }
-
-    created_categories: list[str] = []
-    created_groups: list[str] = []
-    added: dict[str, list[str]] = {}
-    skipped: list[dict[str, str]] = []
-
-    # --- categories/groups the seed has and the DB does not --------------------
-    for cat_key, cat in file_groups.FILE_CATEGORIES.items():
-        if cat_key in db_cats:
-            continue
-        created_categories.append(cat_key)
-        if not dry_run:
-            row = FileCategoryModel(
-                key=cat_key,
-                label=cat.label,
-                description=cat.description,
-                extractor=cat.extractor,
-                is_builtin=True,
-            )
-            session.add(row)
-            db_cats[cat_key] = row
-    if created_categories and not dry_run:
-        await session.flush()  # category ids are needed for the group FK below
-
-    for group_key, group in file_groups.FILE_GROUPS.items():
-        if group_key in db_groups:
-            continue
-        cat_key = file_groups._GROUP_CATEGORY.get(group_key)
-        parent = db_cats.get(cat_key) if cat_key else None
-        if parent is None:
-            # A seed group whose category we could neither find nor create: skip
-            # rather than invent a parent. Reported so it is not invisible.
-            skipped.append({"group": group_key, "reason": "no such category in the taxonomy"})
-            continue
-        created_groups.append(group_key)
-        if not dry_run:
-            row = FileGroupModel(
-                key=group_key,
-                label=group.label,
-                description=group.description or "",
-                category_id=parent.id,
-                is_builtin=True,
-            )
-            session.add(row)
-            db_groups[group_key] = row
-    if created_groups and not dry_run:
-        await session.flush()  # group ids are needed for the extension FK below
-
-    # --- extensions ------------------------------------------------------------
-    for ext, group_key in file_groups.EXT_GROUP_MAP.items():
-        existing = db_exts.get(ext)
-        if existing is not None:
-            # Already mapped. Report it ONLY when the operator's placement differs
-            # from the seed's — an ext already sitting where the seed wants it is
-            # not interesting, and listing all ~1200 would bury the signal.
-            current = next(
-                (k for k, g in db_groups.items() if g.id == existing.group_id), None
-            )
-            if current is not None and current != group_key:
-                skipped.append({"ext": ext, "kept_in": current, "seed_wants": group_key})
-            continue
-        target = db_groups.get(group_key)
-        if target is None:
-            skipped.append({"ext": ext, "reason": f"group {group_key!r} missing"})
-            continue
-        added.setdefault(group_key, []).append(ext)
-        if not dry_run:
-            session.add(FileGroupExtension(ext=ext, group_id=target.id))
-
-    total_added = sum(len(v) for v in added.values())
-    version: int | None = None
-    if not dry_run and (total_added or created_groups or created_categories):
-        version = await _finish(session)
+    result = await taxonomy_ops.sync_seed_now(session, dry_run=dry_run)
+    if not dry_run and (
+        result["added_count"] or result["created_groups"] or result["created_categories"]
+    ):
         await audit.emit(
             audit.TAXONOMY_SEED_SYNCED,
             request=request,
             principal_id=audit.actor_id(request),
             details={
-                "added": total_added,
-                "created_groups": created_groups,
-                "created_categories": created_categories,
-                "version": version,
+                "added": result["added_count"],
+                "created_groups": result["created_groups"],
+                "created_categories": result["created_categories"],
+                "version": result["version"],
             },
         )
-    elif not dry_run:
-        # Nothing to do: do NOT bump the version. A no-op sync that invalidated
-        # every agent's cached taxonomy would be a fleet-wide refetch for nothing.
-        await session.rollback()
-
-    return {
-        "dry_run": dry_run,
-        "added_count": total_added,
-        "added": {k: sorted(v) for k, v in sorted(added.items())},
-        "created_categories": created_categories,
-        "created_groups": created_groups,
-        "skipped": skipped,
-        "version": version,
-        "note": (
-            "Existing items keep their stored classification. Run "
-            "POST /system/reclassify-extensions to apply this to rows already in "
-            "the catalogue — no rescan required."
-        ),
-    }
+    return result
 
 
 # --------------------------------------------------------------------------- #

@@ -19,7 +19,7 @@ from filearr.errors import (
 )
 from filearr.jobs_stats import jobs_summary, running_jobs, thumbnail_totals
 from filearr.meili_stats import meili_snapshot
-from filearr.models import AppLog, Item, ItemStatus, Library
+from filearr.models import AppLog, Item, Library
 from filearr.queue_stats import queue_snapshot
 from filearr.schemas import FailedJobPage
 from filearr.security import require_scope
@@ -1211,13 +1211,6 @@ async def set_job_priority(
     }
 
 
-#: Batch size for deferring index_sync jobs after a reclassify pass. Bounds how
-#: many item ids ride a single ``sync_items`` job (and thus one Meili upsert
-#: batch) so a large reclass fans out across many small, retryable jobs instead
-#: of one giant payload.
-RECLASSIFY_SYNC_BATCH = 1000
-
-
 @router.post(
     "/system/reclassify-extensions",
     dependencies=[Depends(require_scope("admin"))],
@@ -1242,69 +1235,9 @@ async def reclassify_extensions(
     ``index_sync`` path, deferred in bounded ``RECLASSIFY_SYNC_BATCH``-sized jobs.
     Returns ``{changed, by_category}`` where ``by_category`` maps each destination
     ``file_category`` to how many rows moved INTO it."""
-    from filearr import taxonomy, worker
+    from filearr import taxonomy_ops
 
-    # Snapshot the current taxonomy and derive the ext -> (category, group) map.
-    tax = await taxonomy.load(session)
-    # Group extensions by their (category, group) target so each target is one
-    # bounded set-based UPDATE.
-    targets: dict[tuple[str, str], list[str]] = {}
-    for ext, group in tax.ext_to_group.items():
-        category = tax.group_to_category.get(group, taxonomy.CATEGORY_OTHER)
-        targets.setdefault((category, group), []).append(ext)
-    all_mapped = list(tax.ext_to_group.keys())
-
-    counts: dict[str, int] = {}
-    changed_ids: list[str] = []
-
-    for (category, group), exts in targets.items():
-        result = await session.execute(
-            update(Item)
-            .where(
-                Item.status == ItemStatus.active,
-                Item.extension.in_(exts),
-                or_(
-                    Item.file_category.is_distinct_from(category),
-                    Item.file_group.is_distinct_from(group),
-                ),
-            )
-            .values(file_category=category, file_group=group)
-            .returning(Item.id)
-        )
-        ids = [str(r[0]) for r in result]
-        if ids:
-            counts[category] = counts.get(category, 0) + len(ids)
-            changed_ids.extend(ids)
-
-    # Reconciliation: an item whose extension is NULL or no longer mapped falls back
-    # to (other, other) (matches taxonomy.detect). ``NOT IN`` is NULL-blind, so the
-    # explicit ``IS NULL`` arm is required to catch extensionless files.
-    result = await session.execute(
-        update(Item)
-        .where(
-            Item.status == ItemStatus.active,
-            or_(Item.extension.is_(None), Item.extension.notin_(all_mapped)),
-            or_(
-                Item.file_category.is_distinct_from(taxonomy.CATEGORY_OTHER),
-                Item.file_group.is_distinct_from(taxonomy.GROUP_OTHER),
-            ),
-        )
-        .values(file_category=taxonomy.CATEGORY_OTHER, file_group=taxonomy.GROUP_OTHER)
-        .returning(Item.id)
-    )
-    other_ids = [str(r[0]) for r in result]
-    if other_ids:
-        counts[taxonomy.CATEGORY_OTHER] = counts.get(taxonomy.CATEGORY_OTHER, 0) + len(other_ids)
-        changed_ids.extend(other_ids)
-
-    await session.commit()
-
-    # Re-project changed rows through the normal incremental index path, in
-    # bounded batches (invariant 1: Meili is a rebuildable projection of PG).
-    for i in range(0, len(changed_ids), RECLASSIFY_SYNC_BATCH):
-        await worker.defer_index_sync(changed_ids[i : i + RECLASSIFY_SYNC_BATCH])
-
-    return {"changed": len(changed_ids), "by_category": counts}
+    return await taxonomy_ops.reclassify_now(session)
 
 
 

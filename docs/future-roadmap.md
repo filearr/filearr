@@ -1438,6 +1438,15 @@ still pointed at it as if it were pending. Closed out properly:
   `xaml` → markup, `qml` → source-code, `vbproj`/`fsproj` → config-data
   (beside their csproj/sln siblings), `chitubox`/`ctb` (resin-slicer project +
   sliced output) → 3d-model.
+- **Automated (2026-08-21, follow-up):** both halves now run themselves via
+  the watermark-guarded **Taxonomy upkeep** maintenance task (every 15 min,
+  editable on the Jobs page; `filearr.taxonomy_ops`). Watermarks in
+  app_settings — `taxonomy_seed_fingerprint` (seed adopted once per deploy
+  that changed it) and `taxonomy_reclassified_version` (one reclassify per
+  version bump, debouncing edit bursts) — make it event-driven: a quiet run
+  costs two reads. The deliberate non-choice: an unguarded nightly reclassify
+  (dozens of UPDATE scans over 1.37M rows for nothing). Manual buttons remain
+  for immediacy; endpoints delegate to the same shared ops.
 - **Standing activity, not a task:** the unmapped report stays the feed;
   review its top rows occasionally, map what's real media/data via the
   taxonomy GUI, leave junk unmapped (policy: "other is a signal, not a

@@ -190,6 +190,19 @@ _SPECS: tuple[MaintTaskSpec, ...] = (
         lock="reconcile-meili", editable=True,
     ),
     MaintTaskSpec(
+        key="taxonomy_upkeep",
+        task_name="filearr.worker.taxonomy_upkeep",
+        title="Taxonomy upkeep",
+        description=(
+            "Adopts extensions a software update added to the built-in "
+            "taxonomy seed (add-only; your own placements always win) and "
+            "reclassifies catalogued items after any taxonomy change — both "
+            "watermark-guarded, so a run with nothing to do costs two reads."
+        ),
+        category="integrity", default_cron="*/15 * * * *",
+        lock="taxonomy-upkeep", editable=True,
+    ),
+    MaintTaskSpec(
         key="nightly_reconcile",
         task_name="filearr.worker.nightly_reconcile",
         title="Nightly deep reconcile",
