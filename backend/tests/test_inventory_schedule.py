@@ -111,6 +111,11 @@ async def test_tick_enqueues_once_per_occurrence(maker, monkeypatch):
     async with maker() as s:
         cmd = (await s.execute(select(AgentCommand))).scalars().one()
         cmd.status = "done"
+        # The once-per-occurrence cursor is the command's created_at, which the
+        # DB stamped with REAL now. Pin it to the simulated first occurrence or
+        # this test breaks the day the real clock passes next_tick (it did on
+        # 2026-08-21: real-now > Aug-21-03:00 made the occurrence look consumed).
+        cmd.created_at = datetime(2026, 8, 20, 3, 0, tzinfo=UTC)
         await s.commit()
     assert await worker_mod.schedule_agent_inventories(next_tick) == 1
 

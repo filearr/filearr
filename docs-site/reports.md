@@ -32,7 +32,7 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 |---|---|
 | `unmapped_extensions` | Which extensions landed in the "other" catch-all — feeds extension-map expansion. |
 | `bad_mtime` | Files dated more than 48 h in the **future** (bad clock, timezone bug, corrupt timestamp). |
-| `corrupt_media` | Items that recorded an extraction error, split into ffprobe/decode rejections vs. tag-parser errors. |
+| `corrupt_media` | Items that recorded an extraction error, grouped by **kind** — `guard` (a size/decompression/timeout ceiling refused the file; raise the limit, then retry), `corrupt` (the file's bytes defeated the parser), `dependency` (image missing a module), `error` (everything else) — plus the ffprobe-vs-tag decode classification for media. |
 | `largest_files` | Top N by size. |
 | `largest_folders` | Every folder at every depth with its **recursive** (du-style) total. |
 | `low_quality_video` | Probed video scored against resolution / codec / bitrate-per-pixel floors. |

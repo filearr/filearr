@@ -1250,7 +1250,7 @@
       independently and without blocking other agents or the worker queues —
       so it appears here rather than under running jobs.
     </p>
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Agent</th>
@@ -1269,13 +1269,13 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
   {/if}
 
   <!-- Running scans -->
   {#if summary && summary.scans_running.length > 0}
     <h3 class="mt-6 text-base font-semibold">Running scans</h3>
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Library</th>
@@ -1314,13 +1314,13 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
   {/if}
 
   <!-- Running now -->
   <h3 class="mt-6 text-base font-semibold">Running now</h3>
   {#if summary && summary.running.length > 0}
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Task</th>
@@ -1367,7 +1367,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
     <p class="mt-2 text-xs text-slate-500">
       Attempts shows tries used against each task's genuine-failure retry budget
       (attempts/cap). Extract re-queues itself while a scan is running — those waits
@@ -1395,7 +1395,7 @@
     {/if}
   </div>
   {#if failures.length > 0}
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Task</th>
@@ -1421,7 +1421,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
     <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
       <span>
         {failuresOffset + 1}–{Math.min(failuresOffset + FAILED_PAGE, failuresTotal)} of {failuresTotal}
@@ -1454,7 +1454,7 @@
       apply within a minute — no restart. Monitors and system ticks are fixed by
       design.
     </p>
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Task</th>
@@ -1582,7 +1582,7 @@
           {/if}
         {/each}
       </tbody>
-    </table>
+    </table></div>
   {/if}
 
   <!--
@@ -1616,7 +1616,7 @@
     {#if backupMsg}<span class="text-xs text-slate-500">{backupMsg}</span>{/if}
   </div>
   {#if backups.length > 0}
-    <table class="mt-2 w-full text-sm">
+    <div class="mt-2 overflow-x-auto"><table class="w-full min-w-[44rem] text-sm">
       <thead>
         <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
           <th class="py-2 pr-3 font-medium">Bundle</th>
@@ -1656,7 +1656,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
   {:else}
     <p class="mt-2 text-xs text-slate-500">
       No bundles yet. Backups written here live on the config volume — download

@@ -1171,7 +1171,7 @@
         title="Delete every failed job history row now. Does not affect queued or running work; failed rows also age out automatically on retention.">
         {clearingFailed ? "Clearing…" : "Clear failed history"}</button>
     </div>
-    <table class="mt-2 w-full text-sm">
+    <div class="overflow-x-auto"><table class="mt-2 w-full text-sm">
       <thead>
         <tr class="text-left text-slate-500">
           <th class="py-2 pr-3">Queue</th>
@@ -1196,7 +1196,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
     <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
       <span>
         {failedOffset + 1}–{Math.min(failedOffset + FAILED_PAGE, failedTotal)} of {failedTotal}

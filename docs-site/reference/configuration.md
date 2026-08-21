@@ -233,6 +233,18 @@ now*; results are cached for 6 hours.
 
 ## Extraction limits (safety caps)
 
+**Per-library overrides:** each library can override these limits — the
+timeouts (`FILEARR_EXTRACT_TIMEOUT_SECONDS`, `FILEARR_FFPROBE_TIMEOUT_S`) and
+the size/decompression ceilings (`FILEARR_DOCUMENT_MAX_BYTES`,
+`FILEARR_DOC_DECOMPRESSED_MAX`, `FILEARR_DOC_DECOMPRESSION_RATIO`,
+`FILEARR_DOC_DECOMPRESSION_RATIO_MIN_BYTES`, `FILEARR_MODEL3D_MAX_BYTES`,
+`FILEARR_EMAIL_MAX_BYTES`) — under **Extraction limits** in the library's edit
+form (or `extract_overrides` on the libraries API). A 3D-print library full of
+multi-GiB zips can raise its decompression ceiling without loosening the guard
+for every other share. Blank/absent fields keep the global value; changes
+apply to future extractions (use *retry* on failed items to re-run them under
+the new limits).
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `FILEARR_FFPROBE_TIMEOUT_S` | `30` | ffprobe wall-clock cap. |

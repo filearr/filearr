@@ -4,9 +4,29 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from filearr.models import HashPolicy
+
+
+def _validate_extract_overrides(v: dict | None) -> dict | None:
+    """Shared LibraryIn/LibraryUpdate check for ``extract_overrides``: keys
+    must be allow-listed (config.EXTRACT_OVERRIDE_KEYS), values positive
+    numbers. ``{}`` normalises to None (= no overrides)."""
+    if v is None:
+        return None
+    from filearr.config import EXTRACT_OVERRIDE_KEYS
+
+    unknown = sorted(set(v) - EXTRACT_OVERRIDE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"unknown extract_overrides key(s) {unknown}; "
+            f"allowed: {sorted(EXTRACT_OVERRIDE_KEYS)}"
+        )
+    for key, value in v.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"extract_overrides[{key!r}] must be a positive number")
+    return v or None
 
 
 class LibraryIn(BaseModel):
@@ -56,6 +76,14 @@ class LibraryIn(BaseModel):
     # deliberately skip, which is slow on rclone/SMB where big pruned trees
     # (.git/.venv) live. Enable when an item count disagrees with the OS.
     count_pruned_files: bool = False
+    # Per-library extraction-limit overrides: allow-listed Settings keys
+    # (timeouts + size/decompression ceilings) overlaid onto the global config
+    # for this library's extract jobs. None = global settings.
+    extract_overrides: dict[str, float] | None = None
+
+    _check_extract_overrides = field_validator("extract_overrides")(
+        _validate_extract_overrides
+    )
 
 
 class LibraryUpdate(BaseModel):
@@ -80,7 +108,12 @@ class LibraryUpdate(BaseModel):
     chunking_enabled: bool | None = None
     expose_gps: bool | None = None
     count_pruned_files: bool | None = None
+    extract_overrides: dict[str, float] | None = None
     enabled: bool | None = None
+
+    _check_extract_overrides = field_validator("extract_overrides")(
+        _validate_extract_overrides
+    )
 
 
 class LastScan(BaseModel):

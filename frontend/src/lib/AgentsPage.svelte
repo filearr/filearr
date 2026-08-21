@@ -2297,7 +2297,7 @@ ${detail}
               </div>
               {#if modulesOpen[a.id] && rep.modules?.length}
                 <div class="mt-1 max-h-80 overflow-y-auto">
-                  <table class="w-full text-[11px]">
+                  <div class="overflow-x-auto"><table class="w-full text-[11px]">
                     <thead class="text-left text-slate-500">
                       <tr class="border-b border-slate-200 dark:border-slate-800">
                         <th class="py-1 pr-3 font-medium">Module</th>
@@ -2316,7 +2316,7 @@ ${detail}
                         </tr>
                       {/each}
                     </tbody>
-                  </table>
+                  </table></div>
                 </div>
               {/if}
             </div>
@@ -3015,7 +3015,7 @@ ${detail}
           {:else if historyRows.length === 0}
             <p class="mt-2 text-sm text-slate-400">No versions recorded for this group.</p>
           {:else}
-            <table class="mt-2 w-full text-xs">
+            <div class="overflow-x-auto"><table class="mt-2 w-full text-xs">
               <thead class="text-left text-slate-500">
                 <tr>
                   <th class="py-1 pr-3 font-medium">Version</th>
@@ -3066,7 +3066,7 @@ ${detail}
                   {/if}
                 {/each}
               </tbody>
-            </table>
+            </table></div>
           {/if}
         </div>
       {:else}

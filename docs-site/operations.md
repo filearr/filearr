@@ -567,7 +567,10 @@ return the count requeued. Anything still broken simply re-records its error.
 
 Reading the error kinds: **guard** rejections (size/decompression ceilings —
 messages show human-readable sizes) will fail again identically until the
-relevant `FILEARR_*` ceiling is raised, so raise the config first, then retry;
+relevant ceiling is raised, so raise it first, then retry — either the global
+`FILEARR_*` env or, better, just for the affected library via **Extraction
+limits** in its edit form (see
+[per-library overrides](reference/configuration.md#extraction-limits-safety-caps));
 **corrupt** means the file's own bytes defeated the parser; **dependency**
 means the image is missing a module (a deployment problem, not a file
 problem); a timeout suggests tuning `FILEARR_EXTRACT_TIMEOUT_SECONDS`.

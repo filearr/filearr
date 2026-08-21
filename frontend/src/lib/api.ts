@@ -428,6 +428,9 @@ export interface Library {
   watch_mode: boolean;
   hash_policy: HashPolicy;
   hash_full_max_bytes: number | null;
+  /** Per-library extraction-limit overrides (allow-listed Settings keys:
+   *  timeouts + size/decompression ceilings). null = global settings. */
+  extract_overrides: Record<string, number> | null;
   ocr_enabled: boolean;
   chunking_enabled: boolean;
   expose_gps: boolean;
@@ -718,6 +721,7 @@ export const createLibrary = (body: {
   watch_mode?: boolean;
   hash_policy?: HashPolicy;
   hash_full_max_bytes?: number | null;
+  extract_overrides?: Record<string, number> | null;
   ocr_enabled?: boolean;
   chunking_enabled?: boolean;
   expose_gps?: boolean;
@@ -743,6 +747,7 @@ export const updateLibrary = (
     watch_mode: boolean;
     hash_policy: HashPolicy;
     hash_full_max_bytes: number | null;
+    extract_overrides: Record<string, number> | null;
     ocr_enabled: boolean;
   chunking_enabled: boolean;
     expose_gps: boolean;

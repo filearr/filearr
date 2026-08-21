@@ -376,12 +376,26 @@ def _build_corrupt(params: ReportParams) -> Select:
             Library.native_prefix.label("native_prefix"),
             Library.share_prefix.label("share_prefix"),
             Item.metadata_["_extract_error"].astext.label("error_text"),
+            Item.metadata_["_extract_error_kind"].astext.label("error_kind"),
         )
         .join(Library, Item.library_id == Library.id)
         .where(_ACTIVE, Item.metadata_.has_key("_extract_error"))
-        .order_by(Item.rel_path.asc())
+        # Group rows by recorded kind first (guard/corrupt/dependency/error;
+        # NULL = pre-classification rows, normalised to "error" in the row
+        # shaper) so the report reads as sorted-by-error-type out of the box.
+        .order_by(
+            Item.metadata_["_extract_error_kind"].astext.asc().nulls_last(),
+            Item.rel_path.asc(),
+        )
     )
     return _apply_library(stmt, params)
+
+
+#: The recorded ``_extract_error_kind`` vocabulary (see tasks.extract._error_kind
+#: and the typed extractor errors). Anything else — including the NULL of a row
+#: written before kinds existed — normalises to the neutral "error" bucket,
+#: matching ``errors.failing_items``.
+_KNOWN_ERROR_KINDS = ("guard", "corrupt", "dependency")
 
 
 def _row_corrupt(r: Any) -> dict:
@@ -389,6 +403,7 @@ def _row_corrupt(r: Any) -> dict:
         "item_id": str(r.item_id),
         "rel_path": r.rel_path,
         "library": r.library,
+        "kind": r.error_kind if r.error_kind in _KNOWN_ERROR_KINDS else "error",
         "error_class": _classify_extract_error(r.error_text),
         "error_text": r.error_text or "",
         **_path_context(r),
@@ -822,11 +837,15 @@ _REPORTS: tuple[CannedReport, ...] = (
         id="corrupt_media",
         title="Extraction errors",
         description=(
-            "Items that recorded an extraction error, classified as an ffprobe / "
-            "media-decode rejection (likely corrupt/truncated media) vs. a "
-            "tag/parser-level error."
+            "Items that recorded an extraction error, grouped by error kind — "
+            "guard (a size/decompression/timeout ceiling refused the file; raise "
+            "the limit and retry), corrupt (the file's own bytes defeated the "
+            "parser), dependency (the image is missing a module), error "
+            "(everything else) — plus the ffprobe-vs-tag classification for "
+            "media."
         ),
-        columns=("rel_path", "library", "error_class", "error_text", *PATH_CONTEXT_COLUMNS),
+        columns=("rel_path", "library", "kind", "error_class", "error_text",
+                 *PATH_CONTEXT_COLUMNS),
         build=_build_corrupt,
         row=_row_corrupt,
         supports_library=True,

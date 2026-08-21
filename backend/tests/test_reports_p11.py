@@ -307,9 +307,32 @@ async def test_corrupt_media_classifies_ffprobe_vs_tag(api):
         metadata={"_extract_error": "tinytag could not read tags"},
     )
     await _mk_item(maker, lib, "clean.bin", metadata={})
+    # Recorded kinds (2026-08-21: sortable error category column).
+    await _mk_item(
+        maker, lib, "huge.zip", file_category="archive", file_group="archive",
+        metadata={"_extract_error": "decompression guard: declared uncompressed size "
+                                    "5.57 GiB exceeds the 1 GiB ceiling",
+                  "_extract_error_kind": "guard"},
+    )
+    await _mk_item(
+        maker, lib, "broken.pdf", file_category="document", file_group="doc",
+        metadata={"_extract_error": "EOF marker not found",
+                  "_extract_error_kind": "corrupt"},
+    )
     r = await client.get("/api/v1/reports/corrupt_media")
-    rows = {row["rel_path"]: row["error_class"] for row in r.json()["rows"]}
-    assert rows == {"bad.mkv": "ffprobe", "song.mp3": "tag"}
+    body = r.json()
+    rows = {row["rel_path"]: row["error_class"] for row in body["rows"]}
+    assert rows == {"bad.mkv": "ffprobe", "song.mp3": "tag",
+                    "huge.zip": "tag", "broken.pdf": "tag"}
+    kinds = {row["rel_path"]: row["kind"] for row in body["rows"]}
+    # Pre-kind rows (no _extract_error_kind) normalise to the neutral bucket.
+    assert kinds == {"bad.mkv": "error", "song.mp3": "error",
+                     "huge.zip": "guard", "broken.pdf": "corrupt"}
+    # Rows arrive grouped by kind (recorded kinds first, NULLs last).
+    assert [row["rel_path"] for row in body["rows"]] == [
+        "broken.pdf", "huge.zip", "bad.mkv", "song.mp3",
+    ]
+    assert "kind" in body["columns"]
 
 
 async def test_largest_files_capped_and_ordered(api):

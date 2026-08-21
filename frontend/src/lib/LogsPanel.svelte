@@ -121,7 +121,7 @@
     <p class="text-sm text-slate-500">No log records match. The stream fills as the app and worker run{minLevel !== "info" ? " — try the info+ level" : ""}.</p>
   {:else}
     <div class="max-h-96 overflow-y-auto font-mono text-xs">
-      <table class="w-full border-collapse">
+      <div class="overflow-x-auto"><table class="w-full border-collapse">
         <tbody>
           {#each rows as r (r.id)}
             <tr class="border-b border-slate-100 align-top dark:border-slate-800">
@@ -146,7 +146,7 @@
             </tr>
           {/each}
         </tbody>
-      </table>
+      </table></div>
     </div>
     {#if nextBeforeId !== null}
       <button

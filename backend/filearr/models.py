@@ -163,6 +163,13 @@ class Library(Base):
     # Per-library override of FILEARR_SCAN_HASH_FULL_MAX_BYTES: files at/below this
     # many bytes may be full-hashed. NULL -> fall back to the global setting.
     hash_full_max_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Per-library extraction-limit overrides (2026-08-21): a small JSONB map of
+    # allow-listed Settings keys (config.EXTRACT_OVERRIDE_KEYS — timeouts and
+    # size/decompression ceilings) overlaid onto the global config for THIS
+    # library's extract jobs. NULL/empty -> global settings apply unchanged.
+    # Validated at the API boundary AND re-validated on read
+    # (config.clean_extract_overrides).
+    extract_overrides: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # P3-T6 (R4): per-library opt-in for the CPU-costly Tesseract OCR pass.
     # Global default is OFF (FILEARR_OCR_ENABLED=false); flipping this true opts a
     # library in. Mirrors the watch_mode boolean mapping.

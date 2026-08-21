@@ -4,6 +4,7 @@ content_hash only when the library's resolved hash policy (T7) permits it and th
 file is at/below the (per-library or global) size ceiling."""
 
 import asyncio
+import contextvars
 import logging
 import random
 import re
@@ -17,7 +18,7 @@ from sqlalchemy import select, text
 
 from filearr import taxonomy
 from filearr.backpressure import extract_limiter
-from filearr.config import get_settings
+from filearr.config import clean_extract_overrides, get_settings
 from filearr.db import SessionLocal
 from filearr.errors import sanitize_error
 from filearr.hashpolicy import resolve_hash_policy
@@ -35,6 +36,22 @@ QUICK_CHUNK = 65536  # 64 KiB head + tail
 # column. Matches errors.MAX_ERROR_CHARS so a single pathological tag can never
 # bloat a row; ``title`` (Text) has no DB-level length limit, so we enforce one.
 STR_CAP = 500
+
+# Per-library extraction overrides (Library.extract_overrides, 2026-08-21).
+# ``extract_item`` installs the overlaid Settings here for the duration of one
+# job; the extractor wrappers below read config through effective_settings()
+# so the overlay reaches them even inside asyncio.to_thread (contextvars are
+# copied into the thread). Everything else in the codebase keeps calling
+# get_settings() and never sees a library overlay.
+_settings_override: contextvars.ContextVar = contextvars.ContextVar(
+    "filearr_extract_settings_override", default=None
+)
+
+
+def effective_settings():
+    """The Settings for the CURRENT extract job: the per-library overlay when
+    one is installed, else the global config."""
+    return _settings_override.get() or get_settings()
 
 
 def _error_kind(exc: BaseException) -> str:
@@ -456,7 +473,6 @@ def extract_video(path: str) -> dict[str, Any]:
     """
     from guessit import guessit
 
-    from filearr.config import get_settings
     from filearr.tasks.ffprobe import FfprobeError, extract_video_tech
 
     guessed = guessit(path)
@@ -475,7 +491,7 @@ def extract_video(path: str) -> dict[str, Any]:
         meta["unsupported"] = True
         return meta
 
-    settings = get_settings()
+    settings = effective_settings()
     try:
         meta.update(
             extract_video_tech(
@@ -513,11 +529,10 @@ def extract_audiobook(path: str) -> dict[str, Any]:
 
 def extract_model3d(path: str) -> dict[str, Any]:
     """trimesh geometry facts, bounded by FILEARR_MODEL3D_MAX_BYTES."""
-    from filearr.config import get_settings
     from filearr.tasks.model3d import Model3DError
     from filearr.tasks.model3d import extract_model3d as _extract
 
-    st = get_settings()
+    st = effective_settings()
     try:
         return _extract(
             path,
@@ -532,11 +547,10 @@ def extract_email(path: str) -> dict[str, Any]:
     """.eml / .mbox / Outlook .msg headers + body text (roadmap §15, 2026-08-19),
     bounded by FILEARR_EMAIL_MAX_BYTES / FILEARR_EMAIL_MBOX_MAX_MESSAGES and the
     document body-text cap. PST/OST record an ``unsupported`` marker."""
-    from filearr.config import get_settings
     from filearr.tasks.email_extract import EmailError
     from filearr.tasks.email_extract import extract_email as _extract
 
-    st = get_settings()
+    st = effective_settings()
     try:
         return _extract(
             path,
@@ -558,11 +572,10 @@ def extract_document(path: str) -> dict[str, Any]:
     discards the already-parsed properties; a decompression-bomb docx/xlsx is
     rejected by the same guard BEFORE either parser opens the archive.
     """
-    from filearr.config import get_settings
     from filearr.tasks.documents import DocumentError, extract_body
     from filearr.tasks.documents import extract_document as _extract
 
-    settings = get_settings()
+    settings = effective_settings()
     guard = {
         "decompressed_max": settings.doc_decompressed_max,
         "ratio_limit": settings.doc_decompression_ratio,
@@ -724,9 +737,44 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
     if not extract_limiter.try_acquire(settings):
         raise BackpressureReschedule("host under load; deferring extract")
     try:
-        return await _extract_item_impl(item_id, scan_run_id, settings)
+        # Per-library extraction overrides: overlay the owning library's
+        # allow-listed limits onto the global config for THIS job. The impl
+        # receives the overlaid object directly and the contextvar carries it
+        # into the extractor wrappers (effective_settings) — reset in finally
+        # so no overlay ever leaks into a sibling job.
+        settings, ov_token = await _overlay_for_item(item_id, settings)
+        try:
+            return await _extract_item_impl(item_id, scan_run_id, settings)
+        finally:
+            if ov_token is not None:
+                _settings_override.reset(ov_token)
     finally:
         extract_limiter.release()
+
+
+async def _overlay_for_item(item_id: str, settings):
+    """``(settings, contextvar-token)`` with the item's library
+    ``extract_overrides`` applied — ``(settings, None)`` when there are none
+    (or the item/library is gone). One indexed two-PK lookup; negligible next
+    to the extraction it configures. Resetting the token is the caller's job."""
+    try:
+        async with SessionLocal() as session:
+            raw = (
+                await session.execute(
+                    select(Library.extract_overrides)
+                    .join(Item, Item.library_id == Library.id)
+                    .where(Item.id == item_id)
+                )
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 - overlay is best-effort, never job-fatal
+        # A failed read degrades to the global settings; if the DB is really
+        # down the impl's own session fails the job with the true error.
+        return settings, None
+    overrides = clean_extract_overrides(raw)
+    if not overrides:
+        return settings, None
+    overlaid = settings.model_copy(update=overrides)
+    return overlaid, _settings_override.set(overlaid)
 
 
 async def _extract_item_impl(

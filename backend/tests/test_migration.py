@@ -17,7 +17,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # table. Its predecessor c7d2e4a91b38 adds the session-rotation grace columns.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "c7e2b91f4a63"
+HEAD = "72d54be1b149"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).

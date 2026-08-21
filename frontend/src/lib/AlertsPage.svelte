@@ -527,7 +527,7 @@
     {#if channels.length === 0}
       <p class="text-sm text-slate-500">No channels yet.</p>
     {:else}
-      <table class="w-full text-sm">
+      <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead class="text-left text-slate-500">
           <tr><th class="py-1">Name</th><th>Type</th><th>Locality</th><th>Enabled</th><th></th></tr>
         </thead>
@@ -565,7 +565,7 @@
             {/if}
           {/each}
         </tbody>
-      </table>
+      </table></div>
     {/if}
 
     {#if chNew || chEditing}
@@ -707,7 +707,7 @@
       </div>
     {/if}
 
-    <table class="w-full text-sm">
+    <div class="overflow-x-auto"><table class="w-full text-sm">
       <thead class="text-left text-slate-500">
         <tr>
           <th class="py-1 pr-1">
@@ -739,7 +739,7 @@
           </tr>
         {/each}
       </tbody>
-    </table>
+    </table></div>
 
     {#if rlNew || rlEditing}
       <form class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-800" onsubmit={saveRule}>
@@ -916,7 +916,7 @@
     {:else if events.length === 0}
       <p class="text-sm text-slate-500">No events.</p>
     {:else}
-      <table class="w-full text-sm">
+      <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead class="text-left text-slate-500">
           <tr><th class="py-1">Occurred</th><th>Rule</th><th>Event</th><th>Library</th><th>Status</th><th>Delivered</th></tr>
         </thead>
@@ -949,7 +949,7 @@
             </tr>
           {/each}
         </tbody>
-      </table>
+      </table></div>
     {/if}
   {/if}
 </div>

@@ -79,6 +79,7 @@
         chunkingEnabled: false,
         exposeGps: false,
         countPrunedFiles: false,
+        extractOverrides: {} as Record<string, number>,
       }
     : {
         name: library.name,
@@ -100,6 +101,7 @@
         chunkingEnabled: library.chunking_enabled,
         exposeGps: library.expose_gps,
         countPrunedFiles: library.count_pruned_files,
+        extractOverrides: { ...(library.extract_overrides ?? {}) },
       });
 
   let name = $state(seed.name);
@@ -144,6 +146,47 @@
   let chunkingEnabled = $state(seed.chunkingEnabled);
   let exposeGps = $state(seed.exposeGps);
   let countPrunedFiles = $state(seed.countPrunedFiles);
+
+  // Per-library extraction-limit overrides. Stored server-side in raw units
+  // (bytes / seconds / ratio); byte fields are edited in MiB here. Blank =
+  // fall back to the global FILEARR_* setting.
+  const OVERRIDE_FIELDS: { key: string; label: string; unit: string; scale: number; help: string }[] = [
+    { key: "extract_timeout_seconds", label: "Extractor timeout", unit: "s", scale: 1,
+      help: "Wall-clock budget per file before the parser is abandoned (FILEARR_EXTRACT_TIMEOUT_SECONDS). Raise for huge 3MF/PDF files on slow storage." },
+    { key: "ffprobe_timeout_s", label: "ffprobe timeout", unit: "s", scale: 1,
+      help: "Per-file ffprobe budget for video metadata (FILEARR_FFPROBE_TIMEOUT_S)." },
+    { key: "document_max_bytes", label: "Document ceiling", unit: "MiB", scale: 1048576,
+      help: "Documents/spreadsheets larger than this are guard-skipped (FILEARR_DOCUMENT_MAX_BYTES)." },
+    { key: "doc_decompressed_max", label: "Decompressed ceiling", unit: "MiB", scale: 1048576,
+      help: "Zip/docx whose DECLARED uncompressed total exceeds this are guard-skipped as decompression bombs (FILEARR_DOC_DECOMPRESSED_MAX). Raise for libraries of legitimately huge archives (e.g. 3D-print zips)." },
+    { key: "doc_decompression_ratio", label: "Decompression ratio", unit: ":1", scale: 1,
+      help: "Uncompressed:compressed ratio above which an archive is treated as a bomb (FILEARR_DOC_DECOMPRESSION_RATIO)." },
+    { key: "doc_decompression_ratio_min_bytes", label: "Ratio guard floor", unit: "MiB", scale: 1048576,
+      help: "The ratio guard only applies to payloads larger than this (FILEARR_DOC_DECOMPRESSION_RATIO_MIN_BYTES)." },
+    { key: "model3d_max_bytes", label: "3D model ceiling", unit: "MiB", scale: 1048576,
+      help: "3D models larger than this skip geometry extraction (FILEARR_MODEL3D_MAX_BYTES)." },
+    { key: "email_max_bytes", label: "E-mail ceiling", unit: "MiB", scale: 1048576,
+      help: "E-mail files larger than this are guard-skipped (FILEARR_EMAIL_MAX_BYTES)." },
+  ];
+  let overrideInputs = $state<Record<string, string>>(
+    Object.fromEntries(
+      OVERRIDE_FIELDS.map((f) => {
+        const v = seed.extractOverrides[f.key];
+        return [f.key, v != null ? String(v / f.scale) : ""];
+      }),
+    ),
+  );
+
+  function overridesPayload(): Record<string, number> | null {
+    const out: Record<string, number> = {};
+    for (const f of OVERRIDE_FIELDS) {
+      const raw = (overrideInputs[f.key] ?? "").trim();
+      if (!raw) continue;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) out[f.key] = Math.round(n * f.scale);
+    }
+    return Object.keys(out).length ? out : null;
+  }
 
   let error = $state("");
   let busy = $state(false);
@@ -216,6 +259,7 @@
           chunking_enabled: chunkingEnabled,
           expose_gps: exposeGps,
           count_pruned_files: countPrunedFiles,
+          extract_overrides: overridesPayload(),
         });
         onSaved();
         return;
@@ -240,6 +284,7 @@
         chunking_enabled: chunkingEnabled,
         expose_gps: exposeGps,
         count_pruned_files: countPrunedFiles,
+        extract_overrides: overridesPayload(),
       });
       onSaved();
     } catch (e) {
@@ -410,6 +455,26 @@
           </label>
           <input class="w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs dark:border-slate-700"
             type="number" min="1" placeholder="bytes (blank = global default)" bind:value={hashCeiling} />
+        </div>
+      </section>
+
+      <!-- Per-library extraction-limit overrides -->
+      <section>
+        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Extraction limits</h4>
+        <p class="mb-2 text-xs text-slate-500">
+          Override the global extraction ceilings for this library only — blank fields keep
+          the global <code class="font-mono">FILEARR_*</code> defaults. Changes apply to future
+          extractions; use <em>retry</em> on failed items to re-run them under the new limits.
+        </p>
+        <div class="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
+          {#each OVERRIDE_FIELDS as f (f.key)}
+            <label class="flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"
+              title={f.help}>
+              <span>{f.label} <span class="text-slate-400">({f.unit})</span></span>
+              <input class="w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700"
+                type="number" min="0" step="any" placeholder="global" bind:value={overrideInputs[f.key]} />
+            </label>
+          {/each}
         </div>
       </section>
 

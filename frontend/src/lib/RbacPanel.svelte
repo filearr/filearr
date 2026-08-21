@@ -144,7 +144,7 @@
       Add group
     </button>
   </div>
-  <table class="mt-2 w-full text-sm">
+  <div class="overflow-x-auto"><table class="mt-2 w-full text-sm">
     <thead><tr class="text-left text-slate-500">
       <th class="py-1">Name</th><th>Source</th><th>Members</th><th></th>
     </tr></thead>
@@ -184,7 +184,7 @@
         {/if}
       {:else}<tr><td colspan="4" class="py-2 text-slate-400">no groups yet</td></tr>{/each}
     </tbody>
-  </table>
+  </table></div>
 
   <!-- Grants -->
   <h3 class="mt-6 font-medium">Path grants</h3>
@@ -226,7 +226,7 @@
     {@const lib = libraries.find((l) => l.id === gLibraryId)}
     <FolderPicker initial={lib?.root_path ?? ""} onPick={onPickPath} onClose={() => (showPicker = false)} />
   {/if}
-  <table class="mt-2 w-full text-sm">
+  <div class="overflow-x-auto"><table class="mt-2 w-full text-sm">
     <thead><tr class="text-left text-slate-500">
       <th class="py-1">Subject</th><th>Library</th><th>Scope</th><th>Action</th><th>Effect</th><th></th>
     </tr></thead>
@@ -242,7 +242,7 @@
         </tr>
       {:else}<tr><td colspan="6" class="py-2 text-slate-400">no grants yet</td></tr>{/each}
     </tbody>
-  </table>
+  </table></div>
 
   <!-- Preview -->
   <h3 class="mt-6 font-medium">Decision preview</h3>

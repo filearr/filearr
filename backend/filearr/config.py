@@ -1492,3 +1492,43 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# Per-library extraction overrides (``Library.extract_overrides`` JSONB,
+# 2026-08-21): the ONLY Settings fields a single library may override — the
+# extraction limits an operator legitimately tunes per corpus (a 3D-print
+# library full of >1 GiB zips needs a bigger decompression ceiling than the
+# documents share). Everything else in Settings stays global. The API
+# validates on write; ``clean_extract_overrides`` re-validates on read so a
+# hand-edited row can never poison the Settings overlay.
+_FLOAT_OVERRIDE_KEYS = frozenset({"ffprobe_timeout_s", "doc_decompression_ratio"})
+EXTRACT_OVERRIDE_KEYS = frozenset(
+    {
+        "extract_timeout_seconds",
+        "ffprobe_timeout_s",
+        "document_max_bytes",
+        "doc_decompressed_max",
+        "doc_decompression_ratio",
+        "doc_decompression_ratio_min_bytes",
+        "model3d_max_bytes",
+        "email_max_bytes",
+    }
+)
+
+
+def clean_extract_overrides(raw: object) -> dict[str, int | float]:
+    """The allow-listed, positive-numeric subset of an ``extract_overrides``
+    blob, coerced to each field's type. Unknown keys and non-positive or
+    non-numeric values are dropped (bool is rejected — it IS an int)."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int | float] = {}
+    for key, value in raw.items():
+        if (
+            key in EXTRACT_OVERRIDE_KEYS
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0
+        ):
+            out[key] = float(value) if key in _FLOAT_OVERRIDE_KEYS else int(value)
+    return out

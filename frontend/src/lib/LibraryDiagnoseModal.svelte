@@ -238,7 +238,7 @@
                 <span class="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600 dark:bg-slate-700 dark:text-slate-300">{kind}: {n}</span>
               {/each}
             </div>
-            <table class="mt-2 w-full text-left">
+            <div class="overflow-x-auto"><table class="mt-2 w-full text-left">
               <thead class="text-slate-500"><tr><th class="pr-2">count</th><th>message</th></tr></thead>
               <tbody>
                 {#each report.extract_errors.top_messages as m, i (i)}
@@ -248,7 +248,7 @@
                   </tr>
                 {/each}
               </tbody>
-            </table>
+            </table></div>
             <p class="mt-2 text-slate-500">The Errors column on the Libraries page opens the per-item list.</p>
           {/if}
         </DiagnoseSection>
