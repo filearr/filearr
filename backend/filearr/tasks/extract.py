@@ -98,6 +98,23 @@ def coerce_str(raw: Any, *, cap: int = STR_CAP) -> str | None:
     return s[:cap]
 
 
+def _strip_nul(value: Any) -> Any:
+    """Recursively remove NUL characters from every string in an extracted
+    metadata tree (keys included). Postgres JSONB stores text and refuses
+    U+0000 (psycopg ``UntranslatableCharacter``), while EXIF strings are
+    routinely NUL-padded/-terminated — live 2026-08-21: episode-art JPEGs with
+    a NUL-terminated ``taken_at`` failed every metadata commit into the
+    class-B fallback. A string that carried a NUL is also stripped of the
+    surrounding whitespace padding that tends to come with it. Never raises."""
+    if isinstance(value, str):
+        return value.replace("\x00", "").strip() if "\x00" in value else value
+    if isinstance(value, dict):
+        return {_strip_nul(k): _strip_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_nul(v) for v in value]
+    return value
+
+
 def quick_hash(path: str, size: int) -> str:
     """xxh3-64 head/tail sampling probe (the fast move-detection tier).
 
@@ -962,6 +979,14 @@ async def _extract_item_impl(
                 meta["_extract_error"] = str(exc)
                 meta["_extract_error_kind"] = exc.kind
                 extract_failed = True
+
+        # NUL-scrub BEFORE anything derived from ``meta`` is persisted
+        # (metadata_, the ItemVersion patch, title/year). Postgres JSONB stores
+        # text and rejects U+0000 outright (psycopg UntranslatableCharacter),
+        # and EXIF strings are routinely NUL-padded — live 2026-08-21: every
+        # episode-art JPEG with a NUL-terminated ``taken_at`` fell into the
+        # class-B commit fallback and surfaced as an extract error.
+        meta = _strip_nul(meta)
 
         # P4-T2: validate the extractor output against its file_category profile
         # BEFORE it reaches metadata_. This catches a future extractor regression

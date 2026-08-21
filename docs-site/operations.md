@@ -549,6 +549,29 @@ degrades on your catalogue, `VACUUM ANALYZE items` first — a stale plan on a
 table that has grown by a million rows is the usual reason the planner stops
 using the index.
 
+## Retrying failed extractions {#retry-extracts}
+
+Items whose extraction failed carry the sanitized error in their metadata and
+surface on the Libraries page (the red **Errors** count expands to the failing
+items). Requeueing them:
+
+- **Per library** — the **retry** button next to the count, or
+  `POST /api/v1/libraries/{id}/retry-extracts`.
+- **All libraries at once** — the **Retry all failed** banner button that
+  appears above the table whenever any library has errors, or
+  `POST /api/v1/system/retry-extracts` (write scope).
+
+Both clear the stored error markers, requeue extraction for the errored items
+*plus* any never-hashed items (skipping ones with a job already queued), and
+return the count requeued. Anything still broken simply re-records its error.
+
+Reading the error kinds: **guard** rejections (size/decompression ceilings —
+messages show human-readable sizes) will fail again identically until the
+relevant `FILEARR_*` ceiling is raised, so raise the config first, then retry;
+**corrupt** means the file's own bytes defeated the parser; **dependency**
+means the image is missing a module (a deployment problem, not a file
+problem); a timeout suggests tuning `FILEARR_EXTRACT_TIMEOUT_SECONDS`.
+
 ## Extraction throughput and adaptive backpressure {#extract-backpressure}
 
 Extraction is the greediest stage of the pipeline: one job per file, each one

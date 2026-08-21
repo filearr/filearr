@@ -91,6 +91,56 @@ def sanitize_error(value: object, *, limit: int = MAX_ERROR_CHARS) -> str:
     return cleaned
 
 
+async def collect_retryable_items(
+    session: AsyncSession, library_id: str | None = None
+) -> list[str]:
+    """Ids of every active item needing re-extraction, with their stale
+    ``_extract_error`` markers cleared in the same transaction; the CALLER
+    commits and defers the extract jobs. ``library_id=None`` spans all
+    libraries (the one-click global drain, 2026-08-21).
+
+    Two populations (belt and braces — see the /retry-extracts endpoint docs):
+    errored items (``metadata ? '_extract_error'``; always requeued) and
+    never-hashed items (``quick_hash IS NULL``) anti-joined against pending
+    extract jobs so a live scan's untouched backlog is NOT double-deferred
+    (FIX-1: 423k duplicate jobs observed live). ``to_regclass`` guards a DB
+    without the procrastinate schema (fresh DB / unit tests)."""
+    has_jobs = (
+        await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
+    ).scalar()
+    if has_jobs is not None:
+        null_hash_arm = (
+            "(quick_hash IS NULL AND NOT EXISTS ("
+            "  SELECT 1 FROM procrastinate_jobs pj"
+            "  WHERE pj.task_name = 'filearr.tasks.extract.extract_item'"
+            "  AND pj.args->>'item_id' = items.id::text"
+            "  AND pj.status IN ('todo', 'doing')"
+            "))"
+        )
+    else:
+        null_hash_arm = "quick_hash IS NULL"
+    lib_clause = "AND library_id = :lib " if library_id else ""
+    params: dict = {"lib": str(library_id)} if library_id else {}
+    rows = await session.execute(
+        text(
+            "SELECT id::text FROM items "
+            f"WHERE status = 'active' {lib_clause}"
+            f"AND (metadata ? '_extract_error' OR {null_hash_arm})"
+        ),
+        params,
+    )
+    ids = [r[0] for r in rows.all()]
+    await session.execute(
+        text(
+            "UPDATE items SET metadata = metadata - '_extract_error' "
+            f"WHERE status = 'active' {lib_clause}"
+            "AND metadata ? '_extract_error'"
+        ),
+        params,
+    )
+    return ids
+
+
 async def extract_error_count(session: AsyncSession, library_id: str) -> int:
     """Count active items in a library whose metadata carries ``_extract_error``.
 

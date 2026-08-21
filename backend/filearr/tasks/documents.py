@@ -53,6 +53,8 @@ import zipfile
 from pathlib import PurePath
 from typing import Any
 
+from filearr.humanize import human_bytes
+
 log = logging.getLogger(__name__)
 
 # --- pypdf log noise ---------------------------------------------------------
@@ -182,7 +184,8 @@ def _guard_size(path: str, max_bytes: int) -> None:
         raise DocumentError(f"cannot stat document: {exc}", kind="error") from exc
     if size > max_bytes:
         raise DocumentError(
-            f"document too large ({size} > {max_bytes} bytes)", kind="guard"
+            f"document too large ({human_bytes(size)} > {human_bytes(max_bytes)} limit)",
+            kind="guard",
         )
 
 
@@ -220,7 +223,8 @@ def guard_decompression(
     if total_uncompressed > decompressed_max:
         raise DocumentError(
             "decompression guard: declared uncompressed size "
-            f"{total_uncompressed} exceeds ceiling {decompressed_max} bytes",
+            f"{human_bytes(total_uncompressed)} exceeds the "
+            f"{human_bytes(decompressed_max)} ceiling",
             kind="guard",
         )
     if total_compressed > 0:
@@ -228,7 +232,7 @@ def guard_decompression(
         if ratio > ratio_limit and total_uncompressed > ratio_min_bytes:
             raise DocumentError(
                 f"decompression guard: compression ratio {ratio:.1f}:1 exceeds "
-                f"{ratio_limit:.0f}:1 at {total_uncompressed} uncompressed bytes",
+                f"{ratio_limit:.0f}:1 at {human_bytes(total_uncompressed)} uncompressed",
                 kind="guard",
             )
 

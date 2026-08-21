@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from filearr import audit, share_map
 from filearr.api.scan_paths import _normalize_rel_path
 from filearr.db import get_session
-from filearr.errors import extract_error_count, failing_items
+from filearr.errors import collect_retryable_items, extract_error_count, failing_items
 from filearr.models import Item, ItemStatus, Library, ScanRun
 from filearr.presets import PRESET_BUNDLES, validate_extension_group_names
 from filearr.schedule import InvalidCronError, is_network_path, validate_cron
@@ -678,58 +678,13 @@ async def retry_extracts(
     if library is None:
         raise HTTPException(404, "Library not found")
 
-    lib = str(library_id)
-    # FIX-1: the never-hashed (quick_hash IS NULL) arm also matches the entire
-    # not-yet-extracted backlog during a live scan, so retrying re-defers hundreds
-    # of thousands of DUPLICATE extract jobs (423k observed live). Guard the
-    # NULL-hash arm with an anti-join against pending extract jobs: exclude any
-    # item that already has a todo/doing job in procrastinate_jobs (matched on
-    # args->>'item_id'). The _extract_error arm is left untouched -- an errored
-    # item should always be requeued regardless of any in-flight job.
-    #
-    # to_regclass() guards the case where the procrastinate schema is not yet
-    # applied (fresh DB / unit tests without the queue): fall back to the plain
-    # predicate rather than erroring on a missing relation.
-    has_jobs = (
-        await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
-    ).scalar()
-    if has_jobs is not None:
-        null_hash_arm = (
-            "(quick_hash IS NULL AND NOT EXISTS ("
-            "  SELECT 1 FROM procrastinate_jobs pj"
-            "  WHERE pj.task_name = 'filearr.tasks.extract.extract_item'"
-            "  AND pj.args->>'item_id' = items.id::text"
-            "  AND pj.status IN ('todo', 'doing')"
-            "))"
-        )
-    else:
-        null_hash_arm = "quick_hash IS NULL"
-    # Ids of every affected active item (errored OR never-hashed-with-no-pending-job).
-    # Single scan; the metadata predicate is served by the GIN index used elsewhere.
-    rows = await session.execute(
-        text(
-            "SELECT id::text FROM items "
-            "WHERE library_id = :lib AND status = 'active' "
-            f"AND (metadata ? '_extract_error' OR {null_hash_arm})"
-        ),
-        {"lib": lib},
-    )
-    ids = [r[0] for r in rows.all()]
-
-    # Clear the stale error marker in one UPDATE (jsonb key removal) so the retry
-    # starts from a clean slate; a re-failure re-records it.
-    await session.execute(
-        text(
-            "UPDATE items SET metadata = metadata - '_extract_error' "
-            "WHERE library_id = :lib AND status = 'active' "
-            "AND metadata ? '_extract_error'"
-        ),
-        {"lib": lib},
-    )
+    # FIX-1 anti-join + marker clearing live in errors.collect_retryable_items
+    # (shared with the global POST /system/retry-extracts drain).
+    ids = await collect_retryable_items(session, str(library_id))
     await session.commit()
 
     await defer_extract(ids)
-    return {"library_id": lib, "retried": len(ids)}
+    return {"library_id": str(library_id), "retried": len(ids)}
 
 
 @router.delete(

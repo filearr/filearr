@@ -88,7 +88,7 @@ async def client(db_maker, monkeypatch, tmp_path):
     app.dependency_overrides.clear()
 
 
-async def _seed_agent(maker, version=None):
+async def _seed_agent(maker, version=None, agent_id=None):
     fp = "FP:" + uuid.uuid4().hex
     async with maker() as s:
         agent = Agent(
@@ -98,6 +98,8 @@ async def _seed_agent(maker, version=None):
             cert_fingerprint=fp,
             agent_version=version,
         )
+        if agent_id is not None:
+            agent.id = agent_id
         s.add(agent)
         await s.commit()
         return agent.id, fp
@@ -382,24 +384,27 @@ async def test_update_gate_keys_validated_on_group_save(client):
 # --------------------------------------------------------------------------- #
 # Phased release rollouts on the tier engine (roadmap §23, 2026-08-19)          #
 # --------------------------------------------------------------------------- #
-async def _seed_agents_by_bucket(maker, n=40, version="main-0000000"):
-    """Seed agents until we hold at least one whose bucket is < 10 and one
-    >= 50 (buckets are a stable sha256 of the id, so this is deterministic
-    per id but we don't control ids -- seed a handful and pick)."""
+async def _seed_agents_by_bucket(maker, version="main-0000000"):
+    """One agent whose bucket is < 10 and one >= 50. Buckets are a stable
+    sha256 of the id, so pick suitable ids BEFORE seeding (mining random ids
+    in memory is free; seeding agents until both buckets hit was a ~1.5%-flaky
+    0.9^40 gamble that failed in CI on 2026-08-21)."""
     from filearr.agent_config import agent_bucket
 
-    low = high = None
-    for _ in range(n):
-        aid, fp = await _seed_agent(maker, version=version)
-        b = agent_bucket(aid)
-        if b < 10 and low is None:
-            low = (aid, fp, b)
-        if b >= 50 and high is None:
-            high = (aid, fp, b)
-        if low and high:
-            break
-    assert low and high, "could not seed both buckets"
-    return low, high
+    low_id = high_id = None
+    while not (low_id and high_id):
+        cand = uuid.uuid4()
+        b = agent_bucket(cand)
+        if b < 10 and low_id is None:
+            low_id = cand
+        elif b >= 50 and high_id is None:
+            high_id = cand
+    low_aid, low_fp = await _seed_agent(maker, version=version, agent_id=low_id)
+    high_aid, high_fp = await _seed_agent(maker, version=version, agent_id=high_id)
+    return (
+        (low_aid, low_fp, agent_bucket(low_aid)),
+        (high_aid, high_fp, agent_bucket(high_aid)),
+    )
 
 
 async def test_release_rollout_gates_by_bucket_then_promotes(client):

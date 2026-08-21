@@ -1015,6 +1015,12 @@ export const retryExtracts = (id: string) =>
     { method: "POST" },
   );
 
+/** Global drain: clear stored extraction errors in EVERY library and re-defer
+ *  extraction for all affected items (plus any never-hashed items with no
+ *  pending job). Returns the total requeued. */
+export const retryAllExtracts = () =>
+  request<{ retried: number }>(`/system/retry-extracts`, { method: "POST" });
+
 /** Per-library count of items whose stored hashes were computed under an older
  *  hashing scheme, plus whether a light re-hash job is already queued/running.
  *  Drives the Libraries-page "update hashes" prompt. */

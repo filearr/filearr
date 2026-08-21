@@ -459,6 +459,26 @@ async def rebuild_index_endpoint() -> dict:
 
 
 @router.post(
+    "/system/retry-extracts",
+    dependencies=[Depends(require_scope("write"))],
+)
+async def retry_all_extracts(session: AsyncSession = Depends(get_session)) -> dict:
+    """Requeue extraction for every failed item across ALL libraries
+    (2026-08-21, write scope) — the one-click global drain of the errors
+    surface. Same semantics as the per-library ``POST
+    /libraries/{id}/retry-extracts`` (errored items + never-hashed items with
+    no pending job; stale ``_extract_error`` markers cleared first) via the
+    shared ``errors.collect_retryable_items``. Returns the total requeued."""
+    from filearr.errors import collect_retryable_items
+    from filearr.worker import defer_extract
+
+    ids = await collect_retryable_items(session, None)
+    await session.commit()
+    await defer_extract(ids)
+    return {"retried": len(ids)}
+
+
+@router.post(
     "/system/embed-backfill",
     status_code=202,
     dependencies=[Depends(require_scope("admin"))],

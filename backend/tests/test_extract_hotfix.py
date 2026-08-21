@@ -397,3 +397,85 @@ async def test_retry_extracts_unknown_library_404(wired):
             "/api/v1/libraries/00000000-0000-0000-0000-000000000000/retry-extracts"
         )
         assert r.status_code == 404
+
+
+async def test_retry_all_extracts_spans_libraries(wired, monkeypatch):
+    """POST /system/retry-extracts (2026-08-21): one call drains the errored
+    backlog of EVERY library and clears the stale markers."""
+    from sqlalchemy import select
+
+    from filearr import worker as worker_mod
+    from filearr.models import Item, Library
+
+    maker = wired["maker"]
+    async with maker() as s:
+        lib_a = Library(name="music", root_path="/d")
+        lib_b = Library(name="video", root_path="/e")
+        s.add_all([lib_a, lib_b])
+        await s.commit()
+        a_id, b_id = lib_a.id, lib_b.id
+
+    err_a = await _mk_item(
+        maker, a_id, "bad.mp3", metadata={"_extract_error": "boom"}, quick_hash="h1"
+    )
+    err_b = await _mk_item(
+        maker, b_id, "bad.mkv", metadata={"_extract_error": "boom"}, quick_hash="h2"
+    )
+    clean = await _mk_item(maker, a_id, "ok.mp3", metadata={"title": "x"}, quick_hash="h3")
+
+    deferred: list[list[str]] = []
+
+    async def _fake(ids):
+        deferred.append(list(ids))
+
+    # The system endpoint does `from filearr.worker import defer_extract` at
+    # call time, so patching the worker module attribute intercepts it.
+    monkeypatch.setattr(worker_mod, "defer_extract", _fake)
+
+    async with _client(wired["app"]) as c:
+        r = await c.post("/api/v1/system/retry-extracts")
+        assert r.status_code == 200
+        assert r.json()["retried"] == 2
+
+    assert {i for batch in deferred for i in batch} == {err_a, err_b}
+    async with maker() as s:
+        for iid in (err_a, err_b):
+            it = (await s.execute(select(Item).where(Item.id == iid))).scalar_one()
+            assert "_extract_error" not in it.metadata_
+        ok = (await s.execute(select(Item).where(Item.id == clean))).scalar_one()
+        assert ok.metadata_.get("title") == "x"
+
+
+# --------------------------------------------------------------------------- #
+# F) NUL bytes in extracted strings (live 2026-08-21: EXIF taken_at)          #
+# --------------------------------------------------------------------------- #
+def test_strip_nul_recursive():
+    from filearr.tasks.extract import _strip_nul
+
+    # the exact live failure: a NUL-terminated EXIF datetime killed the JSONB
+    # commit with psycopg UntranslatableCharacter (U+0000 is unrepresentable)
+    meta = {
+        "taken_at": "Thu Jun 10 22:28:20 2010\x00",
+        "nested": {"a": ["x\x00y", 1, None]},
+        "width": 300,
+    }
+    out = _strip_nul(meta)
+    assert out["taken_at"] == "Thu Jun 10 22:28:20 2010"
+    assert out["nested"]["a"] == ["xy", 1, None]
+    assert out["width"] == 300
+    # NUL-free input passes through structurally identical
+    clean = {"a": "b", "n": [1, "two"]}
+    assert _strip_nul(clean) == clean
+
+
+def test_human_bytes_formatting():
+    from filearr.humanize import human_bytes
+
+    assert human_bytes(0) == "0 B"
+    assert human_bytes(512) == "512 B"
+    assert human_bytes(1024) == "1 KiB"
+    assert human_bytes(200 * 1024 * 1024) == "200 MiB"
+    assert human_bytes(1073741824) == "1 GiB"
+    # the exact live guard values the console showed as raw digit strings
+    assert human_bytes(1107763383) == "1.03 GiB"
+    assert human_bytes(5979270438) == "5.57 GiB"

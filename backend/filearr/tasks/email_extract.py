@@ -34,6 +34,8 @@ from html.parser import HTMLParser
 from pathlib import PurePath
 from typing import Any
 
+from filearr.humanize import human_bytes
+
 DEFAULT_MAX_BYTES = 256 * 1024 * 1024  # one .eml/.msg/.mbox handed to a parser
 DEFAULT_MBOX_MAX_MESSAGES = 5000
 DEFAULT_BODY_MAX_CHARS = 100_000
@@ -397,7 +399,10 @@ def extract_email(
     except OSError as exc:
         raise EmailError(f"cannot stat: {exc}", kind="error") from exc
     if size > max_bytes:
-        raise EmailError(f"e-mail file too large ({size} > {max_bytes} bytes)", kind="guard")
+        raise EmailError(
+            f"e-mail file too large ({human_bytes(size)} > {human_bytes(max_bytes)} limit)",
+            kind="guard",
+        )
     if ext in _MBOX_EXTS:
         return extract_mbox(path, max_chars=max_chars, max_messages=max_messages)
     if ext in _MSG_EXTS:

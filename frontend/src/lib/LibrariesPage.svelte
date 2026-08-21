@@ -4,7 +4,7 @@
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
     rehashLibrary,
-    retryExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
+    retryExtracts, retryAllExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     libraryStats,
     type FailedJob, type FailingItem, type Library, type LibraryHashStatus, type LibraryStatsResponse,
@@ -415,6 +415,24 @@
     }
   }
 
+  let retryingAll = $state(false);
+  const errorTotal = $derived(Object.values(errorCounts).reduce((a, b) => a + b, 0));
+
+  async function retryAllFailed() {
+    if (retryingAll) return;
+    if (!confirm(`Re-extract all ${errorTotal.toLocaleString()} failed item(s) across every library? Errors are cleared and the items re-queued; anything still broken will re-record its error.`)) return;
+    retryingAll = true;
+    try {
+      await retryAllExtracts();
+      failing = {};
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      retryingAll = false;
+    }
+  }
+
   async function retryFailed(libId: string) {
     retrying[libId] = true;
     try {
@@ -712,6 +730,23 @@
         extraction, thumbnails or embeddings), far lighter than a full rescan. A full
         rescan also converges them, at full extract cost.
       </p>
+    </div>
+  {/if}
+
+  {#if errorTotal > 0}
+    <div
+      class="mt-3 flex items-center justify-between gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+      role="alert">
+      <div>
+        <span class="font-semibold">{errorTotal.toLocaleString()} item{errorTotal === 1 ? "" : "s"} failed extraction.</span>
+        <span class="text-xs"> Expand a library's Errors count for details, or requeue everything at once.</span>
+      </div>
+      <button
+        class="shrink-0 rounded-lg border border-red-400 px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-50 dark:border-red-800 dark:text-red-200"
+        disabled={retryingAll}
+        onclick={retryAllFailed}>
+        {retryingAll ? "requeuing…" : "Retry all failed"}
+      </button>
     </div>
   {/if}
 
@@ -1049,6 +1084,15 @@
                   onclick={() => toggleErrors(lib.id)}>
                   {ec}
                 </button>
+                {#if ec > 0}
+                  <button
+                    class="ml-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                    title="Clear errors and re-extract the failing items"
+                    disabled={retrying[lib.id]}
+                    onclick={() => retryFailed(lib.id)}>
+                    {retrying[lib.id] ? "…" : "retry"}
+                  </button>
+                {/if}
               </td>
               <td class="py-2 text-right">
                 <div class="flex justify-end gap-1">

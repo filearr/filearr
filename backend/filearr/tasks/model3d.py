@@ -37,6 +37,8 @@ import os
 from pathlib import PurePath
 from typing import Any
 
+from filearr.humanize import human_bytes
+
 # Extensions trimesh can load as geometry with its default, dependency-free
 # stack. Deliberately excludes step/stp/fbx/blend (no safe pure loader).
 _GEOMETRY_EXTS = {"stl", "obj", "ply", "off", "gltf", "glb", "3mf"}
@@ -103,7 +105,8 @@ def extract_model3d(path: str, *, max_bytes: int, accurate_max_bytes: int = 0) -
         raise Model3DError(f"cannot stat model: {exc}", kind="error") from exc
     if size > max_bytes:
         raise Model3DError(
-            f"model too large ({size} > {max_bytes} bytes)", kind="guard"
+            f"model too large ({human_bytes(size)} > {human_bytes(max_bytes)} limit)",
+            kind="guard",
         )
 
     import trimesh

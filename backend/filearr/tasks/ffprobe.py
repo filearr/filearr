@@ -43,6 +43,8 @@ import shutil
 import subprocess
 from typing import Any
 
+from filearr.humanize import human_bytes
+
 
 class FfprobeError(RuntimeError):
     """ffprobe could not analyse the file (missing binary, timeout, nonzero
@@ -100,7 +102,8 @@ def probe(
 
     if len(proc.stdout) > max_output_bytes:
         raise FfprobeError(
-            f"ffprobe output too large ({len(proc.stdout)} > {max_output_bytes} bytes)"
+            f"ffprobe output too large "
+            f"({human_bytes(len(proc.stdout))} > {human_bytes(max_output_bytes)})"
         )
 
     try:
