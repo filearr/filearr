@@ -652,6 +652,26 @@ export const addTaxonomyExtension = (groupKey: string, ext: string) =>
     { method: "POST", body: JSON.stringify({ ext }) },
   );
 
+/** Adopt extensions/groups the shipped built-in seed has gained since this
+ *  DB was seeded (add-only; operator placements are never overridden). */
+export const syncTaxonomySeed = (dryRun = false) =>
+  request<{
+    dry_run: boolean;
+    added_count: number;
+    added: Record<string, string[]>;
+    skipped: { ext: string; kept_in?: string; seed_wants?: string; reason?: string }[];
+    version?: number | null;
+  }>(`/taxonomy/sync-seed${dryRun ? "?dry_run=true" : ""}`, { method: "POST" });
+
+/** Recompute every active item's (file_category, file_group) from the CURRENT
+ *  taxonomy and re-sync changed search docs — applies taxonomy edits to items
+ *  already in the catalogue without a rescan. */
+export const reclassifyExtensions = () =>
+  request<{ changed: number; by_category: Record<string, number> }>(
+    `/system/reclassify-extensions`,
+    { method: "POST" },
+  );
+
 export const deleteTaxonomyExtension = (ext: string) =>
   request<TaxonomyVersion>(`/taxonomy/extensions/${encodeURIComponent(ext)}`, { method: "DELETE" });
 

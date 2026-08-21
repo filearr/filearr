@@ -144,7 +144,7 @@ async def stop_scan(scan_id: uuid.UUID, session: AsyncSession = Depends(get_sess
         **(run.stats or {}),
         "stopped": True,
         "reconcile_note": "stop requested with no live scan worker; finalized "
-        "as stopped by the stop endpoint (FIX-15)",
+        "as stopped by the stop endpoint",
     }
     await notify_scan_progress(session, run.id)
     await session.commit()
@@ -206,7 +206,7 @@ async def force_clear_scan(
         **(run.stats or {}),
         "stopped": True,
         "force_cleared": True,
-        "reconcile_note": f"force-cleared from '{prev}' by operator (FIX-15)",
+        "reconcile_note": f"force-cleared from '{prev}' by operator",
     }
     await notify_scan_progress(session, run.id)
     await session.commit()

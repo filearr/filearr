@@ -237,7 +237,7 @@ Comic-book archives (a page-image bundle in a ZIP/RAR/7z/tar wrapper).
 ### `markup` — Markup & typesetting source
 
 *Parent `file_category`:* `document`  
-*Extensions (64):* `.adoc`, `.asciidoc`, `.atom`, `.bib`, `.bst`, `.cls`, `.creole`, `.dita`, `.docbook`, `.dtd`, `.dtx`, `.ejs`, `.erb`, `.haml`, `.handlebars`, `.hbs`, `.htm`, `.html`, `.j2`, `.jade`, `.jinja`, `.jinja2`, `.latex`, `.liquid`, `.ltx`, `.man`, `.markdown`, `.md`, `.mdown`, `.mdwn`, `.mdx`, `.mediawiki`, `.mkd`, `.mkdn`, `.mustache`, `.njk`, `.nroff`, `.nunjucks`, `.org`, `.pod`, `.pug`, `.rdoc`, `.rng`, `.roff`, `.rss`, `.rst`, `.sgml`, `.shtml`, `.slim`, `.sty`, `.tex`, `.texi`, `.texinfo`, `.textile`, `.troff`, `.twig`, `.typ`, `.wiki`, `.xht`, `.xhtml`, `.xml`, `.xsd`, `.xsl`, `.xslt`
+*Extensions (65):* `.adoc`, `.asciidoc`, `.atom`, `.bib`, `.bst`, `.cls`, `.creole`, `.dita`, `.docbook`, `.dtd`, `.dtx`, `.ejs`, `.erb`, `.haml`, `.handlebars`, `.hbs`, `.htm`, `.html`, `.j2`, `.jade`, `.jinja`, `.jinja2`, `.latex`, `.liquid`, `.ltx`, `.man`, `.markdown`, `.md`, `.mdown`, `.mdwn`, `.mdx`, `.mediawiki`, `.mkd`, `.mkdn`, `.mustache`, `.njk`, `.nroff`, `.nunjucks`, `.org`, `.pod`, `.pug`, `.rdoc`, `.rng`, `.roff`, `.rss`, `.rst`, `.sgml`, `.shtml`, `.slim`, `.sty`, `.tex`, `.texi`, `.texinfo`, `.textile`, `.troff`, `.twig`, `.typ`, `.wiki`, `.xaml`, `.xht`, `.xhtml`, `.xml`, `.xsd`, `.xsl`, `.xslt`
 
 Human-authored markup, template and typesetting SOURCE — Markdown, HTML/XML, reStructuredText, AsciiDoc, LaTeX, and friends.
 
@@ -247,7 +247,7 @@ Human-authored markup, template and typesetting SOURCE — Markdown, HTML/XML, r
 ### `3d-model` — 3D model / mesh
 
 *Parent `file_category`:* `three-d-cad`  
-*Extensions (52):* `.3ds`, `.3mf`, `.abc`, `.amf`, `.blend`, `.blend1`, `.c4d`, `.collada`, `.dae`, `.e57`, `.fbx`, `.gco`, `.gcode`, `.glb`, `.gltf`, `.gltf2`, `.ksplat`, `.las`, `.laz`, `.lwo`, `.lws`, `.lxl`, `.lxo`, `.ma`, `.max`, `.mb`, `.mesh`, `.mmd`, `.mqo`, `.mtl`, `.obj`, `.off`, `.pcd`, `.ply`, `.pmd`, `.pmx`, `.qb`, `.splat`, `.stl`, `.usd`, `.usda`, `.usdc`, `.usdz`, `.vox`, `.vrml`, `.wrl`, `.x3d`, `.x3db`, `.x3dv`, `.xyz`, `.zpr`, `.ztl`
+*Extensions (54):* `.3ds`, `.3mf`, `.abc`, `.amf`, `.blend`, `.blend1`, `.c4d`, `.chitubox`, `.collada`, `.ctb`, `.dae`, `.e57`, `.fbx`, `.gco`, `.gcode`, `.glb`, `.gltf`, `.gltf2`, `.ksplat`, `.las`, `.laz`, `.lwo`, `.lws`, `.lxl`, `.lxo`, `.ma`, `.max`, `.mb`, `.mesh`, `.mmd`, `.mqo`, `.mtl`, `.obj`, `.off`, `.pcd`, `.ply`, `.pmd`, `.pmx`, `.qb`, `.splat`, `.stl`, `.usd`, `.usda`, `.usdc`, `.usdz`, `.vox`, `.vrml`, `.wrl`, `.x3d`, `.x3db`, `.x3dv`, `.xyz`, `.zpr`, `.ztl`
 
 3D meshes, scenes and printable models (STL/OBJ/glTF/FBX/3MF/…).
 
@@ -271,7 +271,7 @@ Digital typefaces and font-editor sources (TrueType/OpenType/WOFF/…).
 ### `source-code` — Source code
 
 *Parent `file_category`:* `development`  
-*Extensions (149):* `.ada`, `.adb`, `.ads`, `.asm`, `.au3`, `.bas`, `.c`, `.c++`, `.cairo`, `.cbl`, `.cc`, `.cjs`, `.cl`, `.clj`, `.cljc`, `.cljs`, `.cob`, `.cobol`, `.coffee`, `.comp`, `.cpp`, `.cpy`, `.cr`, `.cs`, `.csx`, `.cts`, `.cu`, `.cuh`, `.cxx`, `.d`, `.dart`, `.diff`, `.dpr`, `.edn`, `.eex`, `.el`, `.elm`, `.erl`, `.ex`, `.f`, `.f03`, `.f08`, `.f90`, `.f95`, `.for`, `.frag`, `.fs`, `.fsi`, `.fsscript`, `.fsx`, `.ftn`, `.gd`, `.gemspec`, `.geom`, `.glsl`, `.go`, `.groovy`, `.gvy`, `.gy`, `.h`, `.h++`, `.heex`, `.hh`, `.hlsl`, `.hpp`, `.hrl`, `.hs`, `.hx`, `.hxml`, `.hxx`, `.i`, `.inc`, `.inl`, `.ino`, `.ipp`, `.jav`, `.java`, `.jl`, `.js`, `.jsx`, `.kt`, `.ktm`, `.kts`, `.leex`, `.lhs`, `.lisp`, `.litcoffee`, `.lsp`, `.lua`, `.m`, `.metal`, `.mjs`, `.ml`, `.mli`, `.mm`, `.move`, `.nasm`, `.nim`, `.nims`, `.pas`, `.patch`, `.php`, `.php3`, `.php4`, `.php5`, `.phps`, `.phtml`, `.pl`, `.pm`, `.pp`, `.purs`, `.pxd`, `.pxi`, `.py`, `.pyi`, `.pyw`, `.pyx`, `.r`, `.rake`, `.rb`, `.rbw`, `.re`, `.rei`, `.rkt`, `.rpy`, `.rs`, `.s`, `.sc`, `.scala`, `.scm`, `.sol`, `.ss`, `.sv`, `.svh`, `.swift`, `.t`, `.tcc`, `.tcl`, `.tpp`, `.tsx`, `.v`, `.vala`, `.vapi`, `.vb`, `.vert`, `.vhdl`, `.wat`, `.wgsl`, `.zig`
+*Extensions (150):* `.ada`, `.adb`, `.ads`, `.asm`, `.au3`, `.bas`, `.c`, `.c++`, `.cairo`, `.cbl`, `.cc`, `.cjs`, `.cl`, `.clj`, `.cljc`, `.cljs`, `.cob`, `.cobol`, `.coffee`, `.comp`, `.cpp`, `.cpy`, `.cr`, `.cs`, `.csx`, `.cts`, `.cu`, `.cuh`, `.cxx`, `.d`, `.dart`, `.diff`, `.dpr`, `.edn`, `.eex`, `.el`, `.elm`, `.erl`, `.ex`, `.f`, `.f03`, `.f08`, `.f90`, `.f95`, `.for`, `.frag`, `.fs`, `.fsi`, `.fsscript`, `.fsx`, `.ftn`, `.gd`, `.gemspec`, `.geom`, `.glsl`, `.go`, `.groovy`, `.gvy`, `.gy`, `.h`, `.h++`, `.heex`, `.hh`, `.hlsl`, `.hpp`, `.hrl`, `.hs`, `.hx`, `.hxml`, `.hxx`, `.i`, `.inc`, `.inl`, `.ino`, `.ipp`, `.jav`, `.java`, `.jl`, `.js`, `.jsx`, `.kt`, `.ktm`, `.kts`, `.leex`, `.lhs`, `.lisp`, `.litcoffee`, `.lsp`, `.lua`, `.m`, `.metal`, `.mjs`, `.ml`, `.mli`, `.mm`, `.move`, `.nasm`, `.nim`, `.nims`, `.pas`, `.patch`, `.php`, `.php3`, `.php4`, `.php5`, `.phps`, `.phtml`, `.pl`, `.pm`, `.pp`, `.purs`, `.pxd`, `.pxi`, `.py`, `.pyi`, `.pyw`, `.pyx`, `.qml`, `.r`, `.rake`, `.rb`, `.rbw`, `.re`, `.rei`, `.rkt`, `.rpy`, `.rs`, `.s`, `.sc`, `.scala`, `.scm`, `.sol`, `.ss`, `.sv`, `.svh`, `.swift`, `.t`, `.tcc`, `.tcl`, `.tpp`, `.tsx`, `.v`, `.vala`, `.vapi`, `.vb`, `.vert`, `.vhdl`, `.wat`, `.wgsl`, `.zig`
 
 Programming-language source files across the common language ecosystems.
 
@@ -305,7 +305,7 @@ Literate computational notebooks (Jupyter, R Markdown, Quarto).
 ### `config-data` — Config & structured data
 
 *Parent `file_category`:* `development`  
-*Extensions (73):* `.avsc`, `.babelrc`, `.bazel`, `.bzl`, `.capnp`, `.cfg`, `.cmake`, `.cnf`, `.conf`, `.config`, `.containerfile`, `.csproj`, `.desktop`, `.dhall`, `.dockerfile`, `.dotenv`, `.editorconfig`, `.env`, `.eslintrc`, `.fbs`, `.gcrd`, `.geojson`, `.gql`, `.gradle`, `.graphql`, `.hcl`, `.ics`, `.ini`, `.json`, `.json5`, `.jsonc`, `.jsonl`, `.jsonnet`, `.kdl`, `.libsonnet`, `.lock`, `.mak`, `.mk`, `.ndjson`, `.ninja`, `.nix`, `.npmrc`, `.pbxproj`, `.plist`, `.prefs`, `.prettierrc`, `.pri`, `.prop`, `.properties`, `.proto`, `.rc`, `.reg`, `.resx`, `.ron`, `.sbt`, `.service`, `.sln`, `.tf`, `.tfstate`, `.tfvars`, `.thrift`, `.toml`, `.topojson`, `.torrent`, `.unit`, `.vcf`, `.vcs`, `.vct`, `.vcxproj`, `.xcconfig`, `.yaml`, `.yarnrc`, `.yml`
+*Extensions (77):* `.avsc`, `.babelrc`, `.bazel`, `.bzl`, `.capnp`, `.cfg`, `.cmake`, `.cnf`, `.conf`, `.config`, `.containerfile`, `.csproj`, `.desktop`, `.dhall`, `.dockerfile`, `.dotenv`, `.editorconfig`, `.env`, `.eslintrc`, `.fbs`, `.fsproj`, `.gcrd`, `.geojson`, `.gql`, `.gradle`, `.graphql`, `.hcl`, `.ics`, `.ini`, `.json`, `.json5`, `.jsonc`, `.jsonl`, `.jsonnet`, `.kdl`, `.libsonnet`, `.lock`, `.mak`, `.mk`, `.ndjson`, `.ninja`, `.nix`, `.npmrc`, `.pbxproj`, `.plist`, `.prefs`, `.prettierrc`, `.pri`, `.prop`, `.properties`, `.proto`, `.rc`, `.reg`, `.resx`, `.ron`, `.sbt`, `.service`, `.sln`, `.srr`, `.srs`, `.tf`, `.tfstate`, `.tfvars`, `.thrift`, `.toml`, `.topojson`, `.torrent`, `.unit`, `.vbproj`, `.vcf`, `.vcs`, `.vct`, `.vcxproj`, `.xcconfig`, `.yaml`, `.yarnrc`, `.yml`
 
 Machine-readable configuration and structured-data / serialization files (JSON/YAML/TOML/INI/env/infrastructure-as-code/…).
 
@@ -401,15 +401,15 @@ No matching group — an unrecognised or absent extension. The bucket ``file_gro
 | `spreadsheet` | Spreadsheet / tabular | `document` | 34 |
 | `ebook` | E-book | `document` | 29 |
 | `comic` | Comic archive | `document` | 7 |
-| `markup` | Markup & typesetting source | `document` | 64 |
-| `3d-model` | 3D model / mesh | `three-d-cad` | 52 |
+| `markup` | Markup & typesetting source | `document` | 65 |
+| `3d-model` | 3D model / mesh | `three-d-cad` | 54 |
 | `cad` | CAD & engineering | `three-d-cad` | 58 |
 | `font` | Font | `system` | 31 |
-| `source-code` | Source code | `development` | 149 |
+| `source-code` | Source code | `development` | 150 |
 | `script` | Shell / automation script | `development` | 36 |
 | `web-asset` | Web asset | `development` | 14 |
 | `notebook` | Computational notebook | `development` | 8 |
-| `config-data` | Config & structured data | `development` | 73 |
+| `config-data` | Config & structured data | `development` | 77 |
 | `database` | Database & dataset | `system` | 54 |
 | `archive` | Archive / compressed | `archive` | 74 |
 | `disk-image` | Disk / filesystem image | `archive` | 48 |
@@ -598,6 +598,7 @@ Every mapped extension, alphabetically, with its group.
 | `.cgi` | `script` |
 | `.cgm` | `vector-image` |
 | `.chd` | `disk-image` |
+| `.chitubox` | `3d-model` |
 | `.chm` | `ebook` |
 | `.cif` | `disk-image` |
 | `.cjs` | `source-code` |
@@ -647,6 +648,7 @@ Every mapped extension, alphabetically, with its group.
 | `.css` | `web-asset` |
 | `.csv` | `spreadsheet` |
 | `.csx` | `source-code` |
+| `.ctb` | `3d-model` |
 | `.cts` | `source-code` |
 | `.cu` | `source-code` |
 | `.cue` | `playlist` |
@@ -829,6 +831,7 @@ Every mapped extension, alphabetically, with its group.
 | `.frm` | `database` |
 | `.fs` | `source-code` |
 | `.fsi` | `source-code` |
+| `.fsproj` | `config-data` |
 | `.fsscript` | `source-code` |
 | `.fsx` | `source-code` |
 | `.ftn` | `source-code` |
@@ -1365,6 +1368,7 @@ Every mapped extension, alphabetically, with its group.
 | `.qcp` | `audio-lossy` |
 | `.qed` | `disk-image` |
 | `.qmd` | `notebook` |
+| `.qml` | `source-code` |
 | `.qoi` | `raster-photo` |
 | `.qpw` | `spreadsheet` |
 | `.qt` | `video` |
@@ -1522,6 +1526,8 @@ Every mapped extension, alphabetically, with its group.
 | `.sr2` | `raw-photo` |
 | `.srf` | `raw-photo` |
 | `.srpm` | `package-installer` |
+| `.srr` | `config-data` |
+| `.srs` | `config-data` |
 | `.srt` | `subtitle` |
 | `.srw` | `raw-photo` |
 | `.ss` | `source-code` |
@@ -1640,6 +1646,7 @@ Every mapped extension, alphabetically, with its group.
 | `.vapi` | `source-code` |
 | `.vb` | `source-code` |
 | `.vbe` | `script` |
+| `.vbproj` | `config-data` |
 | `.vbs` | `script` |
 | `.vcf` | `config-data` |
 | `.vcs` | `config-data` |
@@ -1719,6 +1726,7 @@ Every mapped extension, alphabetically, with its group.
 | `.x3f` | `raw-photo` |
 | `.x_b` | `cad` |
 | `.x_t` | `cad` |
+| `.xaml` | `markup` |
 | `.xapk` | `package-installer` |
 | `.xar` | `archive` |
 | `.xbm` | `raster-photo` |
@@ -1777,4 +1785,4 @@ Every mapped extension, alphabetically, with its group.
 | `.ztl` | `3d-model` |
 | `.zz` | `archive` |
 
-_1350 extensions across 37 groups. Generated from `backend/filearr/file_groups.py`._
+_1358 extensions across 37 groups. Generated from `backend/filearr/file_groups.py`._

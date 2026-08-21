@@ -22,6 +22,8 @@
     deleteTaxonomyGroup,
     addTaxonomyExtension,
     deleteTaxonomyExtension,
+    syncTaxonomySeed,
+    reclassifyExtensions,
     TAXONOMY_EXTRACTORS,
     type TaxonomyNode,
     type AuthPrincipal,
@@ -41,6 +43,45 @@
   let extInput = $state<Record<string, string>>({});
   let extError = $state<Record<string, string>>({});
   let extNotice = $state<Record<string, string>>({});
+
+  // Maintenance actions: adopt a widened built-in seed / apply the current
+  // taxonomy to already-catalogued items (no rescan). Result shown inline.
+  let seedBusy = $state(false);
+  let reclassBusy = $state(false);
+  let actionNotice = $state("");
+
+  async function syncSeed() {
+    if (seedBusy) return;
+    seedBusy = true; error = ""; actionNotice = "";
+    try {
+      const r = await syncTaxonomySeed();
+      actionNotice = r.added_count
+        ? `Seed sync adopted ${r.added_count} new extension(s)` +
+          (r.skipped?.length ? ` (${r.skipped.length} left where you placed them)` : "") +
+          " — run “Reclassify items” to apply to the existing catalogue."
+        : "Seed sync: nothing new — this taxonomy already covers the shipped defaults.";
+      await refresh();
+    } catch (e) {
+      error = errDetail(e);
+    } finally {
+      seedBusy = false;
+    }
+  }
+
+  async function reclassify() {
+    if (reclassBusy) return;
+    reclassBusy = true; error = ""; actionNotice = "";
+    try {
+      const r = await reclassifyExtensions();
+      actionNotice = r.changed
+        ? `Reclassified ${r.changed.toLocaleString()} item(s); their search docs are re-syncing.`
+        : "Reclassify: every item already matches the current taxonomy.";
+    } catch (e) {
+      error = errDetail(e);
+    } finally {
+      reclassBusy = false;
+    }
+  }
 
   function errDetail(e: unknown): string {
     if (e instanceof ApiError) {
@@ -242,9 +283,18 @@
     <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300"
       onclick={refresh}>Refresh</button>
     {#if isAdmin}
+      <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+        title="Adopt extensions the shipped built-in seed has gained since this database was set up. Add-only: anything you moved or removed stays exactly where you put it."
+        disabled={seedBusy} onclick={syncSeed}>{seedBusy ? "syncing…" : "Sync built-in seed"}</button>
+      <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+        title="Apply the current taxonomy to items already in the catalogue (updates file category/group + search docs in place — no rescan)."
+        disabled={reclassBusy} onclick={reclassify}>{reclassBusy ? "reclassifying…" : "Reclassify items"}</button>
       <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={newCategory}>New category</button>
     {/if}
   </div>
+  {#if actionNotice}
+    <p class="mt-2 rounded-lg border border-emerald-300 bg-emerald-50 p-2 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">{actionNotice}</p>
+  {/if}
 
   {#if !isAdmin}
     <p class="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">

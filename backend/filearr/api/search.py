@@ -443,16 +443,16 @@ async def search(
     year_gte: int | None = None,
     year_lte: int | None = None,
     size_gte: int | None = Query(
-        default=None, ge=0, description="P3-T4 min file size in bytes (inclusive)"
+        default=None, ge=0, description="Minimum file size in bytes (inclusive)"
     ),
     size_lte: int | None = Query(
-        default=None, ge=0, description="P3-T4 max file size in bytes (inclusive)"
+        default=None, ge=0, description="Maximum file size in bytes (inclusive)"
     ),
     mtime_gte: int | None = Query(
-        default=None, description="P3-T4 min mtime as epoch seconds (inclusive)"
+        default=None, description="Minimum mtime as epoch seconds (inclusive)"
     ),
     mtime_lte: int | None = Query(
-        default=None, description="P3-T4 max mtime as epoch seconds (inclusive)"
+        default=None, description="Maximum mtime as epoch seconds (inclusive)"
     ),
     tags: str | None = Query(default=None, description="comma-separated, AND semantics"),
     sidecar_of: str | None = Query(
@@ -466,7 +466,7 @@ async def search(
     hash: str | None = Query(
         default=None,
         pattern="^[0-9a-f]{8,64}$",
-        description="P3-T1 exact hash lookup: matches quick_hash OR content_hash "
+        description="Exact hash lookup: matches quick_hash OR content_hash "
         "(lowercase hex, 8-64 chars). Typo tolerance is off for these fields, so "
         "a single differing digit returns nothing.",
     ),
@@ -524,7 +524,7 @@ async def search(
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="P3-T8 hybrid semantic ratio (0..1). 0 = pure keyword "
+        description="Hybrid semantic ratio (0..1). 0 = pure keyword "
         "(default, unchanged behaviour); 1 = pure vector; in between blends both. "
         "Ignored (treated as 0) unless semantic search is enabled server-side.",
     ),

@@ -1410,3 +1410,35 @@ previously env-only. Built on the existing `app_settings` KV store + the
   anchor (leaf excluded → survives renewal). Per-endpoint `tls_ca_cert_pem` for
   cross-forest. Verification stays ON — the fetched CA is the anchor, not a
   bypass.
+
+## 33. Extension-map upkeep as a standing activity (2026-08-21)
+
+OPS-T4 ("extension-map expansion") was completed 2026-07-13 (map additions,
+xmp/thm sidecar classification, the reclassify endpoint) — but the interface
+still pointed at it as if it were pending. Closed out properly:
+
+- **Interface references removed.** The `unmapped_extensions` report no longer
+  cites OPS-T4; its description now says exactly where extensions get added.
+  Same sweep removed the other internal task IDs that leaked into user-visible
+  strings (search API parameter descriptions carried P3-T\* prefixes; the scan
+  stop status message carried a FIX-15 tag). Internal IDs stay in code
+  comments/docstrings only — never in text the GUI or /api/docs renders.
+- **Where extensions live now** (the answer the report points at):
+  1. **Runtime authority** — the DB taxonomy, edited at **Admin → Taxonomy**
+     (or `/api/v1/taxonomy`). Category → group → extensions; add/move an
+     extension there.
+  2. **Shipped defaults** — `backend/filearr/file_groups.py` (the seed).
+     Widening the seed only reaches an *edited* DB via **Sync built-in seed**
+     (add-only; operator placements win) — now a button on the Taxonomy page
+     alongside **Reclassify items** (`POST /system/reclassify-extensions`,
+     applies the current taxonomy to already-catalogued rows, no rescan).
+- **Seed additions off the 2026-08-21 live report:** `srr`/`srs` (ReScene
+  release/sample reconstruction metainfo → config-data, beside `torrent`;
+  deliberately NOT archive — the archive extractor can't read them),
+  `xaml` → markup, `qml` → source-code, `vbproj`/`fsproj` → config-data
+  (beside their csproj/sln siblings), `chitubox`/`ctb` (resin-slicer project +
+  sliced output) → 3d-model.
+- **Standing activity, not a task:** the unmapped report stays the feed;
+  review its top rows occasionally, map what's real media/data via the
+  taxonomy GUI, leave junk unmapped (policy: "other is a signal, not a
+  bucket") and exclude it per-library instead.

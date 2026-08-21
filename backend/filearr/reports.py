@@ -811,8 +811,11 @@ _REPORTS: tuple[CannedReport, ...] = (
             "total bytes per extension, most common first. Linked sidecars "
             "(.nfo/.xml/.xmp/.thm/artwork) are excluded so the tail is genuinely "
             "unmappable. An empty extension row ('') = extensionless files (no "
-            "extension signal; left as 'other'). Feeds extension-map expansion "
-            "(OPS-T4)."
+            "extension signal; left as 'other'). To map an extension: add it to "
+            "a group under Admin → Taxonomy (or the /taxonomy API), then run "
+            "'Reclassify extensions' — no rescan needed. Deliberately-junk "
+            "extensions (installers, OS artifacts) are best left unmapped and "
+            "excluded per-library instead."
         ),
         columns=("extension", "file_count", "total_bytes"),
         build=_build_unmapped,

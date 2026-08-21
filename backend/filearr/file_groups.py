@@ -640,7 +640,7 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
     ),
     "markup": (
         "md", "markdown", "mdown", "mkd", "mkdn", "mdwn", "mdx", "html", "htm", "xhtml", "xht",
-        "shtml", "xml", "xsl", "xslt", "xsd", "dtd", "rng", "rss", "atom", "rst", "adoc", "asciidoc",
+        "shtml", "xml", "xaml", "xsl", "xslt", "xsd", "dtd", "rng", "rss", "atom", "rst", "adoc", "asciidoc",
         "textile", "creole", "org", "pod", "roff", "man", "nroff", "troff", "texi", "texinfo",
         "tex", "latex", "ltx", "sty", "cls", "dtx", "bib", "bst", "sgml", "dita", "docbook", "wiki",
         "mediawiki", "typ", "haml", "slim", "pug", "jade", "ejs", "hbs", "handlebars", "mustache",
@@ -652,6 +652,9 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "usd", "usda", "usdc", "usdz", "x3d", "x3db", "x3dv", "wrl", "vrml", "off", "gcode", "gco",
         "amf", "vox", "qb", "pmx", "pmd", "mmd", "mqo", "splat", "ksplat", "e57", "pcd", "las",
         "laz", "xyz", "mesh",
+        # Resin-printing slicer artifacts (live unmapped report, 2026-08-21):
+        # ``chitubox`` = CHITUBOX project, ``ctb`` = its sliced output.
+        "chitubox", "ctb",
     ),
     "cad": (
         "dwg", "dxf", "dwf", "dwfx", "dgn", "step", "stp", "stpz", "iges", "igs", "sat", "sab",
@@ -677,7 +680,7 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "v", "sv", "svh", "vhdl", "d", "pas", "pp", "dpr", "inc", "f", "f90", "f95", "f03", "f08",
         "for", "ftn", "ada", "adb", "ads", "cob", "cbl", "cobol", "cpy", "lisp", "lsp", "cl", "el",
         "scm", "ss", "rkt", "vb", "bas", "asm", "s", "nasm", "sol", "move", "cairo", "wat", "gd",
-        "rpy", "ino", "au3", "purs", "re", "rei", "vala", "vapi", "hx", "hxml", "wgsl", "glsl",
+        "rpy", "ino", "au3", "purs", "re", "rei", "vala", "vapi", "hx", "hxml", "qml", "wgsl", "glsl",
         "hlsl", "metal", "vert", "frag", "comp", "geom", "cu", "cuh",
         # Unified-diff patches: source-derived text that belongs beside the code it
         # edits, not in the ``other`` bucket.
@@ -703,11 +706,17 @@ _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
         "thrift", "capnp", "fbs", "avsc", "graphql", "gql", "reg", "desktop", "service", "unit",
         "rc", "npmrc", "yarnrc", "babelrc", "eslintrc", "prettierrc", "editorconfig", "cmake", "mk",
         "mak", "ninja", "bazel", "bzl", "sbt", "gradle", "lock", "resx", "pbxproj", "xcconfig",
-        "csproj", "vcxproj", "sln", "pri", "prefs", "containerfile", "dockerfile",
+        "csproj", "vcxproj", "vbproj", "fsproj", "sln", "pri", "prefs", "containerfile",
+        "dockerfile",
         # BitTorrent metainfo (bencoded structured data describing a transfer, not the
         # payload) plus the iCalendar / vCard personal-data interchange family
         # (``vcs`` = legacy vCalendar, ``gcrd``/``vct`` = vCard aliases).
         "torrent", "ics", "vcs", "vcf", "gcrd", "vct",
+        # ReScene metainfo (``srr`` = RAR-set reconstruction data, ``srs`` = sample
+        # reconstruction): data DESCRIBING a release, same role as ``torrent`` —
+        # NOT an archive (mapping them there would run the archive extractor and
+        # guarantee an error row per file).
+        "srr", "srs",
     ),
     "database": (
         "db", "db3", "sqlite", "sqlite3", "sqlitedb", "s3db", "sl3", "mdb", "accdb", "accde", "mde",
