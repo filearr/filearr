@@ -16,6 +16,7 @@ stack trace or a partial session.
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,6 +28,10 @@ from filearr.db import get_session
 from filearr.security import set_session_cookie
 
 router = APIRouter()
+
+# Same auth-method logging convention as api/auth.py ("filearr.auth"): every
+# login outcome names its method so log lines from the three providers collate.
+logger = logging.getLogger("filearr.auth")
 
 
 def _require_enabled(settings) -> None:
@@ -128,6 +133,13 @@ async def oidc_callback(
     _require_enabled(eff)
 
     def _fail(reason: str, return_to: str = "/") -> RedirectResponse:
+        # The client only ever sees the short reason token; the log line is the
+        # operator's diagnostic (which method failed and why).
+        logger.info(
+            "login failed: method=oidc reason=%s ip=%s",
+            reason,
+            ratelimit.client_ip(request),
+        )
         sep = "&" if "?" in return_to else "?"
         return RedirectResponse(
             url=f"{return_to}{sep}{urlencode({'sso_error': reason})}",
@@ -194,7 +206,15 @@ async def oidc_callback(
     # the P6-T8 rate limiter — the 256-bit single-use ``state`` (consumed above)
     # already gates replay/brute force, so there is no credential to lock.
     await audit.emit(
-        audit.OIDC_LOGIN, request=request, principal_id=result.principal_id
+        audit.OIDC_LOGIN,
+        request=request,
+        principal_id=result.principal_id,
+        details={"method": "oidc"},
+    )
+    logger.info(
+        "login success: principal=%s method=oidc ip=%s",
+        result.principal_id,
+        ratelimit.client_ip(request),
     )
 
     response = RedirectResponse(

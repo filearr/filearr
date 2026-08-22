@@ -20,6 +20,7 @@ and none of it engages while ``FILEARR_AUTH_ENABLED=false``.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -42,6 +43,11 @@ from filearr.security import (
 )
 
 router = APIRouter()
+
+# Auth-outcome log lines carry the METHOD (local / ldap / oidc) so an operator
+# reading the app log can tell which provider actually answered a login —
+# mirrored into the audit row's ``details.method`` for the Security audit view.
+logger = logging.getLogger("filearr.auth")
 
 # Roles are data since 2026-08-16 (builtin admin/user/viewer + custom); a role
 # name is validated against the live registry at the endpoint, not a Literal.
@@ -334,6 +340,8 @@ async def login(
     principal = await authx.authenticate_local(session, payload.username, payload.password)
     ldap_result = None
     provider = "local"
+    methods_tried = ["local"]
+    ldap_error_reason: str | None = None
     # Local-first, then LDAP fall-through (P6-T6): only when local auth did not
     # succeed AND the username is unknown or ldap-sourced. Same login form; the
     # directory verifies the password via a real bind.
@@ -344,15 +352,18 @@ async def login(
         if eff.ldap_is_configured and await _ldap_eligible(session, payload.username):
             from filearr import ldap_auth
 
+            methods_tried.append("ldap")
             try:
                 ldap_result = await ldap_auth.authenticate_ldap(
                     session, payload.username, payload.password
                 )
-            except ldap_auth.LDAPError:
+            except ldap_auth.LDAPError as exc:
                 # Config/transport/role-refusal → generic failure (fail-closed);
-                # discard any partial provisioning writes.
+                # discard any partial provisioning writes. The reason token is
+                # audit/log-only — the client still sees the generic 401.
                 await session.rollback()
                 ldap_result = None
+                ldap_error_reason = exc.reason
             if ldap_result is not None:
                 principal = await session.get(Principal, uuid.UUID(ldap_result.principal_id))
                 provider = "ldap"
@@ -361,8 +372,22 @@ async def login(
         # Counter mutations + audit run in their OWN transactions, so the rollback
         # above never discards them (P6-T8/T9).
         newly_locked = await ratelimit.register_failure(payload.username, ip)
+        fail_details: dict = {"methods_attempted": methods_tried}
+        if ldap_error_reason is not None:
+            fail_details["ldap_error"] = ldap_error_reason
         await audit.emit(
-            audit.LOGIN_FAILURE, request=request, username_attempted=payload.username
+            audit.LOGIN_FAILURE,
+            request=request,
+            username_attempted=payload.username,
+            details=fail_details,
+        )
+        # No username here: app_logs is read-scope (vs the admin-only audit
+        # feed) and a failed "username" is sometimes a mistyped password.
+        logger.info(
+            "login failed from %s (methods tried: %s%s)",
+            ip,
+            " -> ".join(methods_tried),
+            f"; ldap error: {ldap_error_reason}" if ldap_error_reason else "",
         )
         if newly_locked:
             await audit.emit(
@@ -392,6 +417,10 @@ async def login(
         request=request,
         principal_id=principal.id,
         username_attempted=payload.username,
+        details={"method": provider},
+    )
+    logger.info(
+        "login success: user=%s method=%s ip=%s", user.username, provider, ip
     )
     return LoginOut(principal=_principal_out(principal, user), warning=_https_warning(request))
 

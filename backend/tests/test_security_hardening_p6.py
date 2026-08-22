@@ -188,6 +188,45 @@ async def test_login_success_and_logout_audited(client):
     assert await _count(maker, "security_events", event_type="logout") == 1
 
 
+async def test_login_events_record_auth_method(client, caplog):
+    """Success rows carry details.method; failure rows carry the attempted-method
+    chain — and the app log names the method without leaking the username on
+    failure (app_logs is read-scope; a failed 'username' can be a password)."""
+    import json
+    import logging
+
+    c, settings, maker = client
+    await _bootstrap_admin(c)
+    with caplog.at_level(logging.INFO, logger="filearr.auth"):
+        r = await c.post("/api/v1/auth/login", json={"username": "admin", "password": "nope"})
+        assert r.status_code == 401
+        r = await c.post(
+            "/api/v1/auth/login", json={"username": "admin", "password": "adminpass1"}
+        )
+        assert r.status_code == 200
+    async with maker() as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT event_type, details FROM security_events "
+                    "WHERE event_type IN ('login_success', 'login_failure') "
+                    "ORDER BY ts"
+                )
+            )
+        ).all()
+    details = {
+        et: (d if isinstance(d, dict) else json.loads(d)) for et, d in rows if d is not None
+    }
+    assert details["login_success"]["method"] == "local"
+    # LDAP is unconfigured here, so only the local method was attempted.
+    assert details["login_failure"]["methods_attempted"] == ["local"]
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "filearr.auth"]
+    assert any("login success: user=admin method=local" in ln for ln in lines)
+    fail_lines = [ln for ln in lines if "login failed" in ln]
+    assert fail_lines and all("methods tried: local" in ln for ln in fail_lines)
+    assert all("admin" not in ln for ln in fail_lines)
+
+
 async def test_lockout_event_audited_once(client):
     c, settings, maker = client
     await _bootstrap_admin(c)

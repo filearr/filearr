@@ -359,6 +359,19 @@ Login, logout, session lifecycle, grant changes, and every agent mutation
 (Admin → Audit, or `GET /api/v1/audit`, admin scope). Raw tokens and secrets
 never appear in the log.
 
+Every login outcome names the **authentication method** that handled it. The
+event type already separates providers (`login_success` = local password,
+`ldap_login`, `oidc_login`); each success row also carries `details.method`
+(`local` / `ldap` / `oidc`), and a `login_failure` row records
+`details.methods_attempted` — e.g. `["local", "ldap"]` when local auth missed
+and the directory fall-through was tried too — plus `details.ldap_error` (a
+short reason token) when the directory itself refused. The same information is
+written to the application log (`filearr.auth`, visible in the Jobs → Logs
+panel): success lines include the username and method; failure lines
+deliberately name only the method chain and source IP, never the attempted
+username (the Logs panel is read-scope, and a failed "username" is sometimes a
+mistyped password — the admin-only audit feed keeps the full record).
+
 High-volume **read** auditing (a per-query event) is **off by default** (low
 value outside multi-tenant SaaS) and toggled with `FILEARR_AUDIT_READS`. Retention
 is split: noisy login-failure rows purge sooner than higher-value events.
