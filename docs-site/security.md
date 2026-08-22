@@ -61,7 +61,13 @@ break-glass path if a federated provider locks everyone out. See
 - **LDAP / Active Directory** — bind auth via ldap3, TLS-first (StartTLS upgrade
   for non-loopback `ldap://`, refused without TLS unless an operator explicitly
   allows plaintext). Direct-bind or search-then-bind, group→role mapping, and
-  optional group sync.
+  optional group sync. **Login-name formats:** `DOMAIN\user`, `user@domain` and
+  the bare account name are all accepted — the as-typed form is tried first (so
+  a `userPrincipalName` filter keeps working), then the stripped bare name
+  against your `ldap_user_filter` (AD: `(sAMAccountName={username})`). The
+  domain qualifier is dropped, not selected from — login talks to one
+  directory, so no domain picker is needed; a wrong-domain typo simply fails
+  the bind.
 
 Both fail **closed**: a half-configured provider's endpoints 404 rather than
 500ing, and an unmapped user is refused when you leave the default role empty.

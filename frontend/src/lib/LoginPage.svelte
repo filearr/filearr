@@ -108,6 +108,7 @@
         class="rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
         bind:value={username}
         autocomplete="username"
+        title={"With directory (AD/LDAP) login, DOMAIN\\user, user@domain and the bare account name are all accepted."}
         required />
     </label>
     <label class="flex flex-col gap-1 text-sm">

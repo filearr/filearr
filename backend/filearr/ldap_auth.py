@@ -378,6 +378,33 @@ def _resolve_groups(cfg: LdapConfig, reader: Connection, entry, user_dn: str) ->
         raise LDAPError("group_search_failed", str(exc)) from exc
 
 
+def _login_name_variants(username: str) -> list[str]:
+    """The accepted spellings of one AD login, in lookup order (2026-08-22).
+
+    Users type whatever their OS trained them to: ``DOMAIN\\user``,
+    ``user@domain.tld``, or the bare account name — but the search filter
+    matches ONE attribute (``sAMAccountName`` on AD), so only the bare form
+    ever found an entry and the other two failed as "invalid credentials".
+
+    The as-typed string is tried FIRST so a ``userPrincipalName``-matching
+    ``ldap_user_filter`` keeps seeing the full UPN; the stripped bare name is
+    the fallback. The domain qualifier is dropped, not validated — this is
+    single-forest normalisation (login talks to one directory; a wrong-domain
+    typo simply fails the bind like any unknown user). A multi-forest login
+    with a domain selector would need per-domain login endpoints, which only
+    directory SYNC has today."""
+    variants = [username]
+    if "\\" in username:
+        bare = username.rsplit("\\", 1)[1].strip()
+        if bare and bare not in variants:
+            variants.append(bare)
+    elif "@" in username:
+        bare = username.split("@", 1)[0].strip()
+        if bare and bare not in variants:
+            variants.append(bare)
+    return variants
+
+
 def resolve_ldap_identity(
     cfg: LdapConfig, username: str, password: str, *, connector=connect
 ) -> LdapIdentity | None:
@@ -405,9 +432,16 @@ def resolve_ldap_identity(
 
         entry = None
         if cfg.user_dn_template:
-            user_dn = cfg.user_dn_template.format(username=_escape_dn_value(username))
+            # Template mode composes a DN, so a DOMAIN\\ or @domain decoration
+            # can never belong in it — use the bare account name (the last
+            # variant; identical to as-typed for an undecorated login).
+            bare = _login_name_variants(username)[-1]
+            user_dn = cfg.user_dn_template.format(username=_escape_dn_value(bare))
         else:
-            entry = _search_user(cfg, svc, username)
+            for candidate in _login_name_variants(username):
+                entry = _search_user(cfg, svc, candidate)
+                if entry is not None:
+                    break
             if entry is None:
                 return None
             user_dn = entry.entry_dn

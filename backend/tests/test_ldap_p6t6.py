@@ -584,3 +584,53 @@ async def test_login_ldap_bumps_grant_cache_on_group_change(client, monkeypatch)
     r = await c.post("/api/v1/auth/login", json={"username": "alice", "password": "alicepw"})
     assert r.status_code == 200
     assert bumps["n"] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# AD login-name formats (2026-08-22): DOMAIN\user and user@domain accepted     #
+# --------------------------------------------------------------------------- #
+def test_login_name_variants_order_and_dedup():
+    v = ldap_auth._login_name_variants
+    assert v("alice") == ["alice"]
+    # As-typed FIRST (a UPN-matching filter must see the full string), bare after.
+    assert v("EX\\alice") == ["EX\\alice", "alice"]
+    assert v("alice@ex.com") == ["alice@ex.com", "alice"]
+    # Degenerate decorations never yield an empty variant.
+    assert v("EX\\") == ["EX\\"]
+    assert v("@ex.com") == ["@ex.com"]
+
+
+def test_search_bind_accepts_netbios_and_upn_formats():
+    """The exact live complaint: with an sAMAccountName-style filter, only the
+    bare name ever matched — DOMAIN\\user and user@domain failed as invalid
+    credentials. Both now fall back to the stripped bare name."""
+    for typed in ("EX\\alice", "alice@ex.com"):
+        ident = ldap_auth.resolve_ldap_identity(
+            _cfg(), typed, "alicepw", connector=make_connector()
+        )
+        assert ident is not None, typed
+        assert ident.username == "alice"
+    # The wrong password still fails regardless of decoration.
+    assert (
+        ldap_auth.resolve_ldap_identity(
+            _cfg(), "EX\\alice", "wrong", connector=make_connector()
+        )
+        is None
+    )
+
+
+def test_direct_bind_template_uses_bare_name():
+    """DN-template mode composes a DN, where a domain qualifier can never
+    belong: the decorated login must bind the same DN the bare name does."""
+    cfg = _cfg(
+        ldap_user_dn_template="uid={username},ou=people,dc=ex,dc=com",
+        ldap_user_base="",
+    )
+    calls: list = []
+    ident = ldap_auth.resolve_ldap_identity(
+        cfg, "EX\\alice", "alicepw", connector=make_connector(calls=calls)
+    )
+    assert ident is not None
+    # calls = [(user_dn, password), ...]; the user bind must target the BARE DN.
+    assert ("uid=alice,ou=people,dc=ex,dc=com", "alicepw") in calls
+    assert ident.username == "alice"
