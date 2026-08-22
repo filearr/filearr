@@ -438,17 +438,36 @@ def resolve_ldap_identity(
             bare = _login_name_variants(username)[-1]
             user_dn = cfg.user_dn_template.format(username=_escape_dn_value(bare))
         else:
-            for candidate in _login_name_variants(username):
+            variants = _login_name_variants(username)
+            for candidate in variants:
                 entry = _search_user(cfg, svc, candidate)
                 if entry is not None:
                     break
             if entry is None:
+                # Stage-level diagnostics (no username — app logs are
+                # read-scope): "not found" vs "password rejected" need entirely
+                # different operator fixes (user_base/filter vs credentials or
+                # bind policy), and the generic 401 hides which one fired.
+                logger.info(
+                    "ldap auth failed at stage=search: no directory entry "
+                    "matched any of %d login-name variant(s) under user_base "
+                    "%r — check ldap_user_base covers the account and "
+                    "ldap_user_filter matches the login attribute",
+                    len(variants),
+                    cfg.user_base,
+                )
                 return None
             user_dn = entry.entry_dn
 
         # THE password check: bind as the user.
         user_conn = connector(cfg, user=user_dn, password=password)
         if user_conn is None:
+            logger.info(
+                "ldap auth failed at stage=bind: user DN was located but the "
+                "directory rejected the bind (wrong password, disabled/locked "
+                "account, or a server bind policy such as required LDAP "
+                "signing/channel binding)"
+            )
             return None
         conns.append(user_conn)
 
