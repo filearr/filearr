@@ -2422,10 +2422,15 @@ class AgentCommand(Base):
         # the retroactive repair for the 64-128 KiB quick_hash defect the agent
         # cannot self-heal, because scan.diffEntry only re-hashes files whose
         # size or mtime moved).
+        # ``reconcile`` (2026-08-22): the console-triggered full-manifest
+        # consistency sweep. Agent-scoped; exists because the agent's own
+        # triggers (24h uptime ticker / >24h outage / cursor dead-end) never
+        # fire on a desktop-pattern machine (agent XENON: "Last reconcile:
+        # never"), and because the operator sometimes wants one NOW.
         CheckConstraint(
             "kind IN ('stat_check','rehash_check','stage_upload','inventory',"
             "'self_update','suspend','agent_maintenance','reextract',"
-            "'rehash_sweep')",
+            "'rehash_sweep','reconcile')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(

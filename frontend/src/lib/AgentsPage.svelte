@@ -75,6 +75,7 @@
     rollbackConfigGroup,
     setAgentConfigGroups,
     reextractAgent,
+    reconcileAgent,
     rehashSweepAgent,
     revokeAgent,
     runAgentMaintenance,
@@ -613,6 +614,23 @@
       rehashing = new Set([...rhQueued, ...rhRunning].map((c) => c.agent_id));
     } catch {
       /* transient — keep the last-known sweep sets (the badges are advisory) */
+    }
+  }
+
+  let reconciling: Record<string, boolean> = $state({});
+
+  async function reconcileNow(a: AgentOut) {
+    reconciling[a.id] = true;
+    try {
+      await reconcileAgent(a.id);
+      await refresh();
+    } catch (e) {
+      error =
+        e instanceof ApiError && e.status === 409
+          ? `A reconcile is already queued or running on "${a.name}".`
+          : String(e);
+    } finally {
+      reconciling[a.id] = false;
     }
   }
 
@@ -2480,6 +2498,11 @@ ${detail}
                     disabled={maintaining[a.id]}
                     title="Queue a local maintenance pass: compact the agent's index (VACUUM), prune already-replicated outbox rows, sweep stale temp files. Runs at its next check-in; the result appears in the command history."
                     onclick={() => maintainAgent(a)}>maintain</button>
+                  <button
+                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
+                    disabled={reconciling[a.id]}
+                    title="Queue an immediate full-manifest consistency sweep: the agent checks each root's complete index against central and re-syncs any drift (deletions missed while offline included). Normally automatic — the agent also catches up at startup when its last sweep is overdue — this is the run-it-now handle. Sets the 'Last reconcile' watermark that gates recycle-bin purge of this agent's items."
+                    onclick={() => reconcileNow(a)}>{reconciling[a.id] ? "queuing…" : "reconcile"}</button>
                   <button
                     class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
                     disabled={reextracting[a.id] || sweeping.has(a.id)}

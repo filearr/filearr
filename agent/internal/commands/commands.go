@@ -145,6 +145,13 @@ type Config struct {
 	// back to central. Nil => the kind completes ok=false, so an older agent
 	// degrades cleanly against a central that enqueues one.
 	RunRehashSweep func(ctx context.Context, payload map[string]any) (map[string]any, error)
+
+	// RunReconcile applies a `reconcile` command (2026-08-22): one immediate
+	// full-manifest consistency sweep, routed through the daemon's reconcile
+	// supervisor single-flight gate. Payload verbatim ({"force_reset": bool});
+	// returns the counters posted back to central. Nil => the kind completes
+	// ok=false, so an older agent degrades cleanly.
+	RunReconcile func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // Poller drains central's per-agent command queue and executes each command.
@@ -172,6 +179,7 @@ type Poller struct {
 	runMaint       func(ctx context.Context) (map[string]any, error)
 	runReextract   func(ctx context.Context, payload map[string]any) (map[string]any, error)
 	runRehashSweep func(ctx context.Context, payload map[string]any) (map[string]any, error)
+	runReconcile   func(ctx context.Context, payload map[string]any) (map[string]any, error)
 }
 
 // NewPoller wires a Poller, applying defaults.
@@ -200,6 +208,7 @@ func NewPoller(cfg Config) *Poller {
 		runMaint:       cfg.RunMaintenance,
 		runReextract:   cfg.RunReextract,
 		runRehashSweep: cfg.RunRehashSweep,
+		runReconcile:   cfg.RunReconcile,
 	}
 	if p.http == nil {
 		p.http = &http.Client{Timeout: defaultTimeout}
@@ -305,6 +314,8 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processReextract(ctx, cmd)
 	case KindRehashSweep:
 		p.processRehashSweep(ctx, cmd)
+	case KindReconcile:
+		p.processReconcile(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}

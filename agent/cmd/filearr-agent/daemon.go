@@ -238,7 +238,7 @@ func (p *daemonProgram) run(ctx context.Context, s service.Service, store *enrol
 	// The updater starts BEFORE the command poller so its TriggerNow seam can be
 	// handed to the self_update command handler (console "update now" button).
 	updTrigger, updDone := startUpdater(ctx, p.cfg.DataDir, store, id.State.CentralURL, id.State.AgentID, httpClient, serviceManaged, updInterval)
-	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError, updTrigger, ops)
+	cmdDone := startCommandPoller(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient, onAuthError, updTrigger, ops, sup)
 	thumbDone := startThumbnailer(ctx, idx, store, id.State.CentralURL, id.State.AgentID, httpClient)
 	// Policy-driven scan scheduling (2026-08-03): the daemon runs scans itself
 	// so a service-only install needs no external cron/Task Scheduler. Off

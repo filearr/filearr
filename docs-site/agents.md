@@ -1225,6 +1225,11 @@ per-row actions), applied at the agent's next check-in (~1 min):
   update downloads) older than a day. The result — bytes reclaimed, rows
   pruned, per-pass errors — lands in the command history. 409 while one is
   already queued or running.
+- **reconcile** (`reconcile`) — queue one immediate full-manifest consistency
+  sweep (see [Reconciliation](#reconciliation) below). Normally automatic;
+  this is the run-it-now handle, and it sets the *Last reconcile* watermark
+  that gates recycle-bin purge of the agent's items. 409 while one is already
+  queued or running.
 - **re-extract** (`reextract`) — sweep the agent's existing index and re-emit
   its items with a fresh extraction result. See below; this is the one that
   fills in metadata for files catalogued before extraction was enabled.
@@ -1445,13 +1450,32 @@ happens centrally after the item is replicated. See
 [Data collected & how](data-collection.md#what-agents-replicate) for exactly what
 leaves the agent machine — and what never does.
 
-## Reconciliation
+## Reconciliation {#reconciliation}
 
 Beyond the incremental outbox, the agent periodically (and after long offline
 periods) pages its **whole manifest** to central for a full-manifest diff. Central
 does a server-side anti-join to catch anything the incremental stream missed
 (e.g. a deletion during a long outage). This is the safety net behind
 replication, analogous to the central Postgres↔Meilisearch reconcile sweep.
+
+When a sweep runs (all of these serialize through one gate, so they never
+overlap):
+
+- **Startup catch-up** — a couple of minutes after the daemon starts, if the
+  durable last-sweep watermark is older than the reconcile interval (or was
+  never set), a sweep fires. This is what makes the cadence mean *"at most
+  24 h between sweeps"* rather than *"24 h of uninterrupted uptime"* — before
+  it, a machine that slept, rebooted, or self-updated daily never reconciled
+  at all (its console row showed *Last reconcile: never*), which also silently
+  blocked recycle-bin purge of its items (the purge-safety watermark).
+- **Periodic** — every `reconcile_interval_seconds` (default 24 h) of runtime.
+- **After a long outage** — replication reconnecting after more than the
+  interval of downtime.
+- **Cursor repair** — a replication dead-end forces a reset sweep.
+- **On demand** — the console's per-agent **reconcile** action (the
+  `reconcile` command), or `filearr-agent reconcile` on the box.
+
+A digest match costs one round-trip per root; rows stream only on mismatch.
 
 ## Policy keys
 

@@ -35,7 +35,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -67,6 +67,12 @@ CommandKind = Literal[
     # and writes nothing; ``rehash_sweep`` migrates a whole size band of the
     # agent's index and rewrites the rows in it.
     "rehash_sweep",
+    # 2026-08-22: console-triggered full-manifest consistency sweep. The
+    # agent's own triggers never fire on a desktop-pattern machine (24h uptime
+    # ticker resets every boot; the reconnect trigger needs a >24h outage) —
+    # this is the operator's immediate handle; the agent's startup catch-up
+    # (agent >= this release) covers the steady state.
+    "reconcile",
 ]
 
 # Kinds that target the AGENT itself rather than one of its items: item_id is
@@ -77,6 +83,7 @@ _AGENT_SCOPED_KINDS = {
     "agent_maintenance",
     "reextract",
     "rehash_sweep",
+    "reconcile",
 }
 
 
@@ -751,6 +758,77 @@ class RehashSweepIn(BaseModel):
     #: benefit.
     min_size: int | None = Field(default=None, ge=1, le=REHASH_MAX_SIZE_CEILING)
     max_size: int | None = Field(default=None, ge=1, le=REHASH_MAX_SIZE_CEILING)
+
+
+#: Reconcile TTL: a manifest digest over a million-row index is minutes, but a
+#: mismatch streams every row — give it the same long window as reextract so a
+#: faithfully-heartbeating sweep is never falsely expired mid-run.
+RECONCILE_TTL_SECONDS = 21_600  # 6h
+
+
+class ReconcileIn(BaseModel):
+    # force_reset requests a reset_seq sweep (the replication cursor repair
+    # path) — normally left false; the agent decides reset on its own when its
+    # index was rebuilt.
+    force_reset: bool = False
+
+
+@router.post(
+    "/agents/{agent_id}/reconcile",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def reconcile_agent(
+    agent_id: uuid.UUID,
+    request: Request,
+    body: ReconcileIn = Body(default_factory=ReconcileIn),
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue one immediate full-manifest reconcile sweep on the agent
+    (2026-08-22). The agent builds a complete manifest per root, digests it
+    against central and streams the rows only on a mismatch — central converges
+    (tombstoning deletions the event stream missed) and stamps
+    ``agents.last_reconcile_at``, the recycle-bin purge-safety watermark.
+
+    409 while a reconcile is already queued or running for this agent — same
+    job-not-desired-state reasoning as ``reextract``: two concurrent sweeps
+    would race the per-root reconcile sessions."""
+    await _live_agent(session, agent_id)
+    in_flight = (
+        await session.execute(
+            select(AgentCommand.id).where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "reconcile",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+        )
+    ).first()
+    if in_flight is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "reconcile already queued or running"
+        )
+    cmd = _enqueue_agent_scoped(
+        agent_id,
+        "reconcile",
+        {"force_reset": body.force_reset},
+        request,
+        ttl_seconds=RECONCILE_TTL_SECONDS,
+    )
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "reconcile",
+            "force_reset": body.force_reset,
+        },
+    )
+    return CommandOut.of(cmd)
 
 
 @router.post(

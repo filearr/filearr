@@ -135,3 +135,49 @@ func TestSupervisorCoalescesPreservingReset(t *testing.T) {
 		t.Error("a coalesced run that included a reset trigger must force a reset")
 	}
 }
+
+func TestSupervisorRunNowSharesSingleFlightGate(t *testing.T) {
+	// RunNow (the `reconcile` command path) must serialize against runOnce (the
+	// trigger path): while a triggered sweep is mid-flight, RunNow waits.
+	block := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	var mu sync.Mutex
+	var order []string
+	sweep := func(_ context.Context, opts Options) (SweepResult, error) {
+		entered <- struct{}{}
+		<-block
+		mu.Lock()
+		order = append(order, map[bool]string{true: "reset", false: "plain"}[opts.ForceReset])
+		mu.Unlock()
+		return SweepResult{Reset: opts.ForceReset}, nil
+	}
+	sup := NewSupervisor(sweep, 0, 0, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = sup.Run(ctx) }()
+
+	sup.Trigger(false) // triggered sweep enters and blocks
+	<-entered
+
+	done := make(chan SweepResult, 1)
+	go func() {
+		res, _ := sup.RunNow(context.Background(), true)
+		done <- res
+	}()
+	select {
+	case <-entered:
+		t.Fatal("RunNow entered the sweep while a triggered sweep held the gate")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(block) // release both
+	res := <-done
+	if !res.Reset {
+		t.Fatalf("RunNow(force) must run a reset sweep, got %+v", res)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != "plain" || order[1] != "reset" {
+		t.Fatalf("sweeps must serialize trigger-first: %v", order)
+	}
+}

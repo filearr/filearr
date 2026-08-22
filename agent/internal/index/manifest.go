@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // setFlag upserts a store_flags key/value (durable across restarts). Used by Open
@@ -40,6 +41,39 @@ func (s *Store) RebuiltPending(ctx context.Context) (bool, error) {
 func (s *Store) ClearRebuiltPending(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM store_flags WHERE key = ?`, flagRebuiltPending)
+	return err
+}
+
+// flagLastReconcileUnix records (unix seconds) when the last fully-successful
+// full-manifest reconcile sweep completed. Durable across restarts — which is
+// the whole point: before it existed the daemon's 24h reconcile ticker started
+// from ZERO at every process start, so an agent on a machine that sleeps,
+// reboots or self-updates more often than every 24h NEVER reconciled (live:
+// agent XENON showed "Last reconcile: never" permanently, 2026-08-22). The
+// daemon's startup catch-up reads this to decide whether a sweep is overdue.
+const flagLastReconcileUnix = "last_reconcile_unix"
+
+// LastReconcileAt returns when the last successful sweep completed (zero time
+// when none was ever recorded).
+func (s *Store) LastReconcileAt(ctx context.Context) (time.Time, error) {
+	var v int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT value FROM store_flags WHERE key = ?`, flagLastReconcileUnix).Scan(&v)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(v, 0), nil
+}
+
+// SetLastReconcileAt durably records a successful sweep's completion instant.
+func (s *Store) SetLastReconcileAt(ctx context.Context, t time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO store_flags(key, value) VALUES(?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		flagLastReconcileUnix, t.Unix())
 	return err
 }
 

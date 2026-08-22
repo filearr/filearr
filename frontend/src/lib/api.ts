@@ -3086,6 +3086,17 @@ export const reextractAgent = (
     body: JSON.stringify(opts),
   });
 
+/** Queue a `reconcile` command: one immediate full-manifest consistency sweep
+ *  on the agent. The agent digests each root's complete manifest against
+ *  central and streams rows only on mismatch — central converges (tombstoning
+ *  deletions the event stream missed) and stamps last_reconcile_at, the
+ *  recycle-bin purge-safety watermark. 409 while one is queued or running. */
+export const reconcileAgent = (id: string) =>
+  request<AgentCommandOut>(`/agents/${id}/reconcile`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
 /** Queue a `rehash_sweep` command (QH-T6): the agent re-reads every file in its
  *  index inside a size band, recomputes both hashes under the post-QH-T1 rules,
  *  and re-emits only the rows whose stored value was wrong.

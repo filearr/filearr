@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"math/rand/v2"
 	"net/http"
+	"time"
 
 	"github.com/filearr/filearr/agent/internal/enroll"
 	"github.com/filearr/filearr/agent/internal/index"
@@ -99,5 +102,87 @@ func startSupervisor(ctx context.Context, idx *index.Store, certStore *enroll.Ce
 		defer close(done)
 		_ = sup.Run(ctx)
 	}()
+	go startupCatchup(ctx, idx, sup, interval, newLogger())
 	return sup, done
+}
+
+// startupCatchupDelay is how long after daemon start the catch-up check waits
+// (plus up to startupCatchupJitter) before triggering an overdue sweep — long
+// enough for enrollment/replication to settle and to stay off the boot-time
+// I/O rush, short enough that an overdue agent reconciles within minutes of
+// starting rather than after 24h of uninterrupted uptime.
+const (
+	startupCatchupDelay  = 2 * time.Minute
+	startupCatchupJitter = time.Minute
+)
+
+// startupCatchup fixes the "never reconciles" failure mode (live: agent XENON,
+// 2026-08-22): the supervisor's periodic ticker starts from ZERO at process
+// start, so a machine that sleeps, reboots, or self-updates more often than
+// the interval never accumulates enough uptime to sweep — and the reconnect
+// trigger needs a >interval outage that healthy replication never has. This
+// reads the durable last-sweep watermark (store_flags, written by
+// Sweeper.Sweep on success) and, when the last sweep is older than the
+// interval — or never happened — schedules one through the supervisor's
+// normal trigger path after a short jittered delay. The cadence thereby means
+// "at most `interval` between sweeps" instead of "`interval` of uninterrupted
+// uptime".
+func startupCatchup(ctx context.Context, idx *index.Store, sup *reconcile.Supervisor, interval time.Duration, log *slog.Logger) {
+	if interval <= 0 {
+		return // periodic reconcile disabled: don't resurrect it at boot
+	}
+	delay := startupCatchupDelay + time.Duration(rand.Int64N(int64(startupCatchupJitter)))
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(delay):
+	}
+	last, err := idx.LastReconcileAt(ctx)
+	if err != nil {
+		log.Warn("reconcile catch-up: could not read last-sweep watermark", "err", err)
+		return
+	}
+	if !last.IsZero() && time.Since(last) < interval {
+		log.Debug("reconcile catch-up: last sweep is fresh", "last", last.Format(time.RFC3339))
+		return
+	}
+	if last.IsZero() {
+		log.Info("reconcile catch-up: no recorded sweep; scheduling one")
+	} else {
+		log.Info("reconcile catch-up: last sweep overdue; scheduling one",
+			"last", last.Format(time.RFC3339), "interval", interval.String())
+	}
+	sup.Trigger(false)
+}
+
+// reconcileResultMap flattens a SweepResult into the map a `reconcile` command
+// posts back to central.
+func reconcileResultMap(res reconcile.SweepResult) map[string]any {
+	matched, reconciled, rows := 0, 0, 0
+	var rootErrs []string
+	for _, rr := range res.Roots {
+		rows += rr.RowCount
+		switch {
+		case rr.Err != nil:
+			rootErrs = append(rootErrs, fmt.Sprintf("%s: %v", rr.LibraryRef, rr.Err))
+		case rr.Matched:
+			matched++
+		default:
+			reconciled++
+		}
+	}
+	out := map[string]any{
+		"roots":      len(res.Roots),
+		"matched":    matched,
+		"reconciled": reconciled,
+		"rows":       rows,
+		"reset":      res.Reset,
+	}
+	if res.OutboxMarked > 0 {
+		out["outbox_superseded"] = res.OutboxMarked
+	}
+	if len(rootErrs) > 0 {
+		out["root_errors"] = rootErrs
+	}
+	return out
 }

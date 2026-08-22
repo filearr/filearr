@@ -11,6 +11,7 @@ import (
 
 	"github.com/filearr/filearr/agent/internal/index"
 	"github.com/filearr/filearr/agent/internal/outbox"
+	"time"
 )
 
 // Sweeper runs the full-manifest reconciliation for every local root: build the
@@ -110,6 +111,17 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (SweepResult, error) 
 			s.log.Warn("reconcile: could not clear rebuilt marker (persists for next sweep)", "err", err)
 		} else {
 			s.log.Info("reconcile cleared durable rebuilt marker")
+		}
+	}
+	// Persist the last-successful-sweep watermark (store_flags): the daemon's
+	// startup catch-up reads it to fire an overdue sweep after a restart —
+	// without it the periodic ticker restarts from zero every boot and a
+	// machine that never stays up a whole interval never reconciles. Only a
+	// fully-clean sweep advances it; a partial failure leaves it stale so the
+	// catch-up retries. A write failure is logged, never fatal.
+	if firstErr == nil {
+		if err := s.store.SetLastReconcileAt(context.WithoutCancel(ctx), time.Now()); err != nil {
+			s.log.Warn("reconcile: could not persist last-sweep watermark", "err", err)
 		}
 	}
 	return res, firstErr

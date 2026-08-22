@@ -30,6 +30,7 @@ type Supervisor struct {
 	log           *slog.Logger
 
 	mu           sync.Mutex
+	runMu        sync.Mutex // serializes sweep EXECUTION (runOnce + RunNow)
 	pending      bool
 	pendingReset bool
 	wake         chan struct{}
@@ -155,9 +156,21 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 }
 
+// RunNow executes one sweep synchronously through the same execution gate as
+// the supervisor's own triggers, so a command-driven sweep (the central
+// `reconcile` agent command) can never interleave with a periodic/reconnect
+// sweep already in flight — it simply waits its turn.
+func (s *Supervisor) RunNow(ctx context.Context, forceReset bool) (SweepResult, error) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.sweep(ctx, Options{ForceReset: forceReset})
+}
+
 // runOnce executes a single sweep and logs the outcome; errors never crash the
 // daemon (the next trigger retries).
 func (s *Supervisor) runOnce(ctx context.Context, forceReset bool) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
 	res, err := s.sweep(ctx, Options{ForceReset: forceReset})
 	if err != nil {
 		s.log.Error("reconcile sweep failed", "force_reset", forceReset, "err", err)

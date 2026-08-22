@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/filearr/filearr/agent/internal/inventory"
 	"github.com/filearr/filearr/agent/internal/outbox"
 	"github.com/filearr/filearr/agent/internal/pathspec"
+	"github.com/filearr/filearr/agent/internal/reconcile"
 )
 
 // Command-poller env fallbacks (flags are not plumbed for this loop — it is a
@@ -33,7 +35,7 @@ const (
 // stat_check / rehash_check against local disk, reusing the shared bearer-auth +
 // mTLS HTTP client. It returns a done-channel so the daemon waits for a clean
 // stop, mirroring startReplication / startPoller.
-func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func(), updTrigger updateTriggerFn, ops *opState) <-chan struct{} {
+func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, onAuthError func(), updTrigger updateTriggerFn, ops *opState, sup *reconcile.Supervisor) <-chan struct{} {
 	dataDir := envOr(envDataDir, defaultDataDir())
 	log := newLogger()
 	poller := commands.NewPoller(commands.Config{
@@ -84,6 +86,18 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		// hasher got wrong. Distinct from the `rehash_check` command kind (one
 		// item, verify only) — see internal/commands/rehash_sweep.go.
 		RunRehashSweep: rehashSweepRunner(idx, dataDir, ops, log),
+		// 2026-08-22: the console-triggered full-manifest sweep, routed
+		// through the reconcile supervisor's single-flight gate so it can
+		// never interleave with a periodic/reconnect sweep in flight. Nil
+		// supervisor (defensive) => the kind completes ok=false.
+		RunReconcile: func(rctx context.Context, payload map[string]any) (map[string]any, error) {
+			if sup == nil {
+				return nil, fmt.Errorf("reconcile supervisor not running")
+			}
+			force, _ := payload["force_reset"].(bool)
+			res, err := sup.RunNow(rctx, force)
+			return reconcileResultMap(res), err
+		},
 	})
 	done := make(chan struct{})
 	go func() {
