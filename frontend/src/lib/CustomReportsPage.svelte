@@ -10,6 +10,7 @@
     createCustomReport,
     updateCustomReport,
     deleteCustomReport,
+    copyCustomReport,
     runCustomReport,
     downloadCustomReport,
     EXPORT_FORMATS,
@@ -160,6 +161,17 @@
   }
 
   // Round-trip to the visual builder: parse this report's DSL back into rows.
+  async function copyReport(d: ReportDefinition) {
+    error = "";
+    try {
+      const copy = await copyCustomReport(d.id);
+      defs = await listCustomReports();
+      openEdit(copy); // land straight in the edit form: copy-and-edit in one click
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function editInBuilder(d: ReportDefinition) {
     setBuilderPrefill({ query: d.query });
     location.hash = "#/filter-builder";
@@ -378,6 +390,9 @@
               </div>
             {/if}
           </div>
+          <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+            title="Clone this report and open the clone for editing — the original is untouched"
+            onclick={() => copyReport(d)}>Copy</button>
           <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={() => editInBuilder(d)}>Edit in builder</button>
           <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={() => openEdit(d)}>Edit</button>
           <button class="rounded-lg border border-red-300 px-3 py-1 text-sm text-red-700 dark:border-red-800 dark:text-red-300" onclick={() => remove(d)}>Delete</button>

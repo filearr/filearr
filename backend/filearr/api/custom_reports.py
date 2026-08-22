@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -205,6 +205,59 @@ async def create_custom_report(
     except IntegrityError:
         await session.rollback()
         raise HTTPException(409, f"a report named {body.name!r} already exists") from None
+    await session.refresh(row)
+    return row
+
+
+@router.post(
+    "/{report_id}/copy",
+    response_model=ReportDefinitionOut,
+    status_code=201,
+    dependencies=[Depends(require_scope("write"))],
+)
+async def copy_custom_report(
+    report_id: uuid.UUID,
+    body: dict = Body(default_factory=dict),
+    session: AsyncSession = Depends(get_session),
+) -> ReportDefinition:
+    """Clone an existing custom report (2026-08-21) so it can be edited without
+    touching the original — the copy-and-edit workflow. The copy keeps the
+    source's query/columns/sort/format and owner; ``body.name`` overrides the
+    default ``"<name> (copy)"``, and a name collision auto-suffixes
+    ``(copy 2)``, ``(copy 3)``, … instead of failing."""
+    src = await session.get(ReportDefinition, report_id)
+    if src is None:
+        raise HTTPException(404, "custom report not found")
+    requested = (body.get("name") or "").strip() if isinstance(body, dict) else ""
+    base = requested or f"{src.name} (copy)"
+    taken = {
+        n
+        for (n,) in (
+            await session.execute(
+                select(ReportDefinition.name).where(
+                    ReportDefinition.owner_principal == src.owner_principal
+                )
+            )
+        ).all()
+    }
+    name, n = base, 2
+    while name in taken:
+        name = f"{base[:180]} {n}" if requested else f"{src.name} (copy {n})"
+        n += 1
+    row = ReportDefinition(
+        name=name[:200],
+        owner_principal=src.owner_principal,
+        query=src.query,
+        columns=list(src.columns),
+        sort=src.sort,
+        format=src.format,
+    )
+    session.add(row)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(409, f"a report named {name!r} already exists") from None
     await session.refresh(row)
     return row
 

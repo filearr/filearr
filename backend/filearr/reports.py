@@ -561,6 +561,71 @@ def _row_duplicates(r: Any) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# 6c. largest_duplicates — duplicate groups ranked by PER-COPY SIZE (capped)   #
+# --------------------------------------------------------------------------- #
+# WHY alongside ``duplicate_files``: that report orders by TOTAL wasted bytes,
+# which a 5,000-copy small file can top. This one answers the other question an
+# operator actually asks — "what are the biggest individual files I keep more
+# than once?" — by ranking on the size of one copy (prime dedupe targets even at
+# 2 copies), capped top-N like ``largest_files``. Same grouping key, same
+# zero-byte exclusion, same hash-tier caveat.
+def _build_largest_duplicates(params: ReportParams) -> Select:
+    dup_key = func.coalesce(
+        Item.content_hash,
+        Item.quick_hash.concat(literal(":")).concat(cast(Item.size, Text)),
+    ).label("dup_key")
+    # Within a group all sizes are equal (content-identical, or the quick-hash
+    # key embeds the size), so max() is simply "the size of one copy".
+    size_bytes = func.max(Item.size).label("size_bytes")
+    wasted = (func.sum(Item.size) - func.max(Item.size)).label("wasted_bytes")
+    hash_tier = case(
+        (func.max(Item.content_hash).isnot(None), literal("content_hash")),
+        else_=literal("quick_hash"),
+    ).label("hash_tier")
+    stmt = (
+        select(
+            dup_key,
+            size_bytes,
+            func.count().label("copies"),
+            wasted,
+            hash_tier,
+            func.max(Item.content_hash).label("content_hash"),
+            func.max(Item.quick_hash).label("quick_hash"),
+            func.string_agg(
+                Library.name.concat(literal(":")).concat(Item.rel_path),
+                literal("; "),
+            ).label("paths"),
+        )
+        .join(Library, Item.library_id == Library.id)
+        .where(
+            _ACTIVE,
+            Item.size > 0,
+            or_(Item.content_hash.isnot(None), Item.quick_hash.isnot(None)),
+        )
+        .group_by(dup_key)
+        .having(func.count() > 1)
+        .order_by(
+            func.max(Item.size).desc(),
+            (func.sum(Item.size) - func.max(Item.size)).desc(),
+        )
+    )
+    return _apply_library(stmt, params)
+
+
+def _row_largest_duplicates(r: Any) -> dict:
+    return {
+        "dup_key": r.dup_key,
+        "size_bytes": int(r.size_bytes or 0),
+        "copies": int(r.copies),
+        "wasted_bytes": int(r.wasted_bytes or 0),
+        "hash_tier": r.hash_tier,
+        "content_hash": r.content_hash,
+        "quick_hash": r.quick_hash,
+        "paths": r.paths or "",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 6b. duplicate_files_detail — ONE ROW PER COPY (IN-T1, 2026-08-13)            #
 # --------------------------------------------------------------------------- #
 # WHY this exists alongside the aggregate ``duplicate_files``: that report's
@@ -909,6 +974,26 @@ _REPORTS: tuple[CannedReport, ...] = (
         build=_build_duplicates,
         row=_row_duplicates,
         supports_library=True,
+        row_link="search_hash",
+    ),
+    CannedReport(
+        id="largest_duplicates",
+        title="Largest duplicates",
+        description=(
+            "The biggest individual files that exist more than once — duplicate "
+            "groups ranked by the size of one copy (top N, default 500), with "
+            "copy count and wasted bytes. Complements 'Duplicate files' (which "
+            "ranks by TOTAL waste, so a thousand-copy small file can top it); "
+            "this view surfaces the prime per-file dedupe targets. Same hash-"
+            "tier caveat: a 'quick_hash' group is a sampled signal, not "
+            "byte-verified."
+        ),
+        columns=("size_bytes", "copies", "wasted_bytes", "hash_tier", "paths"),
+        build=_build_largest_duplicates,
+        row=_row_largest_duplicates,
+        supports_library=True,
+        is_capped=True,
+        default_limit=500,
         row_link="search_hash",
     ),
     CannedReport(

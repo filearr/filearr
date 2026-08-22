@@ -38,6 +38,7 @@ curl -s http://filearr.example.com:8484/api/v1/reports | jq '.reports[].id'
 | `low_quality_video` | Probed video scored against resolution / codec / bitrate-per-pixel floors. |
 | `duplicate_files` | One row **per duplicate group**: copy count, hash tier, wasted bytes. The overview. |
 | `duplicate_files_detail` | One row **per copy**. The actionable one — see [Acting on the duplicate copies export](#acting-on-duplicates). |
+| `largest_duplicates` | Duplicate groups ranked by the **size of one copy** (top N, default 500) — the biggest individual files kept more than once. Complements `duplicate_files`, which ranks by *total* waste (a thousand-copy small file can top that). |
 | `stale_files` | Files not **modified** in *N* days (default 730) — see [Staleness](#staleness). |
 | `permissions_by_principal` | Every **explicit** (non-inherited) allow/deny from a non-system principal on paths an agent has inventoried with the `permissions` collector — one row per ACE, newest snapshot per path; owner always shown. Read agent-side (Linux mode bits + POSIX ACL xattrs; Windows owner + full DACL, local or UNC). Check `fidelity`: `synthesized_from_mode` means a cifs mount without `cifsacl` — the mount options, not the server's ACL. |
 | `permissions_broad_access` | Paths where **Everyone / Authenticated Users / Users / POSIX "other"** hold an explicit allow with write, delete, change-permissions or full control — the world-writable review list. |
@@ -60,8 +61,9 @@ Common parameters:
 :   Restrict to one library. Rejected with 422 by reports that do not support it.
 
 `limit` / `offset`
-:   JSON paging. For a **capped** report (`largest_files`, `largest_folders`)
-    `limit` is the report's definitional top-N and bounds the export too.
+:   JSON paging. For a **capped** report (`largest_files`, `largest_folders`,
+    `largest_duplicates`) `limit` is the report's definitional top-N and bounds
+    the export too.
 
 `threshold_days`
 :   Only for reports whose metadata sets `supports_threshold` (today:
@@ -70,6 +72,17 @@ Common parameters:
 
 `format`
 :   `json` (default, the paginated envelope) or an export format — next section.
+
+### Copying and editing reports {#copy-reports}
+
+Canned reports are fixed, code-defined views. The editable kind is a **custom
+report** (Reports → Custom reports): a filter-DSL query + column projection +
+sort, with full create/edit/delete and the same export formats. To start from
+an existing one, press **Copy** on any custom report — it clones the
+definition as *"‹name› (copy)"* and opens the clone in the editor, leaving the
+original untouched (`POST /api/v1/custom-reports/{id}/copy`; name collisions
+auto-suffix). To build a query visually first, use the Filter builder and its
+*Save as custom report* handoff.
 
 ### Path columns {#path-columns}
 

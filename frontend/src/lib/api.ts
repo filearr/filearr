@@ -2632,6 +2632,15 @@ export const createCustomReport = (body: {
     body: JSON.stringify(body),
   });
 
+/** Clone a custom report so it can be edited without touching the original
+ *  ("<name> (copy)" by default; collisions auto-suffix server-side). */
+export const copyCustomReport = (id: string, name?: string) =>
+  request<ReportDefinition>(`/custom-reports/${id}/copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(name ? { name } : {}),
+  });
+
 export const updateCustomReport = (
   id: string,
   body: Partial<{

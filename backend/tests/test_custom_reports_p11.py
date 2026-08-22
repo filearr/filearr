@@ -260,6 +260,53 @@ async def _mk_cf(maker, name, data_type="integer"):
         await s.commit()
 
 
+async def test_copy_custom_report_clones_and_suffixes(env):
+    """POST /custom-reports/{id}/copy (2026-08-21): clone-for-editing. The copy
+    keeps query/columns/sort/format; names auto-suffix on collision."""
+    client, maker = env
+    r = await client.post("/api/v1/custom-reports", json={
+        "name": "Big video", "query": "kind:video size:>1G",
+        "columns": ["rel_path", "size"], "sort": "-size",
+    })
+    assert r.status_code == 201, r.text
+    src = r.json()
+
+    r = await client.post(f"/api/v1/custom-reports/{src['id']}/copy", json={})
+    assert r.status_code == 201, r.text
+    copy1 = r.json()
+    assert copy1["name"] == "Big video (copy)"
+    assert copy1["id"] != src["id"]
+    assert copy1["query"] == src["query"]
+    assert copy1["columns"] == src["columns"]
+    assert copy1["sort"] == src["sort"]
+
+    # second copy of the same source auto-suffixes instead of 409ing
+    r = await client.post(f"/api/v1/custom-reports/{src['id']}/copy", json={})
+    assert r.status_code == 201
+    assert r.json()["name"] == "Big video (copy 2)"
+
+    # explicit name wins; the copy is independently editable
+    r = await client.post(
+        f"/api/v1/custom-reports/{src['id']}/copy", json={"name": "Huge video"}
+    )
+    assert r.status_code == 201
+    huge = r.json()
+    assert huge["name"] == "Huge video"
+    r = await client.patch(f"/api/v1/custom-reports/{huge['id']}", json={
+        "query": "kind:video size:>10G",
+    })
+    assert r.status_code == 200
+    # original untouched
+    r = await client.get(f"/api/v1/custom-reports/{src['id']}")
+    assert r.json()["query"] == "kind:video size:>1G"
+
+    # unknown id -> 404
+    r = await client.post(
+        "/api/v1/custom-reports/00000000-0000-0000-0000-000000000000/copy", json={}
+    )
+    assert r.status_code == 404
+
+
 async def test_create_and_run_json_roundtrip(env):
     client, maker = env
     lib = await _mk_lib(maker)

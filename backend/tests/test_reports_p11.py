@@ -235,6 +235,8 @@ async def test_registry_lists_every_canned_report(api):
         "low_quality_video",
         "duplicate_files",
         "duplicate_files_detail",
+        # 2026-08-21: duplicate groups ranked by per-copy size (capped)
+        "largest_duplicates",
         "largest_folders",
         "stale_files",
         # W7-T7 (2026-08-19): permission snapshots
@@ -384,6 +386,41 @@ async def test_duplicate_files_groups_and_wasted_bytes(api):
     assert "q1:50" in rows
     assert rows["q1:50"]["copies"] == 2
     assert "beef" not in rows
+
+
+async def test_largest_duplicates_ranked_by_copy_size_and_capped(api):
+    """6c (2026-08-21): duplicate groups ranked by the size of ONE copy —
+    the big-file dedupe view, capped like largest_files."""
+    client, maker = api
+    lib = await _mk_lib(maker, name="LD")
+    # small file, many copies (tops the WASTED ranking, not this one)
+    for i in range(4):
+        await _mk_item(maker, lib, f"s{i}.bin", size=10, content_hash="aaaa")
+    # big file, two copies (tops THIS ranking)
+    await _mk_item(maker, lib, "big1.iso", size=5000, content_hash="bbbb")
+    await _mk_item(maker, lib, "big2.iso", size=5000, content_hash="bbbb")
+    # middling quick-hash pair
+    await _mk_item(maker, lib, "m1.bin", size=300, quick_hash="q9")
+    await _mk_item(maker, lib, "m2.bin", size=300, quick_hash="q9")
+    # a huge singleton never appears
+    await _mk_item(maker, lib, "alone.iso", size=99999, content_hash="cccc")
+
+    r = await client.get("/api/v1/reports/largest_duplicates")
+    body = r.json()
+    rows = body["rows"]
+    assert [row["size_bytes"] for row in rows] == [5000, 300, 10]
+    assert rows[0]["copies"] == 2 and rows[0]["wasted_bytes"] == 5000
+    assert rows[1]["hash_tier"] == "quick_hash"
+    assert rows[2]["copies"] == 4 and rows[2]["wasted_bytes"] == 30
+    # rows carry the search_hash link representatives
+    assert rows[0]["content_hash"] == "bbbb"
+    assert "size_bytes" in body["columns"]
+
+    # capped like largest_files
+    r = await client.get("/api/v1/reports/largest_duplicates?limit=1")
+    body = r.json()
+    assert len(body["rows"]) == 1 and body["rows"][0]["size_bytes"] == 5000
+    assert body["has_more"] is True
 
 
 async def test_duplicate_files_hash_tier_column(api):
