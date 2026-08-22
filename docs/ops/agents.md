@@ -639,8 +639,8 @@ Rekor-logged statement binding the image digest to this repo + workflow +
 commit, with **no private key in custody at all**. Verify any pull:
 
 ```bash
-gh attestation verify oci://ghcr.io/pwsh/filearr:latest       -R pwsh/filearr
-gh attestation verify oci://ghcr.io/pwsh/filearr-agent:latest -R pwsh/filearr
+gh attestation verify oci://ghcr.io/filearr/filearr:latest       -R filearr/filearr
+gh attestation verify oci://ghcr.io/filearr/filearr-agent:latest -R filearr/filearr
 ```
 
 This covers the agent-dist first-install binaries too — they are baked inside
@@ -1019,7 +1019,7 @@ scheduler/cancellation coordination).
 
 ## 12. Docker container (Unraid-first, any container host)
 
-The agent ships as a standalone container image — `ghcr.io/pwsh/filearr-agent`,
+The agent ships as a standalone container image — `ghcr.io/filearr/filearr-agent`,
 built from `agent/Dockerfile`, published by the same CI-gated `build`
 workflow as the main image. This is the supported way to run an inventory
 agent on Unraid (the native `.plg` plugin is deliberately deferred — see
@@ -1125,7 +1125,7 @@ Agents page → first scan replicates and central begins extraction.
 ```yaml
 services:
   filearr-agent:
-    image: ghcr.io/pwsh/filearr-agent:latest
+    image: ghcr.io/filearr/filearr-agent:latest
     restart: unless-stopped
     environment:
       FILEARR_AGENT_CENTRAL_URL: https://filearr.example.com

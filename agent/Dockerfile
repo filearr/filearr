@@ -65,7 +65,7 @@ FROM alpine:3.22
 #
 # Extra OCR LANGUAGES are still a derived image (the -data-* packages are per
 # language and shipping them all would be gratuitous):
-#   FROM ghcr.io/pwsh/filearr-agent:latest
+#   FROM ghcr.io/filearr/filearr-agent:latest
 #   RUN apk add --no-cache tesseract-ocr-data-deu
 # The console's per-agent capability matrix shows which tools each host actually
 # resolved, so a missing one is visible rather than mysterious.

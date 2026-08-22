@@ -446,8 +446,8 @@ Three complementary trust layers:
 - **Sigstore build provenance** — every published image is attested keylessly
   by the release workflow (`actions/attest-build-provenance`: Fulcio-signed,
   Rekor-logged, no private key in custody). Anyone can verify a pull came from
-  this repo's workflow: `gh attestation verify oci://ghcr.io/pwsh/filearr:latest
-  -R pwsh/filearr`. The first-install agent binaries are baked inside the
+  this repo's workflow: `gh attestation verify oci://ghcr.io/filearr/filearr:latest
+  -R filearr/filearr`. The first-install agent binaries are baked inside the
   attested image, inheriting its provenance.
 - **Unpinned builds** (installed via the central install scripts) accept
   central's dist update channel over their authenticated TLS session plus

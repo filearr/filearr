@@ -84,7 +84,7 @@ services:
     env_file: .env               # FILEARR_TLS_DOMAIN / *_ACME_EMAIL / CLOUDFLARE_API_TOKEN / *_PROXY_SHARED_SECRET
     environment:
       # UR-T1 (2026-08-12): both Caddyfiles now read their upstreams from env so
-      # the SAME files can ship inside the published ghcr.io/pwsh/filearr-caddy
+      # the SAME files can ship inside the published ghcr.io/filearr/filearr-caddy
       # image, where the container names are Unraid's (`filearr`,
       # `filearr-stepca`) rather than compose's. They carry `{$VAR:app:8000}`
       # style defaults that already match this stack — these two lines exist so

@@ -138,7 +138,7 @@
   const MAP_PAGE = 200;
   // The bundled manual is served at /docs/ by this instance; the Vite dev server
   // has no such mount, so dev points at the public site (same rule as HelpPage).
-  const DOCS_URL = import.meta.env.DEV ? "https://pwsh.github.io/filearr/" : "/docs/";
+  const DOCS_URL = import.meta.env.DEV ? "https://filearr.com/" : "/docs/";
 
   // P3-T8 hybrid semantic search. The slider is HIDDEN unless /stats reports the
   // feature enabled server-side; `semantic` is the 0..1 blend ratio (0 = keyword).

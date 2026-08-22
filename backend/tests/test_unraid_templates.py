@@ -198,7 +198,7 @@ def test_grace_default_does_not_exceed_the_container_stop_timeout():
 def test_caddy_template_matches_the_published_image_and_its_profiles():
     root = ET.parse(UNRAID_DIR / "filearr-caddy.xml").getroot()
     # UR-T1: this is the tag build.yml's caddy-image job publishes.
-    assert root.findtext("Repository").startswith("ghcr.io/pwsh/filearr-caddy")
+    assert root.findtext("Repository").startswith("ghcr.io/filearr/filearr-caddy")
 
     cfgs = {c.get("Target"): c for c in root.findall("Config")}
     # The profile selector the image's CMD reads.

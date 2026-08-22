@@ -423,7 +423,7 @@ It is stuck if there is **no** `scan_library` job for that library still in
 **Symptom.** The web console stops loading (often right as a redeploy starts,
 during the "quiesce jobs" step), the host/CT shows sustained high CPU, and
 some ports answer while others don't. Full runbook:
-[`docs/ops/troubleshooting.md`](https://github.com/pwsh/filearr/blob/main/docs/ops/troubleshooting.md).
+[`docs/ops/troubleshooting.md`](https://github.com/filearr/filearr/blob/main/docs/ops/troubleshooting.md).
 
 **Triage from any machine.** `ping` the host, then `curl -m 5` each service
 port and read `%{time_connect}`:
@@ -474,7 +474,7 @@ running — if the two agree, the update flag is wrong:
 
 ```bash
 # what the tag points at, and what commit that image was built from
-docker image inspect ghcr.io/pwsh/filearr:latest   --format '{{index .RepoDigests 0}}{{"
+docker image inspect ghcr.io/filearr/filearr:latest   --format '{{index .RepoDigests 0}}{{"
 "}}{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
@@ -499,7 +499,7 @@ logged in Rekor), which attaches as an OCI *referrer* rather than as an index
 entry, and is the stronger of the two —
 
 ```bash
-gh attestation verify oci://ghcr.io/pwsh/filearr:latest -R pwsh/filearr
+gh attestation verify oci://ghcr.io/filearr/filearr:latest -R filearr/filearr
 ```
 
 If you build and push your own image, drop the attestation index entries the
@@ -1052,7 +1052,7 @@ each service.
 
 [apprise-urls]: https://github.com/caronc/apprise/wiki
 
-**Included in the image.** The `ghcr.io/pwsh/filearr` image ships apprise
+**Included in the image.** The `ghcr.io/filearr/filearr` image ships apprise
 (pinned) since 2026-08-19, so compose, Unraid and Proxmox deployments can use
 apprise channels out of the box. Only a bare-Python install has to add the
 extra: `pip install "filearr[apprise]"`.

@@ -53,7 +53,7 @@ jobs:
       # Sigstore keyless build provenance (SLSA): the workflow's OIDC identity
       # signs an attestation binding the pushed image digest to this repo,
       # workflow, and commit — publicly logged (Rekor), no key custody.
-      # Verify: gh attestation verify oci://ghcr.io/pwsh/filearr:latest -R pwsh/filearr
+      # Verify: gh attestation verify oci://ghcr.io/filearr/filearr:latest -R filearr/filearr
       id-token: write
       attestations: write
     steps:

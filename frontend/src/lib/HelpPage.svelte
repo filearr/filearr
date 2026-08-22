@@ -9,13 +9,13 @@
   import { DSL_SECTIONS } from "./dslHelp";
   import { HELP, HELP_TOPICS, type HelpTopic } from "./help";
 
-  let { sourceUrl = "https://github.com/pwsh/filearr" }: { sourceUrl?: string } =
+  let { sourceUrl = "https://github.com/filearr/filearr" }: { sourceUrl?: string } =
     $props();
 
   // The bundled mkdocs manual is served by the backend at /docs/; the Vite dev
   // server has no such mount, so dev falls back to the public docs site.
   const DOCS_URL = import.meta.env.DEV
-    ? "https://pwsh.github.io/filearr/"
+    ? "https://filearr.com/"
     : "/docs/";
 
   // $derived so the Source entry tracks the runtime /version source_url

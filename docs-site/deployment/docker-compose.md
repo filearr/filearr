@@ -11,15 +11,15 @@ and the two gotchas that bite people.
   conditions). Any current Engine release qualifies.
 - **`git`** to fetch the source. The shipped compose file **builds the images
   locally** (`build: .`), so the full source tree is required; pre-built
-  multi-arch images also exist at `ghcr.io/pwsh/filearr` /
-  `ghcr.io/pwsh/filearr-agent` if you'd rather swap `build:` for `image:`.
+  multi-arch images also exist at `ghcr.io/filearr/filearr` /
+  `ghcr.io/filearr/filearr-agent` if you'd rather swap `build:` for `image:`.
 - Your media reachable on the host at a stable path (local disk, or an
   SMB/NFS/rclone mount) — mounted **read-only** into the containers.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/pwsh/filearr.git && cd filearr
+git clone https://github.com/filearr/filearr.git && cd filearr
 cp .env.example .env          # then edit the secrets (see below)
 docker compose up -d          # builds images on first run, then starts the stack
 ```

@@ -392,7 +392,7 @@ nothing to install. None of them run unless a policy enables extraction. Extra
 OCR languages are a one-line derived image:
 
 ```dockerfile
-FROM ghcr.io/pwsh/filearr-agent:latest
+FROM ghcr.io/filearr/filearr-agent:latest
 RUN apk add --no-cache tesseract-ocr-data-deu
 ```
 
@@ -449,7 +449,7 @@ The install script above still needs a token minted in the console first. For
 zero-console automation, **your central serves a single lifecycle script,
 pre-configured with its own URL** (also shown on the Agents page's installer
 card; the repository copy at
-[`scripts/manage-windows-agent.ps1`](https://github.com/pwsh/filearr/blob/main/scripts/manage-windows-agent.ps1)
+[`scripts/manage-windows-agent.ps1`](https://github.com/filearr/filearr/blob/main/scripts/manage-windows-agent.ps1)
 is identical but needs `-CentralUrl`):
 
 ```powershell
@@ -556,7 +556,7 @@ Logging is definable per install or per configuration group:
 ## Running the agent in Docker (Unraid)
 
 For NAS boxes — Unraid first among them — the agent also ships as a
-standalone container: `ghcr.io/pwsh/filearr-agent`. The image bundles the
+standalone container: `ghcr.io/filearr/filearr-agent`. The image bundles the
 static agent binary, `ffmpeg` (for video poster thumbnails), and an
 entrypoint that enrolls on first start, then runs the replication daemon
 alongside interval rescans of your mounted shares.
@@ -620,7 +620,7 @@ pulling a new image.
 ```yaml
 services:
   filearr-agent:
-    image: ghcr.io/pwsh/filearr-agent:latest
+    image: ghcr.io/filearr/filearr-agent:latest
     restart: unless-stopped
     environment:
       FILEARR_AGENT_CENTRAL_URL: https://filearr.example.com

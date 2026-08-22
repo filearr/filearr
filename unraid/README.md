@@ -13,10 +13,10 @@ need all of them — pick a tier, then install that tier's templates **in order*
 |---|---|---|---|
 | 1 | `filearr-postgres.xml` | `postgres:18.4` | Source of truth + job queue — **back this up** |
 | 2 | `filearr-meilisearch.xml` | `getmeili/meilisearch:v1.53.0` | Disposable, rebuildable search index |
-| 3 | `filearr.xml` | `ghcr.io/pwsh/filearr` | Web UI + API **and** the background worker (port 8484) |
+| 3 | `filearr.xml` | `ghcr.io/filearr/filearr` | Web UI + API **and** the background worker (port 8484) |
 | 4 | `filearr-stepca.xml` | `smallstep/step-ca:0.30.2` | Private CA that issues every agent's client certificate — **required for any agent**, in both `fingerprint` and `mtls-header` auth modes |
-| 5 | `filearr-caddy.xml` | `ghcr.io/pwsh/filearr-caddy` | TLS reverse proxy + the mTLS agent plane |
-| — | `filearr-agent.xml` | `ghcr.io/pwsh/filearr-agent` | Standalone inventory agent — independent install, needs only a central URL + enrollment token |
+| 5 | `filearr-caddy.xml` | `ghcr.io/filearr/filearr-caddy` | TLS reverse proxy + the mTLS agent plane |
+| — | `filearr-agent.xml` | `ghcr.io/filearr/filearr-agent` | Standalone inventory agent — independent install, needs only a central URL + enrollment token |
 
 The install order matters for one reason each: Postgres before everything because
 the app bootstraps its schema on first start; Meilisearch before the app because
@@ -132,7 +132,7 @@ admin password and provisioner JWK inline. Run it in the Unraid terminal (the
 
 ```bash
 mkdir -p /boot/config/plugins/filearr
-curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/main/scripts/setup-unraid.sh \
+curl -fsSL https://raw.githubusercontent.com/filearr/filearr/main/scripts/setup-unraid.sh \
   -o /boot/config/plugins/filearr/setup-unraid.sh
 bash /boot/config/plugins/filearr/setup-unraid.sh
 ```
@@ -248,7 +248,7 @@ script does, and the path for a box with no internet.
   Safe to skip — the pipeline falls back to software automatically.
 - Publishing to Community Applications later: submit via ca.unraid.net/submit
   (needs HTTPS PNG icon, support thread, overview — all present; the templates
-  point at the real ghcr.io/pwsh images and github.com/pwsh/filearr URLs).
+  point at the real ghcr.io/filearr images and github.com/filearr/filearr URLs).
 - Alternative: use the repo's `docker-compose.yml` with the Compose Manager
   plugin. It keeps `app` and `worker` as separate services on purpose and does
   not use the merged `all` mode.

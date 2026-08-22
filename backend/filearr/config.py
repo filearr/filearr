@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     # footer "Source" link, so an operator running a FORK can point users at THEIR
     # modified source without rebuilding the frontend (the Vite build-time
     # __SOURCE_URL__ is only the fallback default). Override via FILEARR_SOURCE_URL.
-    source_url: str = "https://github.com/pwsh/filearr"
+    source_url: str = "https://github.com/filearr/filearr"
 
     # --- Phase 6 identity/auth/RBAC (P6-T1) ----------------------------------
     # Interactive session cookie name + lifecycle. Postgres-backed sessions

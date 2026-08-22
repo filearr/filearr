@@ -44,3 +44,4 @@ manifest.json.sig
 /agent/filearr-agent.exe
 /agent/filearr-release
 /agent/filearr-release.exe
+debug.log

@@ -8,7 +8,7 @@ wizard on first run and an idempotent redeploy on later runs.
 Run it on the **Proxmox host shell** (as root), from inside the project folder:
 
 ```bash
-git clone https://github.com/pwsh/filearr.git && cd filearr   # once
+git clone https://github.com/filearr/filearr.git && cd filearr   # once
 bash proxmox/deploy-proxmox.sh                # first run -> wizard, then deploy
 bash proxmox/deploy-proxmox.sh               # later runs -> redeploy with saved defaults
 bash proxmox/deploy-proxmox.sh --reconfigure # re-run the wizard

@@ -18,7 +18,7 @@
 #   FILEARR_CA_UPSTREAM         step-ca host:port        (default step-ca:9000)
 #
 # UR-T1 (2026-08-12): the two upstreams are env-parameterised because this file
-# is now BAKED into the published ghcr.io/pwsh/filearr-caddy image, and the
+# is now BAKED into the published ghcr.io/filearr/filearr-caddy image, and the
 # compose service names it was written against (`app`, `step-ca`) are not the
 # names an Unraid install uses (`filearr`, `filearr-stepca`). The `{$VAR:default}`
 # form keeps the compose defaults literal, and docker-compose.yml sets both

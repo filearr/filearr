@@ -201,7 +201,7 @@ const ABOUT: About = {
   application: {
     app_version: "0.1.0",
     build_stamp: null,
-    source_url: "https://github.com/pwsh/filearr",
+    source_url: "https://github.com/filearr/filearr",
     license: "AGPL-3.0-or-later",
     license_url: "https://www.gnu.org/licenses/agpl-3.0.html",
     python_version: "3.14.0",

@@ -95,7 +95,7 @@ reachable. Postgres and Meilisearch stay on the internal network.
 
 All published ports are **TCP**. Filearr pins Caddy to `h1 h2` (HTTP/3 off), so
 you never need a UDP/443 firewall rule — see
-[TLS operations](https://github.com/pwsh/filearr/blob/main/docs/ops/tls.md) for
+[TLS operations](https://github.com/filearr/filearr/blob/main/docs/ops/tls.md) for
 why enabling HTTP/3 here is not a safe drop-in change.
 
 ## Read-only media mount posture

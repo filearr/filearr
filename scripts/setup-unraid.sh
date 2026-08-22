@@ -4,7 +4,7 @@
 # as root; the Unraid shell IS root, so there is no sudo dance.
 #
 #   mkdir -p /boot/config/plugins/filearr
-#   curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/main/scripts/setup-unraid.sh \
+#   curl -fsSL https://raw.githubusercontent.com/filearr/filearr/main/scripts/setup-unraid.sh \
 #     -o /boot/config/plugins/filearr/setup-unraid.sh
 #   bash /boot/config/plugins/filearr/setup-unraid.sh
 #
@@ -141,7 +141,7 @@ TEMPLATE_DIR="/boot/config/plugins/dockerMan/templates-user"
 RC_DOCKER="/etc/rc.d/rc.docker"
 USER_SCRIPTS_DIR="/boot/config/plugins/user.scripts/scripts"
 
-TEMPLATE_BASE_URL="https://raw.githubusercontent.com/pwsh/filearr/main/unraid"
+TEMPLATE_BASE_URL="https://raw.githubusercontent.com/filearr/filearr/main/unraid"
 LOCAL_DIR=""            # --local-dir override
 
 # The stack, in the order containers must be APPLIED. Note step-ca comes BEFORE

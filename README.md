@@ -9,7 +9,7 @@ source of truth; Meilisearch is a disposable, rebuildable search projection.** T
 public REST API supports search **and** metadata updates. Docker-first,
 Unraid/Proxmox-friendly, with an optional distributed-agent fleet.
 
-📖 **Documentation:** <https://pwsh.github.io/filearr/>
+📖 **Documentation:** <https://filearr.com/>
 
 ## Features
 
@@ -39,7 +39,7 @@ docker compose up -d
 
 Full deployment guides (Docker Compose, Unraid, Proxmox LXC), the agent runbook,
 security model, data-collection details, operations/recovery, and the full
-configuration reference are in the **[documentation site](https://pwsh.github.io/filearr/)**.
+configuration reference are in the **[documentation site](https://filearr.com/)**.
 
 ## Stack (pinned)
 
@@ -60,7 +60,7 @@ cd backend && uv run procrastinate --app=filearr.worker.proc_app worker
 cd frontend && npm install && npm run dev   # proxies /api to :8000
 ```
 
-See the [Development guide](https://pwsh.github.io/filearr/reference/development/)
+See the [Development guide](https://filearr.com/reference/development/)
 for the full layout, tests, and contribution basics.
 
 ## License and source (AGPL §13)

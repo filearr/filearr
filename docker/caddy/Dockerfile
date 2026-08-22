@@ -30,7 +30,7 @@ RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" xcaddy build v2.11.4 \
 FROM caddy:2.11.4
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
-# UR-T1 (2026-08-12): this image is now PUBLISHED as ghcr.io/pwsh/filearr-caddy
+# UR-T1 (2026-08-12): this image is now PUBLISHED as ghcr.io/filearr/filearr-caddy
 # so an Unraid install can reach mTLS parity without a compose file. compose
 # still BUILDS it locally and bind-mounts ./docker/caddy over /etc/caddy — the
 # local build stays the source of truth for the Proxmox path — so everything

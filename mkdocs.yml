@@ -3,9 +3,9 @@ site_description: >-
   Self-hosted unified file & media catalog with typo-tolerant instant search,
   a Postgres source of truth, a disposable Meilisearch projection, and an
   optional distributed-agent fleet.
-site_url: https://pwsh.github.io/filearr/
-repo_url: https://github.com/pwsh/filearr
-repo_name: pwsh/filearr
+site_url: https://filearr.com/
+repo_url: https://github.com/filearr/filearr
+repo_name: filearr/filearr
 copyright: >-
   Filearr is free software under the GNU AGPL-3.0-or-later.
   Network use requires offering Corresponding Source (AGPL section 13).

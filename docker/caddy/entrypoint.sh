@@ -3,7 +3,7 @@
 #
 # Why this exists: the compose stack MOUNTS ./docker/caddy over /etc/caddy and
 # picks its config in the service `command:`, so it never needs this script. The
-# PUBLISHED image (ghcr.io/pwsh/filearr-caddy, used by unraid/filearr-caddy.xml)
+# PUBLISHED image (ghcr.io/filearr/filearr-caddy, used by unraid/filearr-caddy.xml)
 # has no bind mount and no compose file to hold that logic — an Unraid template
 # is env vars and nothing else. So both Caddyfiles are baked into the image and
 # selected here by FILEARR_CADDY_PROFILE.

@@ -477,7 +477,7 @@ still work. Enable it in Edit when you want the schedule back.
 ## Still stuck? {#still-stuck}
 
 Click **Copy report** in the dialog and paste the JSON into a new issue at
-<https://github.com/pwsh/filearr/issues>, together with the deployment type
+<https://github.com/filearr/filearr/issues>, together with the deployment type
 (Unraid / Compose / Proxmox), how the media path is mounted (local, SMB,
 NFS, rclone) and what you have already tried. Paths and error messages in the
 report are sanitised of secrets, but do skim it before posting.

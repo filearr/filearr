@@ -44,7 +44,7 @@ async def test_version_exposes_source_url(client):
     body = r.json()
     # The shipped default must point at the REAL public repo — the footer went
     # live to github.com/filearr/filearr (nonexistent) before this pin.
-    assert body["source_url"] == "https://github.com/pwsh/filearr"
+    assert body["source_url"] == "https://github.com/filearr/filearr"
 
 
 async def test_version_source_url_honours_setting(client, monkeypatch):

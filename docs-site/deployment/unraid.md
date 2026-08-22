@@ -29,7 +29,7 @@ shell is already root; there is no `sudo` step.
 
 ```bash
 mkdir -p /boot/config/plugins/filearr
-curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/main/scripts/setup-unraid.sh \
+curl -fsSL https://raw.githubusercontent.com/filearr/filearr/main/scripts/setup-unraid.sh \
   -o /boot/config/plugins/filearr/setup-unraid.sh
 bash /boot/config/plugins/filearr/setup-unraid.sh
 ```
@@ -53,7 +53,7 @@ Three deliberate details in those three lines:
   content at a SHA cannot change under you:
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/pwsh/filearr/<commit-sha>/scripts/setup-unraid.sh \
+    curl -fsSL https://raw.githubusercontent.com/filearr/filearr/<commit-sha>/scripts/setup-unraid.sh \
       -o /boot/config/plugins/filearr/setup-unraid.sh
     ```
 
@@ -581,12 +581,12 @@ is the entire point of the passthrough ([step 5](#step-5-caddy)).
 ## Installing a template {#installing-a-template}
 
 Fetch the XML files you need from the repo's
-[`unraid/` folder](https://github.com/pwsh/filearr/tree/main/unraid):
+[`unraid/` folder](https://github.com/filearr/filearr/tree/main/unraid):
 
 ```bash
 cd /boot/config/plugins/dockerMan/templates-user/
 for t in filearr filearr-postgres filearr-meilisearch filearr-stepca filearr-caddy; do
-  wget -q "https://raw.githubusercontent.com/pwsh/filearr/main/unraid/$t.xml"
+  wget -q "https://raw.githubusercontent.com/filearr/filearr/main/unraid/$t.xml"
 done
 ```
 
@@ -887,7 +887,7 @@ troubleshooting reference.
 
 The TLS reverse proxy: Caddy 2.11.4 built with the Cloudflare DNS-01 solver and
 the layer-4 (raw TCP/SNI) app. The stock Caddy image has neither, which is why
-this is a published image (`ghcr.io/pwsh/filearr-caddy`) rather than a
+this is a published image (`ghcr.io/filearr/filearr-caddy`) rather than a
 configuration note.
 
 !!! tip "Give this container its own IP"
