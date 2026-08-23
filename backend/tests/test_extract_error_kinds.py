@@ -167,14 +167,17 @@ def test_extract_wrappers_record_kind(tmp_path, monkeypatch):
     assert "_extract_error" in meta
 
 
-    def _boom(*a, **k):
-        raise Model3DError("model too large (x > y bytes)", kind="guard")
+    # The model3d wrapper runs the parser in a CHILD process (2026-08-22
+    # isolation), so an in-process monkeypatch of the parser can't reach it —
+    # trip the real size guard inside the child via the settings it is handed.
+    from filearr.config import get_settings
 
-    monkeypatch.setattr(
-        "filearr.tasks.model3d.extract_model3d", _boom
-    )
-    meta = extract_model3d(str(tmp_path / "any.stl"))
+    big = tmp_path / "any.stl"
+    big.write_bytes(b"solid fake\n" * 64)
+    monkeypatch.setattr(get_settings(), "model3d_max_bytes", 1)
+    meta = extract_model3d(str(big))
     assert meta["_extract_error_kind"] == "guard"
+    assert "too large" in meta["_extract_error"]
 
 
 def test_archive_error_preserves_guard_kind(tmp_path):

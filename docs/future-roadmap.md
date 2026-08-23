@@ -596,6 +596,21 @@ Remaining, non-trivial:
   threshold before handing them to the parser) would harden against a crafted
   zip bomb. Deferred as medium — the size ceiling covers the common case.
 
+**3MF cost + parser isolation (2026-08-22, live):** multi-part `.3mf` print
+bundles (6–190 MB on disk, gigabytes of vertex XML inside) pinned every worker
+slot at the 300 s extract timeout — and because a trimesh parse in a worker
+thread cannot be interrupted, the abandoned threads kept burning CPU, so a few
+such files turned a 4-slot worker into ~0 throughput for every queue. Two
+fixes: (1) 3MF is ZIP — the `model3d_max_bytes` ceiling now applies to the
+declared **uncompressed** total read from the central directory (reusing
+`documents.guard_decompression`, bomb-ratio check included), so a bundle that
+would take minutes is refused in milliseconds; (2) `extract.extract_model3d`
+runs the parser in a **killable child process** (`python -m
+filearr.tasks.model3d`, `subprocess.run(timeout=extract_timeout-5)`) — a hang
+is terminated, the thread returns, and an OOM inside trimesh can no longer take
+the worker down. Same pattern is the candidate for pypdf/document parsing if
+it ever shows the same signature.
+
 ## 16. Hash-policy follow-ups (deferred from T7, 2026-07-07)
 
 > **Status 2026-08-19 (later): CLOSED.** The two remaining tails shipped:

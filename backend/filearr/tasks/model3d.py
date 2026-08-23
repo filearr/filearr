@@ -109,6 +109,22 @@ def extract_model3d(path: str, *, max_bytes: int, accurate_max_bytes: int = 0) -
             kind="guard",
         )
 
+    if ext == "3mf":
+        # A 3MF is a ZIP of XML meshes: its ON-DISK size says little about the
+        # parse cost — a 190 MB print bundle inflates to gigabytes of vertex
+        # XML that trimesh walks in pure Python for many minutes (live
+        # 2026-08-22: every worker slot pinned on 3mf files at the 300 s
+        # extract timeout, and the abandoned threads kept burning CPU). Read
+        # ONLY the central directory and apply the same ceiling to the
+        # declared UNCOMPRESSED total (plus the bomb-ratio check), exactly as
+        # documents.py does for docx/xlsx.
+        from filearr.tasks.documents import DocumentError, guard_decompression
+
+        try:
+            guard_decompression(path, decompressed_max=max_bytes)
+        except DocumentError as exc:
+            raise Model3DError(f"3mf {exc}", kind=exc.kind) from exc
+
     import trimesh
 
     accurate = accurate_max_bytes > 0 and size <= accurate_max_bytes
@@ -168,3 +184,44 @@ def extract_model3d(path: str, *, max_bytes: int, accurate_max_bytes: int = 0) -
             pass
 
     return meta
+
+
+# --------------------------------------------------------------------------- #
+# Isolated entry point                                                         #
+# --------------------------------------------------------------------------- #
+def _main(argv: list[str] | None = None) -> int:
+    """``python -m filearr.tasks.model3d <path> [--max-bytes N]
+    [--accurate-max-bytes N]`` — run :func:`extract_model3d` in THIS process and
+    print one JSON object: ``{"ok": <meta>}`` or ``{"error": {"message", "kind"}}``.
+
+    extract.py runs every 3D file through this entry in a child process
+    (``subprocess.run`` with a timeout) instead of a worker thread: trimesh's
+    pure-Python loaders cannot be interrupted, so a hung parse in a thread was
+    abandoned at the extract timeout yet kept spinning until the worker
+    recycled — with enough of them the worker's executor starved. A child can be
+    killed, and an OOM inside trimesh no longer takes the worker down."""
+    import argparse
+    import json
+    import sys
+
+    ap = argparse.ArgumentParser(prog="filearr.tasks.model3d")
+    ap.add_argument("path")
+    ap.add_argument("--max-bytes", type=int, default=536_870_912)
+    ap.add_argument("--accurate-max-bytes", type=int, default=0)
+    ns = ap.parse_args(argv)
+    try:
+        meta = extract_model3d(
+            ns.path, max_bytes=ns.max_bytes, accurate_max_bytes=ns.accurate_max_bytes
+        )
+        payload: dict[str, Any] = {"ok": meta}
+    except Model3DError as exc:
+        payload = {"error": {"message": str(exc), "kind": exc.kind}}
+    except Exception as exc:  # noqa: BLE001 — report, never traceback to the parent
+        payload = {"error": {"message": f"{type(exc).__name__}: {exc}", "kind": "error"}}
+    sys.stdout.write(json.dumps(payload, default=str))
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover — exercised via subprocess in tests
+    raise SystemExit(_main())

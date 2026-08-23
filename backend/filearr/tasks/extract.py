@@ -527,20 +527,70 @@ def extract_audiobook(path: str) -> dict[str, Any]:
     return meta
 
 
+#: Seconds shaved off the extract timeout for the isolated model3d child so the
+#: child is killed — and the calling thread returns — BEFORE the outer
+#: ``asyncio.wait_for`` gives up and abandons that thread.
+_ISOLATED_TIMEOUT_MARGIN_S = 5
+
+
 def extract_model3d(path: str) -> dict[str, Any]:
-    """trimesh geometry facts, bounded by FILEARR_MODEL3D_MAX_BYTES."""
-    from filearr.tasks.model3d import Model3DError
-    from filearr.tasks.model3d import extract_model3d as _extract
+    """trimesh geometry facts, bounded by FILEARR_MODEL3D_MAX_BYTES — computed in
+    a KILLABLE child process (``python -m filearr.tasks.model3d``).
+
+    Why a child and not the worker thread every other extractor uses: trimesh's
+    pure-Python loaders (3MF especially) cannot be interrupted, so a hung parse
+    used to be abandoned at the extract timeout but kept burning a CPU and an
+    executor thread until the worker recycled (live 2026-08-22: all four slots
+    pinned on .3mf files, throughput ~0). ``subprocess.run(timeout=...)`` kills
+    the child on expiry, the thread returns immediately, and an OOM inside
+    trimesh can no longer take the worker with it. The child's own timeout is
+    the extract timeout minus a small margin so it always fires first."""
+    import json
+    import subprocess
+    import sys
 
     st = effective_settings()
+    timeout = max(5, int(st.extract_timeout_seconds) - _ISOLATED_TIMEOUT_MARGIN_S)
+    cmd = [
+        sys.executable, "-m", "filearr.tasks.model3d", path,
+        "--max-bytes", str(st.model3d_max_bytes),
+        "--accurate-max-bytes", str(st.model3d_accurate_max_bytes),
+    ]
     try:
-        return _extract(
-            path,
-            max_bytes=st.model3d_max_bytes,
-            accurate_max_bytes=st.model3d_accurate_max_bytes,
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
         )
-    except Model3DError as exc:
-        return {"_extract_error": str(exc), "_extract_error_kind": exc.kind}
+    except subprocess.TimeoutExpired:
+        return {
+            "_extract_error": (
+                f"3D model parse exceeded {timeout}s and was terminated "
+                "(huge or pathological mesh — raise FILEARR_EXTRACT_TIMEOUT_SECONDS "
+                "or lower FILEARR_MODEL3D_MAX_BYTES)"
+            ),
+            "_extract_error_kind": "guard",
+        }
+    except OSError as exc:
+        return {
+            "_extract_error": f"could not start model3d worker: {exc}",
+            "_extract_error_kind": "dependency",
+        }
+    try:
+        payload = json.loads(proc.stdout or "")
+    except ValueError:
+        tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        return {
+            "_extract_error": (
+                f"model3d worker exited {proc.returncode} without a result: {tail[0][:200]}"
+            ),
+            "_extract_error_kind": "error",
+        }
+    if "ok" in payload:
+        return payload["ok"]
+    err = payload.get("error") or {}
+    return {
+        "_extract_error": str(err.get("message") or "model3d worker failed"),
+        "_extract_error_kind": str(err.get("kind") or "error"),
+    }
 
 
 def extract_email(path: str) -> dict[str, Any]:
