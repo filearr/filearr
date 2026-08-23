@@ -105,6 +105,10 @@
   let selectedCategories = $state<string[]>([]);
   let fileGroupOptions = $state<TaxOption[]>([]);
   let selectedGroups = $state<string[]>([]);
+  // Library filter (multi-select, OR). A library is also how a machine/agent is
+  // addressed — every agent root is its own library — so the row groups agent
+  // libraries under the agent's name and offers a one-click "whole machine".
+  let selectedLibraries = $state<string[]>([]);
   let extension = $state(""); // "" = any extension
   let extQuery = $state("");  // type-ahead-lite filter text over the ext facet
   let includeSidecars = $state(false); // T3 sidecars hidden by default
@@ -477,6 +481,7 @@
     // ``file_group`` query params for the backend's List[str].
     if (selectedCategories.length) p.file_category = selectedCategories.join(",");
     if (selectedGroups.length) p.file_group = selectedGroups.join(",");
+    if (selectedLibraries.length) p.library = selectedLibraries.join(",");
     if (selectedTags.length) p.tags = selectedTags.join(",");
     if (includeSidecars) p.include_sidecars = "true";
     if (searchIn !== "all") p.search_in = searchIn;
@@ -547,6 +552,9 @@
       : [];
     selectedGroups = p.file_group
       ? p.file_group.split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
+    selectedLibraries = p.library
+      ? p.library.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
     selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
     tagQuery = "";
@@ -907,6 +915,44 @@
   const categoryLabel = (key: string): string =>
     categoryOptions.find((c) => c.key === key)?.label ?? key;
 
+  // Library multi-select (OR): toggle one id, or a whole agent's libraries.
+  function toggleLibrary(id: string) {
+    selectedLibraries = selectedLibraries.includes(id)
+      ? selectedLibraries.filter((l) => l !== id)
+      : [...selectedLibraries, id];
+    reset();
+  }
+  function toggleAgentLibraries(ids: string[]) {
+    const allOn = ids.every((id) => selectedLibraries.includes(id));
+    selectedLibraries = allOn
+      ? selectedLibraries.filter((l) => !ids.includes(l))
+      : [...new Set([...selectedLibraries, ...ids])];
+    reset();
+  }
+  function libraryLabel(id: string): string {
+    const l = libs.get(id);
+    if (!l) return id.slice(0, 8);
+    return l.agent_name ? `${l.agent_name}: ${l.name}` : l.name;
+  }
+  // Library rows for the Filters panel: central libraries first (by name), then
+  // one group per agent/machine (by agent name) holding that agent's libraries.
+  type LibGroup = { agent: string | null; libs: Library[] };
+  const libraryGroups = $derived.by<LibGroup[]>(() => {
+    const all = [...libs.values()];
+    const byName = (a: Library, b: Library) => a.name.localeCompare(b.name);
+    const central = all.filter((l) => !l.source_agent_id).sort(byName);
+    const agents = new Map<string, Library[]>();
+    for (const l of all.filter((l) => !!l.source_agent_id)) {
+      const key = l.agent_name || l.source_agent_id || "agent";
+      agents.set(key, [...(agents.get(key) ?? []), l]);
+    }
+    const out: LibGroup[] = [];
+    if (central.length) out.push({ agent: null, libs: central });
+    for (const key of [...agents.keys()].sort((a, b) => a.localeCompare(b)))
+      out.push({ agent: key, libs: (agents.get(key) ?? []).sort(byName) });
+    return out;
+  });
+
   // file_group multi-select (granular): toggle a key, then re-query.
   function toggleGroup(key: string) {
     selectedGroups = selectedGroups.includes(key)
@@ -942,6 +988,7 @@
     for (const c of selectedCategories) out.push({ key: `fc:${c}`, label: `category: ${categoryLabel(c)}`, clear: () => toggleCategory(c) });
     if (extension) out.push({ key: "ext", label: `ext: ${extension}`, clear: () => { extension = ""; reset(); } });
     for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
+    for (const l of selectedLibraries) out.push({ key: `lib:${l}`, label: `library: ${libraryLabel(l)}`, clear: () => toggleLibrary(l) });
     for (const t of selectedTags) out.push({ key: `tag:${t}`, label: `tag: ${t}`, clear: () => removeTag(t) });
     if (includeSidecars) out.push({ key: "sidecar", label: "sidecars shown", clear: () => { includeSidecars = false; reset(); } });
     // R8-UI: the map's area reads as an ordinary removable filter, so it can be
@@ -1302,6 +1349,47 @@
 
   {#if filtersOpen}
     <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      <!-- Library / machine filter (MULTI-select, OR). Central libraries first,
+           then one group per agent with a whole-machine toggle; counts come
+           from the library_id facet when the backend surfaces it. Hidden on a
+           single-library catalog (nothing to choose). -->
+      {#if libs.size > 1}
+        <div class="mb-3 flex flex-wrap items-start gap-2">
+          <span class="mt-1 w-10 text-xs font-medium text-slate-500">Library</span>
+          <div class="flex flex-wrap items-center gap-2">
+            {#each libraryGroups as grp (grp.agent ?? "central")}
+              {#if grp.agent}
+                {@const ids = grp.libs.map((l) => l.id)}
+                {@const allOn = ids.every((id) => selectedLibraries.includes(id))}
+                <button
+                  class="rounded-full border border-dashed px-2 py-0.5 text-xs {allOn
+                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    : 'border-slate-400 dark:border-slate-600'}"
+                  title="every library on this machine"
+                  aria-pressed={allOn}
+                  onclick={() => toggleAgentLibraries(ids)}>
+                  🖥 {grp.agent}
+                </button>
+              {/if}
+              {#each grp.libs as l (l.id)}
+                {@const count = facets.library_id?.[l.id]}
+                {@const on = selectedLibraries.includes(l.id)}
+                <button
+                  class="rounded-full border px-3 py-1 text-sm {on
+                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+                    ? 'opacity-40'
+                    : ''}"
+                  title={l.root_path}
+                  aria-pressed={on}
+                  onclick={() => toggleLibrary(l.id)}>
+                  {l.name}{#if count != null}<span class="ml-1 text-xs opacity-70">{count}</span>{/if}
+                </button>
+              {/each}
+            {/each}
+          </div>
+        </div>
+      {/if}
       <!-- File-group chips (MULTI-select, granular second taxonomy level).
            Roadmap §20: moved INSIDE the collapsed Filters panel — the row is
            long and ate vertical space on every visit. Counts are shown only

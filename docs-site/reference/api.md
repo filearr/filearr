@@ -84,6 +84,12 @@ curl -X POST http://localhost:8484/api/v1/libraries/<id>/rehash \
 # returns the item. search_in=names is the inverse; default matches everything.
 curl "http://localhost:8484/api/v1/search?q=invoice+total&search_in=content"
 
+# scope a search to one library — or to one MACHINE: every agent root is its own
+# library, so repeat `library` (OR) with all of that agent's library ids. The
+# console's Filters panel has a Library row with a whole-machine toggle; the
+# response carries a `library_id` facet with per-library counts.
+curl "http://localhost:8484/api/v1/search?q=budget&library=<lib-id>&library=<other-lib-id>"
+
 # the AGPL §13 source link + running version
 curl http://localhost:8484/api/v1/version
 ```

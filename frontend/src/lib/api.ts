@@ -124,7 +124,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // NOTE (forward-looking): ``file_category`` + ``file_group`` are intentionally
 // first-class in this flat param vocabulary so the future visual filter builder
 // can emit/consume them 1:1 with the search filters (see FilterBuilderPage).
-const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group"] as const;
+const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group", "library"] as const;
 
 export function search(
   params: Record<string, string>,

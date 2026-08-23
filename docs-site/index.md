@@ -21,7 +21,9 @@ index other machines and replicate their catalogs to a central server.
   audiobooks, samples, images, 3D models, documents and spreadsheets, with
   per-library include/exclude rules.
 - **Typo tolerance and facets.** Powered by Meilisearch: instant results, typo
-  correction, faceted filtering, and (optionally) local semantic/hybrid search.
+  correction, faceted filtering (type, group, extension, tags, size, date — and
+  **library or machine**, since every agent root is its own library), and
+  (optionally) local semantic/hybrid search.
 - **Search by place, and across passages.** Optional
   [geo filters](reference/api.md#geo-search-radius-and-bounding-box) (radius or
   map viewport, nearest-first ordering) for photos in a library that opts into

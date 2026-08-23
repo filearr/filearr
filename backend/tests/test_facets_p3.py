@@ -183,3 +183,17 @@ async def test_negative_size_rejected(monkeypatch):
         r = await c.get("/api/v1/search?size_gte=-5")
     assert r.status_code == 422  # ge=0 rejects before any engine call
     assert "filter" not in sink
+
+
+def test_library_filter_accepts_a_list_as_or_and_a_str_as_before():
+    """2026-08-23: the Search page's Library/machine row sends several ids (an
+    agent's roots are each their own library) — repeatable => OR, quoted."""
+    one = build_filters(status=None, library=["a1"])
+    assert "library_id = 'a1'" in one
+    many = build_filters(status=None, library=["a1", "b'2"])
+    assert "(library_id = 'a1' OR library_id = 'b\\'2')" in many
+    assert build_filters(status=None, library=[]) == build_filters(status=None)
+
+
+def test_library_id_is_a_facet_for_the_library_row():
+    assert "library_id" in FACETS

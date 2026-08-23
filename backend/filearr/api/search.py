@@ -57,6 +57,10 @@ FACETS = [
     "is_sidecar",
     "size",
     "mtime",
+    # Per-library counts drive the Search page's Library filter row (a library is
+    # also how an agent/machine is addressed — each agent root is its own
+    # library). Low-cardinality, facet-search-disabled: cheap.
+    "library_id",
 ]
 
 # P3-T5 highlighting/cropping. ``body_text`` (document body) is cropped to a short
@@ -114,7 +118,7 @@ def build_filters(
     *,
     file_category: list[str] | None = None,
     file_group: list[str] | None = None,
-    library: str | None = None,
+    library: str | list[str] | None = None,
     status: str | None = "active",
     extension: str | None = None,
     year_gte: int | None = None,
@@ -163,7 +167,15 @@ def build_filters(
                 "(" + " OR ".join(f"file_group = '{g}'" for g in valid) + ")"
             )
     if library:
-        filters.append(f"library_id = '{meili_quote(library)}'")
+        # Repeatable => OR (an item lives in exactly one library). A plain str is
+        # still accepted (older callers / the LLM facade); every value is quoted.
+        libs = [library] if isinstance(library, str) else [x for x in library if x]
+        if len(libs) == 1:
+            filters.append(f"library_id = '{meili_quote(libs[0])}'")
+        elif libs:
+            filters.append(
+                "(" + " OR ".join(f"library_id = '{meili_quote(x)}'" for x in libs) + ")"
+            )
     if status:
         filters.append(f"status = '{meili_quote(status)}'")
     if extension:
@@ -437,7 +449,12 @@ async def search(
         "derived similarity bucket. See GET /system/file-groups for the vocabulary. "
         "Unknown values are ignored.",
     ),
-    library: str | None = None,
+    library: list[str] | None = Query(
+        default=None,
+        description="library-id filter (repeatable = OR). A library is also how a "
+        "machine/agent is addressed: every agent root is its own library, so pass "
+        "all of an agent's library ids to scope a search to that machine.",
+    ),
     status: str | None = Query(default="active"),
     extension: str | None = None,
     year_gte: int | None = None,
