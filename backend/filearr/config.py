@@ -231,6 +231,18 @@ class Settings(BaseSettings):
     ldap_user_filter: str = "(uid={username})"  # AD: (sAMAccountName={username})
     ldap_attr_username: str = "uid"  # AD: sAMAccountName
     ldap_attr_email: str = "mail"
+    # How a JIT-provisioned LDAP account is NAMED in Filearr (2026-08-23). The
+    # bare username attribute collides with same-named local accounts (you end
+    # up with "eric2") and hides where the account came from, so the default
+    # reflects the directory source:
+    #   upn      -> userPrincipalName (eric@holzhueter.us); falls back to attr
+    #   netbios  -> DOMAIN\user via msDS-PrincipalName (AD); falls back to attr
+    #   attr     -> the bare ldap_attr_username value (pre-2026-08-23 behaviour)
+    # Applied on EVERY login: an account whose name differs from the styled name
+    # is renamed when that name is free (so "eric2" heals itself).
+    ldap_username_format: str = "upn"
+    ldap_attr_upn: str = "userPrincipalName"
+    ldap_attr_display_name: str = "displayName"
     # Stable external subject attribute. PREFER an immutable operational attribute
     # (OpenLDAP ``entryUUID`` / AD ``objectGUID``) over the DN, which changes when
     # an entry is renamed/moved. Falls back to the DN (with a warning) when the

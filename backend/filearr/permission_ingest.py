@@ -183,6 +183,7 @@ async def ingest_entries(
     # alerts -- emitted after the batch commit so the events never outrun rows.
     changed: list[tuple[str, uuid.UUID | None, uuid.UUID | None, PermissionSnapshot, dict, str]]
     changed = []
+    touched_items: list[uuid.UUID | None] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -212,6 +213,7 @@ async def ingest_entries(
                 await session.execute(select(Agent.name).where(Agent.id == agent_id))
             ).scalar_one_or_none()
         item_id, library_id = await _link_item(session, roots, path)
+        touched_items.append(item_id)
         collected = rec.get("collected_at")
         try:
             collected_at = (
@@ -266,6 +268,18 @@ async def ingest_entries(
                 )
     if written:
         await session.commit()
+    # 2026-08-23: the search projection carries who-can-read / world-readable /
+    # owner per item (permission_projection), so a new snapshot must refresh
+    # the linked items' docs. Best-effort, after the commit (invariant 5).
+    linked = [str(iid) for iid in touched_items if iid is not None]
+    if linked:
+        try:
+            from filearr import worker as _worker
+
+            for i in range(0, len(linked), 500):
+                await _worker.defer_index_sync(linked[i : i + 500])
+        except Exception:  # noqa: BLE001 — projection refresh must never fail ingest
+            log.warning("permission ingest: index_sync defer failed", exc_info=True)
     for path, item_id, library_id, prev, rec, digest in changed:
         await _emit_change_alert(
             session,

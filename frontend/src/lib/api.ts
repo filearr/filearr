@@ -124,7 +124,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // NOTE (forward-looking): ``file_category`` + ``file_group`` are intentionally
 // first-class in this flat param vocabulary so the future visual filter builder
 // can emit/consume them 1:1 with the search filters (see FilterBuilderPage).
-const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group", "library"] as const;
+const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group", "library", "principal"] as const;
 
 export function search(
   params: Record<string, string>,
@@ -202,6 +202,39 @@ export type ItemRecord = Record<string, unknown> & {
 
 /** Fetch one item with every stored field. Powers the Raw detail view. */
 export const getItem = (id: string) => request<ItemRecord>(`/items/${id}`);
+
+/** Newest agent-collected ACL snapshot for an item (2026-08-23). ``available``
+ *  is false (with a reason) for central-scanned items — permissions are
+ *  collected by agents only. */
+export interface PermissionPrincipal {
+  kind?: string; canonical_id?: string; id?: string; source_identifier?: string;
+  display?: string | null; name?: string | null; domain?: string | null; resolved?: boolean;
+}
+export interface PermissionAce {
+  principal: PermissionPrincipal; type: "allow" | "deny" | string;
+  verbs?: string[]; raw_mask?: string; inherited?: boolean; scope?: string; source?: string;
+}
+export interface ItemPermissions {
+  available: boolean; reason?: string; item_id: string;
+  collected_at?: string; agent_id?: string; agent_name?: string | null; path?: string;
+  is_dir?: boolean; fidelity?: string;
+  owner?: PermissionPrincipal | null; group?: PermissionPrincipal | null;
+  aces?: PermissionAce[]; posture?: Record<string, unknown> | null;
+  aliases?: Record<string, string>;
+  summary?: { perm_principals: string[]; perm_world: boolean; perm_owner: string | null };
+}
+export const getItemPermissions = (id: string) =>
+  request<ItemPermissions>(`/items/${id}/permissions`);
+
+/** Principal suggestions for the Search page's permission filter (facet search
+ *  over perm_principals — SIDs, DOMAIN\names and display names). */
+export function searchPrincipals(
+  q: string,
+  signal?: AbortSignal,
+): Promise<{ principals: { value: string; count: number }[] }> {
+  const qs = new URLSearchParams({ q });
+  return request(`/search/principals?${qs}`, { signal });
+}
 
 /** Frecency use ping (fire-and-forget; 204 with no body). Callers swallow errors. */
 export async function touchItem(id: string): Promise<void> {
@@ -2326,6 +2359,10 @@ export interface AuthPrincipal {
   session_ttl_hours?: number | null;
   /** Coarse API scopes the role grants; gate admin UI on `scopes.includes("admin")`. */
   scopes?: string[];
+  external_issuer?: string | null;
+  external_subject?: string | null;
+  external_profile?: Record<string, unknown> | null;
+  last_login_at?: string | null;
 }
 
 /** True when the principal's role carries the admin scope (works for custom

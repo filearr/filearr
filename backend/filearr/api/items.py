@@ -210,6 +210,85 @@ async def get_item(
     return _with_native_path(item, library, share_url, share_source)
 
 
+@router.get("/{item_id}/permissions")
+async def get_item_permissions(
+    item_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    ctx: PermissionContext = Depends(require_permission("search_metadata")),
+) -> dict:
+    """The newest agent-collected ACL snapshot for one item (2026-08-23): owner,
+    group, the normalized ACE list, posture, fidelity, who/when collected, plus
+    the search-projection summary (who can read / world-readable). Permissions
+    are collected by AGENTS only (W7 ``permissions`` collector), so a
+    central-scanned item answers ``available=false`` with the reason rather
+    than 404 — the detail view renders that line. Same read scope as the item."""
+    from sqlalchemy import desc
+
+    from filearr.models import Agent, PermissionSnapshot, PrincipalAlias
+    from filearr.permission_projection import summary_for_snapshot
+
+    item = await _get_item(session, item_id)
+    ctx.authorize_item(item)
+    library = (
+        await session.execute(select(Library).where(Library.id == item.library_id))
+    ).scalar_one_or_none()
+    snap = (
+        await session.execute(
+            select(PermissionSnapshot)
+            .where(PermissionSnapshot.item_id == item.id)
+            .order_by(desc(PermissionSnapshot.collected_at), desc(PermissionSnapshot.id))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if snap is None:
+        reason = (
+            "permissions are collected by agents (W7 'permissions' collector); "
+            "this item belongs to an agent library but no snapshot has been "
+            "collected for it yet"
+            if library is not None and library.source_agent_id is not None
+            else "permissions are collected by agents only; this library is scanned "
+            "by central, which does not read ACLs"
+        )
+        return {"available": False, "reason": reason, "item_id": str(item.id)}
+    agent_name = (
+        await session.execute(select(Agent.name).where(Agent.id == snap.agent_id))
+    ).scalar_one_or_none()
+    # Best-effort name resolution for principals the agent could not resolve:
+    # the operator/directory-maintained principal_aliases (SID -> name).
+    ids: set[str] = set()
+    for p in (snap.owner, snap.group_):
+        if isinstance(p, dict) and p.get("id"):
+            ids.add(str(p["id"]))
+    for a in snap.aces or []:
+        p = (a or {}).get("principal") if isinstance(a, dict) else None
+        if isinstance(p, dict) and p.get("id"):
+            ids.add(str(p["id"]))
+    aliases: dict[str, str] = {}
+    if ids:
+        rows = await session.execute(
+            select(PrincipalAlias.alias, PrincipalAlias.canonical).where(
+                PrincipalAlias.alias.in_(sorted(ids))
+            )
+        )
+        aliases = {a: c for a, c in rows.all()}
+    return {
+        "available": True,
+        "item_id": str(item.id),
+        "collected_at": snap.collected_at,
+        "agent_id": str(snap.agent_id),
+        "agent_name": agent_name,
+        "path": snap.path,
+        "is_dir": snap.is_dir,
+        "fidelity": snap.fidelity,
+        "owner": snap.owner,
+        "group": snap.group_,
+        "aces": snap.aces or [],
+        "posture": snap.posture,
+        "aliases": aliases,
+        "summary": summary_for_snapshot(snap),
+    }
+
+
 # Frecency touches are fire-and-forget UI pings; bound them so a stuck client
 # loop can't write-amplify (reuses the LLM facade's in-process token bucket).
 _TOUCH_LIMITER = RateLimiter()

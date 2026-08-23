@@ -634,3 +634,86 @@ def test_direct_bind_template_uses_bare_name():
     # calls = [(user_dn, password), ...]; the user bind must target the BARE DN.
     assert ("uid=alice,ou=people,dc=ex,dc=com", "alicepw") in calls
     assert ident.username == "alice"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08-23: account naming reflects the directory source + identity details  #
+# --------------------------------------------------------------------------- #
+def test_preferred_username_styles():
+    ident = ldap_auth.LdapIdentity(
+        subject="s", username="Alice", email=None,
+        upn="Alice@Ex.com", netbios_name="EX\\alice",
+    )
+    assert ldap_auth.preferred_username(_cfg(ldap_username_format="upn"), ident) == "alice@ex.com"
+    assert ldap_auth.preferred_username(_cfg(ldap_username_format="netbios"), ident) == "ex\\alice"
+    assert ldap_auth.preferred_username(_cfg(ldap_username_format="attr"), ident) == "alice"
+    # styled forms fall back to the bare attribute when the directory lacks them
+    bare = ldap_auth.LdapIdentity(subject="s", username="bob", email=None)
+    assert ldap_auth.preferred_username(_cfg(ldap_username_format="upn"), bare) == "bob"
+    assert ldap_auth.preferred_username(_cfg(ldap_username_format="netbios"), bare) == "bob"
+
+
+async def test_jit_account_is_named_by_upn_and_keeps_identity_profile(db_maker, ldap_settings):
+    """Default style = upn: a new LDAP account is alice@ex.com (not 'alice'), so
+    it can never collide with a same-named local account, and the admin Users
+    view gets dn/upn/groups/mapped role via external_profile."""
+    from sqlalchemy import select
+
+    ident = ldap_auth.LdapIdentity(
+        subject="aaaa", username="alice", email="alice@ex.com", group_dns=(GRP_ADMINS,),
+        group_names=(ldap_auth._dn_cn(GRP_ADMINS),), dn="cn=alice,ou=people,dc=ex,dc=com",
+        upn="alice@ex.com", display_name="Alice Example", netbios_name="EX\\alice",
+    )
+    await _provision(db_maker, ident)
+    async with db_maker() as s:
+        user = (await s.execute(select(User))).scalar_one()
+    assert user.username == "alice@ex.com"
+    assert user.display_name == "Alice Example"
+    prof = user.external_profile or {}
+    assert prof["dn"] == "cn=alice,ou=people,dc=ex,dc=com"
+    assert prof["upn"] == "alice@ex.com" and prof["netbios"] == "EX\\alice"
+    assert prof["sam"] == "alice" and prof["mapped_role"] == "admin"
+    assert prof["groups"] == ["admins"]
+
+
+async def test_existing_account_heals_to_styled_name_when_free(db_maker, ldap_settings):
+    """An account provisioned under the old bare style (or with a collision
+    suffix) is renamed to the styled name at its next login when that name is
+    free; a taken styled name leaves it alone. Identity = issuer+subject, so the
+    rename never re-links anything."""
+    from sqlalchemy import select
+
+    # first login: directory without UPN -> bare 'alice'
+    await _provision(db_maker, _identity())
+    # the directory now reports a UPN (or the operator switched styles)
+    styled = ldap_auth.LdapIdentity(
+        subject="aaaa", username="alice", email="alice@ex.com", group_dns=(GRP_ADMINS,),
+        group_names=("admins",), upn="alice@ex.com",
+    )
+    await _provision(db_maker, styled)
+    async with db_maker() as s:
+        users = (await s.execute(select(User))).scalars().all()
+    assert [u.username for u in users] == ["alice@ex.com"]  # renamed, not duplicated
+
+    # a different directory user whose styled name is already taken keeps its name
+    async with db_maker() as s:
+        p = Principal(kind="user", global_role="viewer")
+        s.add(p)
+        await s.flush()
+        s.add(User(principal_id=p.id, username="bob@ex.com", auth_provider="local",
+                   password_hash="x"))
+        await s.commit()
+    await _provision(db_maker, ldap_auth.LdapIdentity(
+        subject="bbbb", username="bob", email=None, group_dns=(GRP_ADMINS,),
+        group_names=("admins",),
+    ))
+    await _provision(db_maker, ldap_auth.LdapIdentity(
+        subject="bbbb", username="bob", email=None, group_dns=(GRP_ADMINS,),
+        group_names=("admins",), upn="bob@ex.com",
+    ))
+    async with db_maker() as s:
+        names = sorted(
+            u.username for u in (await s.execute(select(User))).scalars().all()
+            if u.external_subject == "bbbb"
+        )
+    assert names == ["bob"]  # styled name taken by the local account -> unchanged

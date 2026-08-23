@@ -90,6 +90,12 @@ curl "http://localhost:8484/api/v1/search?q=invoice+total&search_in=content"
 # response carries a `library_id` facet with per-library counts.
 curl "http://localhost:8484/api/v1/search?q=budget&library=<lib-id>&library=<other-lib-id>"
 
+# permission search (2026-08-23): files a principal can read (agent-collected
+# ACLs; names/SIDs as /search/principals returns them), or world-readable files
+curl "http://localhost:8484/api/v1/search?principal=HOLZHUETER%5Ceric"
+curl "http://localhost:8484/api/v1/search?world_readable=true&file_category=document"
+curl "http://localhost:8484/api/v1/items/<id>/permissions"
+
 # the AGPL §13 source link + running version
 curl http://localhost:8484/api/v1/version
 ```

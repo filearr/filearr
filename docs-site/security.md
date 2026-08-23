@@ -69,6 +69,24 @@ break-glass path if a federated provider locks everyone out. See
   directory, so no domain picker is needed; a wrong-domain typo simply fails
   the bind.
 
+**How an LDAP account is named in Filearr** (`ldap_username_format`, GUI-
+editable under Admin → Authentication): by default the account is named after
+the directory source — the **UPN** (`eric@holzhueter.us`) — so it never collides
+with a same-named local account (the old behaviour produced `eric2`) and shows
+at a glance where it came from. `netbios` names it `DOMAIN\user` (from AD's
+`msDS-PrincipalName`); `attr` keeps the bare username attribute. The style is
+applied at **every** login: an account named under another style is renamed to
+the styled name when that name is free, so an existing `eric2` heals itself on
+its next login. The login form accepts any of the forms regardless.
+
+Admin → Users shows a federated account's **identity source** when you expand
+it: server/issuer, stable subject (objectGUID/entryUUID), DN, UPN, NetBIOS and
+account names, the directory groups seen at the last login, the role the group
+map produced, and the last login time. That role is **re-applied at every LDAP
+login** — a role changed by hand in the Users table holds only until the user
+next signs in through the directory; to change it durably, change the
+group→role map (or the user's group membership).
+
 Both fail **closed**: a half-configured provider's endpoints 404 rather than
 500ing, and an unmapped user is refused when you leave the default role empty.
 
@@ -236,6 +254,33 @@ root as well is harmless and survives an issuing-CA rollover review. PKCS#7
 PFX/PKCS#12 with
 `openssl pkcs12 -in bundle.pfx -cacerts -nokeys -out chain.pem` — never paste a
 private key; Filearr only wants public CA certificates.
+
+## Searching and inspecting file permissions {#permission-search}
+
+Agents that run the `permissions` collector (W7) store a normalized ACL
+snapshot per file. Since 2026-08-23 that data is reachable in two more places
+besides the permission reports:
+
+- **Item detail → Permissions** — owner, group, the ACE list (allow/deny,
+  rights, inherited entries collapsed by default), whether the file is
+  world-readable, and when/which agent collected it. Every principal is a link
+  to "find everything this principal can read". A central-scanned item (no
+  agent) says so rather than showing nothing — permissions are collected by
+  agents only.
+- **Search → Filters → Access** — a principal type-ahead (`/search?principal=`,
+  repeatable = OR; names and SIDs exactly as the `/search/principals` facet
+  returns them) and a world-readable tri-state (`world_readable=true|false`).
+  The projection is three derived index fields (`perm_principals` = principals
+  with an allow entry plus the owner, minus any with a deny entry;
+  `perm_world` = Everyone / Authenticated Users / POSIX other; `perm_owner`),
+  refreshed whenever a new snapshot lands and rebuilt in full by
+  `rebuild-index`. Items without a collected ACL never match a principal.
+
+!!! note "Upgrading to this build"
+    The three fields are new filterable attributes — settings drift. Run
+    **Rebuild index** (Admin → System, or `POST /system/rebuild-index`) once
+    after deploying so existing documents carry them; until then the Access
+    filter only matches items re-indexed since the upgrade.
 
 ## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
 

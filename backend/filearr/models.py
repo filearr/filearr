@@ -1413,6 +1413,10 @@ class User(Base):
     # identity an SSO login re-resolves to (never the mutable username/email).
     external_issuer: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 2026-08-23: what the identity provider told us about this account, for the
+    # admin Users view (LDAP: dn, upn, sam, display_name, netbios, groups,
+    # server). Informational only — never consulted for authorization.
+    external_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -173,6 +173,11 @@ class PrincipalOut(BaseModel):
     # what the SPA should gate admin surfaces on, since a CUSTOM role may carry
     # the admin scope without being named "admin".
     scopes: list[str] = Field(default_factory=list)
+    # 2026-08-23: identity-provider details for the admin Users view (LDAP/OIDC).
+    external_issuer: str | None = None
+    external_subject: str | None = None
+    external_profile: dict | None = None
+    last_login_at: datetime | None = None
 
 
 class LoginOut(BaseModel):
@@ -200,6 +205,10 @@ def _principal_out(principal: Principal, user: User) -> PrincipalOut:
         session_inactivity_hours=principal.session_inactivity_hours,
         session_ttl_hours=principal.session_ttl_hours,
         scopes=sorted(authx.scopes_for_role(principal.global_role)),
+        external_issuer=user.external_issuer,
+        external_subject=user.external_subject,
+        external_profile=user.external_profile,
+        last_login_at=user.last_login_at,
     )
 
 

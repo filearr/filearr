@@ -1228,6 +1228,11 @@ Meilisearch have diverged.
 **Diagnosis.** An hourly reconcile sweep detects divergence and never writes
 Postgres — check the Jobs page / worker logs for its results.
 
+Builds on or after 2026-08-23 add three filterable attributes for the
+permission search (`perm_principals`, `perm_world`, `perm_owner` — see
+[security.md#permission-search](security.md#permission-search)); run one rebuild
+after that upgrade so existing documents carry them.
+
 **Fix — always safe** (Meili is a disposable projection):
 
 ```bash

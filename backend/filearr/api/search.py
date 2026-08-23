@@ -61,6 +61,7 @@ FACETS = [
     # also how an agent/machine is addressed — each agent root is its own
     # library). Low-cardinality, facet-search-disabled: cheap.
     "library_id",
+    "perm_world",
 ]
 
 # P3-T5 highlighting/cropping. ``body_text`` (document body) is cropped to a short
@@ -131,6 +132,8 @@ def build_filters(
     sidecar_of: str | None = None,
     include_sidecars: bool = False,
     hash: str | None = None,
+    principal: list[str] | None = None,
+    world_readable: bool | None = None,
 ) -> list[str]:
     """Build Meilisearch filter clauses. Sidecars are excluded by default (T3);
     an explicit ``sidecar_of`` or ``include_sidecars`` opts them back in. A
@@ -178,6 +181,19 @@ def build_filters(
             )
     if status:
         filters.append(f"status = '{meili_quote(status)}'")
+    # 2026-08-23 permission projection (permission_projection): who can read.
+    # Repeatable => OR ("reachable by any of these"); every value is quoted —
+    # principals are free strings (SIDs, DOMAIN\names, display names).
+    if principal:
+        vals = [p for p in principal if p]
+        if len(vals) == 1:
+            filters.append(f"perm_principals = '{meili_quote(vals[0])}'")
+        elif vals:
+            filters.append(
+                "(" + " OR ".join(f"perm_principals = '{meili_quote(p)}'" for p in vals) + ")"
+            )
+    if world_readable is not None:
+        filters.append(f"perm_world = {'true' if world_readable else 'false'}")
     if extension:
         filters.append(f"extension = '{meili_quote(extension)}'")
     if year_gte is not None:
@@ -480,6 +496,18 @@ async def search(
         description="include sidecar files (.nfo/artwork/JRiver) in results; "
         "excluded by default so they don't pollute top-level hits",
     ),
+    principal: list[str] | None = Query(
+        default=None,
+        description="permission filter (repeatable = OR): items whose newest "
+        "agent-collected ACL grants this principal read access — a SID, a "
+        "DOMAIN\\name or a display name exactly as the /search/principals "
+        "type-ahead returns it. Items without a collected ACL never match.",
+    ),
+    world_readable: bool | None = Query(
+        default=None,
+        description="true = items whose ACL grants Everyone / Authenticated Users / "
+        "POSIX other read access; false = items with a collected ACL that does not.",
+    ),
     hash: str | None = Query(
         default=None,
         pattern="^[0-9a-f]{8,64}$",
@@ -574,6 +602,8 @@ async def search(
     caller something about how the server is configured. Malformed geo parameters
     (half a centre, an inverted box, an out-of-range coordinate) ARE a 422."""
     filters = build_filters(
+        principal=principal,
+        world_readable=world_readable,
         file_category=file_category,
         file_group=file_group,
         library=library,
@@ -977,6 +1007,33 @@ async def search_tags(
         for h in hits[:limit]
     ]
     return {"tags": tags}
+
+
+@router.get("/search/principals")
+async def search_principals(
+    q: str = Query(default="", description="principal name/SID prefix to complete"),
+    library: list[str] | None = Query(default=None),
+    status: str | None = Query(default="active"),
+    limit: int = Query(default=20, ge=1, le=50),
+    scope_filter: str | None = Depends(require_search_scope("read")),
+) -> dict:
+    """Typo-tolerant, count-ordered principal suggestions for the Search page's
+    permission filter (2026-08-23) — a facet search over ``perm_principals``
+    (ids AND display names, see permission_projection), RBAC-scoped exactly
+    like /search/tags. Returns ``{"principals": [{"value", "count"}, ...]}``."""
+    filters = build_filters(library=library, status=status)
+    if scope_filter:
+        filters.append(scope_filter)
+    filter_expr = " AND ".join(filters) if filters else None
+    s = get_settings()
+    async with client() as c:
+        res = await c.index(s.meili_index).facet_search(
+            facet_name="perm_principals",
+            facet_query=q,
+            filter=filter_expr,
+        )
+    hits = getattr(res, "facet_hits", None) or []
+    return {"principals": [{"value": h.value, "count": h.count} for h in hits[:limit]]}
 
 
 # ---------------------------------------------------------------------------

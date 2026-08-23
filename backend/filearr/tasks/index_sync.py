@@ -7,6 +7,7 @@ from sqlalchemy import select
 from filearr.config import get_settings
 from filearr.db import SessionLocal, scalars_where_in
 from filearr.models import Item, ItemStatus, Library
+from filearr.permission_projection import permission_summary_map
 from filearr.retrying import MEILI_RETRY
 from filearr.search import (
     build_doc,
@@ -45,6 +46,7 @@ async def sync_items(item_ids: list[str]) -> None:
         expose = await _expose_gps_map(session, items)
         # P6-T3: parents' path_scope so sidecars inherit their RBAC scope.
         pscope = await parent_scope_map(session, items)
+        perms = await permission_summary_map(session, items)
     # P4-T6: project facetable/sortable custom fields (loaded once per batch).
     defs = await load_projection_defs()
     live = [
@@ -53,6 +55,7 @@ async def sync_items(item_ids: list[str]) -> None:
             defs,
             expose_gps=expose.get(i.library_id, False),
             parent_path_scope=pscope.get(i.sidecar_of),
+            perm=perms.get(i.id),
         )
         for i in items
         if i.status == ItemStatus.active
@@ -135,6 +138,7 @@ async def reproject_library(library_id: str) -> int:
             if not items:
                 break
             pscope = await parent_scope_map(session, items)
+            perms = await permission_summary_map(session, items)
             await replace_docs(
                 [
                     build_doc(
@@ -142,6 +146,7 @@ async def reproject_library(library_id: str) -> int:
                         defs,
                         expose_gps=expose,
                         parent_path_scope=pscope.get(i.sidecar_of),
+                        perm=perms.get(i.id),
                     )
                     for i in items
                 ]

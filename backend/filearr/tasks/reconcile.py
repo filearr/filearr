@@ -37,6 +37,7 @@ from sqlalchemy import func, select, text
 from filearr.config import get_settings
 from filearr.db import SessionLocal, scalars_where_in
 from filearr.models import Item, ItemStatus
+from filearr.permission_projection import permission_summary_map
 from filearr.search import (
     build_doc,
     client,
@@ -162,10 +163,11 @@ async def _reindex_missing(ids: list[str]) -> int:
         rows = await scalars_where_in(session, select(Item), Item.id, ids)
         # P6-T3: parents' path_scope so sidecars inherit their RBAC scope.
         pscope = await parent_scope_map(session, rows)
+        perms = await permission_summary_map(session, rows)
     # P4-T6: project facetable/sortable custom fields (loaded once per repair).
     defs = await load_projection_defs()
     docs = [
-        build_doc(i, defs, parent_path_scope=pscope.get(i.sidecar_of))
+        build_doc(i, defs, parent_path_scope=pscope.get(i.sidecar_of), perm=perms.get(i.id))
         for i in rows
         if i.status == ItemStatus.active
     ]

@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 from pydantic import BaseModel, ConfigDict, Field
 
 from filearr.hashx import HASH_ATTRIBUTES
+from filearr.permission_projection import permission_summary_map
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,12 @@ FILTERABLE_ATTRIBUTES: tuple[str, ...] = (
     # FACET_SEARCH_DISABLED). Adding it is genuine settings drift → a rebuild-index
     # is required after deploy to project it onto existing docs (ops runbook).
     "path_scope",
+    # 2026-08-23 permission projection (filearr.permission_projection): who can
+    # read (ids + names), world-readable flag, owner. ``perm_principals`` keeps
+    # facet search ON for the Search page's principal type-ahead; the other two
+    # are plain filters. Adding them is settings drift -> rebuild-index after
+    # deploy to project them onto existing docs (ops runbook).
+    "perm_principals", "perm_world", "perm_owner",
     # R8 (roadmap §8 "geo filters (photo GPS)"): Meilisearch's reserved geo field.
     # Filterable is what enables the ``_geoRadius(...)`` / ``_geoBoundingBox(...)``
     # filter functions; sortable (below) is what enables ``_geoPoint(...)`` ordering.
@@ -182,7 +189,7 @@ DISABLE_TYPO_ATTRIBUTES: tuple[str, ...] = tuple(
 # cannot express a facet-search opt-out. Harmless: the engine has no string facet
 # values to build for a geo point.
 FACET_SEARCH_DISABLED: tuple[str, ...] = (
-    "size", "mtime", "year", "path_scope", "quick_hash", "content_hash",
+    "size", "mtime", "year", "path_scope", "quick_hash", "content_hash", "perm_owner",
 )
 
 # The genuine facet-search CANDIDATES (brief §2c): low-cardinality,
@@ -190,7 +197,7 @@ FACET_SEARCH_DISABLED: tuple[str, ...] = (
 # (absent from FACET_SEARCH_DISABLED) and, per R2, get their facet VALUES
 # count-ordered (most-common first) — the tag type-ahead consumer is P3-T12.
 FACET_SEARCH_CANDIDATES: tuple[str, ...] = (
-    "tags", "genre", "is_sidecar", "file_group", "file_category",
+    "tags", "genre", "is_sidecar", "file_group", "file_category", "perm_principals",
 )
 
 # searchCutoffMs circuit-breaker (brief §2f): generous but non-infinite so a
@@ -861,12 +868,14 @@ async def rebuild_via_swap(*, wait_s: float | None = None) -> int:
                     last_id = items[-1].id
                     # P6-T3: parents' path_scope so sidecars inherit RBAC scope.
                     pscope = await parent_scope_map(session, items)
+                    perms = await permission_summary_map(session, items)
                     docs = [
                         build_doc(
                             i,
                             projection_defs,
                             expose_gps=expose_gps.get(i.library_id, False),
                             parent_path_scope=pscope.get(i.sidecar_of),
+                            perm=perms.get(i.id),
                         )
                         for i in items
                     ]

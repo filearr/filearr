@@ -278,6 +278,29 @@
                     {/if}
                   </p>
                 </form>
+                {#if u.auth_provider && u.auth_provider !== "local"}
+                  {@const prof = (u.external_profile ?? {}) as Record<string, unknown>}
+                  {@const groups = Array.isArray(prof.groups) ? (prof.groups as string[]) : []}
+                  <div class="mt-3 border-t border-slate-200 pt-2 dark:border-slate-800">
+                    <div class="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Identity source ({u.auth_provider})</div>
+                    <dl class="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-0.5 text-xs">
+                      {#if u.external_issuer}<dt class="text-slate-500">Server / issuer</dt><dd class="font-mono break-all">{u.external_issuer}</dd>{/if}
+                      {#if u.external_subject}<dt class="text-slate-500">Stable subject</dt><dd class="font-mono break-all">{u.external_subject}</dd>{/if}
+                      {#if prof.dn}<dt class="text-slate-500">Distinguished name</dt><dd class="font-mono break-all">{prof.dn}</dd>{/if}
+                      {#if prof.upn}<dt class="text-slate-500">UPN</dt><dd class="font-mono break-all">{prof.upn}</dd>{/if}
+                      {#if prof.netbios}<dt class="text-slate-500">NetBIOS name</dt><dd class="font-mono break-all">{prof.netbios}</dd>{/if}
+                      {#if prof.sam}<dt class="text-slate-500">Account name</dt><dd class="font-mono break-all">{prof.sam}</dd>{/if}
+                      {#if prof.mapped_role}<dt class="text-slate-500">Role from directory</dt><dd>{prof.mapped_role} <span class="text-slate-400">(re-applied at every login — a manual role change lasts until then)</span></dd>{/if}
+                      {#if u.last_login_at}<dt class="text-slate-500">Last login</dt><dd>{new Date(u.last_login_at).toLocaleString()}</dd>{/if}
+                      {#if groups.length}
+                        <dt class="text-slate-500">Directory groups</dt>
+                        <dd class="flex flex-wrap gap-1">
+                          {#each groups as g (g)}<span class="rounded bg-slate-100 px-1.5 py-0.5 dark:bg-slate-800">{g}</span>{/each}
+                        </dd>
+                      {/if}
+                    </dl>
+                  </div>
+                {/if}
               </td>
             </tr>
           {/if}

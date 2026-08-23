@@ -71,7 +71,9 @@ async def test_ensure_index_applies_typed_settings_on_fresh_index(monkeypatch):
     # facet decision added the near-unique P3-T1 digests (opaque exact-match only).
     # R8's _geo is absent: it travels in the same payload as a PLAIN STRING (the
     # documented spelling for the reserved geo field), so it has no features block.
-    assert disabled == {"size", "mtime", "year", "path_scope", "quick_hash", "content_hash"}
+    assert disabled == {
+        "size", "mtime", "year", "path_scope", "quick_hash", "content_hash", "perm_owner",
+    }
     assert "_geo" in [f for f in filt if isinstance(f, str)]
     # ...but the hashes stay FILTERABLE (exact-match hash search must still work):
     # facet-search-disabled only flips features.facet_search, not filterability.

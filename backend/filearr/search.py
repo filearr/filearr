@@ -561,6 +561,7 @@ def build_doc(
     *,
     expose_gps: bool = False,
     parent_path_scope: str | None = None,
+    perm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Flatten an Item (with user_metadata overlaid) into a search document.
 
@@ -658,6 +659,15 @@ def build_doc(
             )
         ),
     }
+    # 2026-08-23 permission projection (filearr.permission_projection): the
+    # newest W7 snapshot reduced to who-can-read / world-readable / owner. Items
+    # without a snapshot project the empty shape so the filters stay total.
+    from filearr.permission_projection import EMPTY_SUMMARY
+
+    summary = perm if perm is not None else EMPTY_SUMMARY
+    doc["perm_principals"] = list(summary.get("perm_principals") or [])
+    doc["perm_world"] = bool(summary.get("perm_world"))
+    doc["perm_owner"] = summary.get("perm_owner")
     if custom_defs:
         # P4-T6: project facetable/sortable custom fields under cf_<name>. Only
         # emitted when a value exists; the FILTERABLE/SORTABLE settings side is

@@ -17,8 +17,12 @@
   import { copyText } from "./clipboard";
   import {
     ApiError,
+    type ItemPermissions,
+    type PermissionAce,
+    type PermissionPrincipal,
     friendlyError,
     getItem,
+    getItemPermissions,
     itemCopies,
     listCustomFields,
     patchItem,
@@ -299,6 +303,35 @@
   // P3-T10: the OTHER copies of this item. Always fetched on open; the Copies
   // section renders whenever the group has more than one member (count > 1).
   let copies = $state<CopiesResponse | null>(null);
+  let perms = $state<ItemPermissions | null>(null);
+  let permsShowInherited = $state(false);
+  function principalLabel(p: PermissionPrincipal | null | undefined): string {
+    if (!p) return "—";
+    const id = p.canonical_id || p.id || p.source_identifier || "";
+    const alias = id && perms?.aliases ? perms.aliases[id] : undefined;
+    const name = p.display || p.name || alias;
+    if (name && id && name !== id) return `${name}`;
+    return name || id || "—";
+  }
+  function principalId(p: PermissionPrincipal | null | undefined): string {
+    return p?.canonical_id || p?.id || p?.source_identifier || "";
+  }
+  const visibleAces = $derived(
+    (perms?.aces ?? []).filter((a) => permsShowInherited || !a.inherited),
+  );
+  const inheritedCount = $derived((perms?.aces ?? []).filter((a) => a.inherited).length);
+  function verbsLabel(a: PermissionAce): string {
+    const v = a.verbs ?? [];
+    if (!v.length) return a.raw_mask || "—";
+    if (v.includes("full")) return "full control";
+    return v.join(", ");
+  }
+  /** Deep link to the Search page scoped to one principal. */
+  function searchByPrincipal(value: string) {
+    const qs = new URLSearchParams({ principal: value });
+    window.location.hash = `#/search?${qs}`;
+    onClose?.();
+  }
   let copiedPath = $state<string | null>(null);
   let copiedTimer: ReturnType<typeof setTimeout>;
 
@@ -399,6 +432,12 @@
       .then((r) => (item = r))
       // RBAC (P6-T4): a 403/404 shows a friendly line, never a blank/raw dump.
       .catch((e) => (error = friendlyError(e)));
+    // Permissions (2026-08-23): newest agent-collected ACL; non-blocking, a
+    // failure just hides the section.
+    perms = null;
+    getItemPermissions(id)
+      .then((r) => (perms = r))
+      .catch(() => (perms = null));
     // Copies are a separate, non-blocking fetch — a failure just hides the section.
     itemCopies(id)
       .then((r) => (copies = r))
@@ -623,6 +662,71 @@
         <Card {item} />
       {/if}
     </div>
+
+    <!-- Permissions (2026-08-23): the newest agent-collected ACL snapshot (W7).
+         Central-scanned items explain why there is none instead of hiding. -->
+    {#if item && perms}
+      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+        <h3 class="mb-2 text-sm font-semibold">Permissions</h3>
+        {#if !perms.available}
+          <p class="text-xs text-slate-500">{perms.reason}</p>
+        {:else}
+          <dl class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs">
+            <dt class="text-slate-500">Owner</dt>
+            <dd class="min-w-0 truncate" title={principalId(perms.owner)}>
+              {principalLabel(perms.owner)}
+              {#if principalId(perms.owner)}
+                <button type="button" class="ml-1 underline opacity-70 hover:opacity-100"
+                  title="search everything this principal can read"
+                  onclick={() => searchByPrincipal(principalId(perms!.owner))}>find all</button>
+              {/if}
+            </dd>
+            {#if perms.group}
+              <dt class="text-slate-500">Group</dt>
+              <dd class="min-w-0 truncate" title={principalId(perms.group)}>{principalLabel(perms.group)}</dd>
+            {/if}
+            <dt class="text-slate-500">World</dt>
+            <dd>{perms.summary?.perm_world ? "readable by everyone" : "not world-readable"}</dd>
+            <dt class="text-slate-500">Collected</dt>
+            <dd class="min-w-0 truncate">
+              {perms.collected_at ? new Date(perms.collected_at).toLocaleString() : "—"}
+              {#if perms.agent_name} · by agent {perms.agent_name}{/if}
+              {#if perms.fidelity} · {perms.fidelity}{/if}
+            </dd>
+          </dl>
+          {#if (perms.aces ?? []).length}
+            <div class="mt-2 overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead class="text-left text-slate-400">
+                  <tr><th class="py-1 pr-2">Principal</th><th class="py-1 pr-2">Access</th><th class="py-1 pr-2">Rights</th><th class="py-1 pr-2">Scope</th></tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+                  {#each visibleAces as a, i (i)}
+                    <tr class={a.type === "deny" ? "text-red-600 dark:text-red-400" : ""}>
+                      <td class="py-1 pr-2">
+                        <button type="button" class="text-left hover:underline" title={principalId(a.principal)}
+                          onclick={() => searchByPrincipal(principalId(a.principal) || principalLabel(a.principal))}>
+                          {principalLabel(a.principal)}
+                        </button>
+                      </td>
+                      <td class="py-1 pr-2">{a.type}{#if a.inherited} <span class="opacity-60">(inherited)</span>{/if}</td>
+                      <td class="py-1 pr-2">{verbsLabel(a)}</td>
+                      <td class="py-1 pr-2 opacity-70">{a.scope ?? "this"}{#if a.source && a.source !== "local"} · {a.source}{/if}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            {#if inheritedCount}
+              <button type="button" class="mt-1 text-xs underline opacity-70 hover:opacity-100"
+                onclick={() => (permsShowInherited = !permsShowInherited)}>
+                {permsShowInherited ? "hide" : "show"} {inheritedCount} inherited entr{inheritedCount === 1 ? "y" : "ies"}
+              </button>
+            {/if}
+          {/if}
+        {/if}
+      </div>
+    {/if}
 
     <!-- Roadmap §5 P3 provenance: where the file was downloaded from (xattrs /
          Zone.Identifier read at extract time). Rendered only when present; the

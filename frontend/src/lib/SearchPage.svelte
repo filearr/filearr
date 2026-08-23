@@ -18,6 +18,7 @@
     deleteSavedSearch,
     copyCounts as apiCopyCounts,
     searchTags,
+    searchPrincipals,
     semanticStats,
     fileGroups as apiFileGroups,
     getTaxonomy,
@@ -109,6 +110,15 @@
   // addressed — every agent root is its own library — so the row groups agent
   // libraries under the agent's name and offers a one-click "whole machine".
   let selectedLibraries = $state<string[]>([]);
+  // Permission filter (2026-08-23): principals that can read (OR) + world-readable.
+  let selectedPrincipals = $state<string[]>([]);
+  let worldReadable = $state<"" | "true" | "false">("");
+  let principalQuery = $state("");
+  let principalSuggestions = $state<{ value: string; count: number }[]>([]);
+  let principalOpen = $state(false);
+  let principalActiveIndex = $state(-1);
+  let principalDebounce: ReturnType<typeof setTimeout>;
+  let principalController: AbortController | null = null;
   let extension = $state(""); // "" = any extension
   let extQuery = $state("");  // type-ahead-lite filter text over the ext facet
   let includeSidecars = $state(false); // T3 sidecars hidden by default
@@ -482,6 +492,8 @@
     if (selectedCategories.length) p.file_category = selectedCategories.join(",");
     if (selectedGroups.length) p.file_group = selectedGroups.join(",");
     if (selectedLibraries.length) p.library = selectedLibraries.join(",");
+    if (selectedPrincipals.length) p.principal = selectedPrincipals.join(",");
+    if (worldReadable) p.world_readable = worldReadable;
     if (selectedTags.length) p.tags = selectedTags.join(",");
     if (includeSidecars) p.include_sidecars = "true";
     if (searchIn !== "all") p.search_in = searchIn;
@@ -556,6 +568,10 @@
     selectedLibraries = p.library
       ? p.library.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
+    selectedPrincipals = p.principal
+      ? p.principal.split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
+    worldReadable = p.world_readable === "true" ? "true" : p.world_readable === "false" ? "false" : "";
     selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
     tagQuery = "";
     tagOpen = false;
@@ -915,6 +931,56 @@
   const categoryLabel = (key: string): string =>
     categoryOptions.find((c) => c.key === key)?.label ?? key;
 
+  // Permission filter helpers (type-ahead mirrors the tag combobox).
+  function addPrincipal(v: string) {
+    const val = v.trim();
+    if (!val) return;
+    if (!selectedPrincipals.includes(val)) selectedPrincipals = [...selectedPrincipals, val];
+    principalQuery = ""; principalSuggestions = []; principalOpen = false; principalActiveIndex = -1;
+    reset();
+  }
+  function removePrincipal(v: string) {
+    selectedPrincipals = selectedPrincipals.filter((x) => x !== v);
+    reset();
+  }
+  function onPrincipalInput() {
+    clearTimeout(principalDebounce);
+    principalDebounce = setTimeout(fetchPrincipalSuggestions, 150);
+  }
+  async function fetchPrincipalSuggestions() {
+    principalController?.abort();
+    const ctrl = new AbortController();
+    principalController = ctrl;
+    try {
+      const res = await searchPrincipals(principalQuery, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      principalSuggestions = res.principals.filter((t) => !selectedPrincipals.includes(t.value));
+      principalOpen = principalSuggestions.length > 0;
+      principalActiveIndex = principalOpen ? 0 : -1;
+    } catch {
+      if (!ctrl.signal.aborted) { principalSuggestions = []; principalOpen = false; }
+    }
+  }
+  function onPrincipalKeydown(e: KeyboardEvent) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault(); e.stopPropagation();
+      if (principalSuggestions.length) { principalOpen = true; principalActiveIndex = Math.min(principalSuggestions.length - 1, principalActiveIndex + 1); }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault(); e.stopPropagation();
+      principalActiveIndex = Math.max(0, principalActiveIndex - 1);
+    } else if (e.key === "Enter") {
+      e.preventDefault(); e.stopPropagation();
+      if (principalOpen && principalActiveIndex >= 0 && principalSuggestions[principalActiveIndex]) {
+        addPrincipal(principalSuggestions[principalActiveIndex].value);
+      } else if (principalQuery.trim()) {
+        addPrincipal(principalQuery);
+      }
+    } else if (e.key === "Escape") {
+      e.stopPropagation();
+      principalOpen = false;
+    }
+  }
+
   // Library multi-select (OR): toggle one id, or a whole agent's libraries.
   function toggleLibrary(id: string) {
     selectedLibraries = selectedLibraries.includes(id)
@@ -989,6 +1055,8 @@
     if (extension) out.push({ key: "ext", label: `ext: ${extension}`, clear: () => { extension = ""; reset(); } });
     for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
     for (const l of selectedLibraries) out.push({ key: `lib:${l}`, label: `library: ${libraryLabel(l)}`, clear: () => toggleLibrary(l) });
+    for (const pr of selectedPrincipals) out.push({ key: `pr:${pr}`, label: `readable by: ${pr}`, clear: () => removePrincipal(pr) });
+    if (worldReadable) out.push({ key: "world", label: worldReadable === "true" ? "world-readable" : "not world-readable", clear: () => { worldReadable = ""; reset(); } });
     for (const t of selectedTags) out.push({ key: `tag:${t}`, label: `tag: ${t}`, clear: () => removeTag(t) });
     if (includeSidecars) out.push({ key: "sidecar", label: "sidecars shown", clear: () => { includeSidecars = false; reset(); } });
     // R8-UI: the map's area reads as an ordinary removable filter, so it can be
@@ -1449,6 +1517,60 @@
             <option value="all">everything</option>
             <option value="content">file content only</option>
             <option value="names">names only</option>
+          </select>
+        </label>
+      </div>
+
+      <!-- Permission filter (2026-08-23): who can read (agent-collected ACLs,
+           perm_principals facet type-ahead) + world-readable. Items without a
+           collected ACL never match a principal; the world select is tri-state. -->
+      <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-slate-500">
+        <span class="mt-1 w-10 font-medium" title="Agent-collected file permissions (W7). Only items whose ACL was collected can match.">Access</span>
+        <div class="relative">
+          <input
+            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+                   focus:border-[var(--accent)] dark:border-slate-700"
+            placeholder="readable by principal… (name or SID)"
+            role="combobox"
+            aria-expanded={principalOpen}
+            aria-controls="principal-suggestions"
+            aria-autocomplete="list"
+            bind:value={principalQuery}
+            oninput={onPrincipalInput}
+            onkeydown={onPrincipalKeydown}
+            onfocus={() => { if (!principalSuggestions.length) fetchPrincipalSuggestions(); else principalOpen = true; }} />
+          {#if principalOpen && principalSuggestions.length}
+            <ul id="principal-suggestions" role="listbox"
+              class="absolute z-20 mt-1 max-h-56 w-72 overflow-auto rounded border border-slate-300 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
+              {#each principalSuggestions as sug, i (sug.value)}
+                <li role="option" aria-selected={i === principalActiveIndex}>
+                  <button type="button"
+                    class="flex w-full items-center justify-between gap-2 px-2 py-1 text-left {i === principalActiveIndex
+                      ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                      : 'hover:bg-slate-100 dark:hover:bg-slate-800'}"
+                    onmousedown={(e) => { e.preventDefault(); addPrincipal(sug.value); }}>
+                    <span class="truncate">{sug.value}</span>
+                    <span class="shrink-0 opacity-60">{sug.count}</span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+        {#each selectedPrincipals as pr (pr)}
+          <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-[var(--accent)]">
+            {pr}
+            <button type="button" class="rounded-full px-1 leading-none hover:bg-[var(--accent)]/25"
+              aria-label={`Remove principal ${pr}`} onclick={() => removePrincipal(pr)}>×</button>
+          </span>
+        {/each}
+        <label class="flex items-center gap-1">
+          World
+          <select class="rounded border border-slate-300 bg-transparent px-1 py-0.5 dark:border-slate-700 dark:bg-slate-800"
+            bind:value={worldReadable} onchange={reset}>
+            <option value="">any</option>
+            <option value="true">readable by everyone{#if facets.perm_world?.true != null} ({facets.perm_world.true}){/if}</option>
+            <option value="false">not world-readable</option>
           </select>
         </label>
       </div>

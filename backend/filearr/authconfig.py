@@ -46,6 +46,7 @@ LDAP_FIELDS: frozenset[str] = frozenset(
         "ldap_timeout", "ldap_bind_dn",
         "ldap_user_dn_template", "ldap_user_base", "ldap_user_filter",
         "ldap_attr_username", "ldap_attr_email", "ldap_attr_uid", "ldap_use_memberof",
+        "ldap_username_format", "ldap_attr_upn", "ldap_attr_display_name",
         "ldap_attr_memberof", "ldap_group_base", "ldap_group_filter", "ldap_role_map",
         "ldap_default_role", "ldap_auto_provision", "ldap_group_sync",
     }

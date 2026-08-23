@@ -97,6 +97,10 @@ class LdapConfig:
     default_role: str
     auto_provision: bool
     group_sync: bool
+    # 2026-08-23 account naming + identity details (see config.ldap_username_format)
+    username_format: str = "upn"
+    attr_upn: str = "userPrincipalName"
+    attr_display_name: str = "displayName"
     # In-memory PEM CA chain (pasted/fetched); default so existing keyword
     # constructions and MOCK test connectors need not pass it.
     tls_ca_cert_data: str | None = None
@@ -176,6 +180,9 @@ class LdapConfig:
             default_role=s.ldap_default_role.strip().lower(),
             auto_provision=s.ldap_auto_provision,
             group_sync=s.ldap_group_sync,
+            username_format=(s.ldap_username_format or "upn").strip().lower(),
+            attr_upn=s.ldap_attr_upn,
+            attr_display_name=s.ldap_attr_display_name,
         )
 
 
@@ -189,6 +196,11 @@ class LdapIdentity:
     email: str | None
     group_dns: tuple[str, ...] = ()
     group_names: tuple[str, ...] = ()
+    # 2026-08-23: directory identity details (all optional; older tests omit them)
+    dn: str | None = None
+    upn: str | None = None
+    display_name: str | None = None
+    netbios_name: str | None = None  # AD msDS-PrincipalName, DOMAIN\user
 
 
 @dataclass(slots=True)
@@ -316,13 +328,24 @@ def _bind_service(cfg: LdapConfig, connector) -> Connection:
     return conn
 
 
+def _user_attrs(cfg: LdapConfig) -> list[str]:
+    """Attributes read off the user entry: the login/email/stable-id trio, the
+    identity details shown on the Users page (UPN, display name — and AD's
+    constructed ``msDS-PrincipalName`` for the DOMAIN\\user form), memberOf."""
+    attrs = [cfg.attr_username, cfg.attr_email, cfg.attr_uid]
+    for extra in (cfg.attr_upn, cfg.attr_display_name, "msDS-PrincipalName"):
+        if extra and extra not in attrs:
+            attrs.append(extra)
+    if cfg.use_memberof:
+        attrs.append(cfg.attr_memberof)
+    return attrs
+
+
 def _search_user(cfg: LdapConfig, reader: Connection, username: str):
     """Search-then-bind step 1: locate exactly one user entry. Returns the entry
     or ``None`` (unknown / ambiguous)."""
     filt = cfg.user_filter.format(username=escape_filter_chars(username))
-    attrs = [cfg.attr_username, cfg.attr_email, cfg.attr_uid]
-    if cfg.use_memberof:
-        attrs.append(cfg.attr_memberof)
+    attrs = _user_attrs(cfg)
     try:
         reader.search(
             cfg.user_base, filt, search_scope=SUBTREE, attributes=attrs, size_limit=2
@@ -336,9 +359,7 @@ def _search_user(cfg: LdapConfig, reader: Connection, username: str):
 
 
 def _read_entry(cfg: LdapConfig, reader: Connection, dn: str):
-    attrs = [cfg.attr_username, cfg.attr_email, cfg.attr_uid]
-    if cfg.use_memberof:
-        attrs.append(cfg.attr_memberof)
+    attrs = _user_attrs(cfg)
     try:
         reader.search(dn, "(objectClass=*)", search_scope=BASE, attributes=attrs)
         entries = list(reader.entries)
@@ -361,6 +382,33 @@ def _extract_attrs(cfg: LdapConfig, entry, user_dn: str, fallback_username: str)
     username = _first(attrs.get(cfg.attr_username)) or fallback_username
     email = _first(attrs.get(cfg.attr_email))
     return subject, username, email
+
+
+def _identity_details(cfg: LdapConfig, entry, user_dn: str) -> dict[str, str | None]:
+    """UPN / display name / NetBIOS form for the Users page and account naming."""
+    attrs = _attrs_dict(entry) if entry is not None else {}
+    upn = _first(attrs.get(cfg.attr_upn))
+    display = _first(attrs.get(cfg.attr_display_name))
+    netbios = _first(attrs.get("msDS-PrincipalName"))
+    return {
+        "dn": user_dn or None,
+        "upn": str(upn) if upn else None,
+        "display_name": str(display) if display else None,
+        "netbios_name": str(netbios) if netbios else None,
+    }
+
+
+def preferred_username(cfg: LdapConfig, identity: LdapIdentity) -> str:
+    """The Filearr account name for an LDAP identity per ``username_format``:
+    ``upn`` -> userPrincipalName, ``netbios`` -> DOMAIN\\user, ``attr`` -> the
+    bare username attribute. Each styled form falls back to the bare name when
+    the directory did not supply it (OpenLDAP has no UPN)."""
+    fmt = (cfg.username_format or "upn").lower()
+    if fmt == "upn" and identity.upn:
+        return identity.upn.strip().lower()
+    if fmt == "netbios" and identity.netbios_name:
+        return identity.netbios_name.strip().lower()
+    return (identity.username or "").strip().lower()
 
 
 def _resolve_groups(cfg: LdapConfig, reader: Connection, entry, user_dn: str) -> tuple[str, ...]:
@@ -476,6 +524,7 @@ def resolve_ldap_identity(
             entry = _read_entry(cfg, reader, user_dn)
 
         subject, uname, email = _extract_attrs(cfg, entry, user_dn, username)
+        details = _identity_details(cfg, entry, user_dn)
         group_dns = _resolve_groups(cfg, reader, entry, user_dn)
         group_names = tuple(_dn_cn(dn) for dn in group_dns)
         return LdapIdentity(
@@ -484,6 +533,10 @@ def resolve_ldap_identity(
             email=email,
             group_dns=group_dns,
             group_names=group_names,
+            dn=details["dn"],
+            upn=details["upn"],
+            display_name=details["display_name"],
+            netbios_name=details["netbios_name"],
         )
     finally:
         for c in conns:
@@ -549,12 +602,27 @@ async def provision_ldap_principal(
         )
     ).first()
 
+    # 2026-08-23: the account is NAMED after the directory source (UPN by
+    # default: eric@holzhueter.us) instead of the bare attribute, which collided
+    # with same-named local accounts ("eric2") and hid where it came from.
+    styled = preferred_username(cfg, identity)
     if row is not None:
         user, principal = row
+        # Heal an account named under the old/other style: rename to the styled
+        # name when it differs and is free (the login name is not the identity —
+        # issuer+subject is — so this is safe and reversible).
+        if styled and user.username != styled:
+            taken = (
+                await session.execute(select(User).where(User.username == styled))
+            ).scalar_one_or_none()
+            if taken is None:
+                logger.info("ldap: renaming account %r -> %r (username_format=%s)",
+                            user.username, styled, cfg.username_format)
+                user.username = styled
     else:
         if not cfg.auto_provision:
             raise LDAPError("no_account", "no linked account and auto-provision is off")
-        base = identity.username or (identity.email or "").split("@")[0] or subject
+        base = styled or identity.username or (identity.email or "").split("@")[0] or subject
         username = await unique_username(session, base)
         principal = Principal(kind="user", global_role=role)
         session.add(principal)
@@ -578,6 +646,23 @@ async def provision_ldap_principal(
     if role_changed:
         principal.global_role = role
     user.last_login_at = datetime.now(UTC)
+    # Identity details for the admin Users view (informational, re-synced on
+    # every login). Display name follows the directory unless unset there.
+    if identity.display_name:
+        user.display_name = identity.display_name
+    if identity.email and not user.email:
+        user.email = identity.email
+    user.external_profile = {
+        "server": issuer,
+        "dn": identity.dn,
+        "upn": identity.upn,
+        "sam": identity.username,
+        "netbios": identity.netbios_name,
+        "display_name": identity.display_name,
+        "groups": list(identity.group_names),
+        "group_dns": list(identity.group_dns),
+        "mapped_role": role,
+    }
 
     groups_changed = False
     if cfg.group_sync:
