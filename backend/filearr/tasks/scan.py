@@ -7,6 +7,7 @@ quick-hash tier for move detection. Deletes are tombstoned, never hard-deleted.
 
 import asyncio
 import itertools
+import logging
 import os
 import stat as stat_mod
 import time
@@ -15,7 +16,7 @@ from datetime import UTC, datetime
 
 from pathspec import GitIgnoreSpec
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import load_only
 
 from filearr import rbac, taxonomy
@@ -41,6 +42,8 @@ from filearr.sidecar import classify
 from filearr.tasks.associate import associate_sidecars
 from filearr.tasks.move import detect_cross_library_moves, detect_moves
 from filearr.worker import proc_app
+
+logger = logging.getLogger(__name__)
 
 # UI-T14: cap on ids per ``batch_defer_async`` multi-row INSERT so a staged
 # scan's single end-of-walk defer of the whole library never runs as one
@@ -574,6 +577,12 @@ async def _scan_body(
         # T8 per-batch trickle (defer-after-each-commit) is preserved byte-for-byte.
         staged = get_settings().staged_pipeline
         pending_extract: list[str] = []
+        # Never-hashed self-heal dedup (2026-08-22): ids that ALREADY have a
+        # pending extract job. Loaded once per scan so the else-branch self-heal
+        # below does not re-defer the same never-extracted rows on every scan
+        # (the queue accumulated duplicate jobs per item; the retry endpoint had
+        # this anti-join, the scan did not). New/modified rows are never gated.
+        already_queued = await _pending_extract_item_ids(session, library.id)
         # Rows created this scan (non-sidecar): candidates for move detection at
         # scan end. Kept as a set of ids (survive across batch commits/refresh).
         new_item_ids: list[str] = []
@@ -770,8 +779,14 @@ async def _scan_body(
                     item.symlink_target = symlink_target
                 if item.status == ItemStatus.missing:
                     item.status = ItemStatus.active
-                # committed but never extracted — self-heal (skip sidecars/symlinks)
-                if item.quick_hash is None and not is_sidecar and not is_symlink:
+                # committed but never extracted — self-heal (skip sidecars/symlinks
+                # and rows whose extract job is already pending).
+                if (
+                    item.quick_hash is None
+                    and not is_sidecar
+                    and not is_symlink
+                    and str(item.id) not in already_queued
+                ):
                     pending_extract.append(str(item.id))
 
             if len(seen) % FLUSH_EVERY == 0:
@@ -1082,6 +1097,34 @@ async def _scan_body(
         await notify_scan_progress(session, run.id)
         await session.commit()
         return run.stats
+
+
+async def _pending_extract_item_ids(session, library_id) -> set[str]:
+    """Item ids of this library that already have a ``todo``/``doing`` extract
+    job. One query per scan (joined through items for the library filter, so a
+    large queue for OTHER libraries is not materialised). Best-effort: a missing
+    procrastinate schema (fresh DB / unit tests) or any query failure yields an
+    empty set — the scan then behaves exactly as before (re-defers; harmless,
+    extract is idempotent) rather than failing."""
+    try:
+        has_jobs = (
+            await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
+        ).scalar()
+        if has_jobs is None:
+            return set()
+        rows = await session.execute(
+            text(
+                "SELECT pj.args->>'item_id' FROM procrastinate_jobs pj "
+                "JOIN items i ON i.id::text = pj.args->>'item_id' "
+                "WHERE pj.task_name = 'filearr.tasks.extract.extract_item' "
+                "AND pj.status IN ('todo', 'doing') AND i.library_id = :lib"
+            ),
+            {"lib": str(library_id)},
+        )
+        return {r[0] for r in rows.all() if r[0]}
+    except Exception:  # noqa: BLE001 — a dedup hint must never fail a scan
+        logger.warning("pending-extract lookup failed; self-heal dedup disabled", exc_info=True)
+        return set()
 
 
 async def _defer_extract_batch(item_ids: list[str], scan_run_id: str | None = None) -> None:

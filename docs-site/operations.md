@@ -61,9 +61,55 @@ pct exec <your-vmid> -- docker compose run --rm app python scripts/init_db.py
 pct exec <your-vmid> -- docker compose exec app alembic current
 ```
 
-If you are already inside the container (or on a single-host Unraid/Compose
-deploy), drop the `pct exec <your-vmid> --` prefix and run the `docker compose …`
-part from `/opt/filearr`.
+If you are already inside the LXC (or on a plain Docker Compose host), drop the
+`pct exec <your-vmid> --` prefix and run the `docker compose …` part from
+`/opt/filearr`.
+
+### On Unraid {#unraid-console}
+
+The Community Applications install is **not** a compose stack — each service is
+its own container (`filearr`, `filearr-postgres`, `filearr-meilisearch`, and
+optionally `filearr-caddy`, `filearr-stepca`, `filearr-agent`), and the one
+`filearr` container runs both the web/API process and the worker. So there is no
+`docker compose` to call; address containers by name with `docker exec`. Two ways
+in:
+
+* **Unraid terminal** (the `>_` icon top-right of the web UI, or SSH to the
+  server) — run `docker exec …` against any container by name.
+* **A container's own console** (Docker tab → click the container icon →
+  **Console**) — you are already *inside* that container, so drop the
+  `docker exec <name>` prefix and run the inner command directly (e.g. `psql -U
+  filearr -d filearr` inside `filearr-postgres`).
+
+From the Unraid terminal:
+
+```bash
+# what's running / health
+docker ps --filter name=filearr
+
+# follow logs (app + worker share the filearr container's log)
+docker logs -f filearr
+docker logs -f filearr-postgres
+docker logs filearr-stepca 2>&1 | grep -i "password is"
+
+# a psql shell into the database (user/db from the filearr-postgres template;
+# both default to "filearr")
+docker exec -it filearr-postgres psql -U filearr -d filearr
+# one statement, non-interactive
+docker exec filearr-postgres psql -U filearr -d filearr -c "SELECT 1;"
+# a multi-line statement: paste it between the two SQL markers
+docker exec -i filearr-postgres psql -U filearr -d filearr <<'SQL'
+SELECT count(*) FROM items;
+SQL
+
+# run python / alembic inside the app image
+docker exec filearr python scripts/init_db.py
+docker exec filearr alembic current
+```
+
+Every `docker compose exec -T postgres psql …` / `docker compose exec app …`
+elsewhere in this guide maps to `docker exec filearr-postgres psql …` /
+`docker exec filearr …` on Unraid.
 
 ## Maintenance schedules (Jobs page) {#maintenance-schedules}
 
@@ -613,6 +659,55 @@ items and errored items — is exactly what **Retry failed extractions** and the
 scan's own self-heal would queue anyway. A file that really was modified in the
 same window keeps its previous metadata until it changes again; if that matters,
 let the backlog drain instead.
+
+(Proxmox: `pct exec <vmid> -- docker compose exec -T postgres psql -U filearr -d
+filearr`; Unraid: `docker exec -i filearr-postgres psql -U filearr -d filearr`
+— paste the statement on stdin, see [Working inside the
+containers](#unraid-console).)
+
+**If a large `todo` backlog remains after that**, it is made of items that were
+never successfully extracted — and very likely *duplicate* jobs for them: builds
+before 2026-08-22 re-queued every never-hashed item on **every** scan without
+checking for a job already pending, so a never-extractable file (unreadable over
+the mount, say) collected one job per scan. Triage what is left:
+
+```sql
+SELECT count(*)                                              AS todo_jobs,
+       count(DISTINCT pj.args->>'item_id')                    AS distinct_items,
+       count(*) FILTER (WHERE i.id IS NULL)                   AS item_gone,
+       count(*) FILTER (WHERE i.status <> 'active')           AS item_not_active,
+       count(*) FILTER (WHERE i.quick_hash IS NULL)           AS never_hashed,
+       count(*) FILTER (WHERE i.metadata ? '_extract_error')  AS errored
+FROM procrastinate_jobs pj
+LEFT JOIN items i ON i.id::text = pj.args->>'item_id'
+WHERE pj.task_name = 'filearr.tasks.extract.extract_item' AND pj.status = 'todo';
+```
+
+`todo_jobs` far above `distinct_items` is the duplicate pile-up. Collapse it to
+one pending job per item (keeps the oldest), and drop jobs for rows that no
+longer exist or are tombstoned — both safe at any time:
+
+```sql
+-- one pending extract per item
+DELETE FROM procrastinate_jobs pj
+USING procrastinate_jobs keep
+WHERE pj.task_name = 'filearr.tasks.extract.extract_item' AND pj.status = 'todo'
+  AND keep.task_name = pj.task_name AND keep.status = 'todo'
+  AND keep.args->>'item_id' = pj.args->>'item_id'
+  AND keep.id < pj.id;
+
+-- jobs for deleted / tombstoned rows
+DELETE FROM procrastinate_jobs pj
+WHERE pj.task_name = 'filearr.tasks.extract.extract_item' AND pj.status = 'todo'
+  AND NOT EXISTS (SELECT 1 FROM items i
+                  WHERE i.id::text = pj.args->>'item_id' AND i.status = 'active');
+```
+
+What survives is one job per never-extracted active item — the real backlog.
+Let it drain; items whose file cannot be opened fail quickly and surface on the
+errors report, where **Retry failed extractions** handles them later. From
+2026-08-22 the scan itself skips never-hashed rows that already have a pending
+job, so the pile-up cannot rebuild.
 
 ## Extraction throughput and adaptive backpressure {#extract-backpressure}
 
