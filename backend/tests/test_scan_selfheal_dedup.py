@@ -63,29 +63,48 @@ async def test_selfheal_skips_rows_with_pending_extract_job(engine, tmp_path):
         ).scalars().all()
         by_name = {r.filename: str(r.id) for r in rows}
 
-        # Stand up the lookalike queue with ONE pending job (for queued.bin);
-        # orphan.bin's job is "gone" (e.g. the operator purged the queue).
-        await session.execute(
-            text(
-                "CREATE TABLE IF NOT EXISTS procrastinate_jobs ("
-                "id bigserial PRIMARY KEY, task_name text, status text, args jsonb)"
+        # Stand up ONE pending job (for queued.bin); orphan.bin's job is "gone"
+        # (e.g. the operator purged the queue). The suite's DB may or may not
+        # already carry the real procrastinate schema (another test can have
+        # applied it), so: reuse the real table when present and delete only the
+        # row we add; otherwise create a lookalike with the columns the lookup
+        # reads (+ the real NOT NULL ones) and drop it after. NEVER drop a table
+        # this test did not create — CI 2026-08-23 hit the real table.
+        exists = (
+            await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
+        ).scalar()
+        created = exists is None
+        if created:
+            await session.execute(
+                text(
+                    "CREATE TABLE procrastinate_jobs ("
+                    "id bigserial PRIMARY KEY, queue_name text NOT NULL, "
+                    "task_name text NOT NULL, status text NOT NULL, "
+                    "args jsonb NOT NULL DEFAULT '{}'::jsonb)"
+                )
             )
-        )
-        await session.execute(
-            text(
-                "INSERT INTO procrastinate_jobs (task_name, status, args) VALUES "
-                "('filearr.tasks.extract.extract_item', 'todo', "
-                "jsonb_build_object('item_id', CAST(:i AS text)))"
-            ),
-            {"i": by_name["queued.bin"]},
-        )
+        job_id = (
+            await session.execute(
+                text(
+                    "INSERT INTO procrastinate_jobs (queue_name, task_name, status, args) "
+                    "VALUES ('extract', 'filearr.tasks.extract.extract_item', 'todo', "
+                    "jsonb_build_object('item_id', CAST(:i AS text))) RETURNING id"
+                ),
+                {"i": by_name["queued.bin"]},
+            )
+        ).scalar_one()
         await session.commit()
         try:
             # Neither row was ever extracted (quick_hash NULL): the self-heal
             # must re-defer ONLY the one without a pending job.
             second = await _run_scan(session, lib)
         finally:
-            await session.execute(text("DROP TABLE IF EXISTS procrastinate_jobs"))
+            if created:
+                await session.execute(text("DROP TABLE procrastinate_jobs"))
+            else:
+                await session.execute(
+                    text("DELETE FROM procrastinate_jobs WHERE id = :j"), {"j": job_id}
+                )
             await session.commit()
 
     assert second == [by_name["orphan.bin"]]
