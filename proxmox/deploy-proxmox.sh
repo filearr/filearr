@@ -559,7 +559,7 @@ fi"
 # present in deploy.conf. A plain redeploy with saved answers never prompts;
 # --reconfigure (RECONFIGURE=1) always re-offers the section. Precedence is
 # unchanged — env.overrides still wins over deploy.conf on a duplicate key.
-OPTIONAL_SETTING_KEYS='FILEARR_SEMANTIC_ENABLED FILEARR_CONTENT_SNIFF_ENABLED FILEARR_UPDATE_CHECK_AUTO FILEARR_LOG_DB_ENABLED FILEARR_THUMBNAIL_BUDGET_GB FILEARR_AGENT_AUTH_MODE'
+OPTIONAL_SETTING_KEYS='FILEARR_SEMANTIC_ENABLED FILEARR_CONTENT_SNIFF_ENABLED FILEARR_UPDATE_CHECK_AUTO FILEARR_LOG_DB_ENABLED FILEARR_THUMBNAIL_BUDGET_GB FILEARR_WORKER_CONCURRENCY FILEARR_AGENT_AUTH_MODE'
 
 # Shipped defaults — keep in sync with the in-CT if-absent list in deploy_stack.
 optional_setting_shipped() {
@@ -569,6 +569,7 @@ optional_setting_shipped() {
     FILEARR_UPDATE_CHECK_AUTO)     echo "false" ;;
     FILEARR_LOG_DB_ENABLED)        echo "true" ;;
     FILEARR_THUMBNAIL_BUDGET_GB)   echo "5" ;;
+    FILEARR_WORKER_CONCURRENCY)    echo "4" ;;
     FILEARR_AGENT_AUTH_MODE)       echo "fingerprint" ;;
     *)                             echo "" ;;
   esac
@@ -703,6 +704,26 @@ configure_optional_settings() {
     echo "    must be a number >= 0"
   done
   persist_optional_setting FILEARR_THUMBNAIL_BUDGET_GB "$REPLY"
+
+  # Worker concurrency: parallel jobs in the worker container. The shipped 4
+  # suits a small CT; a 1M-item catalog on a many-core host starves extraction
+  # at 4 (live 2026-08-22: 48 cores, 4 slots, a 500k extract backlog that never
+  # drained). Suggest from the host's core count (the CT sees the same CPUs
+  # unless its cores are capped), capped at 16 -- extraction is I/O-bound on
+  # network mounts, so the gains flatten past that.
+  local cdef ccur cores
+  cores="$(nproc 2>/dev/null || echo 4)"
+  if [[ "$cores" -le 4 ]]; then cdef=4; else cdef=$(( cores / 2 )); [[ "$cdef" -gt 16 ]] && cdef=16; fi
+  ccur="$(optional_setting_current FILEARR_WORKER_CONCURRENCY)"
+  [[ "$ccur" =~ ^[0-9]+$ ]] || ccur="$cdef"
+  echo "  worker concurrency — parallel jobs (scan, extract, index, thumbnails, ...) in the"
+  echo "  worker container; this host has ${cores} cores, ${cdef} is a sensible start"
+  while true; do
+    ask "  FILEARR_WORKER_CONCURRENCY (1-64)" "$ccur"
+    [[ "$REPLY" =~ ^[0-9]+$ && "$REPLY" -ge 1 && "$REPLY" -le 64 ]] && break
+    echo "    must be a whole number between 1 and 64"
+  done
+  persist_optional_setting FILEARR_WORKER_CONCURRENCY "$REPLY"
 
   # Agent auth mode is meaningless without the agent platform.
   if [[ "${AGENTS_ENABLED:-no}" == "yes" ]]; then
@@ -1327,7 +1348,7 @@ mv .env.agv .env
 # what exists without reading config.py. Written ONLY when the key is absent:
 # an operator's own edit, configure_agents' FILEARR_AGENTS_ENABLED=true, and the
 # host-side deploy.conf / env.overrides lines (applied below, LAST) all win.
-for kv in FILEARR_SEMANTIC_ENABLED=false FILEARR_CONTENT_SNIFF_ENABLED=false FILEARR_UPDATE_CHECK_AUTO=false FILEARR_THUMBNAIL_BUDGET_GB=5 FILEARR_LOG_DB_ENABLED=true FILEARR_AGENTS_ENABLED=false FILEARR_AGENT_AUTH_MODE=fingerprint; do
+for kv in FILEARR_SEMANTIC_ENABLED=false FILEARR_CONTENT_SNIFF_ENABLED=false FILEARR_UPDATE_CHECK_AUTO=false FILEARR_THUMBNAIL_BUDGET_GB=5 FILEARR_WORKER_CONCURRENCY=4 FILEARR_LOG_DB_ENABLED=true FILEARR_AGENTS_ENABLED=false FILEARR_AGENT_AUTH_MODE=fingerprint; do
   grep -q \"^\${kv%%=*}=\" .env || printf '%s\n' \"\$kv\" >> .env
 done
 # Host-managed setting overrides (~/.config/filearr/env.overrides + any

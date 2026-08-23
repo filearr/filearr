@@ -266,6 +266,7 @@ AGENTS=${AGENTS}
 CONTENT_SNIFF=${CONTENT_SNIFF}
 THUMB_BUDGET_GB=${THUMB_BUDGET_GB}
 UPDATE_CHECK=${UPDATE_CHECK}
+WORKER_CONCURRENCY=${WORKER_CONCURRENCY}
 TLS_DOMAIN=${TLS_DOMAIN}
 ACME_EMAIL=${ACME_EMAIL}
 EOF
@@ -1038,6 +1039,26 @@ wizard() {
   echo "  product ever makes; off = you press the check button yourself."
   ask_bool "enable automatic update check" "${UPDATE_CHECK:-false}"; UPDATE_CHECK="$REPLY"
 
+  # Worker concurrency: parallel jobs in the ONE filearr container (app+worker).
+  # The shipped default of 4 was sized for a small box; a 1M-item catalog on a
+  # many-core server starves extraction at 4 (live 2026-08-22: 48 cores, 4
+  # slots, a 500k extract backlog that never drained). Suggest from the host's
+  # core count, capped -- extraction is I/O-bound on network mounts and each
+  # slot holds a file open, so past ~16 the gains flatten.
+  local _cores _cdef
+  _cores="$(nproc 2>/dev/null || echo 4)"
+  if [[ "$_cores" -le 4 ]]; then _cdef=4; else _cdef=$(( _cores / 2 )); [[ "$_cdef" -gt 16 ]] && _cdef=16; fi
+  echo
+  echo "  Worker concurrency: how many jobs (scan, extract, index, thumbnails, ...)"
+  echo "  the filearr container runs in parallel. This host reports ${_cores} cores;"
+  echo "  ${_cdef} is a sensible starting point (tune later on the container's Edit page,"
+  echo "  field 'Worker Concurrency')."
+  while :; do
+    ask "worker concurrency" "${WORKER_CONCURRENCY:-$_cdef}"
+    [[ "$REPLY" =~ ^[0-9]+$ && "$REPLY" -ge 1 && "$REPLY" -le 64 ]] && { WORKER_CONCURRENCY="$REPLY"; break; }
+    echo "  a whole number between 1 and 64"
+  done
+
   CADDY_PROFILE="${CADDY_PROFILE:-internal}"
   TLS_DOMAIN="${TLS_DOMAIN:-}"; ACME_EMAIL="${ACME_EMAIL:-}"
   if [[ "$TIER" == "full" ]]; then
@@ -1364,6 +1385,33 @@ merge_new_configs() {
   rm -f "$tmp" "$pristine"
 }
 
+# migrate_upstream_refs FILE NAME: an existing my-<name>.xml is the operator's
+# copy and is never regenerated on a plain re-run -- which means the elements
+# that name the PROJECT'S HOME (<Repository>, <TemplateURL>, <Support>,
+# <Project>, <Icon>) keep pointing wherever the template was first fetched
+# from. After the 2026-08-22 move to the filearr GitHub org the old image
+# namespace (ghcr.io/pwsh/*) is frozen: Unraid's update check would keep
+# pulling stale images forever. Rewrite only those references (the image TAG
+# and every <Config> value are untouched) and tell the operator to force an
+# update so the container is re-created from the new registry.
+migrate_upstream_refs() {
+  local file="$1" name="$2" tmp before after
+  before="$(grep -c 'ghcr\.io/pwsh/\|github\.com/pwsh/filearr\|raw\.githubusercontent\.com/pwsh/filearr\|pwsh\.github\.io/filearr/' "$file" 2>/dev/null || true)"
+  [[ "${before:-0}" -gt 0 ]] || return 0
+  tmp="$(mktemp)"
+  sed -e 's#ghcr\.io/pwsh/#ghcr.io/filearr/#g' \
+      -e 's#github\.com/pwsh/filearr#github.com/filearr/filearr#g' \
+      -e 's#raw\.githubusercontent\.com/pwsh/filearr#raw.githubusercontent.com/filearr/filearr#g' \
+      -e 's#pwsh\.github\.io/filearr/#filearr.com/#g' "$file" > "$tmp"
+  cat "$tmp" > "$file"; rm -f "$tmp"
+  after="$(grep -c 'ghcr\.io/filearr/\|github\.com/filearr/filearr' "$file" 2>/dev/null || true)"
+  info "my-${name}.xml: repointed ${before} reference(s) at the project's current home (ghcr.io/filearr, github.com/filearr/filearr)"
+  if grep -q '<Repository>ghcr\.io/filearr/' "$file"; then
+    warn "container '${name}' still RUNS the image from the old registry -- Docker tab -> Check for Updates -> apply update (or Edit -> Apply) to re-create it from ghcr.io/filearr; until then it receives no new releases"
+  fi
+  : "$after"
+}
+
 # Should this container's template be (re)generated? No, if the container
 # already exists — Unraid rewrote my-<name>.xml on Apply and it now holds the
 # operator's own edits. --force overrides.
@@ -1437,10 +1485,17 @@ generate_templates() {
       # ordering and everything else untouched -- so the Edit page shows the
       # new knob at its upstream default after the next Apply.
       if [[ -f "$f" ]]; then
+        migrate_upstream_refs "$f" "$name"
         merge_new_configs "$name" "$f"
         # A wizard-owned secret answered since (--reconfigure) fills its
         # freshly merged field; blank stays blank (anonymous download).
         if [[ "$name" == "filearr" && -n "$hftok" ]]; then set_cfg "$f" 'Target="HF_TOKEN"' "$hftok"; fi
+        # Worker concurrency answered THIS run (--reconfigure) lands in the
+        # merged template too; a plain re-run never overrides an Edit-page value.
+        if [[ "$name" == "filearr" && "$RECONFIGURE" == 1 && -n "${WORKER_CONCURRENCY:-}" ]]; then
+          set_cfg "$f" 'Target="FILEARR_WORKER_CONCURRENCY"' "$WORKER_CONCURRENCY"
+          info "my-filearr.xml: Worker Concurrency set to ${WORKER_CONCURRENCY} (Edit page -> Apply to restart with it)"
+        fi
       else
         info "my-${name}.xml: SKIPPED — container '${name}' exists (use --force to overwrite)"
       fi
@@ -1465,7 +1520,7 @@ generate_templates() {
       local _k _t _v _changed=0
       for _k in SEMANTIC:FILEARR_SEMANTIC_ENABLED CONTENT_SNIFF:FILEARR_CONTENT_SNIFF_ENABLED \
                 UPDATE_CHECK:FILEARR_UPDATE_CHECK_AUTO THUMB_BUDGET_GB:FILEARR_THUMBNAIL_BUDGET_GB \
-                AGENTS:FILEARR_AGENTS_ENABLED; do
+                WORKER_CONCURRENCY:FILEARR_WORKER_CONCURRENCY AGENTS:FILEARR_AGENTS_ENABLED; do
         _t="${_k#*:}"; _k="${_k%%:*}"
         conf_has "$_k" && continue
         _v="$(get_cfg "$f" "Target=\"${_t}\"" 2>/dev/null || true)"
@@ -1522,6 +1577,7 @@ generate_templates() {
         set_cfg "$f" 'Target="FILEARR_CONTENT_SNIFF_ENABLED"' "$CONTENT_SNIFF"
         set_cfg "$f" 'Target="FILEARR_THUMBNAIL_BUDGET_GB"'   "$THUMB_BUDGET_GB"
         set_cfg "$f" 'Target="FILEARR_UPDATE_CHECK_AUTO"'     "$UPDATE_CHECK"
+        [[ -n "${WORKER_CONCURRENCY:-}" ]] && set_cfg "$f" 'Target="FILEARR_WORKER_CONCURRENCY"' "$WORKER_CONCURRENCY"
         # The disk-monitor read-only view must point at postgres's REAL data path.
         set_cfg "$f" 'Name="Postgres Data (disk monitor)"' "${APPDATA_CACHE}/filearr-postgres"
         if [[ "$TIER" == "full" ]]; then
@@ -2156,7 +2212,7 @@ summary_part_one() {
   echo
   echo "  TOPOLOGY: ${TOPOLOGY}   TIER: ${TIER}   LAN bridge: ${BRIDGE_IF}"
   echo "  FEATURES: semantic=${SEMANTIC}  agents=${AGENTS}  content-sniff=${CONTENT_SNIFF}"
-  echo "            thumbnail-budget=${THUMB_BUDGET_GB}GiB  auto-update-check=${UPDATE_CHECK}"
+  echo "            thumbnail-budget=${THUMB_BUDGET_GB}GiB  auto-update-check=${UPDATE_CHECK}  worker-concurrency=${WORKER_CONCURRENCY:-4}"
   if [[ "$TOPOLOGY" == "B" || -n "${IP_CADDY:-}" ]]; then
     echo "  ADDRESSES"
     [[ -n "${IP_POSTGRES:-}" ]] && printf '    %-22s %-16s %s\n' "filearr-postgres" "$IP_POSTGRES" "5432"

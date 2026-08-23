@@ -68,6 +68,7 @@ Configure optional app settings (semantic search, thumbnail budget, ...)? [y/N]
 | `FILEARR_UPDATE_CHECK_AUTO` | `false` | Auto-refresh the GitHub update check (outbound network call). |
 | `FILEARR_LOG_DB_ENABLED` | `true` | The database log recorder behind the console Logs panel. |
 | `FILEARR_THUMBNAIL_BUDGET_GB` | `5` | Advisory thumbnail-cache budget; `0` disables the advisory. |
+| `FILEARR_WORKER_CONCURRENCY` | `4` | Parallel jobs (scan, extract, index, thumbnails, …) in the worker container. The wizard suggests half the host's cores, capped at 16 — the shipped 4 starves extraction on a many-core host with a large catalog. |
 | `FILEARR_AGENT_AUTH_MODE` | `fingerprint` | **Only asked when distributed agents are enabled.** `fingerprint` = interim bearer; `both` = accept both during migration; `mtls-header` = mTLS only — flip after every agent shows the mTLS badge. |
 
 Every answer (including an accepted default) is written to `deploy.conf`, so

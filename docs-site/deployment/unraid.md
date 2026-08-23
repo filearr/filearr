@@ -75,7 +75,16 @@ preview those; `--help` lists the rest. Nothing regenerates a
 secret that already exists, ever. A plain re-run on an existing install keeps
 your templates but **merges in any fields upstream has added since** (at their
 defaults — open the container's Edit page and Apply to pick them up), so you
-never need `--force` just to get a new knob.
+never need `--force` just to get a new knob. The same re-run **repoints an
+older install at the project's current home**: Filearr moved to the `filearr`
+GitHub organisation on 2026-08-22 (images `ghcr.io/filearr/*`, templates and
+support links under `github.com/filearr/filearr`), and a template saved before
+that still names the old, now-frozen image namespace — so Unraid's update check
+would never see another release. The re-run rewrites those references in your
+`my-*.xml` (image tag and every field value untouched) and prints a warning for
+each container that must be re-created: **Docker tab → Check for Updates →
+apply** (or Edit → Apply) pulls it from the new registry. Re-running with
+`--reconfigure` also asks the new **worker concurrency** question.
 
 ### What it does, and what it leaves to you
 
@@ -675,6 +684,7 @@ index sync, purge). One container, because its Post Arguments say `all`.
 | Public Base URL | optional | *(derived)* | Set when the request-derived URL is wrong. |
 | Recycle Retention Days | optional | `30` | |
 | Worker Concurrency | optional | `4` | Parallel background jobs. |
+| Worker Concurrency | optional | `4` | Parallel jobs in this container (scan, extract, index, thumbnails, …). The setup script suggests half the box's cores, capped at 16; 4 starves extraction on a large catalog. |
 | Worker Queues | optional | *(empty = all)* | Only set with a second, extract-only container. |
 | Stop Grace (seconds) | optional | `60` | See the note below. |
 | Postgres Data (disk monitor) | optional | `/mnt/cache/appdata/filearr-postgres` (ro) | Point at step 1's Data path. |
