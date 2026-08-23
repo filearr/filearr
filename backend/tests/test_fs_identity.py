@@ -132,16 +132,59 @@ async def test_rescan_backfills_fs_identity(engine, tmp_path):
         await session.execute(
             text(
                 "UPDATE items SET nlink=NULL, inode=NULL, dev=NULL, "
-                "symlink_target=NULL WHERE library_id=:l"
+                "symlink_target=NULL, quick_hash='h-pre27' WHERE library_id=:l"
             ),
             {"l": lib_id},
         )
         await session.commit()
         # Rescan without touching the file (size/mtime unchanged -> else branch).
-        await _run_scan(session, lib)
+        requeued = await _run_scan(session, lib)
 
     async with Session() as session:
         row = (
             await session.execute(select(Item).where(Item.library_id == lib_id))
         ).scalar_one()
     assert row.inode is not None and row.dev is not None and row.nlink == 1
+    # Regression (live 2026-08-22): the NULL->value nlink transition must be a
+    # SILENT backfill — it used to satisfy the "changed" test and re-queue
+    # extraction for the entire pre-upgrade catalog on the first scan.
+    assert requeued == [], "pre-§27 backfill must not re-queue extraction"
+
+
+async def test_hardlink_count_change_refreshes_identity_without_reextract(engine, tmp_path):
+    """A hardlink created elsewhere bumps nlink on an untouched file: the row's
+    identity is refreshed, but the bytes are unchanged so nothing is re-queued
+    and the change is not counted as a modification."""
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    root = tmp_path / "lib"
+    root.mkdir()
+    f = root / "a.bin"
+    f.write_bytes(b"x" * 500)
+
+    async with Session() as session:
+        lib = Library(name="hl", root_path=str(root))
+        session.add(lib)
+        await session.commit()
+        lib_id = lib.id
+        first = await _run_scan(session, lib)
+        assert len(first) == 1  # the new file itself
+        # Mark it extracted (the suite never runs the extract worker; a NULL
+        # quick_hash would otherwise trip the legitimate never-extracted
+        # self-heal and mask what this test is about).
+        await session.execute(
+            text("UPDATE items SET quick_hash='h-a' WHERE library_id=:l"), {"l": lib_id}
+        )
+        await session.commit()
+        os.link(f, root / "a-link.bin")  # nlink 1 -> 2 on the original
+        second = await _run_scan(session, lib)
+
+    async with Session() as session:
+        rows = (
+            await session.execute(
+                select(Item).where(Item.library_id == lib_id).order_by(Item.rel_path)
+            )
+        ).scalars().all()
+    by_rel = {r.rel_path: r for r in rows}
+    assert by_rel["a.bin"].nlink == 2 and by_rel["a-link.bin"].nlink == 2
+    # Only the NEW link row is queued; the original is not re-extracted.
+    assert second == [str(by_rel["a-link.bin"].id)]

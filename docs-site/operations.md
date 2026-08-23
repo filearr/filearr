@@ -575,6 +575,45 @@ limits** in its edit form (see
 means the image is missing a module (a deployment problem, not a file
 problem); a timeout suggests tuning `FILEARR_EXTRACT_TIMEOUT_SECONDS`.
 
+## A huge extract backlog right after an upgrade {#post-upgrade-extract-storm}
+
+**Symptom.** Shortly after upgrading, the first scan of each library queues an
+extract job for (nearly) every item it already had — the Jobs page shows an
+`extract` backlog the size of the catalog, the scan summary reports almost every
+file as *modified*, and any "file modified" alert rules fire en masse. Nothing on
+disk actually changed.
+
+**Cause.** Builds from 2026-08-20 to 2026-08-22 compared the new
+filesystem-identity columns (hard-link count) in the scan's changed test. Rows
+catalogued before the upgrade hold `NULL` there, so the first post-upgrade scan
+classified the whole pre-existing catalog as modified and re-queued extraction
+for all of it. Fixed 2026-08-22: link-count changes are recorded silently and
+only size / mtime / symlink-ness re-extract. Upgrade to a build that includes the
+fix before (or instead of) clearing the backlog, or the next scan re-creates it.
+
+**Letting it drain** is harmless but wasteful — every job re-reads and re-parses a
+file whose stored metadata is already current. To discard the spurious jobs
+without touching legitimate work (new or genuinely modified files that have
+never been hashed), delete only the pending extract jobs whose item is already
+extracted:
+
+```sql
+DELETE FROM procrastinate_jobs pj
+USING items i
+WHERE pj.task_name = 'filearr.tasks.extract.extract_item'
+  AND pj.status = 'todo'
+  AND i.id::text = pj.args->>'item_id'
+  AND i.quick_hash IS NOT NULL
+  AND NOT (i.metadata ? '_extract_error');
+```
+
+Safe while the worker is running (it only claims rows it can lock; a deleted
+`todo` row is simply never picked up). Anything this leaves behind — never-hashed
+items and errored items — is exactly what **Retry failed extractions** and the
+scan's own self-heal would queue anyway. A file that really was modified in the
+same window keeps its previous metadata until it changes again; if that matters,
+let the backlog drain instead.
+
 ## Extraction throughput and adaptive backpressure {#extract-backpressure}
 
 Extraction is the greediest stage of the pipeline: one job per file, each one

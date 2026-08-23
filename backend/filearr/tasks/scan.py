@@ -736,9 +736,16 @@ async def _scan_body(
             elif (
                 item.size != size
                 or item.mtime != mtime
-                or item.nlink != nlink
                 or item.symlink_target != symlink_target
             ):
+                # NOTE: nlink is deliberately NOT a "changed" trigger. A link
+                # count moves when a hardlink is created/removed ELSEWHERE (the
+                # bytes behind this row are untouched — nothing to re-extract),
+                # and every row scanned before §27 holds nlink=NULL, so comparing
+                # it classified the whole pre-upgrade catalog as modified on the
+                # first post-upgrade scan (live 2026-08-22: ~1M spurious extract
+                # jobs + "modified" events). Identity fields are refreshed in
+                # BOTH branches instead; only size/mtime/symlink-ness re-extract.
                 item.size, item.mtime = size, mtime
                 item.path = path  # refresh absolute path (mount may have moved)
                 item.nlink, item.inode, item.dev = nlink, inode, dev
@@ -754,9 +761,11 @@ async def _scan_body(
             else:
                 item.last_seen = datetime.now(UTC)
                 item.path = path  # keep absolute path current
-                # Backfill fs-identity onto rows scanned before §27 shipped
-                # (unchanged size/mtime means the diff branch above was skipped).
-                if item.inode is None and inode is not None:
+                # Keep fs-identity current without a re-extract: backfills rows
+                # scanned before §27 (NULL identity) and tracks hardlink-count
+                # moves on unchanged files. Assigning equal values leaves the
+                # row clean (no UPDATE), so this is free in the steady state.
+                if inode is not None:
                     item.nlink, item.inode, item.dev = nlink, inode, dev
                     item.symlink_target = symlink_target
                 if item.status == ItemStatus.missing:

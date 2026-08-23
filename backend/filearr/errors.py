@@ -121,10 +121,20 @@ async def collect_retryable_items(
         null_hash_arm = "quick_hash IS NULL"
     lib_clause = "AND library_id = :lib " if library_id else ""
     params: dict = {"lib": str(library_id)} if library_id else {}
+    # Never-hashed is only a retry signal for rows central WOULD extract:
+    # sidecars and symlinks are catalogued but deliberately never hashed (scan.py
+    # skips them; a symlink extract would stamp the TARGET's bytes onto the
+    # link), and agent-owned libraries hold paths central cannot open. Without
+    # these guards every sidecar/symlink in the catalog was requeued on each
+    # click (and agent items requeued only to fail again).
+    central_only = (
+        "AND library_id IN (SELECT id FROM libraries WHERE source_agent_id IS NULL) "
+    )
     rows = await session.execute(
         text(
             "SELECT id::text FROM items "
-            f"WHERE status = 'active' {lib_clause}"
+            f"WHERE status = 'active' {lib_clause}{central_only}"
+            "AND sidecar_of IS NULL AND symlink_target IS NULL "
             f"AND (metadata ? '_extract_error' OR {null_hash_arm})"
         ),
         params,

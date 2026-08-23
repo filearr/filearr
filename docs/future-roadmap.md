@@ -1219,6 +1219,16 @@ near-real-time change detection on Windows agents, tracked next to the
 Event-Log SACL idea in §22's audit-over-time discussion. Not worth the
 platform-specific raw-filesystem parser today.
 
+**Regression fixed 2026-08-22 (live: ~1M spurious extract jobs on XENON's
+central after the first post-§27 scan):** `nlink` had been added to the scan's
+"changed" test, but every pre-§27 row holds `nlink=NULL`, so the whole existing
+catalog was classified as modified on the first scan after upgrading — a full
+re-extract plus a "modified" event per file. Link count is now refreshed in both
+branches (silent backfill; hardlink moves still tracked) and only size / mtime /
+symlink-ness re-extract. Same pass: `collect_retryable_items` (retry-extracts)
+now excludes sidecars, symlinks and agent-owned libraries from its never-hashed
+arm. Recovery SQL in docs-site/operations.md (#post-upgrade-extract-storm).
+
 ## 28. 2026-08-20 code review — security + correctness fixes
 
 A full Fable review (security sweep + logic sweep, each adversarially verified)

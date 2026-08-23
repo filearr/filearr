@@ -14,6 +14,7 @@ retry-extracts endpoint: clears _extract_error, re-defers errored + never-hashed
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -479,3 +480,68 @@ def test_human_bytes_formatting():
     # the exact live guard values the console showed as raw digit strings
     assert human_bytes(1107763383) == "1.03 GiB"
     assert human_bytes(5979270438) == "5.57 GiB"
+
+
+async def test_retry_all_skips_sidecars_symlinks_and_agent_libraries(wired, monkeypatch):
+    """Regression (2026-08-22): the never-hashed arm must only cover rows central
+    would actually extract. Sidecars and symlinks are catalogued but deliberately
+    never hashed (quick_hash stays NULL forever), and agent-owned libraries hold
+    paths central cannot open — none of them may be requeued, or every click
+    re-enqueues the whole sidecar/symlink population (and agent rows fail again)."""
+    from sqlalchemy import text
+
+    from filearr import worker as worker_mod
+    from filearr.models import Agent, Library
+
+    maker = wired["maker"]
+    async with maker() as s:
+        agent = Agent(
+            name="xenon", hostname="xenon", platform="windows",
+            cert_fingerprint="FP:" + uuid.uuid4().hex,
+        )
+        s.add(agent)
+        await s.flush()
+        lib = Library(name="music", root_path="/d")
+        agent_lib = Library(
+            name="xenon:C", root_path="C:\\media", source_agent_id=agent.id,
+            agent_library_ref="C:\\media",
+        )
+        s.add_all([lib, agent_lib])
+        await s.commit()
+        lib_id, agent_lib_id = lib.id, agent_lib.id
+
+    never_hashed = await _mk_item(maker, lib_id, "plain.mp3", quick_hash=None)
+    primary = await _mk_item(maker, lib_id, "album.mp3", quick_hash="h1")
+    sidecar = await _mk_item(maker, lib_id, "album.nfo", quick_hash=None)
+    symlink = await _mk_item(maker, lib_id, "link.mp3", quick_hash=None)
+    agent_err = await _mk_item(
+        maker, agent_lib_id, "remote.mp3", metadata={"_extract_error": "x"}, quick_hash="h2"
+    )
+    agent_null = await _mk_item(maker, agent_lib_id, "remote2.mp3", quick_hash=None)
+    async with maker() as s:
+        await s.execute(
+            text("UPDATE items SET sidecar_of = :p WHERE id = :s"),
+            {"p": primary, "s": sidecar},
+        )
+        await s.execute(
+            text("UPDATE items SET symlink_target = '/elsewhere/real.mp3' WHERE id = :s"),
+            {"s": symlink},
+        )
+        await s.commit()
+
+    deferred: list[list[str]] = []
+
+    async def _fake(ids):
+        deferred.append(list(ids))
+
+    monkeypatch.setattr(worker_mod, "defer_extract", _fake)
+
+    async with _client(wired["app"]) as c:
+        r = await c.post("/api/v1/system/retry-extracts")
+        assert r.status_code == 200, r.text
+        assert r.json()["retried"] == 1
+
+    requeued = {i for batch in deferred for i in batch}
+    assert requeued == {never_hashed}
+    for excluded in (sidecar, symlink, agent_err, agent_null, primary):
+        assert excluded not in requeued
