@@ -382,6 +382,13 @@ class InventoryConfig(BaseModel):
     # path specs use the agent's ``pathspec`` grammar, e.g. ``D:\\`` or
     # ``home_glob:*``).
     schedule_cron: str | None = None
+    # 2026-08-23: which CLOCK ``schedule_cron`` is read against. None/absent =
+    # UTC (the original contract, so stored documents keep their meaning), an
+    # IANA zone name (e.g. "America/Chicago") = that zone's wall clock,
+    # DST-aware, or the sentinel "agent" = each member agent's own local time
+    # (from the ``utc_offset_minutes`` it self-reports on every command poll;
+    # an agent build that does not report one runs the schedule on UTC).
+    schedule_tz: str | None = None
     paths: list[str] = Field(default_factory=list)
     preset: str | None = None
 
@@ -398,6 +405,23 @@ class InventoryConfig(BaseModel):
             validate_cron(v.strip())
         except InvalidCronError as err:
             raise ValueError(f"invalid inventory.schedule_cron: {err}") from err
+        return v.strip()
+
+    @field_validator("schedule_tz")
+    @classmethod
+    def _valid_schedule_tz(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        from filearr.schedule import validate_schedule_tz
+
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(
+                "inventory.schedule_tz must be 'agent' or an IANA timezone (omit for UTC)"
+            )
+        try:
+            validate_schedule_tz(v.strip())
+        except ValueError as err:
+            raise ValueError(f"invalid inventory.schedule_tz: {err}") from err
         return v.strip()
 
     @field_validator("paths")
@@ -418,6 +442,10 @@ class InventoryConfig(BaseModel):
             raise ValueError(
                 "inventory.schedule_cron needs inventory.paths or inventory.preset "
                 "(the scheduled run must know what to walk)"
+            )
+        if self.schedule_tz and not self.schedule_cron:
+            raise ValueError(
+                "inventory.schedule_tz has no effect without inventory.schedule_cron"
             )
         return self
 

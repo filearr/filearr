@@ -22,7 +22,8 @@ so they are unit-testable without a running Postgres or Procrastinate:
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 from cronsim import CronSim, CronSimError
 
@@ -93,14 +94,17 @@ def due_occurrence(
     last_fired: datetime | None = None,
     *,
     max_catchup_minutes: int = DEFAULT_MAX_CATCHUP_MINUTES,
+    tz: tzinfo | None = None,
 ) -> datetime | None:
     """Latest un-consumed cron occurrence at/before ``tick``, or ``None``.
 
     Returns a tz-aware UTC ``datetime`` (the occurrence instant, minute-floored)
     to store back into ``last_cron_fired_at``; ``None`` when nothing new is due.
 
-    Semantics (all minute-granular, evaluated in UTC to match the stored,
-    fixed-UTC schedule):
+    Semantics (all minute-granular; evaluated in UTC unless ``tz`` names the
+    zone whose WALL CLOCK the expression means — cronsim is DST-aware for
+    tz-aware datetimes, so "0 4 * * *" with ``tz=ZoneInfo('America/Chicago')``
+    fires at 04:00 Chicago time year-round; the return value is always UTC):
 
       * ``last_fired`` is the exclusive lower bound -- an occurrence equal to or
         older than it is already consumed and never re-fires.
@@ -119,6 +123,10 @@ def due_occurrence(
     """
     if not expr or not expr.strip():
         return None
+    if tz is not None:
+        return _due_occurrence_tz(
+            expr, tick, last_fired, max_catchup_minutes=max_catchup_minutes, tz=tz
+        )
     floored = tick.replace(second=0, microsecond=0, tzinfo=None)
     cap_lower = floored - timedelta(minutes=max(1, max_catchup_minutes))
     if last_fired is None:
@@ -149,6 +157,102 @@ def due_occurrence(
     if lf is not None and latest <= lf:
         return None
     return latest.replace(tzinfo=UTC)
+
+
+def _due_occurrence_tz(
+    expr: str,
+    tick: datetime,
+    last_fired: datetime | None,
+    *,
+    max_catchup_minutes: int,
+    tz: tzinfo,
+) -> datetime | None:
+    """The ``due_occurrence`` contract evaluated on ``tz``'s wall clock.
+
+    Same once-per-occurrence semantics; the only difference is the clock the
+    cron fields are read against. cronsim yields tz-aware occurrences when
+    seeded with a tz-aware datetime and handles DST transitions (a skipped
+    02:30 on spring-forward, a repeated hour on fall-back) itself, so a
+    wall-clock-anchored schedule stays at the same local hour year-round —
+    exactly what the fixed-UTC path cannot do. Returned instants are UTC.
+    """
+    if tick.tzinfo is None:
+        tick = tick.replace(tzinfo=UTC)
+    floored = tick.astimezone(tz).replace(second=0, microsecond=0)
+    cap_lower = floored - timedelta(minutes=max(1, max_catchup_minutes))
+    if last_fired is None:
+        lf = None
+        lower = floored - timedelta(minutes=1)
+    else:
+        lf = last_fired.replace(tzinfo=UTC) if last_fired.tzinfo is None else last_fired
+        lf = lf.astimezone(tz).replace(second=0, microsecond=0)
+        lower = max(lf, cap_lower)
+    try:
+        latest: datetime | None = None
+        for occ in CronSim(expr.strip(), lower):
+            if occ > floored:
+                break
+            latest = occ
+    except (CronSimError, StopIteration, ValueError):
+        return None
+    if latest is None:
+        return None
+    if lf is not None and latest <= lf:
+        return None
+    return latest.astimezone(UTC)
+
+
+# --- schedule timezones (2026-08-23) ----------------------------------------
+# ``inventory.schedule_tz`` picks the clock a group's inventory schedule_cron is
+# read against: absent/None = UTC (the pre-existing contract), an IANA zone name
+# = that zone's wall clock (DST-aware), or the sentinel "agent" = each member
+# agent's own local time, from the ``utc_offset_minutes`` it self-reports in its
+# capability advertisement on every command poll (so a DST shift reaches central
+# within one poll interval). An agent build that does not report an offset falls
+# back to UTC — fail-soft, never an error in the tick loop.
+SCHEDULE_TZ_AGENT = "agent"
+
+# ±16h covers every real UTC offset (extremes are -12:00 and +14:00).
+_MAX_ABS_OFFSET_MINUTES = 16 * 60
+
+
+def validate_schedule_tz(name: str) -> None:
+    """Raise ``ValueError`` unless ``name`` is ``"agent"`` or a known IANA zone."""
+    if name == SCHEDULE_TZ_AGENT:
+        return
+    try:
+        ZoneInfo(name)
+    except Exception as exc:  # noqa: BLE001 - ZoneInfoNotFoundError/ValueError/KeyError
+        raise ValueError(
+            f"{name!r} is neither 'agent' nor a known IANA timezone (e.g. Europe/Berlin)"
+        ) from exc
+
+
+def resolve_schedule_tz(
+    name: str | None, *, agent_utc_offset_minutes: object = None
+) -> tzinfo | None:
+    """The ``tzinfo`` a stored ``schedule_tz`` evaluates in, or ``None`` (= UTC).
+
+    Fail-soft on every bad input (an unknown zone that validated on an older
+    tzdata, a garbage self-reported offset): the schedule still fires, on UTC.
+    ``agent_utc_offset_minutes`` is minutes EAST of UTC (e.g. Chicago DST =
+    -300), as self-reported by the agent — the opposite sign convention from
+    JS ``getTimezoneOffset()``.
+    """
+    if not name:
+        return None
+    if name == SCHEDULE_TZ_AGENT:
+        try:
+            off = int(agent_utc_offset_minutes)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if isinstance(agent_utc_offset_minutes, bool) or abs(off) > _MAX_ABS_OFFSET_MINUTES:
+            return None
+        return timezone(timedelta(minutes=off))
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - unknown zone at runtime -> UTC fallback
+        return None
 
 
 def next_occurrence(expr: str, now: datetime) -> datetime | None:

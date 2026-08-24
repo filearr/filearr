@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { copyText } from "./clipboard";
+  import ScheduleField from "./ScheduleField.svelte";
   import {
     CAPABILITY_TOOLS,
     POLICY_FIELDS,
@@ -1061,6 +1062,9 @@ ${detail}
     inventoryEnabled: boolean;
     collectorsText: string;
     invScheduleCron: string;
+    /** Clock the inventory schedule is read against: "" = UTC, an IANA zone
+     *  name, or "agent" = each member agent's own local time. */
+    invScheduleTz: string;
     invPathsText: string;
     invPreset: string;
     selections: SelRow[];
@@ -1443,6 +1447,7 @@ ${detail}
       inventoryEnabled: false,
       collectorsText: "",
       invScheduleCron: "",
+      invScheduleTz: "",
       invPathsText: "",
       invPreset: "",
       selections: [],
@@ -1479,6 +1484,7 @@ ${detail}
       inventoryEnabled: s.inventory?.enabled ?? false,
       collectorsText: (s.inventory?.collectors ?? []).join(", "),
       invScheduleCron: s.inventory?.schedule_cron ?? "",
+      invScheduleTz: s.inventory?.schedule_tz ?? "",
       invPathsText: (s.inventory?.paths ?? []).join("\n"),
       invPreset: s.inventory?.preset ?? "",
       selections: (s.scan_selections ?? []).map((sel) => ({
@@ -1512,6 +1518,20 @@ ${detail}
   }
 
   const toTri = (v: boolean | null | undefined): string => (v === true ? "on" : v === false ? "off" : "");
+
+  // 2026-08-23: friendly inventory scheduling. The cron is authored VERBATIM in
+  // the clock the group picks (ScheduleField offsetMinutes=0) and central
+  // evaluates it there: UTC by default, a named IANA zone (DST-aware), or each
+  // agent's own local time (from its self-reported UTC offset).
+  const browserZone = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      return "";
+    }
+  })();
+  const invTzLabel = (tz: string): string =>
+    tz === "" ? "UTC" : tz === "agent" ? "each agent's local time" : tz;
 
   const splitLines = (t: string): string[] =>
     t.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -1568,7 +1588,12 @@ ${detail}
       }
       // 2026-08-20: central-side scheduling — the worker tick enqueues the
       // same inventory command an operator fires by hand.
-      if (f.invScheduleCron.trim()) inventory.schedule_cron = f.invScheduleCron.trim();
+      if (f.invScheduleCron.trim()) {
+        inventory.schedule_cron = f.invScheduleCron.trim();
+        // The tz only means anything alongside a cron (the backend 422s a
+        // dangling one), and "" = UTC = the key omitted.
+        if (f.invScheduleTz) inventory.schedule_tz = f.invScheduleTz;
+      }
       const invPaths = splitLines(f.invPathsText);
       if (invPaths.length) inventory.paths = invPaths;
       if (f.invPreset.trim()) inventory.preset = f.invPreset.trim();
@@ -3153,13 +3178,13 @@ ${detail}
               {/each}
             </select>
           </label>
-          <label class="text-xs text-slate-500"
-            title="Arms the in-daemon scan scheduler for this group's members, so a lone `filearr-agent run` service scans itself with no external cron or scheduled task. 5-field cron in the AGENT's local time — not UTC, not this browser's timezone. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave blank on container agents — they scan from their own entrypoint loop and would double-scan.">Scan schedule (cron)
-            <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
-              title="Arms the in-daemon scan scheduler for this group's members. 5-field cron in the AGENT's local time — not UTC, not this browser's timezone. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave blank on container agents — they scan from their own entrypoint loop and would double-scan."
-              placeholder="0 3 * * *" bind:value={dialog.cron} />
-            <span class="mt-0.5 block text-[11px] text-slate-400">5-field cron in the agent's local time.</span>
-          </label>
+          <div class="min-w-64 max-w-xl flex-1 text-xs text-slate-500"
+            title="Arms the in-daemon scan scheduler for this group's members, so a lone `filearr-agent run` service scans itself with no external cron or scheduled task. Times mean the AGENT's own local wall clock — the agent itself evaluates this schedule, so no timezone conversion happens anywhere. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave Off on container agents — they scan from their own entrypoint loop and would double-scan.">
+            <span class="mb-1 block">Scan schedule <span class="text-slate-400">(each agent's local time)</span></span>
+            <ScheduleField value={dialog.cron || null} offsetMinutes={0}
+              tzLabel="each agent's local time" dstNote={false}
+              onChange={(c) => { if (dialog) dialog.cron = c ?? ""; }} />
+          </div>
         </div>
         {/if}
 
@@ -3332,12 +3357,44 @@ ${detail}
                   title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names."
                   placeholder="stat, owner, perms" bind:value={dialog.collectorsText} />
               </label>
+            {/if}
+
+            <!-- 2026-08-23: scheduled collection. ALWAYS rendered — it used to
+                 hide inside the catalogue-failed fallback above, so most
+                 operators never discovered a schedule existed. Authored with
+                 the friendly builder; the cron is stored VERBATIM in the clock
+                 picked below and central evaluates it there (DST-aware for
+                 named zones). -->
+            <div class="mt-3 rounded-lg border border-slate-200 p-2.5 dark:border-slate-800">
+              <div class="flex flex-wrap items-baseline gap-2">
+                <span class="text-xs font-medium text-slate-500"
+                  title="When a schedule is set, central enqueues an inventory command for every member agent on each occurrence — the same run the per-agent Inventory button fires, so collectors, results and permission snapshots all ride the existing pipeline. An unfinished scheduled run suppresses the next occurrence.">Scheduled collection</span>
+                <span class="text-[11px] text-slate-400"
+                  title="Without a schedule nothing collects on its own — inventory runs only when you press an agent's Inventory button.">Off = manual runs only (the per-agent Inventory button)</span>
+              </div>
+              <div class="mt-2">
+                <ScheduleField value={dialog.invScheduleCron || null} offsetMinutes={0}
+                  tzLabel={invTzLabel(dialog.invScheduleTz)} dstNote={false}
+                  onChange={(c) => { if (dialog) dialog.invScheduleCron = c ?? ""; }} />
+              </div>
               <div class="mt-2 grid gap-2 sm:grid-cols-2">
                 <label class="block text-xs text-slate-500"
-                  title="5-field cron (UTC). When set, central enqueues an inventory command for every member agent on each occurrence — an unfinished scheduled run suppresses the next. Blank = manual runs only (the per-agent Inventory button).">
-                  Schedule (cron, UTC; blank = manual only)
-                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm font-mono dark:border-slate-700"
-                    placeholder="0 3 * * sun" bind:value={dialog.invScheduleCron} />
+                  title="Which clock the schedule's times mean. UTC is the stored-document default. A named timezone is evaluated DST-aware by central, so an 04:00 schedule stays 04:00 wall-clock year-round. Each agent's local time uses the UTC offset agents self-report on every poll — one group can then run every host at its own 04:00.">
+                  Time zone
+                  <select class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+                    title="Which clock the schedule's times mean. UTC is the stored-document default. A named timezone is evaluated DST-aware by central. Each agent's local time uses the UTC offset agents self-report on every poll."
+                    bind:value={dialog.invScheduleTz}>
+                    <option value="">UTC (server default)</option>
+                    {#if browserZone && browserZone !== "agent"}
+                      <option value={browserZone}>Console time — {browserZone}</option>
+                    {/if}
+                    <option value="agent">Each agent's local time</option>
+                    {#if dialog.invScheduleTz && dialog.invScheduleTz !== "agent" && dialog.invScheduleTz !== browserZone}
+                      <!-- a stored zone authored from another console keeps its
+                           exact value selectable instead of being coerced -->
+                      <option value={dialog.invScheduleTz}>{dialog.invScheduleTz}</option>
+                    {/if}
+                  </select>
                 </label>
                 <label class="block text-xs text-slate-500"
                   title="Optional path-selection preset the scheduled run walks (e.g. user-documents). Combined with the explicit paths.">
@@ -3346,13 +3403,19 @@ ${detail}
                     placeholder="user-documents" bind:value={dialog.invPreset} />
                 </label>
               </div>
+              {#if dialog.invScheduleTz === "agent"}
+                <p class="mt-1 text-[11px] text-slate-400"
+                  title="Agents advertise their current UTC offset on every command poll, so a DST change reaches central within one poll interval. A build that predates the advertisement is scheduled on UTC until it upgrades.">
+                  Uses the UTC offset each agent reports; an agent that has not reported one yet runs on UTC.
+                </p>
+              {/if}
               <label class="mt-2 block text-xs text-slate-500"
                 title="Path specs the scheduled run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). A schedule needs at least one path or a preset.">
                 Paths (one per line; a schedule needs paths or a preset)
                 <textarea class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
                   rows="2" placeholder={"D:\\\nhome_glob:*"} bind:value={dialog.invPathsText}></textarea>
               </label>
-            {/if}
+            </div>
           </div>
 
           <!-- W7 permissions collector (advanced, collapsed by default) -->

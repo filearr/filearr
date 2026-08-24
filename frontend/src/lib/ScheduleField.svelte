@@ -23,14 +23,29 @@
   let {
     value,
     onChange,
+    offsetMinutes,
+    tzLabel,
+    dstNote = true,
   }: {
     value: string | null;
     onChange: (cron: string | null) => void;
+    /** Minute offset for the wall-clock -> stored-cron conversion, in JS
+     *  getTimezoneOffset() convention (+west). Omit for the classic
+     *  browser-local -> fixed-UTC storage; pass 0 to author the cron VERBATIM
+     *  in whatever clock the evaluator reads it against (a named zone, or the
+     *  agent's own local time). */
+    offsetMinutes?: number;
+    /** Label shown beside the time inputs; defaults to the browser zone. */
+    tzLabel?: string;
+    /** The fixed-UTC "shifts across DST" caveat — true only when the stored
+     *  cron is offset-converted (the default mode). Verbatim schedules either
+     *  have no drift (DST-aware zones) or their own caveats; pass false. */
+    dstNote?: boolean;
   } = $props();
 
   // Offset + initial classification are captured once; the modal/form remounts
   // this component per edit target, so seeding from the prop is intentional.
-  const offset = getOffsetMinutes();
+  const offset = untrack(() => offsetMinutes ?? getOffsetMinutes());
   const init = untrack(() => parseCron(value, offset));
 
   const MODES: { id: ScheduleMode; label: string }[] = [
@@ -68,13 +83,16 @@
     untrack(() => (init.mode === "advanced" ? (init.cron ?? "") : (value ?? ""))),
   );
 
-  const tzName = (() => {
+  // tzLabel is reactive (the caller may re-pick the evaluation clock while
+  // this component stays mounted); the browser-zone fallback is not.
+  const browserZone = (() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
     } catch {
       return "local time";
     }
   })();
+  const tzName = $derived(tzLabel ?? browserZone);
 
   function parseTimeStr(s: string): [number, number] {
     const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
@@ -110,9 +128,10 @@
 
   const summary = $derived(describeSchedule(schedule));
   const cron = $derived(generateCron(schedule, offset));
-  // The DST caveat only matters for wall-clock-anchored modes.
+  // The DST caveat only matters for wall-clock-anchored modes, and only when
+  // the stored cron is a fixed-UTC conversion (dstNote prop).
   const showTzNote = $derived(
-    mode === "daily" || mode === "weekly" || mode === "monthly",
+    dstNote && (mode === "daily" || mode === "weekly" || mode === "monthly"),
   );
 
   // Emit on every change, but not on the initial mount (parent already holds the
@@ -212,7 +231,7 @@
     </label>
     <input
       class="w-64 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-      placeholder="e.g. 0 4 * * * (UTC)"
+      placeholder={offset === 0 ? "e.g. 0 4 * * *" : "e.g. 0 4 * * * (UTC)"}
       bind:value={advancedCron} />
   {/if}
 

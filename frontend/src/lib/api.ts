@@ -3386,6 +3386,10 @@ export interface PermissionsConfig {
 
 export interface InventoryConfig {
   schedule_cron?: string | null;
+  /** Clock schedule_cron is read against: absent/null = UTC, an IANA zone
+   *  name = that zone's wall clock (DST-aware), "agent" = each member agent's
+   *  own local time (self-reported UTC offset; older builds run on UTC). */
+  schedule_tz?: string | null;
   paths?: string[];
   preset?: string | null;
   enabled?: boolean;

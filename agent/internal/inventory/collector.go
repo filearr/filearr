@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/filearr/filearr/agent/internal/extract"
 )
@@ -133,6 +134,11 @@ func Capabilities() map[string]any {
 		// Containerized agents update by image pull — central flags a newer
 		// build in the console but never offers them the self-update channel.
 		"container": InContainer(),
+		// The host's CURRENT UTC offset, minutes east of UTC (Chicago DST =
+		// -300). Rebuilt per poll like everything else here, so a DST shift
+		// reaches central within one poll interval. Central reads it to run
+		// "agent local time" inventory schedules (inventory.schedule_tz).
+		"utc_offset_minutes": utcOffsetMinutes(),
 		// This build carries the extraction pass; extract_schema is the
 		// `extracted.schema` version its events will stamp.
 		"extract":        true,
@@ -159,6 +165,14 @@ func Capabilities() map[string]any {
 	}
 	attachModules(caps)
 	return caps
+}
+
+// utcOffsetMinutes is the host clock's current offset from UTC in minutes,
+// east positive (time.Zone convention) -- the advertisement central needs to
+// evaluate an "agent local time" schedule for this host.
+func utcOffsetMinutes() int {
+	_, off := time.Now().Zone()
+	return off / 60
 }
 
 // capabilitiesBudget is the size this advertisement keeps itself under, in

@@ -132,6 +132,7 @@ dependencies = [
     # read for the e-mail extractor. Pure Python, BSD-2. PST/OST stay
     # unsupported (libpff is a native dependency).
     "olefile>=0.47,<1",
+    "tzdata>=2026.3",
 ]
 
 [project.optional-dependencies]

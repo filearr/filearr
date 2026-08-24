@@ -929,12 +929,18 @@ scaffold.
 **`inventory`** — `enabled` (bool, default false), `collectors` (free strings,
 max 64 × 128 chars; central deliberately does not hard-code the vocabulary),
 the optional typed `permissions` block, and — since 2026-08-20 — the
-**scheduling** trio: `schedule_cron` (5-field cron, UTC), `paths` (path specs,
-one of the agent grammar's forms, max 200) and `preset`. With a schedule set,
-central's minutely tick enqueues the same inventory command an operator fires
-by hand (the collectors over paths/preset) for every member agent on each
-occurrence; an unfinished scheduled run suppresses the next, and a schedule
-must name at least one path or a preset. This is what turns the permissions
+**scheduling** block: `schedule_cron` (5-field cron), `schedule_tz` (which
+clock that cron is read against — omit for UTC; an IANA zone name such as
+`Europe/Berlin` for that zone's wall clock, evaluated DST-aware so an 04:00
+schedule stays 04:00 year-round; or the sentinel `agent` for **each member
+agent's own local time**, from the UTC offset agents ≥ 1.5.4 self-report on
+every command poll — an older build runs the schedule on UTC until it
+upgrades), `paths` (path specs, one of the agent grammar's forms, max 200) and
+`preset`. With a schedule set, central's minutely tick enqueues the same
+inventory command an operator fires by hand (the collectors over paths/preset)
+for every member agent on each occurrence; an unfinished scheduled run
+suppresses the next, a schedule must name at least one path or a preset, and a
+`schedule_tz` without a `schedule_cron` is refused. This is what turns the permissions
 collector into a standing audit: schedule it and the drift report/alert see
 every change at the schedule's cadence.
 
@@ -990,7 +996,12 @@ change** alert rule (disabled until you attach a channel) pushes them — see
 [Reports → Permission drift](reports.md#permission-drift). The block remains the
 agent-side knob for a future agent-local audit mode.
 
-The console's group dialog covers all of the above. Collectors are a **checkbox
+The console's group dialog covers all of the above. Schedules (the inventory
+schedule and the group scan schedule alike) are authored with the same friendly
+builder the library scan schedule uses — hourly / daily-at-an-hour / weekly /
+monthly presets, with a raw-cron **Advanced** escape hatch — and the inventory
+schedule adds a **time zone** picker: UTC, the console's own zone, or each
+agent's local time. Collectors are a **checkbox
 list** built from the catalogue endpoint above, with the description, platforms
 and fleet-support count on each row; with `inventory.enabled` unticked the
 selection dims and says so — it is still saved, just inert. The permissions and
@@ -1004,7 +1015,9 @@ until an agent advertises it; name it with **+ add another**.)
     its log threshold on every policy poll while the key is set; absent, the
     local flag/env/sidecar resolution stands. The `inventory` block is
     enforced **by central**: `schedule_cron` + `paths`/`preset` drive the
-    minutely scheduler, which enqueues ordinary
+    minutely scheduler — reading the cron on whichever clock `schedule_tz`
+    picks (UTC, a named zone, or each agent's self-reported local offset) —
+    which enqueues ordinary
     [inventory commands](#inventory-commands) — so collectors, results,
     permission snapshots and the drift alert all ride the existing pipeline
     on any agent build. The `audit` sub-block remains an agent-side

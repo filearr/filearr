@@ -2345,7 +2345,7 @@ async def schedule_agent_inventories(timestamp: int) -> int:
     from filearr.db import SessionLocal
     from filearr.models import Agent as AgentRow
     from filearr.models import AgentCommand
-    from filearr.schedule import due_occurrence
+    from filearr.schedule import due_occurrence, resolve_schedule_tz
 
     log = _logging.getLogger("filearr.worker.inventory_schedule")
 
@@ -2392,8 +2392,18 @@ async def schedule_agent_inventories(timestamp: int) -> int:
             last_at = last_row[0] if last_row else None
             if last_row and last_row[1] in ("pending", "picked_up"):
                 continue
+            # 2026-08-23: the group may pin the schedule to a wall clock --
+            # an IANA zone, or "agent" = this agent's own local time (from
+            # the utc_offset_minutes it self-reports in its capability body).
+            # Every resolution failure falls back to UTC (fail-soft).
+            tz = resolve_schedule_tz(
+                inv.get("schedule_tz"),
+                agent_utc_offset_minutes=(agent.capabilities or {}).get(
+                    "utc_offset_minutes"
+                ),
+            )
             try:
-                occ = due_occurrence(cron, tick, last_at)
+                occ = due_occurrence(cron, tick, last_at, tz=tz)
             except Exception:  # noqa: BLE001 - validated at write; belt only
                 continue
             if occ is None:
