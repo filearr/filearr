@@ -219,7 +219,7 @@ async def get_item_permissions(
     """The newest agent-collected ACL snapshot for one item (2026-08-23): owner,
     group, the normalized ACE list, posture, fidelity, who/when collected, plus
     the search-projection summary (who can read / world-readable). Permissions
-    are collected by AGENTS only (W7 ``permissions`` collector), so a
+    are collected by AGENTS only (the ``permissions`` inventory collector), so a
     central-scanned item answers ``available=false`` with the reason rather
     than 404 — the detail view renders that line. Same read scope as the item."""
     from sqlalchemy import desc
@@ -241,14 +241,29 @@ async def get_item_permissions(
         )
     ).scalar_one_or_none()
     if snap is None:
-        reason = (
-            "permissions are collected by agents (W7 'permissions' collector); "
-            "this item belongs to an agent library but no snapshot has been "
-            "collected for it yet"
-            if library is not None and library.source_agent_id is not None
-            else "permissions are collected by agents only; this library is scanned "
-            "by central, which does not read ACLs"
-        )
+        if library is not None and library.source_agent_id is not None:
+            agent_name = (
+                await session.execute(
+                    select(Agent.name).where(Agent.id == library.source_agent_id)
+                )
+            ).scalar_one_or_none()
+            who = f"agent '{agent_name}'" if agent_name else "its agent"
+            reason = (
+                f"No permissions have been collected for this file yet. It is "
+                f"catalogued by {who}, which reads file permissions only when its "
+                "'permissions' inventory collector is enabled — turn it on under "
+                "Agents → inventory collectors and run a collection; "
+                "permissions appear here after the next upload."
+            )
+        else:
+            reason = (
+                "Permissions are read by Filearr agents directly on the machine "
+                "that owns the files. This library is scanned by the central "
+                "server over a mount, which cannot see the source ACLs. To "
+                "populate permissions, install an agent on the file server, let "
+                "it catalogue this content, and enable its 'permissions' "
+                "inventory collector."
+            )
         return {"available": False, "reason": reason, "item_id": str(item.id)}
     agent_name = (
         await session.execute(select(Agent.name).where(Agent.id == snap.agent_id))

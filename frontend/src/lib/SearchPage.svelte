@@ -1525,7 +1525,7 @@
            perm_principals facet type-ahead) + world-readable. Items without a
            collected ACL never match a principal; the world select is tri-state. -->
       <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-slate-500">
-        <span class="mt-1 w-10 font-medium" title="Agent-collected file permissions (W7). Only items whose ACL was collected can match.">Access</span>
+        <span class="mt-1 w-10 font-medium" title="File permissions read by agents on the machine that owns the files (enable an agent's 'permissions' inventory collector). Only items with a collected ACL can match.">Access</span>
         <div class="relative">
           <input
             class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
