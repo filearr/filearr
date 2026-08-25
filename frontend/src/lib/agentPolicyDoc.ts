@@ -79,10 +79,13 @@ export const POLICY_SECTIONS: { id: PolicySection; label: string; blurb: string 
   },
   {
     id: "scheduling",
-    label: "Scheduling",
+    label: "Scheduling (media scans)",
     blurb:
-      "The in-daemon scan scheduler. All three absent = scheduler off (container " +
-      "deployments keep their entrypoint loop instead — don't enable both).",
+      "When the agent scans ITSELF — the in-daemon scheduler, on the agent's own " +
+      "clock. This is the place to schedule media scans for a group; central only " +
+      "delivers it. Host inventory / permission snapshots are scheduled separately " +
+      "in the Inventory section, on central's clock. All three absent = scheduler " +
+      "off (container deployments keep their entrypoint loop instead — don't enable both).",
   },
   {
     id: "polling",
@@ -221,10 +224,10 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
   // --- Scheduling ----------------------------------------------------------
   {
     key: "scan_cron",
-    label: "Scan schedule (cron)",
+    label: "Scan schedule",
     kind: "cron",
     section: "scheduling",
-    hint: "5-field cron in the AGENT's local time (not UTC, and not this browser's timezone). Wins over the interval below when both are set.",
+    hint: "Fixed times, on the agent's OWN local clock — the agent evaluates it, so no timezone conversion happens anywhere. Wins over the interval below when both are set, over the legacy group scan schedule in the Delivery section, and over the host's FILEARR_AGENT_SCAN_CRON.",
     fallback: "no cron schedule",
     enforcedBy: "agent",
   },
@@ -234,7 +237,7 @@ export const POLICY_FIELDS: PolicyFieldSpec[] = [
     kind: "int",
     section: "scheduling",
     min: 300,
-    hint: "Fixed-interval scanning. Minimum 300s. Ignored when a scan cron is set.",
+    hint: "Scan every N seconds instead of at fixed times. Minimum 300 s. Ignored when a scan schedule is set above.",
     fallback: "no interval schedule",
     enforcedBy: "agent",
   },

@@ -1126,8 +1126,10 @@ ${detail}
   const SETTINGS_SECTIONS: { id: string; label: string; blurb: string }[] = [
     {
       id: "delivery",
-      label: "Log level & group scan schedule",
-      blurb: "Agent-wide settings delivered under the document's `group` section.",
+      label: "Log level (delivery settings)",
+      blurb:
+        "Agent-wide settings delivered under the document's `group` section. " +
+        "Media-scan scheduling lives in the Scheduling section further down.",
     },
     {
       id: "surface",
@@ -1136,7 +1138,13 @@ ${detail}
         "The per-group form of the three local-surface gates. A value set here " +
         "is LIFTED over the policy key of the same name in the delivered document.",
     },
-    { id: "inventory", label: "Inventory", blurb: "Host inventory collection." },
+    {
+      id: "inventory",
+      label: "Inventory & permission snapshots",
+      blurb:
+        "Which host-inventory collectors run, over which paths, and on what " +
+        "schedule (central's clock). Separate from media-scan scheduling.",
+    },
     {
       id: "selections",
       label: "Scan selections",
@@ -1556,6 +1564,20 @@ ${detail}
   })();
   const invTzLabel = (tz: string): string =>
     tz === "" ? "UTC" : tz === "agent" ? "each agent's local time" : tz;
+
+  // Friendly presets for the policy's scan_interval_seconds; anything else is
+  // "custom" and edited as raw seconds beside the select.
+  const INTERVAL_PRESETS: { s: number; label: string }[] = [
+    { s: 900, label: "every 15 minutes" },
+    { s: 1800, label: "every 30 minutes" },
+    { s: 3600, label: "hourly" },
+    { s: 7200, label: "every 2 hours" },
+    { s: 21600, label: "every 6 hours" },
+    { s: 43200, label: "every 12 hours" },
+    { s: 86400, label: "daily" },
+  ];
+  const intervalPresetValue = (raw: string): string =>
+    INTERVAL_PRESETS.some((p) => String(p.s) === raw.trim()) ? raw.trim() : "custom";
 
   const splitLines = (t: string): string[] =>
     t.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -3187,6 +3209,23 @@ ${detail}
         </div>
         {/if}
 
+        <!-- 2026-08-23: three schedules exist in this document and operators
+             could not tell them apart (user report). One glance-table up top
+             says what each one does, who runs it and on whose clock. -->
+        <div class="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
+          <p class="font-medium">Where schedules live in this group</p>
+          <ul class="mt-1 list-disc space-y-0.5 pl-4">
+            <li><span class="font-medium">Media scans</span> (the agent scanning its own roots) —
+              <span class="font-medium">Scheduling (media scans)</span> section below, policy key <code class="font-mono">scan_cron</code> / <code class="font-mono">scan_interval_seconds</code>.
+              Runs on the agent, on the agent's local clock.</li>
+            <li><span class="font-medium">Host inventory &amp; permission snapshots</span> —
+              <span class="font-medium">Inventory &amp; permission snapshots</span> section, <code class="font-mono">inventory.schedule_cron</code>.
+              Central enqueues the run on each occurrence (time zone of your choice), the agent executes it; the per-agent <em>inventory</em> action fires the same run now.</li>
+            <li><span class="font-medium">Legacy group scan schedule</span> (<code class="font-mono">scan_schedule_cron</code>) — only shown in the Delivery section when a group still has one; the Scheduling section's <code class="font-mono">scan_cron</code> outranks it.</li>
+            <li>Scans of libraries mounted on central itself are scheduled on the Libraries page, not here.</li>
+          </ul>
+        </div>
+
         {@render sectionHead(
           "delivery",
           SETTINGS_SECTIONS[0].label,
@@ -3207,13 +3246,20 @@ ${detail}
               {/each}
             </select>
           </label>
-          <div class="min-w-64 max-w-xl flex-1 text-xs text-slate-500"
-            title="Arms the in-daemon scan scheduler for this group's members, so a lone `filearr-agent run` service scans itself with no external cron or scheduled task. Times mean the AGENT's own local wall clock — the agent itself evaluates this schedule, so no timezone conversion happens anywhere. A top-level scan_cron policy key outranks this; the host's FILEARR_AGENT_SCAN_CRON is the fallback when both are absent. Leave Off on container agents — they scan from their own entrypoint loop and would double-scan.">
-            <span class="mb-1 block">Scan schedule <span class="text-slate-400">(each agent's local time)</span></span>
-            <ScheduleField value={dialog.cron || null} offsetMinutes={0}
-              tzLabel="each agent's local time" dstNote={false}
-              onChange={(c) => { if (dialog) dialog.cron = c ?? ""; }} />
-          </div>
+          {#if dialog.cron}
+            <!-- settings.scan_schedule_cron predates the policy scan_cron key
+                 and does the same job one precedence rung lower. It is kept
+                 editable for groups that still carry one (so it can be moved
+                 or switched Off), never offered to groups that don't. -->
+            <div class="min-w-64 max-w-xl flex-1 text-xs text-slate-500"
+              title="Legacy group scan schedule (settings key scan_schedule_cron). Same job as the Scheduling section's scan_cron policy key — the agent scans itself at these times, on its own local clock — but scan_cron outranks it when both are set. Prefer authoring the schedule in the Scheduling section and switching this Off.">
+              <span class="mb-1 block">Legacy group scan schedule
+                <span class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">superseded by Scheduling → scan_cron</span></span>
+              <ScheduleField value={dialog.cron || null} offsetMinutes={0}
+                tzLabel="each agent's local time" dstNote={false}
+                onChange={(c) => { if (dialog) dialog.cron = c ?? ""; }} />
+            </div>
+          {/if}
         </div>
         {/if}
 
@@ -3672,7 +3718,27 @@ ${detail}
                         set in this group
                       </label>
                       {#if dialog.policyForm[f.key]?.set}
-                        {#if f.kind === "int"}
+                        {#if f.kind === "int" && f.key === "scan_interval_seconds"}
+                          <div class="mt-1 flex flex-wrap items-center gap-2">
+                            <select
+                              class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                              title="Common intervals; pick custom to type the seconds."
+                              value={intervalPresetValue(dialog.policyForm[f.key].value)}
+                              onchange={(e) => { if (e.currentTarget.value !== "custom") setPolicyValue(f.key, e.currentTarget.value); }}>
+                              {#each INTERVAL_PRESETS as p (p.s)}
+                                <option value={String(p.s)}>{p.label}</option>
+                              {/each}
+                              <option value="custom">custom…</option>
+                            </select>
+                            <input
+                              type="number" min={f.min} max={f.max}
+                              title={fieldTitle(f)}
+                              class="w-32 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                              value={dialog.policyForm[f.key].value}
+                              oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                            <span class="text-xs text-slate-400">seconds</span>
+                          </div>
+                        {:else if f.kind === "int"}
                           <input
                             type="number" min={f.min} max={f.max}
                             title={fieldTitle(f)}
@@ -3680,12 +3746,12 @@ ${detail}
                             value={dialog.policyForm[f.key].value}
                             oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
                         {:else if f.kind === "cron"}
-                          <input
-                            class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
-                            title={fieldTitle(f)}
-                            placeholder="0 3 * * *"
-                            value={dialog.policyForm[f.key].value}
-                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                          <div class="mt-1 max-w-xl">
+                            <ScheduleField value={dialog.policyForm[f.key].value || null} offsetMinutes={0}
+                              tzLabel="the agent's local time" dstNote={false}
+                              onChange={(c) => setPolicyValue(f.key, c ?? "")} />
+                            <p class="mt-1 text-[11px] text-slate-400">Times are the agent's own local clock. Off leaves the key set-but-empty (a save error) — untick “set in this group” to inherit instead.</p>
+                          </div>
                         {:else if f.kind === "text"}
                           <input
                             class="mt-1 block w-80 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
