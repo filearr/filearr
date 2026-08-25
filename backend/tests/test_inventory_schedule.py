@@ -52,9 +52,9 @@ def test_schema_validates_schedule():
         validate_settings(
             {"inventory": {"enabled": True, "schedule_cron": "not a cron", "paths": ["/x"]}}
         )
-    # a schedule with nothing to walk is refused
-    with pytest.raises(GroupSettingsValidationError):
-        validate_settings({"inventory": {"enabled": True, "schedule_cron": "0 3 * * *"}})
+    # 2026-08-25: a schedule with no paths/preset is fine -- it walks the
+    # agent's own scan roots (its libraries) at tick time.
+    validate_settings({"inventory": {"enabled": True, "schedule_cron": "0 3 * * *"}})
 
 
 async def _seed(maker, settings: dict):
@@ -269,3 +269,36 @@ async def test_tick_agent_local_time_from_reported_offset(maker, monkeypatch):
     # With a reported UTC-5 offset, 03:00 agent-local means 08:00 UTC.
     assert await worker_mod.schedule_agent_inventories(tick_utc3) == 0
     assert await worker_mod.schedule_agent_inventories(tick_east5) == 1
+
+
+async def test_tick_defaults_paths_to_agent_library_roots(maker, monkeypatch):
+    from filearr import db as db_mod
+    from filearr import worker as worker_mod
+    from filearr.config import get_settings
+    from filearr.models import Library
+
+    monkeypatch.setattr(db_mod, "SessionLocal", maker)
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "agents_enabled", True)
+    agent_id = await _seed(
+        maker,
+        {
+            "inventory": {
+                "enabled": True,
+                "collectors": ["permissions"],
+                "schedule_cron": "0 3 * * *",
+            }
+        },
+    )
+    tick = int(datetime(2026, 8, 20, 3, 0, tzinfo=UTC).timestamp())
+    # No libraries yet -> nothing to walk -> skipped, not a broken command.
+    assert await worker_mod.schedule_agent_inventories(tick) == 0
+    async with maker() as s:
+        s.add(Library(name="xenon-d", root_path="D:\\", source_agent_id=agent_id))
+        s.add(Library(name="xenon-e", root_path="E:\\data", source_agent_id=agent_id))
+        await s.commit()
+    assert await worker_mod.schedule_agent_inventories(tick) == 1
+    async with maker() as s:
+        cmd = (await s.execute(select(AgentCommand))).scalars().one()
+        assert cmd.payload["paths"] == ["D:\\", "E:\\data"]
+        assert cmd.payload["collectors"] == ["permissions"]

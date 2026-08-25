@@ -650,7 +650,7 @@
       if (e instanceof ApiError && e.status === 409) {
         error = `An inventory run is already queued or running on "${a.name}".`;
       } else if (e instanceof ApiError && e.status === 422) {
-        error = `"${a.name}": ${e.message} — set the collectors and paths (or a preset) in the agent's group settings, Inventory section.`;
+        error = `"${a.name}": ${e.message} — see the agent's group settings, Inventory section.`;
       } else {
         error = String(e);
       }
@@ -3485,8 +3485,8 @@ ${detail}
                 </p>
               {/if}
               <label class="mt-2 block text-xs text-slate-500"
-                title="Path specs the scheduled run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). A schedule needs at least one path or a preset.">
-                Paths (one per line; a schedule needs paths or a preset)
+                title="Path specs the run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). Leave blank, with no preset, to walk the agent's own scan roots — the root paths of its libraries, which is what you want for permission snapshots of everything it catalogs.">
+                Paths (one per line; blank = the agent's scan roots)
                 <textarea class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
                   rows="2" placeholder={"D:\\\nhome_glob:*"} bind:value={dialog.invPathsText}></textarea>
               </label>

@@ -438,11 +438,9 @@ class InventoryConfig(BaseModel):
 
     @model_validator(mode="after")
     def _schedule_needs_roots(self) -> InventoryConfig:
-        if self.schedule_cron and not (self.paths or self.preset):
-            raise ValueError(
-                "inventory.schedule_cron needs inventory.paths or inventory.preset "
-                "(the scheduled run must know what to walk)"
-            )
+        # 2026-08-25: a schedule with neither paths nor a preset is allowed --
+        # the run walks the agent's own scan roots (its libraries' root paths,
+        # which central knows). See ``inventory_roots_for_agent``.
         if self.schedule_tz and not self.schedule_cron:
             raise ValueError(
                 "inventory.schedule_tz has no effect without inventory.schedule_cron"
@@ -506,6 +504,28 @@ class GroupSettings(BaseModel):
         except InvalidCronError as err:
             raise ValueError(f"invalid scan_schedule_cron: {err}") from err
         return v
+
+
+async def inventory_roots_for_agent(session: Any, agent_id: Any) -> list[str]:
+    """The agent's scan roots as central knows them: the ``root_path`` of every
+    library the agent replicates (agent-local absolute paths such as ``D:\\``
+    or ``/srv/share`` -- valid inventory path specs as-is). The default walk
+    for an inventory run whose group names no ``paths``/``preset`` (2026-08-25:
+    the first press of the console's inventory button 422'd on a group that
+    had collectors but no paths, and the agent's roots were sitting right
+    there in the libraries table)."""
+    from sqlalchemy import select
+
+    from filearr.models import Library
+
+    rows = (
+        await session.execute(
+            select(Library.root_path)
+            .where(Library.source_agent_id == agent_id)
+            .order_by(Library.root_path)
+        )
+    ).all()
+    return [r[0] for r in rows if r[0]]
 
 
 def inventory_command_payload(inv: dict[str, Any], *, scheduled: bool) -> dict[str, Any]:

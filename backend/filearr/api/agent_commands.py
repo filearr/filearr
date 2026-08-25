@@ -833,9 +833,14 @@ async def inventory_agent_now(
             422, "no inventory collectors configured for this agent's groups"
         )
     if not (inv.get("paths") or inv.get("preset")):
-        raise HTTPException(
-            422, "no inventory paths or preset configured for this agent's groups"
-        )
+        # Nothing authored -> the agent's own scan roots (its libraries).
+        inv["paths"] = await agent_config.inventory_roots_for_agent(session, agent_id)
+        if not inv["paths"]:
+            raise HTTPException(
+                422,
+                "nothing to walk: the agent's groups name no inventory paths or preset "
+                "and the agent has no libraries (scan roots) yet",
+            )
     in_flight = (
         await session.execute(
             select(AgentCommand.id).where(

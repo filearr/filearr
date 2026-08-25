@@ -939,8 +939,10 @@ upgrades), `paths` (path specs, one of the agent grammar's forms, max 200) and
 `preset`. With a schedule set, central's minutely tick enqueues the same
 inventory command an operator fires by hand (the collectors over paths/preset)
 for every member agent on each occurrence; an unfinished scheduled run
-suppresses the next, a schedule must name at least one path or a preset, and a
-`schedule_tz` without a `schedule_cron` is refused. This is what turns the permissions
+suppresses the next, and a `schedule_tz` without a `schedule_cron` is refused.
+With neither `paths` nor `preset`, the run walks the agent's **own scan roots**
+(the root paths of its libraries) — the right default for permission snapshots
+of everything the agent catalogs. This is what turns the permissions
 collector into a standing audit: schedule it and the drift report/alert see
 every change at the schedule's cadence.
 
@@ -1204,8 +1206,11 @@ inventory command is enqueued in exactly two ways: the group's
 scheduled run are indistinguishable downstream; the endpoint accepts optional
 `collectors` / `paths` / `preset` overrides for one run. The group's
 `inventory.enabled` master switch gates the *schedule* only — an explicit run
-uses the authored collectors even while scheduling is off. `422` when nothing
-says what to collect or where; `409` while a run is already queued or running.
+uses the authored collectors even while scheduling is off. With no `paths` or
+`preset` authored, both fall back to the agent's scan roots (its libraries).
+`422` when no collectors are configured, or when there is nothing to walk at all
+(no paths, no preset, and the agent has no libraries yet); `409` while a run is
+already queued or running.
 
 !!! warning "Permission snapshots empty despite the collector being enabled?"
     Two things were needed and, before 2026-08-23, neither was reachable: the

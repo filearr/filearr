@@ -2341,7 +2341,11 @@ async def schedule_agent_inventories(timestamp: int) -> int:
 
     from sqlalchemy import select
 
-    from filearr.agent_config import inventory_command_payload, resolve_effective_config
+    from filearr.agent_config import (
+        inventory_command_payload,
+        inventory_roots_for_agent,
+        resolve_effective_config,
+    )
     from filearr.db import SessionLocal
     from filearr.models import Agent as AgentRow
     from filearr.models import AgentCommand
@@ -2408,6 +2412,15 @@ async def schedule_agent_inventories(timestamp: int) -> int:
                 continue
             if occ is None:
                 continue
+            if not (inv.get("paths") or inv.get("preset")):
+                roots = await inventory_roots_for_agent(session, agent.id)
+                if not roots:
+                    log.info(
+                        "inventory schedule: %s has no paths/preset and no libraries; skipped",
+                        agent.id,
+                    )
+                    continue
+                inv = {**inv, "paths": roots}
             payload = inventory_command_payload(inv, scheduled=True)
             session.add(
                 AgentCommand(

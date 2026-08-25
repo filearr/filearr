@@ -719,10 +719,30 @@ async def _seed_global_inventory(maker, inventory: dict) -> None:
 async def test_inventory_now_uses_effective_group_settings(client):
     c, maker, _, _ = client
     agent_id, _, _fp = await _seed(maker)
+    # Pin the starting state: the db fixture does not clear config groups, so a
+    # Global group published by another test file could otherwise leak in.
+    await _seed_global_inventory(maker, {"enabled": False, "collectors": []})
     # Nothing authored anywhere -> 422 that says what is missing, not a 500.
     r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
     assert r.status_code == 422, r.text
     assert "collectors" in r.text
+    # Collectors but no paths/preset and no libraries -> 422 naming that.
+    await _seed_global_inventory(maker, {"enabled": True, "collectors": ["permissions"]})
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 422, r.text
+    assert "nothing to walk" in r.text
+    # ...and once the agent has a library, its root is the default walk.
+    async with maker() as s:
+        lib = (await s.execute(select(Library))).scalars().one()
+        lib.source_agent_id = agent_id
+        await s.commit()
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 201, r.text
+    assert r.json()["payload"]["paths"] == ["/data"]
+    async with maker() as s:
+        cmd = (await s.execute(select(AgentCommand))).scalars().one()
+        await s.delete(cmd)
+        await s.commit()
     await _seed_global_inventory(
         maker,
         {
