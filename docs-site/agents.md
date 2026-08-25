@@ -1195,6 +1195,29 @@ channel. Results return inline for small runs or as a compressed upload for
 large ones, always with a summary (roots expanded, entries, access-denied
 count, placeholders skipped, per-collector errors).
 
+**Running one now.** Inventory is agent-scoped (no item to point at), and an
+inventory command is enqueued in exactly two ways: the group's
+[`inventory.schedule_cron`](#group-settings-schema) tick, or the per-agent
+**inventory** action on the Agents page — `POST /api/v1/agents/{id}/inventory`
+(write scope). Both build the **same** command from the agent's effective group
+`inventory` block (collectors over `paths`/`preset`), so a manual run and a
+scheduled run are indistinguishable downstream; the endpoint accepts optional
+`collectors` / `paths` / `preset` overrides for one run. The group's
+`inventory.enabled` master switch gates the *schedule* only — an explicit run
+uses the authored collectors even while scheduling is off. `422` when nothing
+says what to collect or where; `409` while a run is already queued or running.
+
+!!! warning "Permission snapshots empty despite the collector being enabled?"
+    Two things were needed and, before 2026-08-23, neither was reachable: the
+    inventory schedule field only rendered when the collector catalogue failed
+    to load, and there was no run-now handle. On top of that, agent builds up
+    to 1.5.3 emitted the permissions record under the wire key `record` while
+    central only ingested `permissions` — so even a run that did happen wrote
+    nothing. Central now accepts both keys (an un-upgraded fleet starts working
+    on the central upgrade alone) and agents ≥ 1.5.4 emit `permissions`. Press
+    **inventory** on the agent (or set a schedule), then check
+    `SELECT count(*), count(item_id) FROM permission_snapshots;`.
+
 ## Fleet health and transport {#fleet-health}
 
 Each agent attaches a compact **self-reported health snapshot** to its

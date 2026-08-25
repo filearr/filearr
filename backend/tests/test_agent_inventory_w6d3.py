@@ -288,11 +288,16 @@ async def test_inventory_command_enqueue_poll_complete_inline(client):
     c, maker, _, _ = client
     agent_id, item_id, fp = await _seed(maker)
     # Enqueue an inventory command via the EXISTING command-creation endpoint.
+    # 2026-08-23: agent-scoped — a host walk has no item; an item_id is a 422.
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands",
+        json={"kind": "inventory", "item_id": str(item_id), "payload": {"collectors": ["stat"]}},
+    )
+    assert r.status_code == 422, r.text
     r = await c.post(
         f"/api/v1/agents/{agent_id}/commands",
         json={
             "kind": "inventory",
-            "item_id": str(item_id),
             "payload": {"preset": "downloads", "collectors": ["stat"], "max_entries": 100},
         },
     )
@@ -683,3 +688,113 @@ async def test_effective_access_endpoint(client):
             params={"agent_id": str(agent_id), "path": "/data/x.mkv"},
         )
     ).status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08-23: run-it-now endpoint + the wire-shape regression                  #
+# --------------------------------------------------------------------------- #
+async def _seed_global_inventory(maker, inventory: dict) -> None:
+    """Publish ``inventory`` on the permanent Global group (created here when
+    the migrated schema has none) so the agent's effective config carries it."""
+    from filearr.models import AgentConfigGroup, AgentConfigGroupVersion
+
+    async with maker() as s:
+        g = (
+            await s.execute(select(AgentConfigGroup).where(AgentConfigGroup.is_system.is_(True)))
+        ).scalars().first()
+        if g is None:
+            g = AgentConfigGroup(name="Global", is_system=True, priority=0, current_version=0)
+            s.add(g)
+            await s.flush()
+        nxt = (g.current_version or 0) + 1
+        s.add(
+            AgentConfigGroupVersion(
+                group_id=g.id, version=nxt, settings={"inventory": inventory}, policy={}
+            )
+        )
+        g.current_version = nxt
+        await s.commit()
+
+
+async def test_inventory_now_uses_effective_group_settings(client):
+    c, maker, _, _ = client
+    agent_id, _, _fp = await _seed(maker)
+    # Nothing authored anywhere -> 422 that says what is missing, not a 500.
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 422, r.text
+    assert "collectors" in r.text
+    await _seed_global_inventory(
+        maker,
+        {
+            "enabled": False,  # the master switch gates the SCHEDULE, not a manual run
+            "collectors": ["stat", "permissions"],
+            "paths": ["D:\\"],
+            "preset": "user-documents",
+        },
+    )
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["kind"] == "inventory" and body["item_id"] is None
+    # Byte-for-byte the schedule's payload, except the cursor marker.
+    assert body["payload"] == {
+        "scheduled": False,
+        "collectors": ["stat", "permissions"],
+        "paths": ["D:\\"],
+        "preset": "user-documents",
+    }
+    # A second request while the first is queued is a 409, not a pile-up.
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 409, r.text
+    # Overrides replace the group's fields for one run.
+    async with maker() as s:
+        cmd = (await s.execute(select(AgentCommand))).scalars().one()
+        cmd.status = "done"
+        await s.commit()
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/inventory",
+        json={"collectors": ["permissions"], "paths": ["/srv/share"], "preset": ""},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["payload"] == {
+        "scheduled": False,
+        "collectors": ["permissions"],
+        "paths": ["/srv/share"],
+    }
+
+
+async def test_permission_ingest_accepts_legacy_record_key(client):
+    """Agent builds <= 1.5.3 emitted the permissions record under ``record``
+    (the walker merges collector maps flat into the entry) while central read
+    ``permissions`` -- so nothing was ever ingested. Both keys ingest now, and
+    Go's nil-slice ``"entries": null`` counts as an empty ACE list."""
+    from filearr.models import PermissionSnapshot
+
+    c, maker, _, _ = client
+    agent_id, item_id, fp = await _seed(maker)
+    async with maker() as s:
+        # Linking only considers the agent's OWN libraries (source_agent_id).
+        lib = (await s.execute(select(Library))).scalars().one()
+        lib.source_agent_id = agent_id
+        await s.commit()
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+    legacy = _perm_record()
+    empty = {**_perm_record(owner_id="7"), "entries": None}
+    entries = [
+        {"path": "/data/x.mkv", "rel": "x.mkv", "size": 1, "is_dir": False, "record": legacy},
+        {"path": "/data/pub", "rel": "pub", "is_dir": True, "permissions": empty},
+        {"path": "/data/none", "rel": "none", "record": {"not": "a record"}},
+    ]
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/commands/{cid}/complete",
+        json={"ok": True, "result": {"summary": {"entries": 3}, "entries": entries}},
+        headers=_auth(fp),
+    )
+    assert r.status_code == 200, r.text
+    async with maker() as s:
+        rows = (
+            await s.execute(select(PermissionSnapshot).order_by(PermissionSnapshot.path))
+        ).scalars().all()
+    assert [x.path for x in rows] == ["/data/pub", "/data/x.mkv"]
+    assert rows[0].aces == [] and rows[0].owner["id"] == "7"
+    assert rows[1].item_id == item_id  # linked through the library root

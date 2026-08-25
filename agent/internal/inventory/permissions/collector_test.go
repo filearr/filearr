@@ -8,7 +8,7 @@ import (
 )
 
 // TestCollectEmitsRecordWhereSupported: on a platform with a real read the
-// collector yields ONE "record" entry with owner + baseline mode ACEs and a
+// collector yields ONE "permissions" entry with owner + baseline mode ACEs and a
 // fidelity stamp; elsewhere it still returns the scaffold sentinel.
 func TestCollectEmitsRecordWhereSupported(t *testing.T) {
 	dir := t.TempDir()
@@ -30,7 +30,7 @@ func TestCollectEmitsRecordWhereSupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	rec, ok := fields["record"].(*Record)
+	rec, ok := fields["permissions"].(*Record)
 	if !ok || rec == nil {
 		t.Fatalf("expected a *Record under \"record\", got %#v", fields)
 	}

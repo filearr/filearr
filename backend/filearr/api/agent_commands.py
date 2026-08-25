@@ -78,6 +78,10 @@ CommandKind = Literal[
 # Kinds that target the AGENT itself rather than one of its items: item_id is
 # absent for these (nullable since the self_update migration).
 _AGENT_SCOPED_KINDS = {
+    # 2026-08-23: a host inventory walks the agent's roots -- it never had an
+    # item to point at, yet the generic enqueue demanded one (so the schedule
+    # tick was the only way to ever run one). See POST /agents/{id}/inventory.
+    "inventory",
     "self_update",
     "suspend",
     "agent_maintenance",
@@ -771,6 +775,100 @@ class ReconcileIn(BaseModel):
     # path) — normally left false; the agent decides reset on its own when its
     # index was rebuilt.
     force_reset: bool = False
+
+
+class InventoryRunIn(BaseModel):
+    """Optional per-run overrides for ``POST /agents/{id}/inventory``. Absent =
+    the agent's effective group ``inventory`` settings (the schedule's exact
+    inputs); present = replaces that field for THIS run only."""
+
+    collectors: list[str] | None = Field(default=None, max_length=64)
+    paths: list[str] | None = Field(default=None, max_length=200)
+    preset: str | None = None
+
+
+@router.post(
+    "/agents/{agent_id}/inventory",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("write"))],
+)
+async def inventory_agent_now(
+    agent_id: uuid.UUID,
+    request: Request,
+    body: InventoryRunIn = Body(default_factory=InventoryRunIn),
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Queue one host inventory run NOW (2026-08-23) -- the run-it-now handle
+    the console's per-agent **inventory** button uses.
+
+    Builds the SAME command the group schedule tick enqueues
+    (:func:`filearr.agent_config.inventory_command_payload` over the agent's
+    merged group ``inventory`` block: collectors + paths/preset), so a manual
+    run and a scheduled run are indistinguishable downstream -- collectors,
+    results, permission snapshots, the drift report all ride one pipeline.
+    ``scheduled`` is False so the tick's once-per-occurrence cursor ignores
+    it. The group's ``inventory.enabled`` master switch gates the SCHEDULE,
+    not this: an explicit operator request runs with the authored collectors
+    even while scheduling is off.
+
+    Until this existed the generic enqueue demanded an ``item_id`` for the
+    kind (a host walk has none) and the console had no button, so the tick
+    was the only path to a run -- and its schedule field was hidden. 422 when
+    nothing says what to collect or where; 409 while a run is queued/running
+    (a second walk would race the first's result upload)."""
+    from filearr import agent_config
+
+    agent = await _live_agent(session, agent_id)
+    effective = await agent_config.resolve_effective_config(session, agent)
+    inv = dict((effective.document.get("group") or {}).get("inventory") or {})
+    if body.collectors is not None:
+        inv["collectors"] = body.collectors
+    if body.paths is not None:
+        inv["paths"] = body.paths
+    if body.preset is not None:
+        inv["preset"] = body.preset or None
+    if not inv.get("collectors"):
+        raise HTTPException(
+            422, "no inventory collectors configured for this agent's groups"
+        )
+    if not (inv.get("paths") or inv.get("preset")):
+        raise HTTPException(
+            422, "no inventory paths or preset configured for this agent's groups"
+        )
+    in_flight = (
+        await session.execute(
+            select(AgentCommand.id).where(
+                AgentCommand.agent_id == agent_id,
+                AgentCommand.kind == "inventory",
+                AgentCommand.status.in_(("pending", "picked_up")),
+            )
+        )
+    ).first()
+    if in_flight is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "inventory already queued or running")
+    payload = agent_config.inventory_command_payload(inv, scheduled=False)
+    cmd = _enqueue_agent_scoped(
+        agent_id,
+        "inventory",
+        payload,
+        request,
+        ttl_seconds=get_settings().agent_command_ttl_max_seconds,
+    )
+    session.add(cmd)
+    await session.commit()
+    await audit.emit(
+        audit.AGENT_COMMAND_ENQUEUED,
+        request=request,
+        principal_id=audit.actor_id(request),
+        details={
+            "command_id": str(cmd.id),
+            "agent_id": str(agent_id),
+            "kind": "inventory",
+            "collectors": payload["collectors"],
+        },
+    )
+    return CommandOut.of(cmd)
 
 
 @router.post(

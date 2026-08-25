@@ -508,6 +508,23 @@ class GroupSettings(BaseModel):
         return v
 
 
+def inventory_command_payload(inv: dict[str, Any], *, scheduled: bool) -> dict[str, Any]:
+    """The ``inventory`` command payload for a group's merged ``inventory``
+    block -- ONE builder for the schedule tick and the run-it-now endpoint so
+    a manual run is byte-for-byte the run the schedule would have fired.
+    ``scheduled`` is the once-per-occurrence cursor marker the tick keys on
+    (it must be False for a manual run or the next tick would treat it as a
+    consumed occurrence)."""
+    payload: dict[str, Any] = {
+        "scheduled": scheduled,
+        "collectors": list(inv.get("collectors") or []),
+        "paths": list(inv.get("paths") or []),
+    }
+    if inv.get("preset"):
+        payload["preset"] = inv["preset"]
+    return payload
+
+
 def settings_json_len(settings: Any) -> int:
     """Compact-JSON byte length of a settings object (the oversize gate's measure)."""
     return len(

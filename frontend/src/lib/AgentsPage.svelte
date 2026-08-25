@@ -77,6 +77,7 @@
     setAgentConfigGroups,
     reextractAgent,
     reconcileAgent,
+    inventoryAgent,
     rehashSweepAgent,
     revokeAgent,
     runAgentMaintenance,
@@ -632,6 +633,29 @@
           : String(e);
     } finally {
       reconciling[a.id] = false;
+    }
+  }
+
+  // 2026-08-23: the run-it-now handle for host inventory (permission snapshots
+  // included). Uses the agent's effective group inventory settings, so the
+  // group dialog remains the one place the collectors/paths are authored.
+  let inventorying: Record<string, boolean> = $state({});
+
+  async function inventoryNow(a: AgentOut) {
+    inventorying[a.id] = true;
+    try {
+      await inventoryAgent(a.id);
+      await refresh();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        error = `An inventory run is already queued or running on "${a.name}".`;
+      } else if (e instanceof ApiError && e.status === 422) {
+        error = `"${a.name}": ${e.message} — set the collectors and paths (or a preset) in the agent's group settings, Inventory section.`;
+      } else {
+        error = String(e);
+      }
+    } finally {
+      inventorying[a.id] = false;
     }
   }
 
@@ -2528,6 +2552,11 @@ ${detail}
                     disabled={reconciling[a.id]}
                     title="Queue an immediate full-manifest consistency sweep: the agent checks each root's complete index against central and re-syncs any drift (deletions missed while offline included). Normally automatic — the agent also catches up at startup when its last sweep is overdue — this is the run-it-now handle. Sets the 'Last reconcile' watermark that gates recycle-bin purge of this agent's items."
                     onclick={() => reconcileNow(a)}>{reconciling[a.id] ? "queuing…" : "reconcile"}</button>
+                  <button
+                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
+                    disabled={inventorying[a.id]}
+                    title="Queue one host inventory run now — the same command the group schedule fires: this agent's effective group collectors (stat / owner / perms / permissions …) over the group's paths or preset. Permission snapshots, the drift report and the item-detail Permissions section all come from this. Runs at the agent's next check-in (~1 min); the result appears in the command history."
+                    onclick={() => inventoryNow(a)}>{inventorying[a.id] ? "queuing…" : "inventory"}</button>
                   <button
                     class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
                     disabled={reextracting[a.id] || sweeping.has(a.id)}

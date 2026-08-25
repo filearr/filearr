@@ -36,13 +36,26 @@ func (Collector) Name() string { return CollectorName }
 
 // Collect routes through the per-OS read (collectRecord: Linux xattr/mode,
 // Windows security descriptor; other platforms return ErrPermissionsScaffold)
-// and emits the Record as ONE map entry, "record", so central ingests the exact
-// normalized shape (brief §3.1) rather than a re-flattened copy. Errors are
-// per-file and fail-soft under the runner's contract.
+// and emits the Record as ONE map entry keyed by the collector's own name,
+// "permissions", so central ingests the exact normalized shape (brief §3.1)
+// rather than a re-flattened copy. Errors are per-file and fail-soft under the
+// runner's contract.
+//
+// The key matters: the walker merges every collector's map FLAT into the
+// entry, and central looks the record up by collector name. Until 2026-08-23
+// this emitted "record" instead, so central (which only read "permissions")
+// silently ingested nothing from any agent build; central now accepts both
+// keys, and this build emits the self-describing one.
 func (Collector) Collect(_ context.Context, path string, info fs.FileInfo) (map[string]any, error) {
 	rec, err := collectRecord(path, info)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"record": rec}, nil
+	if rec.Entries == nil {
+		// A nil slice marshals as JSON null; central treats "entries": null as
+		// malformed. A file whose every ACE was filtered out is a real record
+		// with an empty list.
+		rec.Entries = []ACE{}
+	}
+	return map[string]any{CollectorName: rec}, nil
 }

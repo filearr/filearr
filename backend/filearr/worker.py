@@ -2341,7 +2341,7 @@ async def schedule_agent_inventories(timestamp: int) -> int:
 
     from sqlalchemy import select
 
-    from filearr.agent_config import resolve_effective_config
+    from filearr.agent_config import inventory_command_payload, resolve_effective_config
     from filearr.db import SessionLocal
     from filearr.models import Agent as AgentRow
     from filearr.models import AgentCommand
@@ -2408,13 +2408,7 @@ async def schedule_agent_inventories(timestamp: int) -> int:
                 continue
             if occ is None:
                 continue
-            payload = {
-                "scheduled": True,
-                "collectors": list(inv.get("collectors") or []),
-                "paths": list(inv.get("paths") or []),
-            }
-            if inv.get("preset"):
-                payload["preset"] = inv["preset"]
+            payload = inventory_command_payload(inv, scheduled=True)
             session.add(
                 AgentCommand(
                     agent_id=agent.id,

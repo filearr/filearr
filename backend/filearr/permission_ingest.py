@@ -41,6 +41,33 @@ from filearr.models import Agent, Item, Library, PermissionSnapshot
 log = logging.getLogger(__name__)
 
 COLLECTOR_KEY = "permissions"
+# 2026-08-23: the agent's walker merges every collector's returned map FLAT
+# into the entry, and the permissions collector (agent <= 1.5.3) returned its
+# Record under the key ``record`` -- so no wire entry ever carried a
+# ``permissions`` key and NOTHING was ever ingested (live: xenon, weeks of
+# "permissions enabled", zero snapshots). Agents >= 1.5.4 emit ``permissions``;
+# the legacy key stays accepted so an un-upgraded fleet starts working the
+# moment central is upgraded.
+LEGACY_COLLECTOR_KEY = "record"
+
+
+def record_of(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The permissions record carried by an inventory entry, or None. Accepts
+    the current ``permissions`` key and the legacy ``record`` key; normalises a
+    JSON ``null`` ACE list (Go marshals a nil slice as null -- a file whose
+    every ACE was filtered out) to an empty list so it still counts as a
+    record."""
+    rec = entry.get(COLLECTOR_KEY)
+    if not isinstance(rec, dict):
+        rec = entry.get(LEGACY_COLLECTOR_KEY)
+    if not isinstance(rec, dict) or "owner" not in rec:
+        return None
+    entries = rec.get("entries")
+    if entries is None:
+        rec = {**rec, "entries": []}
+    elif not isinstance(entries, list):
+        return None
+    return rec
 
 
 def _norm_sep(p: str) -> str:
@@ -187,8 +214,8 @@ async def ingest_entries(
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        rec = entry.get(COLLECTOR_KEY)
-        if not isinstance(rec, dict) or not isinstance(rec.get("entries"), list):
+        rec = record_of(entry)
+        if rec is None:
             continue
         path = entry.get("path")
         if not isinstance(path, str) or not path:
@@ -314,6 +341,6 @@ async def ingest_ndjson_gz(
             obj = json.loads(line)
         except ValueError:
             continue
-        if isinstance(obj, dict) and COLLECTOR_KEY in obj:
+        if isinstance(obj, dict) and (COLLECTOR_KEY in obj or LEGACY_COLLECTOR_KEY in obj):
             entries.append(obj)
     return await ingest_entries(session, agent_id=agent_id, command_id=command_id, entries=entries)

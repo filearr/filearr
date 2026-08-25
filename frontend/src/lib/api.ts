@@ -3134,6 +3134,22 @@ export const reconcileAgent = (id: string) =>
     body: JSON.stringify({}),
   });
 
+/** Queue one host inventory run NOW (2026-08-23): the same command the
+ *  group schedule enqueues — the agent's effective group `inventory`
+ *  collectors over its `paths`/`preset` — so permission snapshots land
+ *  without waiting for a schedule. Optional overrides replace the group's
+ *  collectors / paths / preset for this run only. 409 while one is queued
+ *  or running; 422 when neither the group nor the overrides say what to
+ *  collect or where. */
+export const inventoryAgent = (
+  id: string,
+  opts: { collectors?: string[]; paths?: string[]; preset?: string | null } = {},
+) =>
+  request<AgentCommandOut>(`/agents/${id}/inventory`, {
+    method: "POST",
+    body: JSON.stringify(opts),
+  });
+
 /** Queue a `rehash_sweep` command (QH-T6): the agent re-reads every file in its
  *  index inside a size band, recomputes both hashes under the post-QH-T1 rules,
  *  and re-emits only the rows whose stored value was wrong.
