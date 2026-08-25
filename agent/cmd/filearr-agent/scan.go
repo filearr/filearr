@@ -154,6 +154,7 @@ func runScan(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 
+	progressGate := &progressLogGate{}
 	opts := scan.Options{
 		EnabledPresets:    sc.Presets,
 		ExcludeGlobs:      sc.ExcludeGlobs,
@@ -167,19 +168,26 @@ func runScan(args []string) error {
 		// rides slog so every line carries a timestamp (user report: the raw
 		// Printf lines had none). Progress also persists to scan-status.json
 		// so the daemon's web UI Activity panel — a SEPARATE process — can
-		// show the running scan.
+		// show the running scan. The LOG line is additionally time-throttled
+		// (progressLogGate): the callback fires at every 250-file batch, which
+		// on a fast local disk or a no-change refresh is several times a
+		// second (2026-08-25: ~450 lines per scan of a 114k-file drive).
 		Progress: func(p scan.Progress) {
+			now := time.Now()
 			writeScanStatus(cfg.DataDir, scanStatus{
 				Root: currentRoot(), Running: true,
 				Seen: p.Seen, New: p.New, Changed: p.Changed,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				UpdatedAt: now.UTC().Format(time.RFC3339),
 			})
 			if !newLogger().Enabled(context.Background(), slog.LevelInfo) {
 				return
 			}
-			newLogger().Info("scan progress",
-				"root", currentRoot(),
-				"seen", p.Seen, "new", p.New, "changed", p.Changed)
+			if due, rate := progressGate.due(currentRoot(), p.Seen, now); due {
+				newLogger().Info("scan progress",
+					"root", currentRoot(),
+					"seen", p.Seen, "new", p.New, "changed", p.Changed,
+					"files_per_s", int(rate))
+			}
 		},
 		// P10-T11 best-effort share discovery: attach a network-open hint to each
 		// created/modified item when a local share covers its path. A single
@@ -644,4 +652,35 @@ func updateScanRoots(dataDir, root string, st rootScanStat) {
 	if os.WriteFile(tmp, b, 0o644) == nil {
 		_ = os.Rename(tmp, path)
 	}
+}
+
+// progressLogEvery bounds how often the "scan progress" INFO line is emitted.
+// The scanner reports at every 250-file batch boundary; the scan-status.json
+// write keeps that cadence (the web UI Activity panel reads it), only the log
+// line is throttled.
+const progressLogEvery = 10 * time.Second
+
+// progressLogGate decides whether a progress line is due and what the file
+// rate since the previous line was. Single-goroutine (the scanner invokes
+// Progress synchronously), so no locking. A new root, or a seen count that
+// went backwards (a fresh scan of the same root), resets the clock so the
+// first batch of every scan still logs once.
+type progressLogGate struct {
+	root     string
+	lastAt   time.Time
+	lastSeen int
+}
+
+func (g *progressLogGate) due(root string, seen int, now time.Time) (bool, float64) {
+	if root != g.root || seen < g.lastSeen || g.lastAt.IsZero() {
+		g.root, g.lastAt, g.lastSeen = root, now, seen
+		return true, 0
+	}
+	elapsed := now.Sub(g.lastAt)
+	if elapsed < progressLogEvery {
+		return false, 0
+	}
+	rate := float64(seen-g.lastSeen) / elapsed.Seconds()
+	g.lastAt, g.lastSeen = now, seen
+	return true, rate
 }
