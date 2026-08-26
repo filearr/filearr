@@ -685,8 +685,33 @@
               <dt class="text-slate-500">Group</dt>
               <dd class="min-w-0 truncate" title={principalId(perms.group)}>{principalLabel(perms.group)}</dd>
             {/if}
-            <dt class="text-slate-500">World</dt>
-            <dd>{perms.summary?.perm_world ? "readable by everyone" : "not world-readable"}</dd>
+            <dt class="text-slate-500">Readable by</dt>
+            <dd>
+              {#if perms.summary?.perm_exposure === "anonymous"}
+                anyone — no sign-in needed (Everyone / POSIX other)
+              {:else if perms.summary?.perm_exposure === "authenticated"}
+                any signed-in account (Authenticated Users) — anonymous is denied
+              {:else}
+                named principals only
+              {/if}
+              {#if perms.summary?.layers?.share}
+                <span class="opacity-70"> · effective through share {(perms.summary.share_names ?? []).join(", ") || "(SMB)"} = share AND file permissions</span>
+              {/if}
+            </dd>
+            {#if perms.summary?.layers?.share}
+              {@const ly = perms.summary.layers}
+              <dt class="text-slate-500">Share vs file</dt>
+              <dd class={ly.share && (ly.share.anonymous !== ly.local.anonymous || ly.share.authenticated !== ly.local.authenticated) ? "text-amber-700 dark:text-amber-300" : ""}>
+                {#if ly.share && (ly.share.anonymous !== ly.local.anonymous || ly.share.authenticated !== ly.local.authenticated)}
+                  they disagree —
+                  share: {ly.share.anonymous ? "anyone" : ly.share.authenticated ? "signed-in accounts" : "named principals"};
+                  file: {ly.local.anonymous ? "anyone" : ly.local.authenticated ? "signed-in accounts" : "named principals"}.
+                  The more restrictive layer wins for access through the share.
+                {:else}
+                  they agree
+                {/if}
+              </dd>
+            {/if}
             <dt class="text-slate-500">Collected</dt>
             <dd class="min-w-0 truncate">
               {perms.collected_at ? new Date(perms.collected_at).toLocaleString() : "—"}
@@ -698,7 +723,7 @@
             <div class="mt-2 overflow-x-auto">
               <table class="w-full text-xs">
                 <thead class="text-left text-slate-400">
-                  <tr><th class="py-1 pr-2">Principal</th><th class="py-1 pr-2">Access</th><th class="py-1 pr-2">Rights</th><th class="py-1 pr-2">Scope</th></tr>
+                  <tr><th class="py-1 pr-2">Principal</th><th class="py-1 pr-2">Access</th><th class="py-1 pr-2">Rights</th><th class="py-1 pr-2">Layer · scope</th></tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
                   {#each visibleAces as a, i (i)}
@@ -711,7 +736,7 @@
                       </td>
                       <td class="py-1 pr-2">{a.type}{#if a.inherited} <span class="opacity-60">(inherited)</span>{/if}</td>
                       <td class="py-1 pr-2">{verbsLabel(a)}</td>
-                      <td class="py-1 pr-2 opacity-70">{a.scope ?? "this"}{#if a.source && a.source !== "local"} · {a.source}{/if}</td>
+                      <td class="py-1 pr-2 opacity-70">{a.source === "share" ? `share ${a.share ?? ""}`.trim() : "file"} · {a.scope ?? "this"}</td>
                     </tr>
                   {/each}
                 </tbody>

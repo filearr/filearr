@@ -130,8 +130,15 @@ func sidPrincipal(sid *windows.SID) Principal {
 }
 
 // collectRecord is the uniform per-OS entry point Collect routes through.
+// 2026-08-26: the file's own DACL plus the ACL of every local SMB share that
+// covers the path (Source=share), so central can reconcile the two layers.
 func collectRecord(path string, info fs.FileInfo) (*Record, error) {
-	return readSecurityDescriptor(path, info != nil && info.IsDir())
+	rec, err := readSecurityDescriptor(path, info != nil && info.IsDir())
+	if err != nil {
+		return nil, err
+	}
+	rec.Entries = append(rec.Entries, shareLayer(path, len(rec.Entries))...)
+	return rec, nil
 }
 
 const supported = true

@@ -73,6 +73,7 @@ async def test_ensure_index_applies_typed_settings_on_fresh_index(monkeypatch):
     # documented spelling for the reserved geo field), so it has no features block.
     assert disabled == {
         "size", "mtime", "year", "path_scope", "quick_hash", "content_hash", "perm_owner",
+        "perm_exposure", "perm_share_mismatch",
     }
     assert "_geo" in [f for f in filt if isinstance(f, str)]
     # ...but the hashes stay FILTERABLE (exact-match hash search must still work):

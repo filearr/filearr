@@ -113,6 +113,9 @@
   // Permission filter (2026-08-23): principals that can read (OR) + world-readable.
   let selectedPrincipals = $state<string[]>([]);
   let worldReadable = $state<"" | "true" | "false">("");
+  // 2026-08-26: effective read tier + share-vs-filesystem disagreement.
+  let exposure = $state<"" | "anonymous" | "authenticated" | "restricted">("");
+  let shareMismatch = $state(false);
   let principalQuery = $state("");
   let principalSuggestions = $state<{ value: string; count: number }[]>([]);
   let principalOpen = $state(false);
@@ -494,6 +497,8 @@
     if (selectedLibraries.length) p.library = selectedLibraries.join(",");
     if (selectedPrincipals.length) p.principal = selectedPrincipals.join(",");
     if (worldReadable) p.world_readable = worldReadable;
+    if (exposure) p.exposure = exposure;
+    if (shareMismatch) p.share_mismatch = "true";
     if (selectedTags.length) p.tags = selectedTags.join(",");
     if (includeSidecars) p.include_sidecars = "true";
     if (searchIn !== "all") p.search_in = searchIn;
@@ -572,6 +577,9 @@
       ? p.principal.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
     worldReadable = p.world_readable === "true" ? "true" : p.world_readable === "false" ? "false" : "";
+    exposure = ["anonymous", "authenticated", "restricted"].includes(p.exposure ?? "")
+      ? (p.exposure as typeof exposure) : "";
+    shareMismatch = p.share_mismatch === "true";
     selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
     tagQuery = "";
     tagOpen = false;
@@ -1057,6 +1065,8 @@
     for (const l of selectedLibraries) out.push({ key: `lib:${l}`, label: `library: ${libraryLabel(l)}`, clear: () => toggleLibrary(l) });
     for (const pr of selectedPrincipals) out.push({ key: `pr:${pr}`, label: `readable by: ${pr}`, clear: () => removePrincipal(pr) });
     if (worldReadable) out.push({ key: "world", label: worldReadable === "true" ? "world-readable" : "not world-readable", clear: () => { worldReadable = ""; reset(); } });
+    if (exposure) out.push({ key: "exposure", label: exposure === "anonymous" ? "anonymous can read" : exposure === "authenticated" ? "any signed-in account can read" : "restricted access", clear: () => { exposure = ""; reset(); } });
+    if (shareMismatch) out.push({ key: "share_mismatch", label: "share ≠ file permissions", clear: () => { shareMismatch = false; reset(); } });
     for (const t of selectedTags) out.push({ key: `tag:${t}`, label: `tag: ${t}`, clear: () => removeTag(t) });
     if (includeSidecars) out.push({ key: "sidecar", label: "sidecars shown", clear: () => { includeSidecars = false; reset(); } });
     // R8-UI: the map's area reads as an ordinary removable filter, so it can be
@@ -1564,14 +1574,21 @@
               aria-label={`Remove principal ${pr}`} onclick={() => removePrincipal(pr)}>×</button>
           </span>
         {/each}
-        <label class="flex items-center gap-1">
-          World
+        <label class="flex items-center gap-1"
+          title="Who can READ, as it actually takes effect: through the SMB share when the agent collected share ACLs (access = share AND file permissions), else the file's own ACL. Anonymous = no credential needed (Everyone / POSIX other); authenticated = any signed-in account (Authenticated Users) but not anonymous; restricted = named principals only.">
+          Readable by
           <select class="rounded border border-slate-300 bg-transparent px-1 py-0.5 dark:border-slate-700 dark:bg-slate-800"
-            bind:value={worldReadable} onchange={reset}>
+            bind:value={exposure} onchange={reset}>
             <option value="">any</option>
-            <option value="true">readable by everyone{#if facets.perm_world?.true != null} ({facets.perm_world.true}){/if}</option>
-            <option value="false">not world-readable</option>
+            <option value="anonymous">anyone, no sign-in{#if facets.perm_exposure?.anonymous != null} ({facets.perm_exposure.anonymous}){/if}</option>
+            <option value="authenticated">any signed-in account{#if facets.perm_exposure?.authenticated != null} ({facets.perm_exposure.authenticated}){/if}</option>
+            <option value="restricted">named principals only{#if facets.perm_exposure?.restricted != null} ({facets.perm_exposure.restricted}){/if}</option>
           </select>
+        </label>
+        <label class="flex items-center gap-1"
+          title="Files whose SMB share ACL and own file ACL disagree on who can read — e.g. the share grants Everyone Read but the files behind it don't (anonymous is denied), or the reverse. The share-vs-file-system reconciliation list.">
+          <input type="checkbox" bind:checked={shareMismatch} onchange={reset} />
+          share ≠ file permissions
         </label>
       </div>
 

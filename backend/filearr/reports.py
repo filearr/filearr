@@ -1249,6 +1249,163 @@ def _perm_base(
     return stmt.order_by(Agent.name, ranked.c.path, a["order_index"].astext.cast(_SAInteger))
 
 
+# --- 2026-08-26: share ACL vs file ACL reconciliation ------------------------
+# Access through an SMB share is share ∩ file (Windows: "Access limited by:
+# Share, File Permissions"). The common misconfiguration is one layer wider
+# than the other -- a share granting Everyone Read over files whose NTFS ACL
+# only names Authenticated Users (anonymous denied in practice; the share grant
+# is dead), or the reverse (files world-readable behind a locked share). This
+# report lists the newest snapshot of every path that carries BOTH layers and
+# where the layers disagree on either tier. Tier evaluation in SQL is the
+# conservative approximation of permission_projection._tier_reads: an allow on
+# a tier principal with read/full, and NO deny on one (ordering ignored).
+_ANON_IDS_SQL = ("S-1-1-0", "s-1-1-0", "other", "world", "S-1-5-7")
+_AUTH_IDS_SQL = _ANON_IDS_SQL + ("S-1-5-11", "s-1-5-11")
+_ANON_WK_SQL = ("EVERYONE", "ANONYMOUS", "WORLD", "OTHER")
+_AUTH_WK_SQL = _ANON_WK_SQL + ("AUTHENTICATED_USERS",)
+
+
+def _tier_reads_sql(aces_col, *, share: bool, ids: tuple, wks: tuple):
+    from sqlalchemy import column as _sacolumn
+
+    def layer(alias_name: str):
+        e = (
+            func.jsonb_array_elements(aces_col)
+            .table_valued(_sacolumn("value", _JSONB))
+            .render_derived()
+            .alias(alias_name)
+        )
+        v = e.c.value
+        src = func.coalesce(v["source"].astext, "local")
+        src_ok = (src == "share") if share else (src != "share")
+        tier = or_(
+            v["principal"]["id"].astext.in_(ids),
+            v["principal"]["well_known"].astext.in_(wks),
+        )
+        reads = or_(v["verbs"].contains(["read"]), v["verbs"].contains(["full"]))
+        not_default = func.coalesce(v["scope"].astext, "this") != "dir_default"
+        return e, and_(src_ok, tier, reads, not_default), v
+
+    ea, cond_a, va = layer("perm_allow_" + ("s" if share else "l"))
+    ed, cond_d, vd = layer("perm_deny_" + ("s" if share else "l"))
+    allow = select(literal(1)).select_from(ea).where(cond_a, va["type"].astext == "allow").exists()
+    deny = select(literal(1)).select_from(ed).where(cond_d, vd["type"].astext == "deny").exists()
+    return and_(allow, ~deny)
+
+
+def _perm_share_vs_fs(params: ReportParams, scope_clause=None) -> Select:
+    from sqlalchemy import column as _sacolumn
+
+    ranked = _latest_snapshots_subq()
+    aces = ranked.c.aces
+    # Share layer present at all? (jsonb_path_exists needs a jsonpath-typed
+    # literal SQLAlchemy cannot express; a plain EXISTS over the elements is
+    # equivalent and type-safe.)
+    sh = (
+        func.jsonb_array_elements(aces)
+        .table_valued(_sacolumn("value", _JSONB))
+        .render_derived()
+        .alias("perm_share_any")
+    )
+    has_share = (
+        select(literal(1)).select_from(sh).where(sh.c.value["source"].astext == "share").exists()
+    )
+    la = _tier_reads_sql(aces, share=False, ids=_ANON_IDS_SQL, wks=_ANON_WK_SQL)
+    lu = _tier_reads_sql(aces, share=False, ids=_AUTH_IDS_SQL, wks=_AUTH_WK_SQL)
+    sa = _tier_reads_sql(aces, share=True, ids=_ANON_IDS_SQL, wks=_ANON_WK_SQL)
+    su = _tier_reads_sql(aces, share=True, ids=_AUTH_IDS_SQL, wks=_AUTH_WK_SQL)
+    sn = (
+        func.jsonb_array_elements(aces)
+        .table_valued(_sacolumn("value", _JSONB))
+        .render_derived()
+        .alias("perm_share_names")
+    )
+    share_names = (
+        select(func.string_agg(func.distinct(sn.c.value["share"].astext), literal(", ")))
+        .select_from(sn)
+        .where(sn.c.value["source"].astext == "share")
+    )
+    stmt = (
+        select(
+            Agent.name.label("agent"),
+            ranked.c.path.label("path"),
+            ranked.c.is_dir.label("is_dir"),
+            ranked.c.item_id.label("item_id"),
+            ranked.c.fidelity.label("fidelity"),
+            ranked.c.collected_at.label("collected_at"),
+            share_names.correlate(ranked).scalar_subquery().label("shares"),
+            la.label("local_anonymous"),
+            lu.label("local_authenticated"),
+            sa.label("share_anonymous"),
+            su.label("share_authenticated"),
+        )
+        .select_from(ranked)
+        .join(Agent, Agent.id == ranked.c.agent_id)
+        .where(ranked.c.rn == 1, has_share)
+        .where(or_(la != sa, lu != su))
+    )
+    if params.library_id is not None or scope_clause is not None:
+        stmt = stmt.join(Item, Item.id == ranked.c.item_id)
+        if params.library_id is not None:
+            stmt = stmt.where(Item.library_id == params.library_id)
+        if scope_clause is not None:
+            stmt = stmt.where(scope_clause)
+    return stmt.order_by(Agent.name, ranked.c.path)
+
+
+def _build_perm_share_vs_fs(params: ReportParams) -> Select:
+    return _perm_share_vs_fs(params)
+
+
+def _scoped_perm_share_vs_fs(params: ReportParams, scope_clause) -> Select:
+    return _perm_share_vs_fs(params, scope_clause)
+
+
+def _tier_word(anon: bool, auth: bool) -> str:
+    return "anyone" if anon else "signed-in accounts" if auth else "named principals"
+
+
+def _row_perm_share(r: Any) -> dict:
+    local = _tier_word(bool(r.local_anonymous), bool(r.local_authenticated))
+    share = _tier_word(bool(r.share_anonymous), bool(r.share_authenticated))
+    eff = _tier_word(
+        bool(r.local_anonymous and r.share_anonymous),
+        bool(r.local_authenticated and r.share_authenticated),
+    )
+    if (r.share_anonymous and not r.local_anonymous) or (
+        r.share_authenticated and not r.local_authenticated
+    ):
+        note = (
+            f"share is wider than the files: the share grants {share} but the file "
+            f"permissions only {local} -- the extra share grant is ineffective"
+        )
+    else:
+        note = (
+            f"files are wider than the share: the file permissions grant {local} but "
+            f"the share only {share} -- protected only by the share (a local login "
+            "or another share sees the wider file access)"
+        )
+    return {
+        "agent": r.agent,
+        "path": r.path,
+        "is_dir": bool(r.is_dir),
+        "shares": r.shares or "",
+        "file_readable_by": local,
+        "share_readable_by": share,
+        "effective_via_share": eff,
+        "note": note,
+        "fidelity": r.fidelity or "",
+        "collected_at": r.collected_at.isoformat() if r.collected_at else "",
+        "item_id": str(r.item_id) if r.item_id else None,
+    }
+
+
+_PERM_SHARE_COLUMNS = (
+    "agent", "path", "is_dir", "shares", "file_readable_by", "share_readable_by",
+    "effective_via_share", "note", "fidelity", "collected_at",
+)
+
+
 def _build_perm_by_principal(params: ReportParams) -> Select:
     return _perm_base(params)
 
@@ -1751,6 +1908,30 @@ _REPORTS = _REPORTS + (
         row=_row_perm,
         supports_library=True,
         scoped_build=_scoped_perm_broad,
+        default_limit=1000,
+    ),
+    CannedReport(
+        id="permissions_share_vs_fs",
+        title="Permissions: share ACL vs file permissions",
+        description=(
+            "Files reachable over an SMB share whose SHARE-level ACL and FILE-level "
+            "ACL disagree on who can read (2026-08-26). Access through a share is "
+            "the intersection of both, so a share granting Everyone Read over files "
+            "that only name Authenticated Users does NOT expose them to anonymous "
+            "callers (Windows' Effective Access shows 'Access limited by: Share, File "
+            "Permissions') -- but the mismatch is still worth a look, in either "
+            "direction: a share wider than its files is a dead grant waiting for a "
+            "file-ACL slip; files wider than their share are protected only by the "
+            "share. Columns give each layer's read tier (anyone / signed-in accounts / "
+            "named principals), the effective tier through the share, and a plain "
+            "note. Needs the agent's share-ACL read (Windows agents >= 1.5.4); paths "
+            "with no share layer never appear."
+        ),
+        columns=_PERM_SHARE_COLUMNS,
+        build=_build_perm_share_vs_fs,
+        row=_row_perm_share,
+        supports_library=True,
+        scoped_build=_scoped_perm_share_vs_fs,
         default_limit=1000,
     ),
     CannedReport(

@@ -242,6 +242,7 @@ async def test_registry_lists_every_canned_report(api):
         # W7-T7 (2026-08-19): permission snapshots
         "permissions_by_principal",
         "permissions_broad_access",
+        "permissions_share_vs_fs",
         "permission_changes",
         # W7-T7 §4 outliers view (2026-08-20): the last W7 scaffold, closed
         "permissions_explicit_outliers",

@@ -295,6 +295,7 @@ def test_index_spec_search_cutoff_and_facet_optouts():
     # point has no string facet values). See meili_ops.STRING_FORM_FILTERABLE.
     assert set(FACET_SEARCH_DISABLED) == {
         "size", "mtime", "year", "path_scope", "quick_hash", "content_hash", "perm_owner",
+        "perm_exposure", "perm_share_mismatch",
     }
     assert set(INDEX_SETTINGS_SPEC["facetSearchDisabled"]) == set(FACET_SEARCH_DISABLED)
 

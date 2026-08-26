@@ -29,12 +29,117 @@ from sqlalchemy import select
 
 from filearr.models import PermissionSnapshot
 
-#: Canonical ids / names that mean "everyone" on their platform.
+#: Canonical ids / names that mean "everyone" on their platform (kept for the
+#: principal-list projection; the exposure tiers below are what decide
+#: "world-readable").
 WORLD_IDS: frozenset[str] = frozenset(
     {"s-1-1-0", "s-1-5-11", "everyone", "authenticated users", "other", "world"}
 )
 
-EMPTY_SUMMARY: dict[str, Any] = {"perm_principals": [], "perm_world": False, "perm_owner": None}
+# 2026-08-26 exposure tiers (user report: a file the share granted "Everyone
+# Read" but whose NTFS ACL only named Authenticated Users showed as world-
+# readable, while Windows' own Effective Access denied ANONYMOUS LOGON). Two
+# distinct questions, answered separately:
+#   * ANONYMOUS  -- can a caller with NO credential read it? Only principals
+#     that include anonymous: Everyone (S-1-1-0), ANONYMOUS LOGON (S-1-5-7),
+#     POSIX other/world, a NULL DACL.
+#   * AUTHENTICATED -- can any logged-in account read it? The above plus
+#     Authenticated Users (S-1-5-11).
+# And two LAYERS: the object's own ACL ("local": NTFS / POSIX / macOS) and, when
+# the collector saw one, the SMB share's ACL ("share"). Access through a share
+# is capped by BOTH (Windows evaluates share ∩ file), so the effective verdict
+# is the AND of the layers; the layers are also compared, because the common
+# misconfiguration is exactly a share that is wider (or narrower) than the
+# files behind it.
+ANONYMOUS_IDS: frozenset[str] = frozenset(
+    {"s-1-1-0", "everyone", "other", "world", "s-1-5-7", "anonymous logon", "anonymous"}
+)
+AUTHENTICATED_IDS: frozenset[str] = ANONYMOUS_IDS | frozenset({"s-1-5-11", "authenticated users"})
+_READ_VERBS: frozenset[str] = frozenset({"read", "full", "full_control"})
+
+EXPOSURE_ANONYMOUS = "anonymous"
+EXPOSURE_AUTHENTICATED = "authenticated"
+EXPOSURE_RESTRICTED = "restricted"
+EXPOSURES: tuple[str, ...] = (EXPOSURE_ANONYMOUS, EXPOSURE_AUTHENTICATED, EXPOSURE_RESTRICTED)
+
+EMPTY_SUMMARY: dict[str, Any] = {
+    "perm_principals": [],
+    "perm_world": False,
+    "perm_owner": None,
+    "perm_exposure": None,
+    "perm_share_mismatch": False,
+    "layers": None,
+    "share_names": [],
+}
+
+
+def _tier_reads(aces: list[dict], ids: frozenset[str]) -> bool:
+    """Whether the principals in ``ids`` end up with READ on this layer, walking
+    the ACEs in stored order with deny-before-allow (NTFS canonical order: a
+    deny seen first removes the right for good; an allow seen first keeps it).
+    Default ACL entries (POSIX ``dir_default``) template children, not this
+    object, and are skipped."""
+    allowed = denied = False
+    for ace in aces:
+        if not isinstance(ace, dict):
+            continue
+        if str(ace.get("scope") or "this").lower() == "dir_default":
+            continue
+        names = {n.lower() for n in _names(ace.get("principal"))}
+        if not (names & ids):
+            continue
+        verbs = {str(v).lower() for v in (ace.get("verbs") or [])}
+        if not (verbs & _READ_VERBS):
+            continue
+        if str(ace.get("type") or "allow").lower() == "deny":
+            if not allowed:
+                denied = True
+        elif not denied:
+            allowed = True
+    return allowed and not denied
+
+
+def _layer(aces: list[dict]) -> dict[str, bool]:
+    return {
+        "anonymous": _tier_reads(aces, ANONYMOUS_IDS),
+        "authenticated": _tier_reads(aces, AUTHENTICATED_IDS),
+    }
+
+
+def exposure_layers(aces: list[dict] | None) -> dict[str, Any]:
+    """Per-layer and effective read exposure for one ACE list.
+
+    Returns ``{"local": {...}, "share": {...} | None, "effective": {...},
+    "share_mismatch": bool, "share_names": [...], "exposure": tier}`` where
+    each ``{...}`` is ``{"anonymous": bool, "authenticated": bool}``. With no
+    share-source ACEs the effective verdict IS the local one; with them it is
+    the AND of both layers, and ``share_mismatch`` says the two disagree on
+    either tier (the reconciliation report lists exactly those files)."""
+    rows = [a for a in (aces or []) if isinstance(a, dict)]
+    local = [a for a in rows if str(a.get("source") or "local") != "share"]
+    share = [a for a in rows if str(a.get("source") or "") == "share"]
+    lv = _layer(local)
+    sv = _layer(share) if share else None
+    if sv is None:
+        eff = dict(lv)
+    else:
+        eff = {k: bool(lv[k] and sv[k]) for k in lv}
+    exposure = (
+        EXPOSURE_ANONYMOUS
+        if eff["anonymous"]
+        else EXPOSURE_AUTHENTICATED
+        if eff["authenticated"]
+        else EXPOSURE_RESTRICTED
+    )
+    names = sorted({str(a.get("share")) for a in share if a.get("share")})
+    return {
+        "local": lv,
+        "share": sv,
+        "effective": eff,
+        "share_mismatch": bool(sv is not None and sv != lv),
+        "share_names": names,
+        "exposure": exposure,
+    }
 
 
 def _names(p: dict | None) -> list[str]:
@@ -85,10 +190,23 @@ def summary_for_snapshot(snapshot: PermissionSnapshot | None) -> dict[str, Any]:
         if n not in allow:
             allow.append(n)
     principals = [n for n in allow if n not in denied]
+    layers = exposure_layers(snapshot.aces or [])
+    del world  # superseded by the tiered, layer-reconciled verdict below
     return {
         "perm_principals": principals,
-        "perm_world": bool(world),
+        # "World-readable" now means the EFFECTIVE anonymous tier: through the
+        # share when share ACEs were collected, else the object's own ACL. A
+        # file only Authenticated Users can read is NOT world-readable.
+        "perm_world": bool(layers["effective"]["anonymous"]),
         "perm_owner": owner_names[-1] if owner_names else None,
+        "perm_exposure": layers["exposure"],
+        "perm_share_mismatch": layers["share_mismatch"],
+        "layers": {
+            "local": layers["local"],
+            "share": layers["share"],
+            "effective": layers["effective"],
+        },
+        "share_names": layers["share_names"],
     }
 
 

@@ -114,6 +114,8 @@ FILTERABLE_ATTRIBUTES: tuple[str, ...] = (
     # are plain filters. Adding them is settings drift -> rebuild-index after
     # deploy to project them onto existing docs (ops runbook).
     "perm_principals", "perm_world", "perm_owner",
+    # 2026-08-26: effective read tier + share-vs-filesystem disagreement.
+    "perm_exposure", "perm_share_mismatch",
     # R8 (roadmap §8 "geo filters (photo GPS)"): Meilisearch's reserved geo field.
     # Filterable is what enables the ``_geoRadius(...)`` / ``_geoBoundingBox(...)``
     # filter functions; sortable (below) is what enables ``_geoPoint(...)`` ordering.
@@ -190,6 +192,7 @@ DISABLE_TYPO_ATTRIBUTES: tuple[str, ...] = tuple(
 # values to build for a geo point.
 FACET_SEARCH_DISABLED: tuple[str, ...] = (
     "size", "mtime", "year", "path_scope", "quick_hash", "content_hash", "perm_owner",
+    "perm_exposure", "perm_share_mismatch",
 )
 
 # The genuine facet-search CANDIDATES (brief §2c): low-cardinality,

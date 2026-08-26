@@ -124,7 +124,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // NOTE (forward-looking): ``file_category`` + ``file_group`` are intentionally
 // first-class in this flat param vocabulary so the future visual filter builder
 // can emit/consume them 1:1 with the search filters (see FilterBuilderPage).
-const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group", "library", "principal"] as const;
+const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group", "library", "principal", "exposure"] as const;
 
 export function search(
   params: Record<string, string>,
@@ -213,6 +213,8 @@ export interface PermissionPrincipal {
 export interface PermissionAce {
   principal: PermissionPrincipal; type: "allow" | "deny" | string;
   verbs?: string[]; raw_mask?: string; inherited?: boolean; scope?: string; source?: string;
+  /** share-source ACEs: the SMB share name the entry came from. */
+  share?: string;
 }
 export interface ItemPermissions {
   available: boolean; reason?: string; item_id: string;
@@ -221,8 +223,19 @@ export interface ItemPermissions {
   owner?: PermissionPrincipal | null; group?: PermissionPrincipal | null;
   aces?: PermissionAce[]; posture?: Record<string, unknown> | null;
   aliases?: Record<string, string>;
-  summary?: { perm_principals: string[]; perm_world: boolean; perm_owner: string | null };
+  summary?: {
+    perm_principals: string[]; perm_world: boolean; perm_owner: string | null;
+    /** Effective read tier: anonymous / authenticated / restricted. */
+    perm_exposure?: string | null;
+    /** The SMB share ACL and the file's own ACL disagree on who can read. */
+    perm_share_mismatch?: boolean;
+    layers?: {
+      local: PermissionTier; share: PermissionTier | null; effective: PermissionTier;
+    } | null;
+    share_names?: string[];
+  };
 }
+export interface PermissionTier { anonymous: boolean; authenticated: boolean; }
 export const getItemPermissions = (id: string) =>
   request<ItemPermissions>(`/items/${id}/permissions`);
 

@@ -282,6 +282,44 @@ besides the permission reports:
     after deploying so existing documents carry them; until then the Access
     filter only matches items re-indexed since the upgrade.
 
+### Share permissions vs file permissions {#share-vs-file-permissions}
+
+An SMB share has its own ACL, and access *through* the share is the
+**intersection** of the share ACL and the file's own ACL — the more
+restrictive layer wins (Windows' Effective Access dialog reports "Access
+limited by: Share, File Permissions"). Since 2026-08-26 the Windows agent's
+`permissions` collector appends the ACL of every local share that covers a
+path (entries tagged `source: share` with the share name), and central
+reconciles the two layers:
+
+- **Read tiers.** Three questions are answered per layer and for the effective
+  result: can an **anonymous** caller read it (Everyone / ANONYMOUS LOGON /
+  POSIX *other*), can **any signed-in account** (adds Authenticated Users),
+  or only **named principals**. *Authenticated Users is not "world"* — a
+  file it can read is `authenticated`, not `anonymous`; the earlier
+  world-readable flag conflated the two.
+- **`world_readable` / `exposure` search filters and the `perm_exposure`
+  facet** use the *effective* tier — through the share when share ACEs were
+  collected, otherwise the file's own ACL. The **share ≠ file permissions**
+  filter (`share_mismatch=true`) lists files whose layers disagree.
+- **Item detail → Permissions** shows the effective tier, whether the share
+  and the file agree, and every ACE with its layer (file / share *name*).
+- **Report `permissions_share_vs_fs`** is the review list: each mismatched
+  path with both layers' tiers, the effective tier and a note saying which
+  layer is wider and what that means.
+
+Worked example: `\\xenon\video\BlueIris\plates\51C71.jpg` — the share
+`video` grants *Everyone: Read*; the file's NTFS ACL grants Authenticated
+Users, SYSTEM, Administrators and Users. Effective through the share:
+**signed-in accounts** (anonymous is denied by the file layer, exactly as
+Effective Access for ANONYMOUS LOGON shows). The file is *not*
+world-readable; the report flags it as "share is wider than the files".
+
+!!! note "Rebuild the index after upgrading"
+    `perm_exposure` and `perm_share_mismatch` are new filterable attributes and
+    the meaning of `perm_world` changed — run one **Rebuild index** (Jobs
+    page) after deploying so existing documents carry the new projection.
+
 ## AD/LDAP directory sync — attributing permissions to accounts {#directory-sync}
 
 The permissions collector reads Windows ACLs, which name a principal by **SID**

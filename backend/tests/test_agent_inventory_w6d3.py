@@ -940,3 +940,50 @@ async def test_agent_can_request_its_own_inventory_run(client):
     assert body["payload"]["collectors"] == ["permissions"]
     r = await c.post(f"/api/v1/agents/{agent_id}/inventory/request", headers=_auth(fp))
     assert r.status_code == 409, r.text
+
+
+async def test_share_vs_fs_report_runs_on_postgres(client):
+    """2026-08-26: the reconciliation report executes (jsonb path + correlated
+    share-name aggregate) and lists only paths whose layers disagree."""
+    from filearr import permission_ingest
+
+    c, maker, _, _ = client
+    agent_id, _, _fp = await _seed(maker)
+
+    def share_ace(pid, name, verbs, typ="allow"):
+        return {"principal": {"kind": "well_known" if pid == "S-1-1-0" else "group", "id": pid, "name": name},
+                "type": typ, "verbs": list(verbs), "raw_mask": "share:read", "inherited": False,
+                "scope": "subtree", "source": "share", "share": "video", "order_index": 9}
+
+    auth_only = {**_perm_record(owner_id="500"), "entries": [
+        {"principal": {"kind": "well_known", "id": "S-1-5-11", "name": "Authenticated Users", "well_known": "AUTHENTICATED_USERS"},
+         "type": "allow", "verbs": ["read"], "raw_mask": "0x1200A9", "inherited": True,
+         "scope": "this", "source": "local", "order_index": 0},
+        share_ace("S-1-1-0", "Everyone", ["read"]),
+    ]}
+    agree = {**_perm_record(owner_id="500"), "entries": [
+        {"principal": {"kind": "well_known", "id": "S-1-1-0", "name": "Everyone", "well_known": "EVERYONE"},
+         "type": "allow", "verbs": ["read"], "raw_mask": "0x1200A9", "inherited": False,
+         "scope": "this", "source": "local", "order_index": 0},
+        share_ace("S-1-1-0", "Everyone", ["read"]),
+    ]}
+    async with maker() as s:
+        out = await permission_ingest.ingest_entries(
+            s, agent_id=agent_id, command_id=None,
+            entries=[
+                {"path": "D:\\BlueIris\\plates\\51C71.jpg", "permissions": auth_only},
+                {"path": "D:\\public\\readme.txt", "permissions": agree},
+                {"path": "D:\\noshare.txt", "permissions": _perm_record()},
+            ],
+        )
+        assert out["written"] == 3
+    r = await c.get("/api/v1/reports/permissions_share_vs_fs")
+    assert r.status_code == 200, r.text
+    rows = r.json()["rows"] if isinstance(r.json(), dict) else r.json()
+    assert [x["path"] for x in rows] == ["D:\\BlueIris\\plates\\51C71.jpg"]
+    row = rows[0]
+    assert row["shares"] == "video"
+    assert row["file_readable_by"] == "signed-in accounts"
+    assert row["share_readable_by"] == "anyone"
+    assert row["effective_via_share"] == "signed-in accounts"
+    assert "wider than the files" in row["note"]

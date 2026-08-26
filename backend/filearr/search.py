@@ -668,6 +668,11 @@ def build_doc(
     doc["perm_principals"] = list(summary.get("perm_principals") or [])
     doc["perm_world"] = bool(summary.get("perm_world"))
     doc["perm_owner"] = summary.get("perm_owner")
+    # 2026-08-26: effective read tier (anonymous / authenticated / restricted;
+    # null = no ACL collected) and whether the SMB share layer disagrees with
+    # the object's own ACL.
+    doc["perm_exposure"] = summary.get("perm_exposure")
+    doc["perm_share_mismatch"] = bool(summary.get("perm_share_mismatch"))
     if custom_defs:
         # P4-T6: project facetable/sortable custom fields under cf_<name>. Only
         # emitted when a value exists; the FILTERABLE/SORTABLE settings side is

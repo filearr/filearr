@@ -69,8 +69,9 @@ type ACE struct {
 	ObjectInherit    bool      `json:"object_inherit,omitempty"`
 	NoPropagate      bool      `json:"no_propagate,omitempty"`
 	InheritOnly      bool      `json:"inherit_only,omitempty"`
-	Scope            string    `json:"scope"`  // ScopeThis | ScopeSubtree | ScopeDirDefault
-	Source           string    `json:"source"` // SourceLocal | SourceShare
+	Scope            string    `json:"scope"`           // ScopeThis | ScopeSubtree | ScopeDirDefault
+	Source           string    `json:"source"`          // SourceLocal | SourceShare
+	Share            string    `json:"share,omitempty"` // SourceShare only: the SMB share name
 	OrderIndex       int       `json:"order_index"`
 }
 

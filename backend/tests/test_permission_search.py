@@ -190,3 +190,96 @@ async def test_item_permissions_endpoint(wired):
         assert r.status_code == 200
         assert r.json()["available"] is False
         assert "agents" in r.json()["reason"]
+
+
+# --- 2026-08-26: exposure tiers + share-layer reconciliation ------------------
+def _share_ace(pid, name, typ="allow", verbs=("read",), share="video", kind="well_known"):
+    a = _ace(pid, name, typ=typ, verbs=verbs, kind=kind)
+    a["source"] = "share"
+    a["share"] = share
+    return a
+
+
+def test_authenticated_users_is_not_world_readable():
+    """User report: NTFS grants Authenticated Users, the share grants Everyone
+    Read -- Windows denies ANONYMOUS LOGON, so the file is 'authenticated',
+    not world-readable, and the layers disagree."""
+    s = summary_for_snapshot(
+        _snap(
+            aces=[
+                _ace("S-1-5-11", "Authenticated Users", kind="well_known"),
+                _ace("S-1-5-18", "SYSTEM", kind="well_known", verbs=("full",)),
+                _share_ace("S-1-1-0", "Everyone"),
+                _share_ace(
+                    "S-1-5-21-1-2-3-512", "HOLZHUETER\\Domain Admins", verbs=("full",), kind="group"
+                ),
+            ]
+        )
+    )
+    assert s["perm_world"] is False
+    assert s["perm_exposure"] == "authenticated"
+    assert s["perm_share_mismatch"] is True
+    assert s["layers"] == {
+        "local": {"anonymous": False, "authenticated": True},
+        "share": {"anonymous": True, "authenticated": True},
+        "effective": {"anonymous": False, "authenticated": True},
+    }
+    assert s["share_names"] == ["video"]
+
+
+def test_exposure_tiers_without_share_layer():
+    everyone = summary_for_snapshot(_snap(aces=[_ace("S-1-1-0", "Everyone", kind="well_known")]))
+    assert everyone["perm_exposure"] == "anonymous" and everyone["perm_world"] is True
+    assert everyone["perm_share_mismatch"] is False and everyone["layers"]["share"] is None
+    named = summary_for_snapshot(_snap(aces=[_ace("S-1-5-21-9", "eric")]))
+    assert named["perm_exposure"] == "restricted" and named["perm_world"] is False
+    # POSIX 'other' with read = anonymous tier; a deny seen first removes it.
+    posix = summary_for_snapshot(
+        _snap(aces=[_ace("other", "other", kind="well_known", verbs=("read",))])
+    )
+    assert posix["perm_exposure"] == "anonymous"
+    denied = summary_for_snapshot(
+        _snap(
+            aces=[
+                _ace("S-1-1-0", "Everyone", typ="deny", kind="well_known"),
+                _ace("S-1-1-0", "Everyone", kind="well_known"),
+            ]
+        )
+    )
+    assert denied["perm_exposure"] == "restricted"
+
+
+def test_share_narrower_than_files_is_also_a_mismatch():
+    s = summary_for_snapshot(
+        _snap(
+            aces=[
+                _ace("S-1-1-0", "Everyone", kind="well_known"),
+                _share_ace(
+                    "S-1-5-21-1-2-3-512", "HOLZHUETER\\Domain Admins", verbs=("full",), kind="group"
+                ),
+            ]
+        )
+    )
+    assert s["perm_exposure"] == "restricted"  # effective through the share
+    assert s["perm_share_mismatch"] is True
+    assert s["layers"]["local"]["anonymous"] is True and s["layers"]["share"]["anonymous"] is False
+
+
+def test_exposure_filters_and_facet():
+    from filearr.api.search import FACETS, build_filters
+
+    assert "perm_exposure" in FACETS
+    f = build_filters(exposure=["authenticated", "bogus"], share_mismatch=True)
+    joined = " AND ".join(f)
+    assert "perm_exposure = authenticated" in joined and "bogus" not in joined
+    assert "perm_share_mismatch = true" in joined
+    assert not any("perm_exposure" in x for x in build_filters(exposure=["bogus"]))
+
+
+def test_share_vs_fs_report_registered_and_builds():
+    from filearr.reports import ReportParams, get_report
+
+    rpt = get_report("permissions_share_vs_fs")
+    assert rpt is not None and rpt.supports_library
+    sql = str(rpt.build(ReportParams(library_id=None, limit=10)))
+    assert "permission_snapshots" in sql and "share" in sql

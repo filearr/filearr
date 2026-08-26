@@ -143,15 +143,15 @@ func New(host string) *Resolver {
 }
 
 // SetStaticMap installs operator-configured share locations from a spec of
-// comma-separated ``localpath=location`` pairs, e.g.
+// comma-separated “localpath=location“ pairs, e.g.
 //
 //	/mnt/user/media=smb://tower/media,/mnt/user/docs=\\tower\documents
 //
 // This exists for environments where enumeration can see nothing — the Docker
 // agent chief among them: inside the container there is no smb.conf, and the
 // NAS's shares are exported by the HOST, under the host's name, not the
-// container's. A location may be an ``smb://host/share[/sub]`` URL, a
-// ``\\host\share[\sub]`` UNC, or an ``nfs://host/export[/sub]`` URL; the
+// container's. A location may be an “smb://host/share[/sub]“ URL, a
+// “\\host\share[\sub]“ UNC, or an “nfs://host/export[/sub]“ URL; the
 // local path maps to it prefix-wise (longest match wins, exactly like
 // discovered exports). Static entries carry their own host and take
 // precedence over an enumerated export of the same local path. Returns how
@@ -465,4 +465,23 @@ func covers(base, target string) bool {
 
 func sameExport(a, b export) bool {
 	return a.name == b.name && a.path == b.path && a.kind == b.kind && a.host == b.host
+}
+
+// LocalShare is one SMB share this host exports, for consumers outside the
+// resolver (2026-08-26: the permissions collector reads each share's ACL).
+type LocalShare struct {
+	Name string // share name
+	Path string // local absolute path exported
+}
+
+// LocalSMBShares enumerates the host's SMB shares (best-effort, R1: never an
+// error). Callers cache it -- on Windows it is a PowerShell invocation.
+func LocalSMBShares() []LocalShare {
+	var out []LocalShare
+	for _, e := range enumerateOS() {
+		if e.kind == "smb" && e.name != "" && e.path != "" {
+			out = append(out, LocalShare{Name: e.name, Path: e.path})
+		}
+	}
+	return out
 }

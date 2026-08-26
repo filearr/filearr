@@ -62,6 +62,7 @@ FACETS = [
     # library). Low-cardinality, facet-search-disabled: cheap.
     "library_id",
     "perm_world",
+    "perm_exposure",
 ]
 
 # P3-T5 highlighting/cropping. ``body_text`` (document body) is cropped to a short
@@ -134,6 +135,8 @@ def build_filters(
     hash: str | None = None,
     principal: list[str] | None = None,
     world_readable: bool | None = None,
+    exposure: list[str] | None = None,
+    share_mismatch: bool | None = None,
 ) -> list[str]:
     """Build Meilisearch filter clauses. Sidecars are excluded by default (T3);
     an explicit ``sidecar_of`` or ``include_sidecars`` opts them back in. A
@@ -194,6 +197,17 @@ def build_filters(
             )
     if world_readable is not None:
         filters.append(f"perm_world = {'true' if world_readable else 'false'}")
+    # 2026-08-26: closed vocabulary -> validate-and-drop, never interpolate.
+    if exposure:
+        from filearr.permission_projection import EXPOSURES
+
+        vals = [e for e in exposure if e in EXPOSURES]
+        if len(vals) == 1:
+            filters.append(f"perm_exposure = {vals[0]}")
+        elif vals:
+            filters.append("(" + " OR ".join(f"perm_exposure = {e}" for e in vals) + ")")
+    if share_mismatch is not None:
+        filters.append(f"perm_share_mismatch = {'true' if share_mismatch else 'false'}")
     if extension:
         filters.append(f"extension = '{meili_quote(extension)}'")
     if year_gte is not None:
@@ -505,8 +519,24 @@ async def search(
     ),
     world_readable: bool | None = Query(
         default=None,
-        description="true = items whose ACL grants Everyone / Authenticated Users / "
-        "POSIX other read access; false = items with a collected ACL that does not.",
+        description="true = items an ANONYMOUS caller can read (Everyone / "
+        "ANONYMOUS LOGON / POSIX other), effective through the SMB share when "
+        "share ACLs were collected; false = items with a collected ACL that "
+        "anonymous cannot read. Authenticated Users alone is NOT world-readable "
+        "-- use exposure=authenticated for that tier.",
+    ),
+    exposure: list[str] | None = Query(
+        default=None,
+        description="effective read tier (repeatable = OR): anonymous (no "
+        "credential needed), authenticated (any logged-in account, but not "
+        "anonymous), restricted (named principals only). Through the SMB share "
+        "when the agent collected share ACLs (access = share AND file system).",
+    ),
+    share_mismatch: bool | None = Query(
+        default=None,
+        description="true = the SMB share's ACL and the file's own ACL disagree "
+        "on who can read (one is wider than the other); the reconciliation "
+        "review list.",
     ),
     hash: str | None = Query(
         default=None,
@@ -604,6 +634,8 @@ async def search(
     filters = build_filters(
         principal=principal,
         world_readable=world_readable,
+        exposure=exposure,
+        share_mismatch=share_mismatch,
         file_category=file_category,
         file_group=file_group,
         library=library,
