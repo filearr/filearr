@@ -152,9 +152,14 @@
   <LoginPage mode={authMode} {oidcEnabled} onAuthed={probeAuth} />
 {:else}
 <div class="mx-auto max-w-screen-2xl px-4 py-4 sm:px-6 lg:px-8">
-  <header class="flex items-center gap-3 py-4">
+  <!-- 2026-08-26 (user report, phone): this row used to be a single
+       non-wrapping flex line — nine nav buttons plus account / paths / theme —
+       so on a 390 px screen the document was ~900 px wide, Safari zoomed out
+       and every page panned sideways. Wrap instead: the nav flows onto extra
+       lines and the utility controls sit on their own line under it. -->
+  <header class="flex flex-wrap items-center gap-x-3 gap-y-2 py-4">
     <h1 class="text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
-    <nav class="ml-4 flex gap-1">
+    <nav class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
       <button
         class="rounded-lg px-3 py-1 text-sm {page === 'search' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
         onclick={() => goto("search")}>Search</button>
@@ -186,6 +191,7 @@
         onclick={() => goto("filter-builder")}>Filter builder</button>
     </nav>
     <div class="grow"></div>
+    <div class="flex flex-wrap items-center gap-2">
     {#if me}
       <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-white' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
         href="#/account"
@@ -209,6 +215,7 @@
     </label>
     <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
       onclick={toggleDark}>Theme</button>
+    </div>
   </header>
 
   {#if page === "libraries"}

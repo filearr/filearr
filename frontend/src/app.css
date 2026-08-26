@@ -33,3 +33,14 @@ html.dark select option,
 html.dark select optgroup {
   @apply bg-slate-900 text-slate-100;
 }
+
+/* Small screens (2026-08-26, user report): nothing may widen the document
+   past the viewport. Every table already sits in an overflow-x-auto wrapper
+   (it scrolls inside its own box — swipe sideways on a phone); fixed-width
+   form controls cap at their container; and the page itself never gains a
+   horizontal scrollbar, which is what let Safari zoom the whole layout out. */
+input, select, textarea { max-width: 100%; }
+.overflow-x-auto { max-width: 100%; min-width: 0; }
+@media (max-width: 640px) {
+  html, body { overflow-x: hidden; }
+}
