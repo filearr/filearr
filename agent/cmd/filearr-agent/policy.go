@@ -104,6 +104,8 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 		Cache:   agentcfg.NewETagCache(dataDir),
 		Applier: &daemonApplier{sup: sup, log: newLogger(), ignored: agentcfg.NewIgnoredLogger(newLogger()), updInterval: updInterval},
 		Logger:  newLogger(),
+		// Local "Sync with central" panel (2026-08-25).
+		OnResult: syncStatus.reporter("policy"),
 		AfterFetch: chainAfterFetch(
 			taxonomyRefreshHook(taxCache, taxClient, newLogger()),
 			// scan_selections -> scan.json on every successful poll, so a root

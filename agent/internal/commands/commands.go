@@ -100,6 +100,16 @@ type Config struct {
 	// self-heals (fix 2026-07-24). Must not block; the rebinder debounces.
 	OnAuthError func()
 
+	// OnPollResult, if set, receives the outcome of every command poll
+	// (2026-08-25, local "Sync with central" panel): err nil on success, else
+	// the failure and the backoff the loop is about to sleep. Must be cheap.
+	OnPollResult func(err error, backoff time.Duration)
+
+	// InventoryStatus, if set, receives a small status map at the start and
+	// end of every inventory command (running/finished/failed, counts, upload
+	// outcome) — the daemon persists it for the local web UI. Must be cheap.
+	InventoryStatus func(status map[string]any)
+
 	// TriggerUpdate runs one immediate self-update check-and-apply on behalf of
 	// a self_update command (update.Updater.TriggerNow's exact signature —
 	// declared structurally to keep this package update-free). beforeApply is
@@ -173,6 +183,8 @@ type Poller struct {
 	clock          func() time.Time
 	rnd            *rand.Rand
 	onAuthError    func()
+	onPollResult   func(err error, backoff time.Duration)
+	invStatus      func(status map[string]any)
 	updateTrigger  func(ctx context.Context, beforeApply func(version string)) (string, bool, error)
 	onMaintenance  func(active bool)
 	setSuspended   func(ctx context.Context, suspended bool) error
@@ -202,6 +214,8 @@ func NewPoller(cfg Config) *Poller {
 		clock:          cfg.Clock,
 		rnd:            cfg.Rand,
 		onAuthError:    cfg.OnAuthError,
+		onPollResult:   cfg.OnPollResult,
+		invStatus:      cfg.InventoryStatus,
 		updateTrigger:  cfg.TriggerUpdate,
 		onMaintenance:  cfg.OnMaintenance,
 		setSuspended:   cfg.SetSuspended,
@@ -269,9 +283,15 @@ func (p *Poller) Run(ctx context.Context) error {
 			}
 			p.log.Warn("command poll failed; backing off", "backoff", backoff.String(), "err", err)
 			wait = backoff
+			if p.onPollResult != nil {
+				p.onPollResult(err, backoff)
+			}
 		} else {
 			backoff = 0
 			wait = p.jittered(p.interval)
+			if p.onPollResult != nil {
+				p.onPollResult(nil, 0)
+			}
 		}
 		if !sleepCtx(ctx, wait) {
 			return ctx.Err()
@@ -557,4 +577,29 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// RequestInventory asks central to enqueue one inventory command for THIS
+// agent (2026-08-25, the local web UI's "inventory now" button). Inventory
+// results only have a home on central (permission_snapshots, the drift
+// report), so a locally-triggered run still has to be a central command: the
+// endpoint builds it from the agent's effective group settings exactly as the
+// console button and the schedule do, and this poller picks it up on its next
+// poll. Returns central's response body (the queued command) on 201/200; a
+// 409 (already queued/running) or 422 (nothing configured) comes back as an
+// error carrying central's detail.
+func (p *Poller) RequestInventory(ctx context.Context) (map[string]any, error) {
+	url := fmt.Sprintf("%s/api/v1/agents/%s/inventory/request", p.baseURL, p.agentID)
+	status, body, err := p.post(ctx, url, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		return nil, p.statusError("inventory/request", status, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("inventory/request: decode body: %w", err)
+	}
+	return out, nil
 }

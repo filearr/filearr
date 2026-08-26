@@ -3408,6 +3408,12 @@ export interface InventoryConfig {
   schedule_tz?: string | null;
   paths?: string[];
   preset?: string | null;
+  /** Also walk what the agent scans: its library roots plus the explicit
+   *  paths of the group's enabled scan_selections. */
+  inherit_scan_paths?: boolean;
+  /** Per-run entry cap handed to the agent (1000..5000000); absent = the
+   *  agent default (100k). */
+  max_entries?: number | null;
   enabled?: boolean;
   collectors?: string[];
   permissions?: PermissionsConfig | null;

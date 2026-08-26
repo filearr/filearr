@@ -646,9 +646,14 @@ binary; the data directory is pinned to `/config`.
     export), **Filters** (a filter builder over the same query grammar as
     the central console, with live preview), **Reports** (categories,
     unmapped extensions, largest files, duplicates, future-dated files —
-    with CSV download), **Status** (agent version and a per-root table of
-    items/size/last-scan statistics), and **Logs** (columnar
-    time/level/message/details view with export).
+    with CSV download), **Status** (identity, per-root scan statistics,
+    **Sync with central** — last success / failure streak / backoff per
+    channel, with the reason classified: overloaded, unreachable, timing out,
+    maintenance, credential rejected — the **host inventory** configuration
+    and last run, logging location + rotation, and every policy key the agent
+    honours), and **Logs** (columnar time/level/message/details view with
+    export). A topbar chip summarises central's reachability on every tab,
+    and a theme toggle cycles system → light → dark (remembered per browser).
 
 !!! note "Web UI logs are the full multi-process log"
     The image sets `FILEARR_AGENT_LOG_DIR=/config/logs`: the daemon, every
@@ -942,7 +947,12 @@ for every member agent on each occurrence; an unfinished scheduled run
 suppresses the next, and a `schedule_tz` without a `schedule_cron` is refused.
 With neither `paths` nor `preset`, the run walks the agent's **own scan roots**
 (the root paths of its libraries) — the right default for permission snapshots
-of everything the agent catalogs. This is what turns the permissions
+of everything the agent catalogs. `inherit_scan_paths` (bool) makes that
+explicit and combinable: the scan roots plus the explicit paths of the group's
+enabled `scan_selections` are walked *in addition to* `paths`. `max_entries`
+(1,000–5,000,000) is the per-run entry cap handed to the agent; absent = the
+agent's built-in 100,000, after which a run stops and its summary says
+`entries_capped` — raise it for a drive with more files than that. This is what turns the permissions
 collector into a standing audit: schedule it and the drift report/alert see
 every change at the schedule's cadence.
 
@@ -1195,7 +1205,13 @@ example adding permission enumeration to a documents sweep — need no agent
 redeployment; genuinely new collectors arrive through the signed self-update
 channel. Results return inline for small runs or as a compressed upload for
 large ones, always with a summary (roots expanded, entries, access-denied
-count, placeholders skipped, per-collector errors).
+count, placeholders skipped, per-collector errors). Central acknowledges an
+uploaded result as soon as the blob is stored (up to
+`FILEARR_AGENT_INVENTORY_RESULT_MAX_BYTES`, default 64 MiB) and ingests its
+`permissions` records into `permission_snapshots` in a worker task — so a
+100k-entry upload acks in seconds, and the agent retries the upload with
+backoff on a transport failure (the endpoint is write-if-absent, so a repeat is
+a no-op). Snapshots appear a minute or two after the command completes.
 
 **Running one now.** Inventory is agent-scoped (no item to point at), and an
 inventory command is enqueued in exactly two ways: the group's
@@ -1727,12 +1743,22 @@ mounted a new share.
     Nothing here can create, edit, move or delete a catalogued item, on the agent
     or centrally.
 
+The Controls tab's **Host inventory** section (2026-08-25) shows what the
+agent's effective group `inventory` block collects and where, plus the last
+run's outcome, and offers **Run inventory now**. Inventory is coordinated by
+central — results (permission snapshots, the drift report) only have a home
+there — so the button does not walk anything locally: the agent POSTs
+`/api/v1/agents/{id}/inventory/request` (agent-plane auth) and central queues
+the same command the console button or the schedule would, which this agent
+picks up on its next command poll. Central's refusals surface verbatim (already
+queued, nothing configured, unreachable).
+
 Everything is **off by default** and enabled per configuration group from the
 console (Agents → the group's **edit** dialog → *Local surface*):
 
 | Policy key | What the local UI may then do |
 | --- | --- |
-| `local_scan_control` | Pause / resume scanning; **Scan now** |
+| `local_scan_control` | Pause / resume scanning; **Scan now**; **Run inventory now** (asks central to queue the run — see below) |
 | `local_schedule_control` | Edit `scan_cron`, `scan_interval_seconds`, `scan_on_start` |
 | `local_roots_control` | Add / remove scan roots, and set each root's **share mapping** |
 

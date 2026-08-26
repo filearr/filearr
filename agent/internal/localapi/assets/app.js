@@ -11,6 +11,44 @@
 // agent whose policy lets reads through anonymously.
 
 (function () {
+  // ---- theme (2026-08-25) --------------------------------------------------
+  // Three states: "" (follow the OS), "light", "dark". Stored per browser;
+  // applied as data-theme on <html> so app.css's variable blocks pick it up.
+  var THEME_KEY = "filearr-agent-theme";
+  function readTheme() {
+    try { return localStorage.getItem(THEME_KEY) || ""; } catch (e) { return ""; }
+  }
+  function applyTheme(mode) {
+    var root = document.documentElement;
+    if (mode === "light" || mode === "dark") root.setAttribute("data-theme", mode);
+    else root.removeAttribute("data-theme");
+    var btn = document.getElementById("theme-toggle");
+    if (btn) {
+      btn.textContent = mode === "light" ? "☀" : mode === "dark" ? "☾" : "◐";
+      btn.title = "Theme: " + (mode || "follows the system") + ". Click to cycle system → light → dark.";
+    }
+  }
+  applyTheme(readTheme());
+  var themeBtn = document.getElementById("theme-toggle");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", function () {
+      var next = { "": "light", "light": "dark", "dark": "" }[readTheme()] || "";
+      try { if (next) localStorage.setItem(THEME_KEY, next); else localStorage.removeItem(THEME_KEY); } catch (e) { /* private mode */ }
+      applyTheme(next);
+    });
+  }
+
+  // Topbar sync chip: central reachability at a glance on every tab, refreshed
+  // each minute (the Status tab re-renders it with the full detail).
+  function refreshSyncChip() {
+    fetch("/api/settings", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (st) { if (st) renderSyncChip(syncSummary(st.sync), st.sync); })
+      .catch(function () { /* the Status tab reports the error */ });
+  }
+  refreshSyncChip();
+  setInterval(refreshSyncChip, 60000);
+
   var qInput = document.getElementById("q");
   var form = document.getElementById("search-form");
   var results = document.getElementById("results");
@@ -468,6 +506,162 @@
     });
   }
 
+  // ---- Status: sync with central (2026-08-25) --------------------------------
+  // One row per central-facing loop with the last success, the failure streak
+  // and the backoff in effect — the answer to "is central overloaded, down, or
+  // is it just me?" without reading the log.
+  var SYNC_CHANNELS = [
+    ["policy", "Policy poll"],
+    ["commands", "Command poll"],
+    ["replication", "Replication push"]
+  ];
+  var SYNC_CLASS_TEXT = {
+    maintenance: "central is in maintenance mode — pushes are held, nothing is lost",
+    overloaded: "central is shedding load (429/503) — backing off; nothing is lost",
+    timeout: "central is not answering in time (slow or overloaded)",
+    unreachable: "central is unreachable (down, DNS, or network)",
+    auth: "central rejected this agent's credential — re-enrol or check the fingerprint binding",
+    error: "failing"
+  };
+  function syncSummary(sync) {
+    var ch = (sync && sync.channels) || {};
+    var worst = null;
+    SYNC_CHANNELS.forEach(function (c) {
+      var row = ch[c[0]];
+      if (row && !row.ok && row.failures > 0) {
+        var rank = { auth: 3, unreachable: 2, timeout: 2, overloaded: 1, maintenance: 1, error: 1 }[row.class] || 1;
+        if (!worst || rank > worst.rank) worst = { rank: rank, cls: row.class, name: c[1], row: row };
+      }
+    });
+    return worst;
+  }
+  function fmtAgo(sec) {
+    if (sec === undefined || sec === null) return "";
+    if (sec < 90) return sec + " s ago";
+    if (sec < 5400) return Math.round(sec / 60) + " min ago";
+    if (sec < 172800) return Math.round(sec / 3600) + " h ago";
+    return Math.round(sec / 86400) + " d ago";
+  }
+  function renderSyncSection(dl, s) {
+    kvSection(dl, "Sync with central");
+    var sync = s.sync || {};
+    var ch = sync.channels || {};
+    if (sync.central_maintenance) kvRow(dl, "Central", "MAINTENANCE MODE — replication push is held until central clears it; scanning continues");
+    if (sync.suspended) kvRow(dl, "Central", "this agent is SUSPENDED by central — scanning and replication are paused");
+    var worst = syncSummary(sync);
+    kvRow(dl, "Overall", worst
+      ? ("DEGRADED — " + (SYNC_CLASS_TEXT[worst.cls] || "failing") + " (" + worst.name + ")")
+      : (Object.keys(ch).length ? "OK — every channel's last attempt succeeded" : "no contact recorded yet (daemon just started?)"));
+    SYNC_CHANNELS.forEach(function (c) {
+      var row = ch[c[0]];
+      if (!row) { kvRow(dl, c[1], "not run yet"); return; }
+      var text;
+      if (row.ok) {
+        text = "ok — last success " + fmtAgo(row.since_success_s) + (row.last_success_at ? " (" + fmtMtime(row.last_success_at) + ")" : "");
+      } else {
+        text = "FAILING ×" + row.failures + " — " + (SYNC_CLASS_TEXT[row.class] || "error");
+        if (row.retry_in_s !== undefined) text += "; retry in " + row.retry_in_s + " s (backoff " + row.backoff_s + " s)";
+        else if (row.backoff_s) text += "; backoff " + row.backoff_s + " s";
+        text += "; last success " + (row.since_success_s !== undefined ? fmtAgo(row.since_success_s) : "never");
+        if (row.last_error) text += "\n" + row.last_error;
+      }
+      kvRow(dl, c[1], text);
+    });
+    if (s.activity && s.activity.outbox_pending > 0 && worst) {
+      kvRow(dl, "Backpressure", s.activity.outbox_pending + " change(s) queued durably on this machine; they drain automatically once central answers again");
+    }
+    renderSyncChip(worst, sync);
+  }
+  function renderSyncChip(worst, sync) {
+    var chip = document.getElementById("sync-chip");
+    if (!chip) return;
+    chip.hidden = false;
+    chip.className = "chip";
+    if (sync && sync.central_maintenance) { chip.classList.add("chip-warn"); chip.textContent = "central: maintenance"; return; }
+    if (!worst) { chip.classList.add("chip-ok"); chip.textContent = "central: ok"; return; }
+    chip.classList.add(worst.cls === "auth" || worst.cls === "unreachable" ? "chip-bad" : "chip-warn");
+    chip.textContent = "central: " + (worst.cls === "overloaded" ? "backing off (overloaded)" : worst.cls === "timeout" ? "slow / timing out" : worst.cls);
+  }
+
+  // ---- Status: inventory configuration + last run (2026-08-25) --------------
+  function renderInventorySection(dl, s) {
+    kvSection(dl, "Host inventory (configured on central)");
+    var ic = s.inventory_config;
+    if (!ic) {
+      kvRow(dl, "Configuration", "none delivered — no group this agent belongs to has an Inventory block (central console → group settings → Inventory)");
+    } else {
+      kvRow(dl, "Enabled (schedule)", ic.enabled ? "yes" : "no — the schedule is off; manual runs still work");
+      kvRow(dl, "Collectors", (ic.collectors || []).join(", ") || "none");
+      kvRow(dl, "Schedule", ic.schedule_cron
+        ? ic.schedule_cron + " (" + (ic.schedule_tz === "agent" ? "this agent's local time" : ic.schedule_tz || "UTC") + ", evaluated by central)"
+        : "none — manual runs only");
+      var where = [];
+      if (ic.inherit_scan_paths || (!(ic.paths || []).length && !ic.preset)) where.push("this agent's scan roots");
+      if ((ic.paths || []).length) where.push((ic.paths || []).join(", "));
+      if (ic.preset) where.push("preset " + ic.preset);
+      kvRow(dl, "Walks", where.join(" + "));
+      kvRow(dl, "Max entries per run", ic.max_entries ? Number(ic.max_entries).toLocaleString() : "100,000 (agent default)");
+      if (ic.permissions) {
+        var pm = ic.permissions;
+        kvRow(dl, "Permissions collector", (pm.enabled ? "enabled" : "configured, disabled") +
+          (pm.include_inherited ? ", inherited ACEs included" : ", explicit ACEs only") +
+          (pm.exclude_well_known === false ? ", well-known principals included" : ""));
+      }
+    }
+    var last = s.inventory_last;
+    if (!last) {
+      kvRow(dl, "Last run", "none on this daemon yet");
+      return;
+    }
+    var sum = last.summary || {};
+    var line = String(last.status || "").toUpperCase();
+    if (last.started_at) line += " — started " + fmtMtime(last.started_at);
+    if (sum.entries !== undefined) line += "; " + Number(sum.entries).toLocaleString() + " entries" + (sum.entries_capped ? " (CAPPED — raise max entries)" : "");
+    if (sum.denied) line += ", " + sum.denied + " access denied";
+    if (last.delivery) line += "; result " + last.delivery + (last.blob_bytes ? " (" + fmtSize(last.blob_bytes) + ")" : "");
+    if (last.error) line += "\n" + last.error;
+    kvRow(dl, "Last run", line);
+    if (sum.collectors_run) kvRow(dl, "Last run collectors", (sum.collectors_run || []).join(", "));
+    if ((sum.collector_errors || []).length) kvRow(dl, "Last run collector errors", sum.collector_errors.join("; "));
+  }
+
+  // ---- Status: policy keys that were never displayed (2026-08-25) ----------
+  function renderPolicyExtras(dl, s) {
+    var px = s.policy_extra;
+    if (!px) return;
+    var pv = s.policy || {};
+    kvSection(dl, "Policy (from central) — limits & sync");
+    kvRow(dl, "Catalog read-only locally", px.read_only ? "yes (invariant)" : "no");
+    kvRow(dl, "Offline grace", px.offline_grace_seconds ? px.offline_grace_seconds + " s" : "default") +
+      (pv.grace_expires_at ? " — cached policy valid until " + fmtMtime(pv.grace_expires_at) : "");
+    if (pv.grace_expires_at) kvRow(dl, "Policy cache expires", fmtMtime(pv.grace_expires_at));
+    kvRow(dl, "Upload rate cap", px.upload_rate_bytes_per_sec ? fmtSize(px.upload_rate_bytes_per_sec) + "/s" : "unlimited");
+    kvRow(dl, "Poll interval", px.poll_interval_seconds ? px.poll_interval_seconds + " s" : "default");
+    kvRow(dl, "Reconcile interval", px.reconcile_interval_seconds ? px.reconcile_interval_seconds + " s" : "default");
+    kvRow(dl, "Update-manifest poll", px.update_poll_interval_seconds ? px.update_poll_interval_seconds + " s" : "default (6 h)");
+    kvRow(dl, "Watch mode", px.watch_mode_set ? (px.watch_mode ? "on" : "off") : "not set");
+    kvRow(dl, "Content-hash size cap", px.content_hash_max_bytes ? fmtSize(px.content_hash_max_bytes) : "default");
+    kvRow(dl, "Include globs", (px.include_globs || []).join(", ") || "none (everything under the roots)");
+    kvRow(dl, "EXIF extraction", px.extract_exif_set ? (px.extract_exif ? "on" : "off") : "not set (off)");
+    kvRow(dl, "Taxonomy version", px.taxonomy_version !== null && px.taxonomy_version !== undefined ? px.taxonomy_version : "baked-in seed");
+    if (px.group_scan_schedule_cron) kvRow(dl, "Group scan schedule (legacy key)", px.group_scan_schedule_cron);
+  }
+
+  // ---- Status: logging (2026-08-25) -------------------------------------------
+  function renderLoggingSection(dl, s) {
+    kvSection(dl, "Logging");
+    var lg = s.logging || {};
+    kvRow(dl, "Log level", (lg.level || s.log_level || "info") + "  (" + (lg.level_source || "default") + ")");
+    if (lg.file_sink) {
+      kvRow(dl, "Log files", lg.dir);
+      kvRow(dl, "Rotation", lg.rotation);
+    } else {
+      kvRow(dl, "Log files", "none — this run logs to stderr only (a service install writes <data dir>/logs; set FILEARR_AGENT_LOG_DIR or the sidecar log_dir to force a file)");
+    }
+    var sd = s.sidecar || {};
+    if (sd.log_dir) kvRow(dl, "Configured log dir (sidecar)", sd.log_dir);
+  }
+
   function loadStatusPanel() {
     var errBox2 = document.getElementById("status-error");
     fetch("/api/settings", { credentials: "same-origin" })
@@ -495,6 +689,8 @@
           act.outbox_pending === undefined ? "—"
             : act.outbox_pending === 0 ? "0 (fully replicated)"
             : act.outbox_pending + " change(s) waiting to reach central");
+        renderSyncSection(dl, s);
+        renderInventorySection(dl, s);
         kvSection(dl, "Identity");
         kvRow(dl, "Agent id", s.agent_id);
         kvRow(dl, "Agent version", s.agent_version);
@@ -583,10 +779,15 @@
         kvRow(dl, "Policy version", pv.version);
         kvRow(dl, "Policy stale", pv.stale ? "YES (past offline grace)" : "no");
         kvRow(dl, "Path scope", (pv.path_scope || []).join(" OR ") || "unrestricted");
+        renderPolicyExtras(dl, s);
         kvSection(dl, "This process");
         kvRow(dl, "Web bind", s.web_addr + (s.web_remote ? " (remote access enabled)" : " (loopback only)"));
         kvRow(dl, "Self-update", s.self_update ? "enabled" : "off (image pulls are the update path)");
-        kvRow(dl, "Log level", s.log_level || "info");
+        var sd = s.sidecar || {};
+        if (sd.agent_name) kvRow(dl, "Configured name", sd.agent_name);
+        if (sd.config_group) kvRow(dl, "Configured group", sd.config_group);
+        if (sd.ffmpeg_path) kvRow(dl, "ffmpeg path (configured)", sd.ffmpeg_path);
+        renderLoggingSection(dl, s);
       })
       .catch(function (e) {
         errBox2.hidden = false;
@@ -698,6 +899,14 @@
         "that — resume it from the central console.";
     }
     ctlEl("ctl-scan-why").textContent = scanWhy;
+
+    // --- host inventory (2026-08-25) ---
+    ctlDisable(ctlEl("ctl-inventory-now"), noScanPerm ||
+      (s.central_suspended ? "suspended by central" : ""));
+    ctlEl("ctl-inv-why").textContent = noScanPerm
+      ? "Central policy does not allow triggering work from this UI (local_scan_control is off)."
+      : "";
+    loadInventoryState();
 
     // --- schedule ---
     var fields = [
@@ -847,6 +1056,30 @@
       .catch(function (e) { ctlShowError("Could not load controls: " + e.message); });
   }
 
+  // The running/last inventory run, from the same settings snapshot the
+  // Status tab renders (inventory-status.json written by the command poller).
+  function loadInventoryState() {
+    fetch("/api/settings", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (st) {
+        var el = ctlEl("ctl-inv-state");
+        if (!el) return;
+        var last = st && st.inventory_last;
+        var ic = st && st.inventory_config;
+        var cfgText = ic
+          ? ((ic.collectors || []).join(", ") || "no collectors") + " over " +
+            ((ic.paths || []).length ? (ic.paths || []).join(", ") : (ic.preset ? "preset " + ic.preset : "this agent's scan roots"))
+          : "no inventory block delivered yet — the run uses whatever central resolves for this agent";
+        if (!last) { el.textContent = "Configured: " + cfgText + ". No run on this daemon yet."; return; }
+        var sum = last.summary || {};
+        el.textContent = "Configured: " + cfgText + ". Last run " + String(last.status || "").toUpperCase() +
+          (last.started_at ? " (started " + fmtMtime(last.started_at) + ")" : "") +
+          (sum.entries !== undefined ? ", " + Number(sum.entries).toLocaleString() + " entries" + (sum.entries_capped ? " — CAPPED" : "") : "") +
+          (last.error ? " — " + last.error : "");
+      })
+      .catch(function () { /* the Status tab shows the error */ });
+  }
+
   var controlsWired = false;
   function initControls() {
     if (!controlsWired) {
@@ -862,6 +1095,16 @@
       });
       ctlEl("ctl-scan-now").addEventListener("click", function () {
         ctlPost("/api/control/scan-now", {});
+      });
+      ctlEl("ctl-inventory-now").addEventListener("click", function () {
+        ctlShowNotice("");
+        ctlPost("/api/control/inventory-now", {}).then(function (d) {
+          if (d && d.queued) {
+            ctlShowNotice("Inventory run queued on central" + (d.command_id ? " (command " + d.command_id + ")" : "") +
+              " — this agent picks it up on its next command poll (about a minute). Progress appears on the Status tab.");
+            loadInventoryState();
+          }
+        });
       });
       ctlEl("ctl-schedule-save").addEventListener("click", function () {
         var body = {}, clear = [];

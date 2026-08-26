@@ -391,6 +391,16 @@ class InventoryConfig(BaseModel):
     schedule_tz: str | None = None
     paths: list[str] = Field(default_factory=list)
     preset: str | None = None
+    # 2026-08-25 (user request): walk what the agent SCANS -- its library
+    # roots as central knows them plus the explicit paths of the group's
+    # enabled scan_selections -- in addition to ``paths``/``preset``. With
+    # neither paths nor preset authored the run walks the scan roots anyway
+    # (the blank default); this makes that intent explicit and combinable.
+    inherit_scan_paths: bool = False
+    # Per-run entry cap handed to the agent (``max_entries``). None = the
+    # agent's built-in default (100k). A 114k-file drive silently stopped at
+    # 100k (summary.entries_capped) until this existed.
+    max_entries: int | None = Field(default=None, ge=1000, le=5_000_000)
 
     @field_validator("schedule_cron")
     @classmethod
@@ -528,6 +538,30 @@ async def inventory_roots_for_agent(session: Any, agent_id: Any) -> list[str]:
     return [r[0] for r in rows if r[0]]
 
 
+async def inventory_walk_paths(
+    session: Any, agent_id: Any, inv: dict[str, Any], group: dict[str, Any] | None
+) -> list[str]:
+    """The ``paths`` an inventory run for this agent walks: the group's own
+    ``inventory.paths``, plus -- when ``inherit_scan_paths`` is set, or when
+    neither paths nor a preset was authored -- the agent's scan roots (its
+    libraries) and the explicit paths of the group's enabled scan_selections.
+    Deduplicated, order preserved."""
+    out: list[str] = list(inv.get("paths") or [])
+    inherit = bool(inv.get("inherit_scan_paths")) or not (out or inv.get("preset"))
+    if inherit:
+        out.extend(await inventory_roots_for_agent(session, agent_id))
+        for sel in (group or {}).get("scan_selections") or []:
+            if isinstance(sel, dict) and sel.get("enabled", True):
+                out.extend(p for p in sel.get("paths") or [] if isinstance(p, str))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in out:
+        if p and p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return deduped
+
+
 def inventory_command_payload(inv: dict[str, Any], *, scheduled: bool) -> dict[str, Any]:
     """The ``inventory`` command payload for a group's merged ``inventory``
     block -- ONE builder for the schedule tick and the run-it-now endpoint so
@@ -542,6 +576,8 @@ def inventory_command_payload(inv: dict[str, Any], *, scheduled: bool) -> dict[s
     }
     if inv.get("preset"):
         payload["preset"] = inv["preset"]
+    if inv.get("max_entries"):
+        payload["max_entries"] = int(inv["max_entries"])
     return payload
 
 

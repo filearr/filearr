@@ -45,7 +45,17 @@ const (
 	rotateMaxSizeMiB = 10 // lumberjack MaxSize is in MiB
 	rotateMaxBackups = 5
 	rotateCompress   = true
+	// rotateMaxAgeDays (2026-08-25) bounds retention by age as well as count,
+	// so a quiet appliance does not keep months-old rotated files around.
+	rotateMaxAgeDays = 30
 )
+
+// RotationPolicy describes the file-sink rotation in operator terms — the
+// local web UI's Logging section shows it next to the log dir.
+func RotationPolicy() string {
+	return fmt.Sprintf("rotate at %d MiB, keep %d files or %d days, gzip",
+		rotateMaxSizeMiB, rotateMaxBackups, rotateMaxAgeDays)
+}
 
 // ParseLevel maps a user-facing level name (case-insensitive) to its slog level.
 // An empty string yields the info default with ok=true; an unrecognised name
@@ -98,7 +108,7 @@ type Options struct {
 // close; a no-op when only stderr is used). The custom VERBOSE level renders as
 // "VERBOSE" in the text handler rather than slog's default "DEBUG+2".
 // levelVar is the LIVE process log threshold. Handlers reference it (not a
-// frozen level), so central policy (group settings ``log_level``, 2026-08-20)
+// frozen level), so central policy (group settings “log_level“, 2026-08-20)
 // can retune verbosity at runtime via SetLevel without rebuilding the logger.
 var levelVar = func() *slog.LevelVar {
 	v := new(slog.LevelVar)
@@ -133,6 +143,7 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 			Filename:   filepath.Join(opts.LogDir, name),
 			MaxSize:    rotateMaxSizeMiB,
 			MaxBackups: rotateMaxBackups,
+			MaxAge:     rotateMaxAgeDays,
 			Compress:   rotateCompress,
 		}
 		writers = append(writers, lj)

@@ -32,7 +32,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.config import get_settings
@@ -87,29 +87,78 @@ async def _agent_roots(session: AsyncSession, agent_id: uuid.UUID) -> list[tuple
     return roots
 
 
-async def _link_item(
-    session: AsyncSession, roots: list[tuple[str, uuid.UUID]], path: str
-) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-    """Best-effort (item_id, library_id) for an agent-local absolute path: the
-    longest library root that prefixes it, then the item at that rel_path.
-    Windows paths compare case-insensitively on the root; rel_path is looked up
-    verbatim (the catalog stores the agent's spelling)."""
+INGEST_CHUNK = 500
+
+
+def _candidate(
+    roots: list[tuple[str, uuid.UUID]], path: str
+) -> tuple[uuid.UUID | None, str | None]:
+    """(library_id, rel_path) an agent-local absolute path would have in the
+    catalog: the longest library root that prefixes it. Windows paths compare
+    case-insensitively on the root; rel_path keeps the agent's spelling (the
+    catalog stores it verbatim). The library root itself is not an item
+    (``(lib, None)``); a path under no root is ``(None, None)``."""
     np = _norm_sep(path)
     for root, lib_id in roots:
         if not root:
             continue
-        cand = np
-        if cand == root or cand.lower() == root.lower():
-            return None, lib_id  # the library root itself is not an item
-        if cand[: len(root)].lower() == root.lower() and cand[len(root) : len(root) + 1] == "/":
-            rel = cand[len(root) + 1 :]
-            item_id = (
-                await session.execute(
-                    select(Item.id).where(Item.library_id == lib_id, Item.rel_path == rel).limit(1)
-                )
-            ).scalar_one_or_none()
-            return item_id, lib_id
+        if np == root or np.lower() == root.lower():
+            return lib_id, None
+        if np[: len(root)].lower() == root.lower() and np[len(root) : len(root) + 1] == "/":
+            return lib_id, np[len(root) + 1 :]
     return None, None
+
+
+async def _link_item(
+    session: AsyncSession, roots: list[tuple[str, uuid.UUID]], path: str
+) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """Best-effort (item_id, library_id) for ONE path (the single-entry form of
+    the chunked lookup ``ingest_entries`` uses)."""
+    lib_id, rel = _candidate(roots, path)
+    if lib_id is None:
+        return None, None
+    if rel is None:
+        return None, lib_id
+    items = await _items_for(session, {(lib_id, rel)})
+    return items.get((lib_id, rel)), lib_id
+
+
+async def _items_for(
+    session: AsyncSession, pairs: set[tuple[uuid.UUID, str]]
+) -> dict[tuple[uuid.UUID, str], uuid.UUID]:
+    """item id per (library_id, rel_path), one query per chunk."""
+    if not pairs:
+        return {}
+    rows = (
+        await session.execute(
+            select(Item.library_id, Item.rel_path, Item.id).where(
+                tuple_(Item.library_id, Item.rel_path).in_(list(pairs))
+            )
+        )
+    ).all()
+    return {(r[0], r[1]): r[2] for r in rows}
+
+
+async def _newest_snapshots(
+    session: AsyncSession, agent_id: uuid.UUID, paths: list[str]
+) -> dict[str, PermissionSnapshot]:
+    """Newest stored snapshot per path for this agent (the digest gate and the
+    change-alert baseline), one DISTINCT ON query per chunk."""
+    if not paths:
+        return {}
+    rows = (
+        await session.execute(
+            select(PermissionSnapshot)
+            .distinct(PermissionSnapshot.path)
+            .where(PermissionSnapshot.agent_id == agent_id, PermissionSnapshot.path.in_(paths))
+            .order_by(
+                PermissionSnapshot.path,
+                PermissionSnapshot.collected_at.desc(),
+                PermissionSnapshot.id.desc(),
+            )
+        )
+    ).scalars()
+    return {r.path: r for r in rows}
 
 
 async def _emit_change_alert(
@@ -200,17 +249,30 @@ async def ingest_entries(
     retain: int | None = None,
 ) -> dict[str, int]:
     """Write snapshots for every entry carrying a ``permissions`` record.
-    Returns ``{seen, written, unchanged, skipped}``."""
+    Returns ``{seen, written, unchanged, skipped}``.
+
+    2026-08-25: chunked. The original loop issued two SELECTs per entry (the
+    previous snapshot, then the item link) -- ~200k round-trips for a 100k-file
+    drive, minutes inside the upload request. Each chunk now prefetches the
+    newest snapshot per path and the catalog items for every candidate
+    (library, rel_path) in two queries, and commits per chunk so a crash
+    mid-blob keeps what landed.
+    """
     keep = retain if retain is not None else int(get_settings().permission_snapshots_retain)
     seen = written = unchanged = skipped = 0
     now = datetime.now(UTC)
-    roots: list[tuple[str, uuid.UUID]] | None = None
-    agent_name: str | None = None
+    roots = await _agent_roots(session, agent_id)
+    agent_name = (
+        await session.execute(select(Agent.name).where(Agent.id == agent_id))
+    ).scalar_one_or_none()
     # (path, item_id, library_id, previous row, record, digest) for the change
-    # alerts -- emitted after the batch commit so the events never outrun rows.
+    # alerts -- emitted after the commits so the events never outrun rows.
     changed: list[tuple[str, uuid.UUID | None, uuid.UUID | None, PermissionSnapshot, dict, str]]
     changed = []
-    touched_items: list[uuid.UUID | None] = []
+    touched_items: list[uuid.UUID] = []
+
+    # Normalise first: only well-formed (path, record) pairs reach the DB.
+    work: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -222,83 +284,95 @@ async def ingest_entries(
             skipped += 1
             continue
         seen += 1
-        digest = _digest(rec)
-        prev = (
-            await session.execute(
-                select(PermissionSnapshot)
-                .where(PermissionSnapshot.agent_id == agent_id, PermissionSnapshot.path == path)
-                .order_by(PermissionSnapshot.collected_at.desc(), PermissionSnapshot.id.desc())
-                .limit(1)
+        work.append((path, rec, entry))
+
+    for start in range(0, len(work), INGEST_CHUNK):
+        chunk = work[start : start + INGEST_CHUNK]
+        paths = [w[0] for w in chunk]
+        prev_by_path = await _newest_snapshots(session, agent_id, paths)
+        # Resolve every chunk path to its (library, rel) candidate up front so
+        # the item lookup is one query.
+        cands: dict[str, tuple[uuid.UUID | None, str | None]] = {}
+        for path in paths:
+            cands[path] = _candidate(roots, path)
+        pairs = {
+            (lib, rel) for lib, rel in cands.values() if lib is not None and rel is not None
+        }
+        items = await _items_for(session, pairs)
+        wrote_this_chunk = 0
+        for path, rec, entry in chunk:
+            digest = _digest(rec)
+            prev = prev_by_path.get(path)
+            if prev is not None and prev.digest == digest:
+                unchanged += 1
+                continue
+            lib_id, rel = cands[path]
+            item_id = items.get((lib_id, rel)) if lib_id is not None and rel is not None else None
+            if item_id is not None:
+                touched_items.append(item_id)
+            collected = rec.get("collected_at")
+            try:
+                collected_at = (
+                    datetime.fromisoformat(str(collected).replace("Z", "+00:00"))
+                    if collected
+                    else now
+                )
+            except ValueError:
+                collected_at = now
+            if prev is not None:
+                # detach the previous row's values before retention may delete it
+                session.expunge(prev)
+                changed.append((path, item_id, lib_id, prev, rec, digest))
+            session.add(
+                PermissionSnapshot(
+                    agent_id=agent_id,
+                    command_id=command_id,
+                    item_id=item_id,
+                    path=path,
+                    is_dir=bool(entry.get("is_dir") or (entry.get("stat") or {}).get("is_dir")),
+                    collected_at=collected_at,
+                    owner=rec.get("owner"),
+                    group_=rec.get("group"),
+                    aces=rec.get("entries") or [],
+                    posture=rec.get("posture"),
+                    fidelity=str(rec.get("fidelity") or "unavailable"),
+                    principals=_principals(rec),
+                    digest=digest,
+                )
             )
-        ).scalar_one_or_none()
-        if prev is not None and prev.digest == digest:
-            unchanged += 1
-            continue
-        if roots is None:
-            roots = await _agent_roots(session, agent_id)
-            agent_name = (
-                await session.execute(select(Agent.name).where(Agent.id == agent_id))
-            ).scalar_one_or_none()
-        item_id, library_id = await _link_item(session, roots, path)
-        touched_items.append(item_id)
-        collected = rec.get("collected_at")
-        try:
-            collected_at = (
-                datetime.fromisoformat(str(collected).replace("Z", "+00:00")) if collected else now
-            )
-        except ValueError:
-            collected_at = now
-        if prev is not None:
-            # detach the previous row's values before retention may delete it
-            session.expunge(prev)
-            changed.append((path, item_id, library_id, prev, rec, digest))
-        session.add(
-            PermissionSnapshot(
-                agent_id=agent_id,
-                command_id=command_id,
-                item_id=item_id,
-                path=path,
-                is_dir=bool(entry.get("is_dir") or (entry.get("stat") or {}).get("is_dir")),
-                collected_at=collected_at,
-                owner=rec.get("owner"),
-                group_=rec.get("group"),
-                aces=rec.get("entries") or [],
-                posture=rec.get("posture"),
-                fidelity=str(rec.get("fidelity") or "unavailable"),
-                principals=_principals(rec),
-                digest=digest,
-            )
-        )
-        written += 1
-        await session.flush()  # the new row takes part in the retention ranking
-        # retention per (agent, path): keep the newest `keep` rows
-        if keep > 0:
-            old_ids = (
-                (
-                    await session.execute(
-                        select(PermissionSnapshot.id)
-                        .where(
-                            PermissionSnapshot.agent_id == agent_id, PermissionSnapshot.path == path
+            written += 1
+            wrote_this_chunk += 1
+            await session.flush()  # the new row takes part in the retention ranking
+            # retention per (agent, path): keep the newest `keep` rows
+            if keep > 0:
+                old_ids = (
+                    (
+                        await session.execute(
+                            select(PermissionSnapshot.id)
+                            .where(
+                                PermissionSnapshot.agent_id == agent_id,
+                                PermissionSnapshot.path == path,
+                            )
+                            .order_by(
+                                PermissionSnapshot.collected_at.desc(),
+                                PermissionSnapshot.id.desc(),
+                            )
+                            .offset(keep)
                         )
-                        .order_by(
-                            PermissionSnapshot.collected_at.desc(), PermissionSnapshot.id.desc()
-                        )
-                        .offset(keep)
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            if old_ids:
-                await session.execute(
-                    delete(PermissionSnapshot).where(PermissionSnapshot.id.in_(old_ids))
-                )
-    if written:
-        await session.commit()
+                if old_ids:
+                    await session.execute(
+                        delete(PermissionSnapshot).where(PermissionSnapshot.id.in_(old_ids))
+                    )
+        if wrote_this_chunk:
+            await session.commit()
     # 2026-08-23: the search projection carries who-can-read / world-readable /
     # owner per item (permission_projection), so a new snapshot must refresh
     # the linked items' docs. Best-effort, after the commit (invariant 5).
-    linked = [str(iid) for iid in touched_items if iid is not None]
+    linked = [str(iid) for iid in touched_items]
     if linked:
         try:
             from filearr import worker as _worker

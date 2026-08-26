@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
@@ -84,6 +85,7 @@ func startWebUI(ctx context.Context, cfg *config, webAddr string, idx *index.Sto
 				return indexRootAggregates(ctx, idx)
 			},
 			idx.ExtractState,
+			webExtras(cache, ops),
 		),
 		// Full multi-process log when a log dir is active (the container
 		// default): the daemon's ring only sees its OWN lines, but scans run as
@@ -211,6 +213,7 @@ func webSettingsSnapshot(
 	outboxPending func(ctx context.Context) (int, error),
 	rootAggregates func(ctx context.Context) (map[string][2]int64, error),
 	reextractState func(ctx context.Context) (index.ExtractState, error),
+	extras func() map[string]any,
 ) func(ctx context.Context) (map[string]any, error) {
 	readJSON := func(name string) map[string]any {
 		b, err := os.ReadFile(filepath.Join(dataDir, name))
@@ -372,6 +375,121 @@ func webSettingsSnapshot(
 			"version":              pv.Version,
 			"path_scope":           pv.Predicates,
 		}
+		if pv.GraceExpiresAt != nil {
+			snap["policy"].(map[string]any)["grace_expires_at"] = pv.GraceExpiresAt.UTC().Format(time.RFC3339)
+		}
+		// 2026-08-25: sync status, logging, sidecar identity, the policy keys
+		// the page never showed, and the inventory configuration + last run.
+		if extras != nil {
+			for k, v := range extras() {
+				snap[k] = v
+			}
+		}
+		if st := readJSON(inventoryStatusName); st != nil {
+			snap["inventory_last"] = st
+		}
 		return snap, nil
 	}
+}
+
+// webExtras builds the 2026-08-25 additions to the Status snapshot (user
+// request: the local page never showed the inventory configuration, the sync
+// state, the log file location, or a dozen policy keys the agent honours).
+func webExtras(cache *agentcfg.ETagCache, ops *opState) func() map[string]any {
+	return func() map[string]any {
+		out := map[string]any{}
+
+		// --- sync with central ---
+		sync := map[string]any{"channels": syncStatus.snapshot()}
+		if ops != nil {
+			sync["central_maintenance"] = ops.CentralMaintenance()
+			sync["suspended"] = ops.Suspended()
+		}
+		out["sync"] = sync
+
+		// --- logging ---
+		sc := activeSidecar()
+		level, levelSource := "info", "default"
+		if sc.LogLevel != "" {
+			level, levelSource = sc.LogLevel, "sidecar"
+		}
+		if v := os.Getenv("FILEARR_AGENT_LOG_LEVEL"); v != "" {
+			level, levelSource = v, "env"
+		}
+		logging := map[string]any{
+			"dir":          activeLogDir(),
+			"rotation":     agentlog.RotationPolicy(),
+			"file_sink":    activeLogDir() != "",
+			"level":        level,
+			"level_source": levelSource,
+		}
+		out["logging"] = logging
+
+		// --- sidecar (never the enrollment token) ---
+		out["sidecar"] = map[string]any{
+			"agent_name":   sc.AgentName,
+			"config_group": sc.ConfigGroup,
+			"log_dir":      sc.LogDir,
+			"ffmpeg_path":  sc.FFmpegPath,
+			"central_url":  sc.CentralURL,
+		}
+
+		// --- policy keys honoured but never displayed ---
+		if cache != nil {
+			if doc, ok, err := cache.Load(); err == nil && ok {
+				if pol, perr := doc.Parsed(); perr == nil {
+					px := map[string]any{
+						"read_only":                    pol.ReadOnly == nil || *pol.ReadOnly,
+						"read_only_set":                pol.ReadOnly != nil,
+						"include_globs":                pol.IncludeGlobs,
+						"exclude_globs":                pol.ExcludeGlobs,
+						"presets":                      pol.Presets,
+						"watch_mode":                   derefBool(pol.WatchMode),
+						"watch_mode_set":               pol.WatchMode != nil,
+						"extract_exif":                 derefBool(pol.ExtractEXIF),
+						"extract_exif_set":             pol.ExtractEXIF != nil,
+						"content_hash_max_bytes":       derefInt64(pol.ContentHashMaxBytes),
+						"reconcile_interval_seconds":   derefInt(pol.ReconcileIntervalSeconds),
+						"poll_interval_seconds":        derefInt(pol.PollIntervalSeconds),
+						"offline_grace_seconds":        derefInt(pol.OfflineGraceSeconds),
+						"upload_rate_bytes_per_sec":    derefInt64(pol.UploadRatePerSec),
+						"update_poll_interval_seconds": derefInt(pol.UpdatePollIntervalSeconds),
+						"taxonomy_version":             derefInt(pol.TaxonomyVersion),
+					}
+					if pol.Group != nil {
+						if pol.Group.LogLevel != nil {
+							px["group_log_level"] = *pol.Group.LogLevel
+							logging["level"], logging["level_source"] = *pol.Group.LogLevel, "central (group log_level)"
+						}
+						if pol.Group.ScanScheduleCron != nil {
+							px["group_scan_schedule_cron"] = *pol.Group.ScanScheduleCron
+						}
+						if pol.Group.Inventory != nil {
+							out["inventory_config"] = pol.Group.Inventory
+						}
+					}
+					out["policy_extra"] = px
+				}
+			}
+		}
+		return out
+	}
+}
+
+func derefBool(p *bool) bool {
+	return p != nil && *p
+}
+
+func derefInt(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func derefInt64(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

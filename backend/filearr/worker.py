@@ -50,6 +50,8 @@ proc_app = procrastinate.App(
         "filearr.tasks.extract",
         "filearr.tasks.index_sync",
         "filearr.tasks.alerts",
+        # 2026-08-25: permission-snapshot ingest of uploaded inventory blobs.
+        "filearr.tasks.permissions",
         # P3-T8 local embedding pipeline (embed queue, lowest priority). Inert
         # until FILEARR_SEMANTIC_ENABLED=true.
         "filearr.tasks.embed",
@@ -626,6 +628,18 @@ async def defer_index_sync(item_ids: list[str]) -> None:
             queue="index",
             priority=get_settings().index_priority,  # UI-T14 default lane
         ).defer_async(item_ids=item_ids)
+
+
+async def defer_permission_ingest(command_id: str) -> None:
+    """Ingest a stored inventory-result blob's permission records off the
+    request path (2026-08-25). Keyed on the command id so a redelivered upload
+    (write-if-absent, same bytes) does not queue a second ingest."""
+    async with open_pool_if_needed():
+        await proc_app.configure_task(
+            "filearr.tasks.permissions.ingest_inventory_result",
+            queue="maintenance",
+            queueing_lock=f"permission-ingest-{command_id}",
+        ).defer_async(command_id=command_id)
 
 
 async def defer_agent_associate(library_ids: list[str]) -> None:
@@ -2343,7 +2357,7 @@ async def schedule_agent_inventories(timestamp: int) -> int:
 
     from filearr.agent_config import (
         inventory_command_payload,
-        inventory_roots_for_agent,
+        inventory_walk_paths,
         resolve_effective_config,
     )
     from filearr.db import SessionLocal
@@ -2412,16 +2426,16 @@ async def schedule_agent_inventories(timestamp: int) -> int:
                 continue
             if occ is None:
                 continue
-            if not (inv.get("paths") or inv.get("preset")):
-                roots = await inventory_roots_for_agent(session, agent.id)
-                if not roots:
-                    log.info(
-                        "inventory schedule: %s has no paths/preset and no libraries; skipped",
-                        agent.id,
-                    )
-                    continue
-                inv = {**inv, "paths": roots}
-            payload = inventory_command_payload(inv, scheduled=True)
+            walk = await inventory_walk_paths(
+                session, agent.id, inv, cfg.document.get("group") or {}
+            )
+            if not (walk or inv.get("preset")):
+                log.info(
+                    "inventory schedule: %s has no paths/preset and no libraries; skipped",
+                    agent.id,
+                )
+                continue
+            payload = inventory_command_payload({**inv, "paths": walk}, scheduled=True)
             session.add(
                 AgentCommand(
                     agent_id=agent.id,

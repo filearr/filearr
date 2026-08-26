@@ -509,6 +509,14 @@ async def test_permission_snapshots_from_ndjson_upload(client):
         headers={**_auth(fp), "X-Filearr-Command-Id": str(cid), "Content-Type": "application/gzip"},
     )
     assert r.status_code == 201, r.text
+    # 2026-08-25: the upload only STORES; the worker task ingests. A malformed
+    # line and an entry without a record are skipped, never fatal.
+    from filearr.tasks.permissions import ingest_inventory_result
+
+    async with maker() as s:
+        n = (await s.execute(select(func.count()).select_from(PermissionSnapshot))).scalar_one()
+    assert n == 0
+    assert (await ingest_inventory_result(str(cid)))["written"] == 1
     async with maker() as s:
         n = (await s.execute(select(func.count()).select_from(PermissionSnapshot))).scalar_one()
     assert n == 1
@@ -762,6 +770,7 @@ async def test_inventory_now_uses_effective_group_settings(client):
         "collectors": ["stat", "permissions"],
         "paths": ["D:\\"],
         "preset": "user-documents",
+        "origin": "console",
     }
     # A second request while the first is queued is a 409, not a pile-up.
     r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
@@ -780,6 +789,7 @@ async def test_inventory_now_uses_effective_group_settings(client):
         "scheduled": False,
         "collectors": ["permissions"],
         "paths": ["/srv/share"],
+        "origin": "console",
     }
 
 
@@ -818,3 +828,115 @@ async def test_permission_ingest_accepts_legacy_record_key(client):
     assert [x.path for x in rows] == ["/data/pub", "/data/x.mkv"]
     assert rows[0].aces == [] and rows[0].owner["id"] == "7"
     assert rows[1].item_id == item_id  # linked through the library root
+
+
+async def test_upload_defers_ingest_to_worker_task(client):
+    """2026-08-25: the upload stores the blob and acks; permission_snapshots
+    are written by the worker task (inline ingest of a 100k-entry blob took
+    minutes and the agent's HTTP client timed out waiting for this ack)."""
+    from filearr.models import PermissionSnapshot
+    from filearr.tasks.permissions import ingest_inventory_result
+
+    c, maker, _, _ = client
+    agent_id, item_id, fp = await _seed(maker)
+    async with maker() as s:
+        lib = (await s.execute(select(Library))).scalars().one()
+        lib.source_agent_id = agent_id
+        await s.commit()
+    cid = await _mk_inventory_command(maker, agent_id, item_id)
+    lines = [
+        json.dumps({"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()}),
+        json.dumps({"path": "/data/pub", "rel": "pub", "is_dir": True, "record": _perm_record()}),
+    ]
+    blob = gzip.compress(("\n".join(lines) + "\n").encode())
+    r = await c.post(
+        f"/api/v1/agents/{agent_id}/inventory-results",
+        content=blob,
+        headers={**_auth(fp), "Content-Type": "application/gzip", "X-Filearr-Command-Id": str(cid)},
+    )
+    assert r.status_code == 201, r.text
+    async with maker() as s:
+        n = (await s.execute(select(func.count()).select_from(PermissionSnapshot))).scalar_one()
+    assert n == 0  # nothing inline any more
+    out = await ingest_inventory_result(str(cid))
+    assert out["written"] == 2
+    async with maker() as s:
+        rows = (
+            await s.execute(select(PermissionSnapshot).order_by(PermissionSnapshot.path))
+        ).scalars().all()
+    assert [x.path for x in rows] == ["/data/pub", "/data/x.mkv"]
+    assert rows[1].item_id == item_id
+    # Re-running the task over the same blob is a no-op (digest gate).
+    assert (await ingest_inventory_result(str(cid)))["written"] == 0
+
+
+async def test_inventory_now_inherits_scan_paths(client):
+    c, maker, _, _ = client
+    agent_id, _, _fp = await _seed(maker)
+    async with maker() as s:
+        lib = (await s.execute(select(Library))).scalars().one()
+        lib.source_agent_id = agent_id
+        await s.commit()
+    await _seed_global_inventory(
+        maker,
+        {
+            "enabled": True,
+            "collectors": ["permissions"],
+            "paths": ["/extra"],
+            "inherit_scan_paths": True,
+            "max_entries": 250000,
+        },
+    )
+    async with maker() as s:
+        from filearr.models import AgentConfigGroup, AgentConfigGroupVersion
+
+        g = (
+            await s.execute(select(AgentConfigGroup).where(AgentConfigGroup.is_system.is_(True)))
+        ).scalars().one()
+        v = (
+            await s.execute(
+                select(AgentConfigGroupVersion).where(
+                    AgentConfigGroupVersion.group_id == g.id,
+                    AgentConfigGroupVersion.version == g.current_version,
+                )
+            )
+        ).scalars().one()
+        v.settings = {
+            **v.settings,
+            "scan_selections": [
+                {"paths": ["%USERPROFILE%/Documents"], "enabled": True},
+                {"paths": ["/disabled"], "enabled": False},
+            ],
+        }
+        await s.commit()
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory")
+    assert r.status_code == 201, r.text
+    payload = r.json()["payload"]
+    assert payload["paths"] == ["/extra", "/data", "%USERPROFILE%/Documents"]
+    assert payload["max_entries"] == 250000
+
+
+async def test_agent_can_request_its_own_inventory_run(client):
+    """2026-08-25: the agent-plane request endpoint (local web UI button)."""
+    c, maker, _, _ = client
+    agent_id, _, fp = await _seed(maker)
+    other_id, _, _other_fp = await _seed(maker)
+    async with maker() as s:
+        for lib in (await s.execute(select(Library))).scalars().all():
+            lib.source_agent_id = agent_id
+        await s.commit()
+    await _seed_global_inventory(maker, {"enabled": True, "collectors": ["permissions"]})
+    # No credential -> 401/403, never a queued command.
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory/request")
+    assert r.status_code in (401, 403), r.text
+    # Another agent's credential cannot queue a run for this one.
+    r = await c.post(f"/api/v1/agents/{other_id}/inventory/request", headers=_auth(fp))
+    assert r.status_code in (401, 403, 404), r.text
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory/request", headers=_auth(fp))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["kind"] == "inventory" and body["requested_by"] is None
+    assert body["payload"]["origin"] == "agent-local"
+    assert body["payload"]["collectors"] == ["permissions"]
+    r = await c.post(f"/api/v1/agents/{agent_id}/inventory/request", headers=_auth(fp))
+    assert r.status_code == 409, r.text

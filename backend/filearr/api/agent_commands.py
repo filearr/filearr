@@ -817,11 +817,27 @@ async def inventory_agent_now(
     was the only path to a run -- and its schedule field was hidden. 422 when
     nothing says what to collect or where; 409 while a run is queued/running
     (a second walk would race the first's result upload)."""
+    agent = await _live_agent(session, agent_id)
+    cmd = await _queue_inventory_run(session, agent, body, request, origin="console")
+    return CommandOut.of(cmd)
+
+
+async def _queue_inventory_run(
+    session: AsyncSession,
+    agent: Agent,
+    body: InventoryRunIn,
+    request: Request,
+    *,
+    origin: str,
+) -> AgentCommand:
+    """Shared by the console button and the agent-local button: resolve the
+    agent's effective ``inventory`` block (+ overrides), refuse an empty run
+    (422) or a duplicate (409), enqueue, audit."""
     from filearr import agent_config
 
-    agent = await _live_agent(session, agent_id)
     effective = await agent_config.resolve_effective_config(session, agent)
-    inv = dict((effective.document.get("group") or {}).get("inventory") or {})
+    group = effective.document.get("group") or {}
+    inv = dict(group.get("inventory") or {})
     if body.collectors is not None:
         inv["collectors"] = body.collectors
     if body.paths is not None:
@@ -832,19 +848,17 @@ async def inventory_agent_now(
         raise HTTPException(
             422, "no inventory collectors configured for this agent's groups"
         )
-    if not (inv.get("paths") or inv.get("preset")):
-        # Nothing authored -> the agent's own scan roots (its libraries).
-        inv["paths"] = await agent_config.inventory_roots_for_agent(session, agent_id)
-        if not inv["paths"]:
-            raise HTTPException(
-                422,
-                "nothing to walk: the agent's groups name no inventory paths or preset "
-                "and the agent has no libraries (scan roots) yet",
-            )
+    inv["paths"] = await agent_config.inventory_walk_paths(session, agent.id, inv, group)
+    if not (inv["paths"] or inv.get("preset")):
+        raise HTTPException(
+            422,
+            "nothing to walk: the agent's groups name no inventory paths or preset "
+            "and the agent has no libraries (scan roots) yet",
+        )
     in_flight = (
         await session.execute(
             select(AgentCommand.id).where(
-                AgentCommand.agent_id == agent_id,
+                AgentCommand.agent_id == agent.id,
                 AgentCommand.kind == "inventory",
                 AgentCommand.status.in_(("pending", "picked_up")),
             )
@@ -853,8 +867,9 @@ async def inventory_agent_now(
     if in_flight is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "inventory already queued or running")
     payload = agent_config.inventory_command_payload(inv, scheduled=False)
+    payload["origin"] = origin
     cmd = _enqueue_agent_scoped(
-        agent_id,
+        agent.id,
         "inventory",
         payload,
         request,
@@ -868,11 +883,35 @@ async def inventory_agent_now(
         principal_id=audit.actor_id(request),
         details={
             "command_id": str(cmd.id),
-            "agent_id": str(agent_id),
+            "agent_id": str(agent.id),
             "kind": "inventory",
             "collectors": payload["collectors"],
+            "origin": origin,
         },
     )
+    return cmd
+
+
+@router.post(
+    "/agents/{agent_id}/inventory/request",
+    response_model=CommandOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_agents_enabled)],
+)
+async def inventory_agent_request(
+    agent_id: uuid.UUID,
+    request: Request,
+    body: InventoryRunIn = Body(default_factory=InventoryRunIn),
+    session: AsyncSession = Depends(get_session),
+) -> CommandOut:
+    """Agent plane (2026-08-25): the agent asks central to queue an inventory
+    run for ITSELF -- the local web UI's "inventory now" button. Authenticated
+    like every agent-plane call (bearer fingerprint / mTLS); the agent can
+    only ever request its own run. Same resolution, 422/409 rules and audit
+    as the console endpoint above, tagged ``origin: agent-local`` in the
+    payload so the command history shows who asked."""
+    agent = await _authenticate_agent(session, agent_id, request)
+    cmd = await _queue_inventory_run(session, agent, body, request, origin="agent-local")
     return CommandOut.of(cmd)
 
 

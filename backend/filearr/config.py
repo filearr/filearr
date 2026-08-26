@@ -1236,7 +1236,10 @@ class Settings(BaseSettings):
     # /agents/{id}/inventory-results. A small result inlines in the command
     # completion (agent_command_result_max_bytes); a larger one uploads here. 8 MiB
     # mirrors the thumbnail/small-blob posture (NOT the multi-GB staging plane).
-    agent_inventory_result_max_bytes: int = 8 * 1024 * 1024
+    # 2026-08-25: 8 MiB refused a 100k-entry permissions blob (gzip NDJSON of
+    # full ACL records). The blob lands on disk and is ingested by a worker task,
+    # so the cap only bounds one request body held in memory.
+    agent_inventory_result_max_bytes: int = 64 * 1024 * 1024
     # Directory the inventory-results receiver writes ``<command_id>.ndjson.gz``
     # under. None => ``{config_dir}/inventory`` (writable central disk, not a media
     # mount — invariant 6).

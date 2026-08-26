@@ -89,6 +89,11 @@ type PollerConfig struct {
 	// its concern (the poll loop ignores them).
 	AfterFetch func(context.Context, PolicyDoc)
 
+	// OnResult, if set, receives the outcome of every poll cycle (2026-08-25,
+	// the local web UI's "Sync with central" panel): err nil on success, else
+	// the failure and the backoff about to be slept. Must be cheap.
+	OnResult func(err error, backoff time.Duration)
+
 	// Test seams.
 	Now    func() time.Time
 	Sleep  func(context.Context, time.Duration) bool // false => ctx cancelled
@@ -110,6 +115,7 @@ type Poller struct {
 	minInterval     time.Duration
 
 	afterFetch func(context.Context, PolicyDoc)
+	onResult   func(err error, backoff time.Duration)
 
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) bool
@@ -145,6 +151,7 @@ func NewPoller(cfg PollerConfig) *Poller {
 		defaultInterval: cfg.DefaultInterval,
 		minInterval:     cfg.MinInterval,
 		afterFetch:      cfg.AfterFetch,
+		onResult:        cfg.OnResult,
 		now:             cfg.Now,
 		sleep:           cfg.Sleep,
 		jitter:          cfg.Jitter,
@@ -191,9 +198,15 @@ func (p *Poller) Run(ctx context.Context) error {
 			}
 			wait = p.backoff.Next()
 			p.log.Warn("policy poll failed; keeping last-known policy", "backoff", wait.String(), "err", err)
+			if p.onResult != nil {
+				p.onResult(err, wait)
+			}
 		} else {
 			p.backoff.Reset()
 			wait = p.nextInterval(doc)
+			if p.onResult != nil {
+				p.onResult(nil, 0)
+			}
 		}
 		if !p.sleep(ctx, wait) {
 			return ctx.Err()

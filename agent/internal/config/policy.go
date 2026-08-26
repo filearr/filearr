@@ -403,6 +403,24 @@ type GroupSettings struct {
 	// When set, the daemon live-retunes agentlog on every policy apply; absent
 	// = the local flag/env/sidecar resolution stands.
 	LogLevel *string `json:"log_level"`
+	// Inventory (2026-08-25): the group's host-inventory block, read here ONLY
+	// for display on the local web UI — central enforces it (the schedule tick
+	// enqueues the commands). Unknown sub-keys are ignored, not rejected.
+	Inventory *InventoryGroup `json:"inventory"`
+}
+
+// InventoryGroup mirrors central's InventoryConfig (filearr.agent_config) for
+// the local Status page: what collects, where, on what schedule.
+type InventoryGroup struct {
+	Enabled          bool           `json:"enabled"`
+	Collectors       []string       `json:"collectors"`
+	ScheduleCron     string         `json:"schedule_cron"`
+	ScheduleTZ       string         `json:"schedule_tz"`
+	Paths            []string       `json:"paths"`
+	Preset           string         `json:"preset"`
+	InheritScanPaths bool           `json:"inherit_scan_paths"`
+	MaxEntries       int            `json:"max_entries"`
+	Permissions      map[string]any `json:"permissions"`
 }
 
 type PolicyDoc struct {

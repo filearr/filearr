@@ -347,6 +347,7 @@ func (ws *WebUIServer) buildHandler(auth webAuth) http.Handler {
 	mux.Handle("POST "+pathControlScanNow, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlScanNow)))
 	mux.Handle("POST "+pathControlSchedule, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlSchedule)))
 	mux.Handle("POST "+pathControlRoots, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlRoots)))
+	mux.Handle("POST "+pathControlInventoryNow, ws.mutationGate(auth, http.HandlerFunc(ws.handleControlInventoryNow)))
 	mux.Handle("GET /", ws.staticHandler())
 
 	cop := http.NewCrossOriginProtection()

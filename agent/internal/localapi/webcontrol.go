@@ -59,15 +59,18 @@ const (
 	pathControlScanNow  = "/api/control/scan-now"
 	pathControlSchedule = "/api/control/schedule"
 	pathControlRoots    = "/api/control/roots"
+	// 2026-08-25: ask central to enqueue one host-inventory run for this agent.
+	pathControlInventoryNow = "/api/control/inventory-now"
 )
 
 // controlMutationPaths is the EXACT set of paths the method backstop lets a POST
 // reach. Everything else keeps 405ing every non-GET/HEAD verb.
 var controlMutationPaths = map[string]bool{
-	pathControlPause:    true,
-	pathControlScanNow:  true,
-	pathControlSchedule: true,
-	pathControlRoots:    true,
+	pathControlPause:        true,
+	pathControlScanNow:      true,
+	pathControlSchedule:     true,
+	pathControlRoots:        true,
+	pathControlInventoryNow: true,
 }
 
 // ControlsState is the agent-supplied half of the local-controls snapshot: the
@@ -167,6 +170,12 @@ type ControlSeams struct {
 	SetLocalPaused func(ctx context.Context, paused bool) error
 	// ScanNow triggers one immediate scan (no-op if one is already running).
 	ScanNow func(ctx context.Context) error
+	// InventoryNow asks CENTRAL to enqueue one inventory command for this agent
+	// (2026-08-25). Inventory results only have a home on central, so the run
+	// stays a central command that this agent's poller picks up; the returned
+	// map is central's queued-command body. An error carries central's detail
+	// (409 already queued/running, 422 nothing configured, or unreachable).
+	InventoryNow func(ctx context.Context) (map[string]any, error)
 	// SetSchedule persists the local schedule overrides.
 	SetSchedule func(ctx context.Context, edit ScheduleEdit) error
 	// AddRoot / RemoveRoot edit the agent's scan roots (scan.json).
@@ -355,6 +364,44 @@ func (ws *WebUIServer) handleControlPause(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleControlInventoryNow asks central to queue one inventory run for this
+// agent. Gated by the same local_scan_control permission as "scan now": both
+// are "make this machine do work now" decisions.
+func (ws *WebUIServer) handleControlInventoryNow(w http.ResponseWriter, r *http.Request) {
+	if _, ok := ws.controlGate(w, r, "scan"); !ok {
+		return
+	}
+	if ws.cfg.Controls.InventoryNow == nil {
+		writeError(w, http.StatusServiceUnavailable, errorBody{Error: "inventory trigger is not available on this agent", Code: "control_unavailable"})
+		return
+	}
+	if st, err := ws.controlState(r.Context()); err == nil && st.CentralSuspended {
+		writeError(w, http.StatusConflict, errorBody{
+			Error: "this agent is suspended by central; resume it from the console first",
+			Code:  "central_suspended",
+		})
+		return
+	}
+	out, err := ws.cfg.Controls.InventoryNow(r.Context())
+	if err != nil {
+		ws.log.Warn("local controls: inventory request refused or failed", "err", err)
+		// Central's own refusals (already queued, nothing configured) and an
+		// unreachable central all surface verbatim: the operator standing at
+		// this machine needs the reason, not a generic failure.
+		writeError(w, http.StatusBadGateway, errorBody{
+			Error: "central did not queue the inventory run: " + err.Error(),
+			Code:  "central_refused",
+		})
+		return
+	}
+	ws.log.Info("local controls: inventory run requested from the local web UI")
+	resp := map[string]any{"ok": true, "queued": true}
+	if id, ok := out["id"]; ok {
+		resp["command_id"] = id
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleControlScanNow triggers one immediate scan.

@@ -85,6 +85,11 @@ type Config struct {
 
 	// Clock is injectable for age-trigger tests (nil => time.Now).
 	Clock func() time.Time
+
+	// OnResult, if set, receives the outcome of every flush attempt (2026-08-25:
+	// the local web UI's "Sync with central" panel): err nil on success, else
+	// the failure and the backoff the loop is about to sleep. Must be cheap.
+	OnResult func(err error, backoff time.Duration)
 }
 
 // Replicator drains the outbox to central's replication endpoint. One instance
@@ -100,6 +105,7 @@ type Replicator struct {
 	maxAge   time.Duration
 	poll     time.Duration
 	backoff  *Backoff
+	onResult func(err error, backoff time.Duration)
 	log      *slog.Logger
 	clock    func() time.Time
 	observer Observer
@@ -121,6 +127,7 @@ func NewReplicator(ob *Outbox, cfg Config) *Replicator {
 		maxAge:   cfg.MaxAge,
 		poll:     cfg.Poll,
 		backoff:  NewBackoff(cfg.Backoff),
+		onResult: cfg.OnResult,
 		log:      cfg.Logger,
 		clock:    cfg.Clock,
 		observer: cfg.Observer,
@@ -262,6 +269,9 @@ func (r *Replicator) Run(ctx context.Context) error {
 			}
 			d := r.backoff.Next()
 			r.log.Warn("replication flush failed; backing off", "backoff", d.String(), "err", err)
+			if r.onResult != nil {
+				r.onResult(err, d)
+			}
 			if !sleepCtx(ctx, d) {
 				return ctx.Err()
 			}
@@ -277,6 +287,9 @@ func (r *Replicator) Run(ctx context.Context) error {
 		}
 		deadEndArmed = true
 		r.backoff.Reset()
+		if r.onResult != nil {
+			r.onResult(nil, 0)
+		}
 	}
 }
 

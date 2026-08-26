@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/filearr/filearr/agent/internal/agentlog"
@@ -65,6 +66,11 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),
 		Logger:       log,
 		OnAuthError:  onAuthError,
+		// Local "Sync with central" panel (2026-08-25).
+		OnPollResult: syncStatus.reporter("commands"),
+		// The local Status page's "last inventory run" (2026-08-25): persisted
+		// per report so it survives the run and is readable cross-process.
+		InventoryStatus: func(st map[string]any) { writeJSONFile(dataDir, inventoryStatusName, st) },
 		// Console "update now" button → self_update command → one immediate
 		// check-and-apply. Nil when self-update is disabled (the handler then
 		// completes ok=false with an explanatory result).
@@ -99,6 +105,9 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 			return reconcileResultMap(res), err
 		},
 	})
+	// The local web UI's "inventory now" seam asks this poller to request a
+	// run from central (see localcontrols.go).
+	activeCommandPoller.Store(poller)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -362,4 +371,30 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// inventoryStatusName is the data-dir file the local Status page reads for the
+// running/last inventory command (written through Config.InventoryStatus).
+const inventoryStatusName = "inventory-status.json"
+
+// activeCommandPoller is the daemon's command poller once started, for the
+// local web UI's inventory-now seam. Nil until startCommandPoller ran.
+var activeCommandPoller atomic.Pointer[commands.Poller]
+
+// writeJSONFile atomically replaces <dataDir>/<name> with v as JSON. Best
+// effort: a status file that fails to write is logged, never fatal.
+func writeJSONFile(dataDir, name string, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dataDir, name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		newLogger().Warn("write status file failed", "file", name, "err", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		newLogger().Warn("replace status file failed", "file", name, "err", err)
+	}
 }

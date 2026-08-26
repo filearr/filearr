@@ -15,8 +15,13 @@
   --code-bg: #eef1f5;
 }
 
+/* Dark palette. Applied by the OS preference unless the user pinned light
+   (data-theme="light"), and always when the user pinned dark (data-theme=
+   "dark"). The toggle lives in the topbar; the choice persists in
+   localStorage and is applied before first paint (see app.js head). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #14171c;
     --fg: #e6e9ee;
     --muted: #9aa2af;
@@ -32,6 +37,23 @@
     --code-bg: #21262e;
   }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14171c;
+  --fg: #e6e9ee;
+  --muted: #9aa2af;
+  --border: #2b3038;
+  --row-hover: #1d2229;
+  --accent: #6ea0ff;
+  --banner-info-bg: #16243d;
+  --banner-info-fg: #a9c7ff;
+  --banner-warn-bg: #2e2415;
+  --banner-warn-fg: #f0c67a;
+  --error-bg: #38181a;
+  --error-fg: #f2a1a1;
+  --code-bg: #21262e;
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 
@@ -173,7 +195,16 @@ tbody tr:hover { background: var(--row-hover); }
   border-radius: 0.5rem; padding: 0.25rem 0.75rem; font: inherit;
   cursor: pointer; color: inherit;
 }
-.tab.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+.tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.theme-toggle { margin-left: 0.5rem; padding: 0.25rem 0.55rem; }
+/* Sync chip in the topbar: one glance at central's reachability. */
+.chip { border-radius: 999px; padding: 0.15rem 0.6rem; font-size: 0.78rem; border: 1px solid var(--border); }
+.chip-ok { background: #dcfce7; color: #166534; border-color: transparent; }
+.chip-warn { background: var(--banner-warn-bg); color: var(--banner-warn-fg); border-color: transparent; }
+.chip-bad { background: var(--error-bg); color: var(--error-fg); border-color: transparent; }
+.chip-muted { color: var(--muted); }
+:root[data-theme="dark"] .chip-ok { background: #14351f; color: #86efac; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .chip-ok { background: #14351f; color: #86efac; } }
 .panel-title { margin: 0.5rem 0 0.25rem; font-size: 1.05rem; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin-top: 0.75rem; }
 .kv dt { font-weight: 600; white-space: nowrap; }

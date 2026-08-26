@@ -19,6 +19,8 @@
       <button id="tab-logs" class="tab" role="tab" aria-selected="false">Logs</button>
     </nav>
     <span id="index-status" class="status" aria-live="polite"></span>
+    <span id="sync-chip" class="chip chip-muted" title="Sync with central — details on the Status tab" hidden></span>
+    <button type="button" id="theme-toggle" class="tab theme-toggle" title="Theme: follows the system. Click to cycle system → light → dark." aria-label="Toggle colour theme">◐</button>
   </header>
 
   <div id="banner-stale" class="banner banner-warn" hidden>
@@ -156,6 +158,21 @@
         <button type="button" id="ctl-scan-now" class="btn btn-accent">Scan now</button>
       </div>
       <p id="ctl-scan-why" class="hint"></p>
+
+      <h3 class="subhead">Host inventory</h3>
+      <p id="ctl-inv-state" class="meta" aria-live="polite"></p>
+      <div class="toolbar">
+        <button type="button" id="ctl-inventory-now" class="btn btn-accent">Run inventory now</button>
+      </div>
+      <p id="ctl-inv-why" class="hint"></p>
+      <p class="hint">Inventory (the collectors — <code>stat</code>, <code>owner</code>,
+        <code>perms</code>, <code>permissions</code> — over this agent's scan roots or the
+        group's inventory paths) is <strong>coordinated by central</strong>: this
+        button asks central to queue the run, this agent picks it up on its next
+        command poll (~1 min), and the results — permission snapshots included —
+        land on central. What it collects and where is configured in the central
+        console's group settings, Inventory section; the effective configuration is
+        shown on the <strong>Status</strong> tab.</p>
 
       <h3 class="subhead">Schedule</h3>
       <div class="ctl-grid">

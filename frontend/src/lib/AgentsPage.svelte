@@ -1089,6 +1089,8 @@ ${detail}
     /** Clock the inventory schedule is read against: "" = UTC, an IANA zone
      *  name, or "agent" = each member agent's own local time. */
     invScheduleTz: string;
+    invInheritScanPaths: boolean;
+    invMaxEntries: string;
     invPathsText: string;
     invPreset: string;
     selections: SelRow[];
@@ -1480,6 +1482,8 @@ ${detail}
       collectorsText: "",
       invScheduleCron: "",
       invScheduleTz: "",
+      invInheritScanPaths: true,
+      invMaxEntries: "",
       invPathsText: "",
       invPreset: "",
       selections: [],
@@ -1517,6 +1521,8 @@ ${detail}
       collectorsText: (s.inventory?.collectors ?? []).join(", "),
       invScheduleCron: s.inventory?.schedule_cron ?? "",
       invScheduleTz: s.inventory?.schedule_tz ?? "",
+      invInheritScanPaths: s.inventory?.inherit_scan_paths ?? false,
+      invMaxEntries: s.inventory?.max_entries ? String(s.inventory.max_entries) : "",
       invPathsText: (s.inventory?.paths ?? []).join("\n"),
       invPreset: s.inventory?.preset ?? "",
       selections: (s.scan_selections ?? []).map((sel) => ({
@@ -1643,6 +1649,8 @@ ${detail}
       const invPaths = splitLines(f.invPathsText);
       if (invPaths.length) inventory.paths = invPaths;
       if (f.invPreset.trim()) inventory.preset = f.invPreset.trim();
+      if (f.invInheritScanPaths) inventory.inherit_scan_paths = true;
+      if (f.invMaxEntries.trim()) inventory.max_entries = Number(f.invMaxEntries.trim());
       settings.inventory = inventory;
     }
     if (f.selections.length) {
@@ -3484,8 +3492,22 @@ ${detail}
                   Uses the UTC offset each agent reports; an agent that has not reported one yet runs on UTC.
                 </p>
               {/if}
+              <div class="mt-2 grid gap-2 sm:grid-cols-2">
+                <label class="inline-flex items-start gap-2 text-xs text-slate-500"
+                  title="Also walk what the agent scans: its library roots (as central knows them) plus the explicit paths of this group's enabled scan selections. Combined with any paths listed below. With no paths and no preset the run walks the scan roots anyway — ticking this makes that explicit and lets you add extra paths on top.">
+                  <input type="checkbox" class="mt-0.5" bind:checked={dialog.invInheritScanPaths} />
+                  <span>Inherit the scan paths<span class="block text-[11px] text-slate-400">agent's library roots + this group's scan selections</span></span>
+                </label>
+                <label class="block text-xs text-slate-500"
+                  title="Maximum entries one run collects before the agent stops walking (the summary then says entries_capped). The agent default is 100,000 — a drive with more files than that is silently truncated unless this is raised. 1,000 – 5,000,000.">
+                  Max entries per run
+                  <input type="number" min="1000" max="5000000" step="1000"
+                    class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+                    placeholder="100000 (agent default)" bind:value={dialog.invMaxEntries} />
+                </label>
+              </div>
               <label class="mt-2 block text-xs text-slate-500"
-                title="Path specs the run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). Leave blank, with no preset, to walk the agent's own scan roots — the root paths of its libraries, which is what you want for permission snapshots of everything it catalogs.">
+                title="Extra path specs the run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). Blank with no preset and the box above unticked still walks the agent's scan roots.">
                 Paths (one per line; blank = the agent's scan roots)
                 <textarea class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
                   rows="2" placeholder={"D:\\\nhome_glob:*"} bind:value={dialog.invPathsText}></textarea>

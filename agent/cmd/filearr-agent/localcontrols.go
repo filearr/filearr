@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"time"
@@ -37,6 +38,17 @@ func webControlSeams(daemonCtx context.Context, cfg *config, ops *opState, log *
 		},
 		ScanNow: func(_ context.Context) error {
 			return triggerScanNow(daemonCtx, cfg, log)
+		},
+		// 2026-08-25: inventory results only have a home on central, so the
+		// local button asks central to queue the run; the command poller
+		// executes it within one poll interval. The request itself is short,
+		// so the request context is fine here.
+		InventoryNow: func(ctx context.Context) (map[string]any, error) {
+			p := activeCommandPoller.Load()
+			if p == nil {
+				return nil, errors.New("the command poller is not running (agent not enrolled?)")
+			}
+			return p.RequestInventory(ctx)
 		},
 		SetSchedule: func(_ context.Context, edit localapi.ScheduleEdit) error {
 			return applyLocalScheduleEdit(dataDir, edit)

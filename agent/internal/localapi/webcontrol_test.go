@@ -12,6 +12,7 @@ package localapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,13 +23,15 @@ import (
 // recordingSeams is a ControlSeams whose actions only record that they ran, so
 // a test can assert "the handler refused BEFORE touching the daemon".
 type recordingSeams struct {
-	state       ControlsState
-	pausedCalls []bool
-	scanNow     int
-	schedule    []ScheduleEdit
-	addRoot     []string
-	removeRoot  []string
-	rootShare   []string // "path=location" per accepted share-mapping edit
+	state        ControlsState
+	pausedCalls  []bool
+	scanNow      int
+	schedule     []ScheduleEdit
+	addRoot      []string
+	removeRoot   []string
+	rootShare    []string // "path=location" per accepted share-mapping edit
+	inventoryNow int
+	inventoryErr error
 }
 
 func (rs *recordingSeams) seams() *ControlSeams {
@@ -39,7 +42,14 @@ func (rs *recordingSeams) seams() *ControlSeams {
 			rs.state.LocalPaused = p
 			return nil
 		},
-		ScanNow:     func(context.Context) error { rs.scanNow++; return nil },
+		ScanNow: func(context.Context) error { rs.scanNow++; return nil },
+		InventoryNow: func(context.Context) (map[string]any, error) {
+			rs.inventoryNow++
+			if rs.inventoryErr != nil {
+				return nil, rs.inventoryErr
+			}
+			return map[string]any{"id": "cmd-1"}, nil
+		},
 		SetSchedule: func(_ context.Context, e ScheduleEdit) error { rs.schedule = append(rs.schedule, e); return nil },
 		AddRoot:     func(_ context.Context, p string) error { rs.addRoot = append(rs.addRoot, p); return nil },
 		RemoveRoot:  func(_ context.Context, p string) error { rs.removeRoot = append(rs.removeRoot, p); return nil },
@@ -551,4 +561,29 @@ func writeTempFile(path string) error {
 func jsonPath(p string) string {
 	b, _ := json.Marshal(p)
 	return string(b[1 : len(b)-1])
+}
+
+// 2026-08-25: the local "inventory now" button asks central to queue the run.
+func TestInventoryNowQueuesViaCentral(t *testing.T) {
+	rs := &recordingSeams{}
+	ws := controlWebUI(t, allControlsPolicy, rs.seams())
+	auth, _ := newWebAuth()
+	h := ws.buildHandler(auth)
+	rec := post(t, h, auth, pathControlInventoryNow, `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rs.inventoryNow != 1 {
+		t.Fatalf("seam called %d times, want 1", rs.inventoryNow)
+	}
+	if !strings.Contains(rec.Body.String(), `"command_id":"cmd-1"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	// Central's refusal (already queued / nothing configured / unreachable)
+	// surfaces verbatim as a 502 so the operator sees the reason.
+	rs.inventoryErr = errors.New("commands inventory/request: 409 inventory already queued or running")
+	rec = post(t, h, auth, pathControlInventoryNow, `{}`)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "already queued") {
+		t.Fatalf("refusal: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }

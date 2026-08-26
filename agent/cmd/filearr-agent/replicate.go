@@ -70,6 +70,8 @@ func newReplicator(idx *index.Store, certStore *enroll.CertStore, centralURL, ag
 		Observer:    observer,
 		OnAuthError: onAuthError,
 		Paused:      paused,
+		// Local "Sync with central" panel (2026-08-25).
+		OnResult: syncStatus.reporter("replication"),
 	})
 }
 
