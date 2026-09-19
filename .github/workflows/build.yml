@@ -84,7 +84,7 @@ jobs:
       # orderable, and disagreeing with every other build path.
       - id: agentver
         run: echo "version=$(tr -d ' \r\n' < agent/VERSION)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
         with:
           context: .
@@ -158,7 +158,7 @@ jobs:
       # Same canonical agent/VERSION stamp as the main image job above.
       - id: agentver
         run: echo "version=$(tr -d ' \r\n' < agent/VERSION)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
         with:
           context: ./agent
@@ -238,7 +238,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
         with:
           # Repo root, matching docker-compose.yml's caddy service: the Dockerfile
