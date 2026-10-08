@@ -51,7 +51,7 @@ dependencies = [
     "networkx>=3.4",
     "charset-normalizer>=3.4",
     "numpy-stl==4.0.0",
-    "pypdf==6.16.1",
+    "pypdf==6.19.0",
     # P12-T5 PDF first-page thumbnails: pypdfium2 is the Apache-2.0 / BSD-3-Clause
     # Python binding over Google PDFium (bundled libpdfium is BSD-style) -- both
     # AGPL-compatible, no copyleft obligation. Chosen over pdftoppm (GPL
