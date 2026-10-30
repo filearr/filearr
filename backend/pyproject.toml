@@ -14,7 +14,7 @@ dependencies = [
     "pydantic-settings==2.15.0",
     # Database — psycopg3 (recommended async driver for new SQLAlchemy projects)
     "sqlalchemy[asyncio]==2.0.52",
-    "psycopg[binary]==3.3.4",
+    "psycopg[binary]==3.3.6",
     "alembic==1.19.1",
     # Jobs — Postgres-native queue (no Redis); 3.9 adds middleware, priorities, cron
     "procrastinate==3.9.0",
@@ -24,13 +24,13 @@ dependencies = [
     "meilisearch-python-sdk==7.5.0",
     # Extraction
     "mutagen==1.48.1",
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     "pymediainfo==7.0.1",
     "python-magic==0.4.27",
     # Defensive XML parsing for untrusted Kodi NFO sidecars (T3)
     "defusedxml==0.7.1",
     "guessit==4.4.0",
-    "tinytag==2.3.0",
+    "tinytag==2.3.2",
     # 3.8.1 -> 4.0.1 (2026-08-20): verified byte-identical digests (xxh32/64,
     # xxh3_64/128; oneshot+streaming+seeded; libxxhash 0.8.2 -> 0.8.3 — XXH3 is
     # frozen since 0.8.0). Stored quick/mid/content hashes stay valid; NO rescan.
@@ -51,7 +51,7 @@ dependencies = [
     "networkx>=3.4",
     "charset-normalizer>=3.4",
     "numpy-stl==4.0.0",
-    "pypdf==6.16.1",
+    "pypdf==6.21.2",
     # P12-T5 PDF first-page thumbnails: pypdfium2 is the Apache-2.0 / BSD-3-Clause
     # Python binding over Google PDFium (bundled libpdfium is BSD-style) -- both
     # AGPL-compatible, no copyleft obligation. Chosen over pdftoppm (GPL
@@ -68,7 +68,7 @@ dependencies = [
     "httpx==0.28.1",
     # Phase 8 alerting (P8-T4): AES-GCM envelope encryption of channel secrets
     # (SMTP password, webhook HMAC secret). Apache-2.0/BSD, no AGPL friction.
-    "cryptography==50.0.0",
+    "cryptography==50.0.2",
     # Phase 6 identity/auth (P6-T1): argon2id password hashing for LOCAL
     # accounts only (federated providers delegate credential checks to the IdP).
     # Distinct trust model from API keys (research §1.1): a human password is
@@ -111,7 +111,7 @@ dependencies = [
     "pathspec==1.1.1",
     # P3-T8 semantic search: local ONNX embedder. FIX-7 (2026-07-12) replaced
     # fastembed with a DIRECT onnxruntime path: fastembed 0.7.x pins pillow<12
-    # (unsatisfiable vs our pillow==12.3.0; pillow 11.x carries CVE-2026-25990 —
+    # (unsatisfiable vs our pillow>=12; pillow 11.x carries CVE-2026-25990 —
     # downgrade forbidden) and its main-branch relaxation has NO release
     # (qdrant/fastembed#606). filearr.embed now reproduces fastembed's exact
     # BAAI/bge-small-en-v1.5 pipeline (Qdrant/bge-small-en-v1.5-onnx-Q,
@@ -120,7 +120,7 @@ dependencies = [
     # test suite mocks the seam out entirely. onnxruntime pulls numpy (compatible
     # with the numpy-stl pin — both accept numpy 2.x).
     "onnxruntime==1.28.0",
-    "tokenizers==0.23.1",
+    "tokenizers==0.23.3",
     "huggingface-hub==1.23.0",
     # Roadmap §15 (2026-08-19): 7z and RAR member LISTING (index-only, never
     # extraction). py7zr is pure Python; rarfile parses RAR3/RAR5 headers in
