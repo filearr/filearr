@@ -33,3 +33,61 @@ export function parseBrowseHash(hash: string): { libraryId: string; path: string
 export function gotoBrowse(libraryId: string, path = ""): void {
   location.hash = browseHash(libraryId, path);
 }
+
+// Shell routing (UI-T9) — hash-based so a refresh keeps the current tab and
+// back/forward toggles between them. Lives here rather than in App.svelte so
+// the mapping is unit-testable; it takes the hash as an argument to stay
+// DOM-free.
+export type Page =
+  | "search"
+  | "libraries"
+  | "admin"
+  | "jobs"
+  | "alerts"
+  | "browse"
+  | "timeline"
+  | "reports"
+  | "agents"
+  | "taxonomy"
+  | "filter-builder"
+  | "help"
+  | "about"
+  | "account";
+
+// Human label per page; `Record<Page, …>` makes a new Page without a label a
+// type error. Doubles as the set of plain `#/<page>` routes.
+const PAGE_LABELS: Record<Page, string> = {
+  search: "Search",
+  libraries: "Libraries",
+  admin: "Admin",
+  jobs: "Jobs",
+  alerts: "Alerts",
+  browse: "Browse",
+  timeline: "Timeline",
+  reports: "Reports",
+  agents: "Agents",
+  taxonomy: "Taxonomy",
+  "filter-builder": "Filter builder",
+  help: "Help",
+  // #/about — the running build stack (versions of everything). Footer-linked
+  // rather than a nav tab: it is a reference surface, not a daily workflow.
+  about: "About",
+  // #/account — self-service profile/password/preferences (header badge link).
+  account: "Account",
+};
+
+/** Resolve a location hash to the page (and browse target) it shows. Empty or
+ *  unknown hashes fall back to search. `#/browse` alone (no library) is not a
+ *  browse route — browse is only reachable with a library id. */
+export function routeFromHash(hash: string): { page: Page; browseLib: string; browsePath: string } {
+  const browse = parseBrowseHash(hash);
+  if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
+  const name = hash.startsWith("#/") ? hash.slice(2) : "";
+  const page = name !== "browse" && Object.hasOwn(PAGE_LABELS, name) ? (name as Page) : "search";
+  return { page, browseLib: "", browsePath: "" };
+}
+
+/** `document.title` for a page, e.g. "Filter builder · Filearr". */
+export function pageTitle(page: Page): string {
+  return `${PAGE_LABELS[page]} · Filearr`;
+}

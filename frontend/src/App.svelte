@@ -1,9 +1,7 @@
 <script module lang="ts">
-  // UI-T9 — hash-based routing so a refresh keeps the current tab and
-  // back/forward toggles between them. `#/search` (default), `#/libraries`
-  // (library management, split from admin 2026-08-19), `#/admin`, `#/jobs`
-  // (UI-T10 jobs dashboard).
-  type Page = "search" | "libraries" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
+  // UI-T9 hash routing: the Page union and hash → page mapping live in
+  // lib/routes.ts so they are unit-testable.
+  import type { Page } from "./lib/routes";
 
   // Route-level code splitting: importing all pages statically made the entry
   // chunk ~870 kB, so each page is its own chunk fetched only when its route is
@@ -42,34 +40,14 @@
 </script>
 
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import LoginPage from "./lib/LoginPage.svelte";
   import { getVersion, authStatus, authMe, authLogout, type AuthMode, type AuthPrincipal } from "./lib/api";
   import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./lib/osFormat.svelte";
   import type { FormatPref } from "./lib/osFormat";
-  import { parseBrowseHash } from "./lib/routes";
-
-  function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
-    const browse = parseBrowseHash(location.hash);
-    if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
-    if (location.hash === "#/libraries") return { page: "libraries", browseLib: "", browsePath: "" };
-    if (location.hash === "#/admin") return { page: "admin", browseLib: "", browsePath: "" };
-    if (location.hash === "#/jobs") return { page: "jobs", browseLib: "", browsePath: "" };
-    if (location.hash === "#/alerts") return { page: "alerts", browseLib: "", browsePath: "" };
-    if (location.hash === "#/timeline") return { page: "timeline", browseLib: "", browsePath: "" };
-    if (location.hash === "#/reports") return { page: "reports", browseLib: "", browsePath: "" };
-    if (location.hash === "#/agents") return { page: "agents", browseLib: "", browsePath: "" };
-    if (location.hash === "#/taxonomy") return { page: "taxonomy", browseLib: "", browsePath: "" };
-    if (location.hash === "#/filter-builder") return { page: "filter-builder", browseLib: "", browsePath: "" };
-    if (location.hash === "#/help") return { page: "help", browseLib: "", browsePath: "" };
-    // #/account — self-service profile/password/preferences (header badge link).
-    if (location.hash === "#/account") return { page: "account", browseLib: "", browsePath: "" };
-    // #/about — the running build stack (versions of everything). Footer-linked
-    // rather than a nav tab: it is a reference surface, not a daily workflow.
-    if (location.hash === "#/about") return { page: "about", browseLib: "", browsePath: "" };
-    return { page: "search", browseLib: "", browsePath: "" };
-  }
+  import { routeFromHash, pageTitle } from "./lib/routes";
+  import { announcement, announce } from "./lib/announce.svelte";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -82,7 +60,7 @@
           ? "Linux"
           : "other";
 
-  const initialRoute = routeFromHash();
+  const initialRoute = routeFromHash(location.hash);
   let page = $state<Page>(initialRoute.page);
   let browseLib = $state<string>(initialRoute.browseLib);
   let browsePath = $state<string>(initialRoute.browsePath);
@@ -142,25 +120,56 @@
     await probeAuth();
   }
 
-  function goto(p: Page) {
-    page = p;
-    const hash = p === "search" ? "#/search" : `#/${p}`;
-    if (location.hash !== hash) location.hash = hash;
-  }
+  // Last hash that was a real route, so the skip link's `#main` can be undone.
+  let lastRouteHash = location.hash;
 
-  // React to back/forward + manual hash edits. Guarded so it only reassigns when
-  // the derived page actually changes (avoids redundant $state churn).
+  // React to nav links, back/forward and manual hash edits. Guarded so it only
+  // reassigns when the derived page actually changes (avoids redundant $state
+  // churn).
   function onHashChange() {
-    const next = routeFromHash();
+    if (location.hash === "#main") {
+      // The skip link is an in-page anchor, not a route: keep the current page
+      // and put the route hash back so refresh/bookmark still work. The browser
+      // has already moved focus to <main>, so nothing to focus here.
+      history.replaceState(null, "", lastRouteHash || "#/search");
+      return;
+    }
+    lastRouteHash = location.hash;
+    const next = routeFromHash(location.hash);
     if (next.page !== page) page = next.page;
     if (next.browseLib !== browseLib) browseLib = next.browseLib;
     if (next.browsePath !== browsePath) browsePath = next.browsePath;
   }
 
+  // Mirrors applyTheme's resolution so the toggle reports the shown theme.
+  // matchMedia is not reactive, but toggleDark always sets an explicit mode.
+  const isDark = $derived(
+    theme.mode === "dark" || (theme.mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches),
+  );
+
   function toggleDark() {
     theme.mode = document.documentElement.classList.contains("dark") ? "light" : "dark";
     applyTheme();
   }
+
+  let mainEl = $state<HTMLElement | undefined>();
+  // False until the first run, so the initial render neither steals focus nor
+  // announces — only later route changes do.
+  let routed = false;
+  $effect(() => {
+    document.title = pageTitle(page);
+    // Only `page` should re-run this: a login/logout flipping `gated` is not a
+    // route change, so read the rest untracked.
+    untrack(() => {
+      if (routed && !gated) {
+        // Without this, a keyboard/screen-reader user stays on the nav link
+        // after the content under it has been replaced.
+        mainEl?.focus({ preventScroll: false });
+        announce(pageTitle(page).replace(" · Filearr", "") + " page");
+      }
+    });
+    routed = true;
+  });
 
   onMount(() => {
     applyTheme();
@@ -176,6 +185,7 @@
   <LoginPage mode={authMode} {oidcEnabled} onAuthed={probeAuth} />
 {:else}
 <div class="mx-auto max-w-screen-2xl px-4 py-4 sm:px-6 lg:px-8">
+  <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:shadow dark:focus:bg-slate-900">Skip to main content</a>
   <!-- 2026-08-26 (user report, phone): this row used to be a single
        non-wrapping flex line — nine nav buttons plus account / paths / theme —
        so on a 390 px screen the document was ~900 px wide, Safari zoomed out
@@ -183,36 +193,27 @@
        lines and the utility controls sit on their own line under it. -->
   <header class="flex flex-wrap items-center gap-x-3 gap-y-2 py-4">
     <h1 class="text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
-    <nav class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'search' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("search")}>Search</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'libraries' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("libraries")}>Libraries</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'admin' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("admin")}>Admin</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'jobs' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("jobs")}>Jobs</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'alerts' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("alerts")}>Alerts</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'timeline' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("timeline")}>Timeline</button>
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'reports' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("reports")}>Reports</button>
+    <!-- Real links (not buttons) so they can be opened in a new tab and the
+         hash router does the navigation. aria-current + font weight mark the
+         active page without relying on colour alone. -->
+    {#snippet navLink(p: Page, label: string)}
+      <a
+        href="#/{p}"
+        aria-current={page === p ? "page" : undefined}
+        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-[var(--accent)] font-semibold text-white' : 'text-slate-500'}">{label}</a>
+    {/snippet}
+    <nav aria-label="Primary" class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
+      {@render navLink("search", "Search")}
+      {@render navLink("libraries", "Libraries")}
+      {@render navLink("admin", "Admin")}
+      {@render navLink("jobs", "Jobs")}
+      {@render navLink("alerts", "Alerts")}
+      {@render navLink("timeline", "Timeline")}
+      {@render navLink("reports", "Reports")}
       {#if agentsEnabled}
-        <button
-          class="rounded-lg px-3 py-1 text-sm {page === 'agents' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-          onclick={() => goto("agents")}>Agents</button>
+        {@render navLink("agents", "Agents")}
       {/if}
-      <button
-        class="rounded-lg px-3 py-1 text-sm {page === 'filter-builder' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
-        onclick={() => goto("filter-builder")}>Filter builder</button>
+      {@render navLink("filter-builder", "Filter builder")}
     </nav>
     <div class="grow"></div>
     <div class="flex flex-wrap items-center gap-2">
@@ -238,6 +239,7 @@
       </select>
     </label>
     <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+      aria-pressed={isDark} aria-label="Toggle dark theme"
       onclick={toggleDark}>Theme</button>
     </div>
   </header>
@@ -257,6 +259,9 @@
     </div>
   {/snippet}
 
+  <!-- tabindex=-1: focusable by script (route change) and by the skip link,
+       but not a Tab stop. -->
+  <main id="main" tabindex="-1" class="outline-none" bind:this={mainEl}>
   {#if page === "libraries"}
     {#await loadPage("libraries")}{@render pageLoading()}{:then m}<m.default {me} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "admin"}
@@ -290,6 +295,11 @@
   {:else}
     {#await loadPage("search")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {/if}
+  </main>
+
+  <!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
+       <main> so page swaps never unmount it mid-announcement. -->
+  <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
     <span title={buildStamp ?? "no build stamp (dev)"}>
