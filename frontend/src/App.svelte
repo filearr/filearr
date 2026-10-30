@@ -120,7 +120,7 @@
     await probeAuth();
   }
 
-  // Last hash that was a real route, so the skip link's `#main` can be undone.
+  // Last hash that was a real route, so a stray `#main` can be undone.
   let lastRouteHash = location.hash;
 
   // React to nav links, back/forward and manual hash edits. Guarded so it only
@@ -128,9 +128,8 @@
   // churn).
   function onHashChange() {
     if (location.hash === "#main") {
-      // The skip link is an in-page anchor, not a route: keep the current page
-      // and put the route hash back so refresh/bookmark still work. The browser
-      // has already moved focus to <main>, so nothing to focus here.
+      // Safety net: the skip link handles its own click, so `#main` only lands
+      // here if it is reached some other way. Not a route: restore the last one.
       history.replaceState(null, "", lastRouteHash || "#/search");
       return;
     }
@@ -153,19 +152,25 @@
   }
 
   let mainEl = $state<HTMLElement | undefined>();
+  // The title follows `gated` too, so the login wall is not titled after the
+  // page behind it. Kept apart from the focus/announce effect below, which
+  // must not re-run on login/logout.
+  $effect(() => {
+    document.title = gated ? "Sign in · Filearr" : pageTitle(page);
+  });
   // False until the first run, so the initial render neither steals focus nor
   // announces — only later route changes do.
   let routed = false;
   $effect(() => {
-    document.title = pageTitle(page);
-    // Only `page` should re-run this: a login/logout flipping `gated` is not a
-    // route change, so read the rest untracked.
+    // Only `page` should re-run this (read here, tracked): a login/logout
+    // flipping `gated` is not a route change, so read the rest untracked.
+    const p = page;
     untrack(() => {
       if (routed && !gated) {
         // Without this, a keyboard/screen-reader user stays on the nav link
         // after the content under it has been replaced.
         mainEl?.focus({ preventScroll: false });
-        announce(pageTitle(page).replace(" · Filearr", "") + " page");
+        announce(pageTitle(p).replace(" · Filearr", "") + " page");
       }
     });
     routed = true;
@@ -185,7 +190,9 @@
   <LoginPage mode={authMode} {oidcEnabled} onAuthed={probeAuth} />
 {:else}
 <div class="mx-auto max-w-screen-2xl px-4 py-4 sm:px-6 lg:px-8">
-  <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:shadow dark:focus:bg-slate-900">Skip to main content</a>
+  <!-- href kept for semantics; the click handler focuses <main> itself so the
+       skip does not push a `#main` history entry. -->
+  <a href="#main" onclick={(e) => { e.preventDefault(); mainEl?.focus(); }} class="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-lg focus:bg-white focus:px-3 focus:py-2 focus:text-sm focus:shadow dark:focus:bg-slate-900">Skip to main content</a>
   <!-- 2026-08-26 (user report, phone): this row used to be a single
        non-wrapping flex line — nine nav buttons plus account / paths / theme —
        so on a 390 px screen the document was ~900 px wide, Safari zoomed out
@@ -221,7 +228,7 @@
       <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
         href="#/account"
         title={`${me.username} · ${me.global_role} — account settings`}>
-        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-[var(--accent-fg)] opacity-70' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
+        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-[var(--accent-fg)]' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
       </a>
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
         onclick={doLogout}>Sign out</button>

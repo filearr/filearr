@@ -585,7 +585,7 @@
           <label class="text-xs text-slate-500" for="edit-title">Title</label>
           <input
             id="edit-title"
-            class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none focus:border-[var(--accent)] dark:border-slate-700"
+            class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="(empty clears the title)"
             bind:value={eTitle} />
 
@@ -599,7 +599,7 @@
             min="1"
             max="9999"
             step="1"
-            class="-mt-2 w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none focus:border-[var(--accent)] dark:border-slate-700"
+            class="-mt-2 w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="(empty)"
             value={eYear}
             oninput={(e) => (eYear = e.currentTarget.value)} />
@@ -608,7 +608,7 @@
           <div class="-mt-2 flex flex-wrap items-center gap-1">
             <input
               id="edit-tags"
-              class="w-44 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none focus:border-[var(--accent)] dark:border-slate-700"
+              class="w-44 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
               placeholder="add tag…"
               bind:value={eTagDraft}
               onkeydown={onTagKey}

@@ -1,20 +1,19 @@
 // Svelte 5 runes-based theme store: dark/light/system + custom accent.
 import { setShareFormat } from "./osFormat.svelte";
 import type { FormatPref } from "./osFormat";
-import { onAccentColor } from "./color";
+import { DEFAULT_ACCENT, normalizeAccent, onAccentColor } from "./color";
 
 export type Mode = "light" | "dark" | "system";
 const MODES: readonly Mode[] = ["light", "dark", "system"];
 const FORMATS: readonly FormatPref[] = ["auto", "url", "unc"];
-const HEX = /^#[0-9a-fA-F]{6}$/;
 
 const rawMode = localStorage.getItem("theme");
 const stored: Mode = MODES.includes(rawMode as Mode) ? (rawMode as Mode) : "system";
-const rawAccent = localStorage.getItem("accent");
-// indigo-600: the old indigo-500 default fell short of 4.5:1 for white text on it.
-export const DEFAULT_ACCENT = "#4f46e5";
+// Defined in color.ts (DOM-free, so normalizeAccent is testable under Node);
+// re-exported because the account page imports it from here.
+export { DEFAULT_ACCENT };
 
-export const theme = $state({ mode: stored, accent: rawAccent && HEX.test(rawAccent) ? rawAccent : DEFAULT_ACCENT });
+export const theme = $state({ mode: stored, accent: normalizeAccent(localStorage.getItem("accent")) ?? DEFAULT_ACCENT });
 
 export function applyTheme() {
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -46,8 +45,9 @@ export function applyServerPreferences(prefs: unknown): boolean {
       theme.mode = mode as Mode;
       touched = true;
     }
-    if (typeof accent === "string" && HEX.test(accent)) {
-      theme.accent = accent;
+    const a = normalizeAccent(accent);
+    if (a) {
+      theme.accent = a;
       touched = true;
     }
   }

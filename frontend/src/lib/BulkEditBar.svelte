@@ -166,7 +166,7 @@
   const ON = "border-transparent bg-[var(--accent)] text-[var(--accent-fg)]";
   const OFF = "border-slate-300 dark:border-slate-700";
   const BOX =
-    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none " +
+    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden " +
     "focus:border-[var(--accent)] dark:border-slate-700";
 </script>
 

@@ -24,13 +24,19 @@ html.dark {
 
 /* Wrapped in @layer base so Tailwind utilities (which live in @layer utilities)
    still win: unlayered CSS beats every layer, which would make the
-   `outline-none` on <main> and `focus-visible:outline-none` on ring inputs inert. */
+   `outline-none` on <main> and `focus-visible:outline-hidden` on ring inputs inert. */
 @layer base {
   /* One keyboard focus indicator for the whole app. :focus-visible leaves mouse
-     clicks alone; the ring uses the accent so it stays visible on both themes. */
+     clicks alone; the ring uses the accent, which meets 3:1 on light surfaces.
+     Dark surfaces need the lighter variant below. */
   :focus-visible {
     outline: 2px solid var(--accent, #4f46e5);
     outline-offset: 2px;
+  }
+  /* Dark surfaces: the accent alone drops under 3:1 on slate-900 cards, so the
+     ring is lightened toward white. color-mix keeps it tied to the user's accent. */
+  .dark :focus-visible {
+    outline-color: color-mix(in srgb, var(--accent, #4f46e5) 55%, white);
   }
 }
 @media (prefers-reduced-motion: reduce) {

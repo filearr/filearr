@@ -418,7 +418,7 @@
     {#await loadItemDetail() then m}
       <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
     {:catch}
-      <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
         Item details failed to load — Filearr may have been updated.
         <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
           onclick={() => location.reload()}>Reload</button>

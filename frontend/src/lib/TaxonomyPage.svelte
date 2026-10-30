@@ -372,7 +372,7 @@
                          group reparents it here (upsert) and reports the move. -->
                     <div class="mt-2 flex flex-wrap items-center gap-2">
                       <input
-                        class="w-40 rounded border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none focus:border-[var(--accent)] dark:border-slate-700"
+                        class="w-40 rounded border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
                         placeholder="add ext (e.g. mkv)"
                         value={extInput[g.key] ?? ""}
                         oninput={(e) => (extInput = { ...extInput, [g.key]: (e.currentTarget as HTMLInputElement).value })}

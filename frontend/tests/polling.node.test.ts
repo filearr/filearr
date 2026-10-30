@@ -10,16 +10,21 @@ import { createPoller, type PollerDeps } from "../src/lib/polling.ts";
 
 // Fake clock + visibility: intervals are stored, `tick()` fires each live one
 // once; `setVisible()` flips the switch and notifies subscribers like a
-// `visibilitychange` event would.
+// `visibilitychange` event would. `advance(ms)` moves the injected `now()`
+// clock, which only the return-refresh rate limit reads; `periods()` lists
+// the `ms` each setInterval call was armed with.
 function fakeDeps() {
   const intervals = new Map<number, () => void>();
   const listeners = new Set<() => void>();
+  const periods: number[] = [];
   let nextId = 1;
   let visible = true;
+  let clock = 0;
   const deps: PollerDeps = {
-    setInterval: ((cb: () => void) => {
+    setInterval: ((cb: () => void, ms: number) => {
       const id = nextId++;
       intervals.set(id, cb);
+      periods.push(ms);
       return id;
     }) as unknown as typeof globalThis.setInterval,
     clearInterval: ((id: number) => {
@@ -30,6 +35,7 @@ function fakeDeps() {
       listeners.add(cb);
       return () => listeners.delete(cb);
     },
+    now: () => clock,
   };
   return {
     deps,
@@ -38,6 +44,10 @@ function fakeDeps() {
       visible = v;
       [...listeners].forEach((cb) => cb());
     },
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    periods: () => periods,
     liveIntervals: () => intervals.size,
     liveListeners: () => listeners.size,
   };
@@ -104,4 +114,39 @@ test("stop() clears the interval, unsubscribes, and prevents further calls", () 
   f.setVisible(false);
   f.setVisible(true);
   assert.equal(calls, 0);
+});
+
+test("setInterval is armed with the requested period", () => {
+  const f = fakeDeps();
+  createPoller(() => {}, 1234, f.deps);
+  assert.deepEqual(f.periods(), [1234]);
+});
+
+test("return-refresh within intervalMs of the last call is skipped", () => {
+  const f = fakeDeps();
+  let calls = 0;
+  createPoller(() => calls++, 1000, f.deps);
+  f.tick(); // last call at t=0
+  assert.equal(calls, 1);
+  f.advance(400);
+  f.setVisible(false);
+  f.setVisible(true); // 400ms since the tick: too soon
+  assert.equal(calls, 1);
+  f.tick(); // ticks are not rate-limited
+  assert.equal(calls, 2);
+});
+
+test("return-refresh after intervalMs since the last call fires", () => {
+  const f = fakeDeps();
+  let calls = 0;
+  createPoller(() => calls++, 1000, f.deps, { immediate: true }); // t=0
+  f.advance(1000);
+  f.setVisible(false);
+  f.setVisible(true);
+  assert.equal(calls, 2);
+  // ...and that return-refresh itself counts as the last call.
+  f.advance(10);
+  f.setVisible(false);
+  f.setVisible(true);
+  assert.equal(calls, 2);
 });

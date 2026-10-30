@@ -1287,7 +1287,7 @@
 <div>
   <input
     bind:this={searchInput}
-    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
+    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
            focus:border-[var(--accent)] dark:border-slate-700"
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
@@ -1509,7 +1509,7 @@
       <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
         <span class="w-10 font-medium">Type</span>
         <input
-          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
+          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                  focus:border-[var(--accent)] dark:border-slate-700"
           placeholder="ext…"
           bind:value={extQuery} />
@@ -1550,7 +1550,7 @@
         <span class="mt-1 w-10 font-medium" title="File permissions read by agents on the machine that owns the files (enable an agent's 'permissions' inventory collector). Only items with a collected ACL can match.">Access</span>
         <div class="relative">
           <input
-            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
+            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="readable by principal… (name or SID)"
             role="combobox"
@@ -1610,7 +1610,7 @@
         <span class="mt-1 w-10 font-medium">Tags</span>
         <div class="relative">
           <input
-            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
+            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="add tag…"
             role="combobox"
@@ -1993,7 +1993,7 @@
     {#await loadItemDetail() then m}
       <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
     {:catch}
-      <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
         Item details failed to load — Filearr may have been updated.
         <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
           onclick={() => location.reload()}>Reload</button>

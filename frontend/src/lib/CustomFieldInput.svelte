@@ -28,7 +28,7 @@
   } = $props();
 
   const BOX =
-    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none " +
+    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden " +
     "focus:border-[var(--accent)] disabled:opacity-50 dark:border-slate-700";
 
   // Text-ish controls are driven value/oninput rather than with `bind:value` on
