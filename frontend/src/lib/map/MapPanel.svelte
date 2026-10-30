@@ -551,7 +551,7 @@
            server should not have to leave the page, and seeing the template
            makes it obvious where the requests go. -->
       <input
-        class="w-72 rounded border border-slate-300 bg-transparent px-2 py-1 outline-none
+        class="w-72 rounded border border-slate-300 bg-transparent px-2 py-1 focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
                focus:border-[var(--accent)] dark:border-slate-700"
         aria-label="Tile URL template"
         title="XYZ tile URL template, with the z / x / y placeholders in braces"
@@ -769,7 +769,7 @@
       <label class="flex flex-col gap-0.5 text-slate-500">
         {f.label}
         <input
-          class="w-24 rounded border border-slate-300 bg-transparent px-2 py-1 tabular-nums outline-none
+          class="w-24 rounded border border-slate-300 bg-transparent px-2 py-1 tabular-nums focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
                  focus:border-[var(--accent)] dark:border-slate-700"
           type="text"
           inputmode="decimal"

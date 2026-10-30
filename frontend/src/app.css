@@ -21,6 +21,26 @@ html.dark {
   @apply bg-slate-950 text-slate-100;
 }
 
+/* Wrapped in @layer base so Tailwind utilities (which live in @layer utilities)
+   still win: unlayered CSS beats every layer, which would make the
+   `outline-none` on <main> and `focus-visible:outline-none` on ring inputs inert. */
+@layer base {
+  /* One keyboard focus indicator for the whole app. :focus-visible leaves mouse
+     clicks alone; the ring uses the accent so it stays visible on both themes. */
+  :focus-visible {
+    outline: 2px solid var(--accent, #4f46e5);
+    outline-offset: 2px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Belt-and-suspenders (FIX-13): explicitly theme option/optgroup lists so they
    stay readable even on engines that ignore color-scheme for the option popup.
    Selects across the app use bg-transparent + inherited text, so their popups

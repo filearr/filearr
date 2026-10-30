@@ -260,7 +260,8 @@
   {/snippet}
 
   <!-- tabindex=-1: focusable by script (route change) and by the skip link,
-       but not a Tab stop. -->
+       but not a Tab stop. outline-none: a ring round the whole page on
+       programmatic focus is noise, not a cue. -->
   <main id="main" tabindex="-1" class="outline-none" bind:this={mainEl}>
   {#if page === "libraries"}
     {#await loadPage("libraries")}{@render pageLoading()}{:then m}<m.default {me} />{:catch}{@render pageLoadFailed()}{/await}

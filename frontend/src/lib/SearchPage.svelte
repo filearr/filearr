@@ -1287,7 +1287,7 @@
 <div>
   <input
     bind:this={searchInput}
-    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg outline-none
+    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
            focus:border-[var(--accent)] dark:border-slate-700"
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
@@ -1509,7 +1509,7 @@
       <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
         <span class="w-10 font-medium">Type</span>
         <input
-          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
                  focus:border-[var(--accent)] dark:border-slate-700"
           placeholder="ext…"
           bind:value={extQuery} />
@@ -1550,7 +1550,7 @@
         <span class="mt-1 w-10 font-medium" title="File permissions read by agents on the machine that owns the files (enable an agent's 'permissions' inventory collector). Only items with a collected ACL can match.">Access</span>
         <div class="relative">
           <input
-            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="readable by principal… (name or SID)"
             role="combobox"
@@ -1610,7 +1610,7 @@
         <span class="mt-1 w-10 font-medium">Tags</span>
         <div class="relative">
           <input
-            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="add tag…"
             role="combobox"
