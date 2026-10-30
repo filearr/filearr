@@ -489,7 +489,7 @@
     <nav class="flex gap-1 text-sm">
       {#each [["channels", "Channels"], ["rules", "Rules"], ["events", "Events"]] as [id, label] (id)}
         <button
-          class="rounded-lg px-3 py-1 {tab === id ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+          class="rounded-lg px-3 py-1 {tab === id ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'text-slate-500'}"
           onclick={() => (tab = id as Tab)}>{label}</button>
       {/each}
     </nav>
@@ -600,7 +600,7 @@
               onchange={() => (chFormatTouched = true)}>
               {#each WEBHOOK_FORMATS as f (f)}<option value={f}>{f}</option>{/each}
             </select>
-            <span class="mt-1 block text-xs text-slate-400">
+            <span class="mt-1 block text-xs text-slate-600 dark:text-slate-400">
               Auto-detected from the URL. <b>generic</b> = Filearr signed JSON;
               <b>discord</b> / <b>slack</b> reshape the body for those endpoints
               (and skip the HMAC signature).
@@ -610,7 +610,7 @@
             <span class="text-slate-500">HMAC secret {chEditing ? "(leave blank to keep)" : "(optional)"}</span>
             <input type="password" autocomplete="new-password" class="mt-1 w-full rounded border px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={cWebhookSecret} />
             {#if cWebhookFormat !== "generic"}
-              <span class="mt-1 block text-xs text-slate-400">Not sent for {cWebhookFormat} — signature is only added to the generic format.</span>
+              <span class="mt-1 block text-xs text-slate-600 dark:text-slate-400">Not sent for {cWebhookFormat} — signature is only added to the generic format.</span>
             {/if}
           </label>
         {:else if chType === "email"}
@@ -650,7 +650,7 @@
         </div>
 
         <div class="flex gap-2">
-          <button type="submit" disabled={chBusy} class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50">
+          <button type="submit" disabled={chBusy} class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50">
             {chBusy ? "Saving…" : "Save"}
           </button>
           <button type="button" class="rounded-lg border px-3 py-1 text-sm dark:border-slate-700" onclick={resetChannelForm}>Cancel</button>
@@ -700,7 +700,7 @@
           </span>
         {/if}
         <div class="grow"></div>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           disabled={bulkBusy || (!bulkThrottle && !bulkTouchChannels)} onclick={applyBulk}>
           {bulkBusy ? "Applying…" : "Apply to selected"}</button>
         <button class="text-xs underline" onclick={() => (bulkSel = new Set())}>clear</button>
@@ -821,7 +821,7 @@
           {#if !rlEditing?.is_system}
             <fieldset class="text-sm">
               <span class="text-slate-500">Group notifications by</span>
-              <p class="text-xs text-slate-400">
+              <p class="text-xs text-slate-600 dark:text-slate-400">
                 Always per event type + library + rule. Add finer keys to split one
                 library-wide batch into several notifications.
               </p>
@@ -838,7 +838,7 @@
           {/if}
           <fieldset class="text-sm">
             <span class="text-slate-500">Inhibited by</span>
-            <p class="text-xs text-slate-400">
+            <p class="text-xs text-slate-600 dark:text-slate-400">
               Mute this rule while any selected rule has fired in the last
               <input class="mx-1 w-20 rounded border px-1 py-0.5 text-xs dark:border-slate-700 dark:bg-slate-900"
                 type="number" min="0" max="86400" bind:value={rInhibitWindow} /> seconds
@@ -861,7 +861,7 @@
         <fieldset class="text-sm">
           <span class="text-slate-500">Channels</span>
           {#if channels.length === 0}
-            <p class="text-xs text-slate-400">No channels defined — create one first.</p>
+            <p class="text-xs text-slate-600 dark:text-slate-400">No channels defined — create one first.</p>
           {:else}
             <div class="mt-1 flex flex-wrap gap-3">
               {#each channels as c (c.id)}
@@ -877,7 +877,7 @@
         <label class="flex items-center gap-2 text-sm"><input type="checkbox" bind:checked={rEnabled} /> Enabled</label>
 
         <div class="flex gap-2">
-          <button type="submit" disabled={rlBusy} class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50">
+          <button type="submit" disabled={rlBusy} class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50">
             {rlBusy ? "Saving…" : "Save"}
           </button>
           <button type="button" class="rounded-lg border px-3 py-1 text-sm dark:border-slate-700" onclick={resetRuleForm}>Cancel</button>

@@ -62,7 +62,7 @@
       Updates
     </h3>
     {#if data?.checked_at}
-      <span class="text-xs text-slate-400" title={new Date(data.checked_at).toLocaleString()}>
+      <span class="text-xs text-slate-600 dark:text-slate-400" title={new Date(data.checked_at).toLocaleString()}>
         checked {new Date(data.checked_at).toLocaleString()}
       </span>
     {/if}
@@ -91,7 +91,7 @@
           <span class="w-28 font-medium text-slate-700 dark:text-slate-200">{comp.component}</span>
           <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {b.cls}">{b.text}</span>
           <span class="font-mono text-slate-500" title={comp.detail}>{comp.running}</span>
-          <span class="text-slate-400">→ {comp.latest}</span>
+          <span class="text-slate-600 dark:text-slate-400">→ {comp.latest}</span>
         </div>
       {/each}
     </div>
@@ -99,7 +99,7 @@
     {#if data.changelog.length > 0}
       <h4 class="mt-3 mb-1 text-xs font-semibold text-slate-500">
         Recent changes
-        <span class="font-normal text-slate-400">(newest first{data.changelog.some((c) => c.is_new) ? "; • = newer than this build" : ""})</span>
+        <span class="font-normal text-slate-600 dark:text-slate-400">(newest first{data.changelog.some((c) => c.is_new) ? "; • = newer than this build" : ""})</span>
       </h4>
       <div class="max-h-72 overflow-y-auto">
         <ul class="space-y-1 text-xs">
@@ -107,8 +107,8 @@
             <li>
               <div class="flex items-baseline gap-2">
                 {#if c.is_new}<span class="text-amber-500" title="Newer than the running build">•</span>{/if}
-                <code class="text-slate-400">{c.sha}</code>
-                {#if c.date}<span class="whitespace-nowrap tabular-nums text-slate-400">{new Date(c.date).toLocaleDateString()}</span>{/if}
+                <code class="text-slate-600 dark:text-slate-400">{c.sha}</code>
+                {#if c.date}<span class="whitespace-nowrap tabular-nums text-slate-600 dark:text-slate-400">{new Date(c.date).toLocaleDateString()}</span>{/if}
                 <button
                   class="text-left text-slate-700 hover:underline dark:text-slate-300 {c.is_new ? 'font-medium' : ''}"
                   onclick={() => (expanded[c.sha] = !expanded[c.sha])}

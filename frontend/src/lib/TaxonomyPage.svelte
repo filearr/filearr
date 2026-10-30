@@ -289,7 +289,7 @@
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
         title="Apply the current taxonomy to items already in the catalogue (updates file category/group + search docs in place — no rescan)."
         disabled={reclassBusy} onclick={reclassify}>{reclassBusy ? "reclassifying…" : "Reclassify items"}</button>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={newCategory}>New category</button>
+      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={newCategory}>New category</button>
     {/if}
   </div>
   {#if actionNotice}
@@ -304,9 +304,9 @@
   {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
 
   {#if loading}
-    <p class="mt-4 text-sm text-slate-400">Loading…</p>
+    <p class="mt-4 text-sm text-slate-600 dark:text-slate-400">Loading…</p>
   {:else if tree.length === 0}
-    <p class="mt-4 text-sm text-slate-400">
+    <p class="mt-4 text-sm text-slate-600 dark:text-slate-400">
       No categories yet.{#if isAdmin} Use “New category” to start building the taxonomy.{/if}
     </p>
   {:else}
@@ -319,9 +319,9 @@
             <span class="text-base font-semibold">{cat.label}</span>
             <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-500 dark:bg-slate-800">{cat.key}</span>
             <span class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]" title="extractor family">{cat.extractor || "none"}</span>
-            {#if cat.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400 dark:bg-slate-800">built-in</span>{/if}
-            <span class="text-[11px] text-slate-400">sort {cat.sort_order}</span>
-            {#if cat.description}<span class="hidden text-xs text-slate-400 sm:inline">— {cat.description}</span>{/if}
+            {#if cat.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-400 dark:bg-slate-800">built-in</span>{/if}
+            <span class="text-[11px] text-slate-600 dark:text-slate-400">sort {cat.sort_order}</span>
+            {#if cat.description}<span class="hidden text-xs text-slate-600 dark:text-slate-400 sm:inline">— {cat.description}</span>{/if}
             <div class="grow"></div>
             {#if isAdmin}
               <button class="text-xs text-[var(--accent)]" onclick={() => newGroup(cat.key)}>+ group</button>
@@ -332,7 +332,7 @@
 
           <!-- Groups -->
           {#if node.groups.length === 0}
-            <p class="px-4 py-3 text-xs text-slate-400">No groups in this category.</p>
+            <p class="px-4 py-3 text-xs text-slate-600 dark:text-slate-400">No groups in this category.</p>
           {:else}
             <div class="divide-y divide-slate-100 dark:divide-slate-800/70">
               {#each node.groups as g (g.key)}
@@ -340,9 +340,9 @@
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="font-medium">{g.label}</span>
                     <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-500 dark:bg-slate-800">{g.key}</span>
-                    {#if g.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-400 dark:bg-slate-800">built-in</span>{/if}
-                    <span class="text-[11px] text-slate-400">sort {g.sort_order}</span>
-                    {#if g.description}<span class="hidden text-xs text-slate-400 sm:inline">— {g.description}</span>{/if}
+                    {#if g.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-400 dark:bg-slate-800">built-in</span>{/if}
+                    <span class="text-[11px] text-slate-600 dark:text-slate-400">sort {g.sort_order}</span>
+                    {#if g.description}<span class="hidden text-xs text-slate-600 dark:text-slate-400 sm:inline">— {g.description}</span>{/if}
                     <div class="grow"></div>
                     {#if isAdmin}
                       <button class="text-xs text-[var(--accent)]" onclick={() => editGroup(cat.key, g)} title="Rename or reparent (change category)">edit / reparent</button>
@@ -353,13 +353,13 @@
                   <!-- Extensions -->
                   <div class="mt-2 flex flex-wrap items-center gap-1.5">
                     {#if g.extensions.length === 0}
-                      <span class="text-xs text-slate-400">no extensions</span>
+                      <span class="text-xs text-slate-600 dark:text-slate-400">no extensions</span>
                     {:else}
                       {#each g.extensions as ext (ext)}
                         <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                           .{ext}
                           {#if isAdmin}
-                            <button class="rounded-full px-0.5 leading-none text-slate-400 hover:text-red-600"
+                            <button class="rounded-full px-0.5 leading-none text-slate-600 dark:text-slate-400 hover:text-red-600"
                               aria-label={`Remove .${ext}`} title="Remove extension" onclick={() => removeExt(ext)}>×</button>
                           {/if}
                         </span>
@@ -409,7 +409,7 @@
       {/if}
 
       <div class="mt-3 flex flex-col gap-3">
-        <label class="text-xs text-slate-500">Key {#if dialog.mode === "edit"}<span class="text-slate-400">(immutable)</span>{/if}
+        <label class="text-xs text-slate-500">Key {#if dialog.mode === "edit"}<span class="text-slate-600 dark:text-slate-400">(immutable)</span>{/if}
           <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm disabled:opacity-60 dark:border-slate-700"
             placeholder="lowercase-key" disabled={dialog.mode === "edit"} bind:value={dialog.key} />
         </label>
@@ -429,7 +429,7 @@
             </select>
           </label>
         {:else}
-          <label class="text-xs text-slate-500">Category {#if dialog.mode === "edit"}<span class="text-slate-400">(change to reparent)</span>{/if}
+          <label class="text-xs text-slate-500">Category {#if dialog.mode === "edit"}<span class="text-slate-600 dark:text-slate-400">(change to reparent)</span>{/if}
             <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.categoryKey}>
               {#each allCategoryKeys as ck}
                 <option value={ck}>{ck}</option>
@@ -446,7 +446,7 @@
 
       <div class="mt-4 flex justify-end gap-2">
         <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700" onclick={() => (dialog = null)}>Cancel</button>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50" disabled={dialogBusy} onclick={saveDialog}>
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50" disabled={dialogBusy} onclick={saveDialog}>
           {dialogBusy ? "Saving…" : dialog.mode === "create" ? "Create" : "Save"}
         </button>
       </div>

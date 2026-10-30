@@ -470,7 +470,7 @@
           {#each OVERRIDE_FIELDS as f (f.key)}
             <label class="flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"
               title={f.help}>
-              <span>{f.label} <span class="text-slate-400">({f.unit})</span></span>
+              <span>{f.label} <span class="text-slate-600 dark:text-slate-400">({f.unit})</span></span>
               <input class="w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700"
                 type="number" min="0" step="any" placeholder="global" bind:value={overrideInputs[f.key]} />
             </label>
@@ -561,7 +561,7 @@
               <label class="inline-flex items-center gap-2">
                 <input type="checkbox" checked={active} onchange={() => togglePreset(p)} />
                 <span class="font-medium">{p.label}</span>
-                {#if p.default_enabled}<span class="text-slate-400">(default on)</span>{/if}
+                {#if p.default_enabled}<span class="text-slate-600 dark:text-slate-400">(default on)</span>{/if}
                 <button type="button" class="text-[var(--accent)] underline"
                   onclick={() => (showPatterns = { ...showPatterns, [p.name]: !showPatterns[p.name] })}>
                   {showPatterns[p.name] ? "hide" : "show"} patterns
@@ -572,7 +572,7 @@
                   Warning: disabling will surface previously hidden files on the next scan.
                 </span>
               {:else if p.caveat}
-                <span class="ml-6 block text-xs text-slate-400">{p.caveat}</span>
+                <span class="ml-6 block text-xs text-slate-600 dark:text-slate-400">{p.caveat}</span>
               {/if}
               {#if showPatterns[p.name]}
                 <code class="ml-6 block whitespace-pre-wrap font-mono text-xs text-slate-500">{p.patterns.join("  ")}</code>
@@ -587,7 +587,7 @@
         <h4 class="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
           Extension groups <Help text={HELP.extension_groups} label="extension groups" />
         </h4>
-        <p class="mb-2 text-xs text-slate-400">
+        <p class="mb-2 text-xs text-slate-600 dark:text-slate-400">
           Enabling a group narrows that media type to the listed extensions (union of enabled
           groups). No group = all extensions of the type.
         </p>
@@ -613,7 +613,7 @@
     <div class="mt-6 flex justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
       <button class="rounded-lg border border-slate-300 px-4 py-2 text-sm dark:border-slate-700"
         onclick={onClose}>Cancel</button>
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
+      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
         disabled={busy || (creating && (!name.trim() || !rootPath.trim()))} onclick={save}>
         {#if creating}{busy ? "Adding…" : "Add library"}{:else}{busy ? "Saving…" : "Save changes"}{/if}
       </button>

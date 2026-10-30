@@ -502,13 +502,13 @@
     <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Drag behaviour">
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'select' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 {dragMode === 'select' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={dragMode === "select"}
         title="Drag on the map to select an area (filters the search)"
         onclick={() => (dragMode = "select")}>Select area</button>
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'pan' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 {dragMode === 'pan' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={dragMode === "pan"}
         title="Drag on the map to pan (Shift+drag always pans)"
         onclick={() => (dragMode = "pan")}>Pan</button>
@@ -780,7 +780,7 @@
     {/each}
     <button
       type="button"
-      class="rounded-full bg-[var(--accent)] px-3 py-1 text-white"
+      class="rounded-full bg-[var(--accent)] px-3 py-1 text-[var(--accent-fg)]"
       onclick={applyDraft}>Apply area</button>
     <button
       type="button"

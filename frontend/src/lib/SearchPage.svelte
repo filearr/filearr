@@ -1299,7 +1299,7 @@
   <div class="mt-3 flex flex-wrap items-center gap-2">
     <button
       class="rounded-full border px-3 py-1 text-sm {selectedCategories.length === 0
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       onclick={() => { selectedCategories = []; reset(); }}>all</button>
     {#each categoryOptions as c (c.key)}
@@ -1307,7 +1307,7 @@
       {@const on = selectedCategories.includes(c.key)}
       <button
         class="rounded-full border px-3 py-1 text-sm {on
-          ? 'border-transparent bg-[var(--accent)] text-white'
+          ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
           ? 'opacity-40'
           : ''}"
@@ -1349,20 +1349,20 @@
     <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Result layout">
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'list' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'list' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'list'}
         title="List view"
         onclick={() => setView('list')}>List</button>
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'grid'}
         title="Grid view"
         onclick={() => setView('grid')}>Grid</button>
       <!-- R8-UI: the map is a third view of the SAME query, not a separate page. -->
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'map'}
         title="Map view — plot the results that carry GPS coordinates, and drag an area to filter by it"
         onclick={() => setView('map')}>Map</button>
@@ -1372,14 +1372,14 @@
          not a legible state indicator. Open/closed persists per browser. -->
     <button
       class="rounded-full border px-3 py-1 text-sm {savedOpen
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={savedOpen}
       title={savedOpen ? "Hide the saved-searches panel" : "Show saved searches"}
       onclick={toggleSavedOpen}>Saved {savedOpen ? "▲" : "▾"}</button>
     <button
       class="rounded-full border px-3 py-1 text-sm {filtersOpen
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={filtersOpen}
       title={filtersOpen ? "Hide the filters panel" : "Show filters (group, extension, tags, ranges)"}
@@ -1394,7 +1394,7 @@
     <div class="mt-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
       <div class="flex items-center gap-2">
         <button
-          class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm text-white"
+          class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
           onclick={saveCurrent}>Save current search</button>
         {#if savedError}<span class="text-xs text-red-500">{savedError}</span>{/if}
       </div>
@@ -1453,7 +1453,7 @@
                 {@const allOn = ids.every((id) => selectedLibraries.includes(id))}
                 <button
                   class="rounded-full border border-dashed px-2 py-0.5 text-xs {allOn
-                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                     : 'border-slate-400 dark:border-slate-600'}"
                   title="every library on this machine"
                   aria-pressed={allOn}
@@ -1466,7 +1466,7 @@
                 {@const on = selectedLibraries.includes(l.id)}
                 <button
                   class="rounded-full border px-3 py-1 text-sm {on
-                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                     : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
                     ? 'opacity-40'
                     : ''}"
@@ -1493,7 +1493,7 @@
             {@const on = selectedGroups.includes(g.key)}
             <button
               class="rounded-full border px-3 py-1 text-sm {on
-                ? 'border-transparent bg-[var(--accent)] text-white'
+                ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                 : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
                 ? 'opacity-40'
                 : ''}"
@@ -1516,7 +1516,7 @@
         {#each topExtensions as [ext, count] (ext)}
           <button
             class="rounded-full border px-2 py-0.5 {extension === ext
-              ? 'border-transparent bg-[var(--accent)] text-white'
+              ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
               : 'border-slate-300 dark:border-slate-700'}"
             onclick={() => toggleExtension(ext)}>
             {ext}<span class="ml-1 opacity-70">{count}</span>
@@ -1668,7 +1668,7 @@
           <span class="tabular-nums">{fmtBytes(sizeLo)} – {fmtBytes(sizeHi)}</span>
         </div>
       {:else}
-        <div class="mt-3 flex items-center gap-3 text-xs text-slate-400">
+        <div class="mt-3 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
           <span class="w-10 font-medium">Size</span>
           <span>range unavailable (no matching results)</span>
         </div>
@@ -1689,7 +1689,7 @@
           <span class="tabular-nums">{fmtDate(mtimeLo)} – {fmtDate(mtimeHi)}</span>
         </div>
       {:else}
-        <div class="mt-2 flex items-center gap-3 text-xs text-slate-400">
+        <div class="mt-2 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
           <span class="w-10 font-medium">Date</span>
           <span>range unavailable (no matching results)</span>
         </div>
@@ -1981,7 +1981,7 @@
     {/if}
 
     {#if loading}
-      <p class="mt-2 text-center text-xs text-slate-400">Loading…</p>
+      <p class="mt-2 text-center text-xs text-slate-600 dark:text-slate-400">Loading…</p>
     {/if}
   {/if}
 

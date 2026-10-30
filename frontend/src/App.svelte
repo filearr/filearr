@@ -200,7 +200,7 @@
       <a
         href="#/{p}"
         aria-current={page === p ? "page" : undefined}
-        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-[var(--accent)] font-semibold text-white' : 'text-slate-500'}">{label}</a>
+        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-[var(--accent)] font-semibold text-[var(--accent-fg)]' : 'text-slate-500'}">{label}</a>
     {/snippet}
     <nav aria-label="Primary" class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
       {@render navLink("search", "Search")}
@@ -218,10 +218,10 @@
     <div class="grow"></div>
     <div class="flex flex-wrap items-center gap-2">
     {#if me}
-      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-white' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
+      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
         href="#/account"
         title={`${me.username} · ${me.global_role} — account settings`}>
-        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-white/70' : 'text-slate-400'}">({me.global_role})</span>
+        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-[var(--accent-fg)] opacity-70' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
       </a>
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
         onclick={doLogout}>Sign out</button>
@@ -305,7 +305,7 @@
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
     <span title={buildStamp ?? "no build stamp (dev)"}>
       Filearr {__APP_VERSION__}{#if buildStamp}
-        <span class="font-mono text-slate-400"> · build {buildStamp.slice(0, 12)}</span>
+        <span class="font-mono text-slate-600 dark:text-slate-400"> · build {buildStamp.slice(0, 12)}</span>
       {/if}
     </span>
     <span class="px-1">·</span>

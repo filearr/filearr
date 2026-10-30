@@ -301,13 +301,13 @@
             aria-label="Folder view">
             <button
               type="button"
-              class="px-3 py-1 text-sm {viewMode === 'table' ? 'bg-[var(--accent)] text-white' : ''}"
+              class="px-3 py-1 text-sm {viewMode === 'table' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
               aria-pressed={viewMode === "table"}
               title="The canned report: a flat top-N of the largest folders across every depth"
               onclick={() => (viewMode = "table")}>Table</button>
             <button
               type="button"
-              class="px-3 py-1 text-sm {viewMode === 'treemap' ? 'bg-[var(--accent)] text-white' : ''}"
+              class="px-3 py-1 text-sm {viewMode === 'treemap' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
               aria-pressed={viewMode === "treemap"}
               title="A drill-down map: one level at a time, cell area proportional to folder size"
               onclick={() => (viewMode = "treemap")}>Treemap</button>

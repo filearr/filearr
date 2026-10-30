@@ -1,6 +1,7 @@
 // Svelte 5 runes-based theme store: dark/light/system + custom accent.
 import { setShareFormat } from "./osFormat.svelte";
 import type { FormatPref } from "./osFormat";
+import { onAccentColor } from "./color";
 
 export type Mode = "light" | "dark" | "system";
 const MODES: readonly Mode[] = ["light", "dark", "system"];
@@ -10,14 +11,18 @@ const HEX = /^#[0-9a-fA-F]{6}$/;
 const rawMode = localStorage.getItem("theme");
 const stored: Mode = MODES.includes(rawMode as Mode) ? (rawMode as Mode) : "system";
 const rawAccent = localStorage.getItem("accent");
+// indigo-600: the old indigo-500 default fell short of 4.5:1 for white text on it.
+export const DEFAULT_ACCENT = "#4f46e5";
 
-export const theme = $state({ mode: stored, accent: rawAccent && HEX.test(rawAccent) ? rawAccent : "#6366f1" });
+export const theme = $state({ mode: stored, accent: rawAccent && HEX.test(rawAccent) ? rawAccent : DEFAULT_ACCENT });
 
 export function applyTheme() {
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const dark = theme.mode === "dark" || (theme.mode === "system" && prefersDark);
   document.documentElement.classList.toggle("dark", dark);
   document.documentElement.style.setProperty("--accent", theme.accent);
+  // Text on the accent flips to dark when the chosen accent is too pale for white.
+  document.documentElement.style.setProperty("--accent-fg", onAccentColor(theme.accent));
   try {
     localStorage.setItem("theme", theme.mode);
     localStorage.setItem("accent", theme.accent);

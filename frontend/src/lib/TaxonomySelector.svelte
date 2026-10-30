@@ -50,7 +50,7 @@
 
 <div class="flex flex-col gap-2">
   {#if tree.length === 0}
-    <p class="text-xs text-slate-400">
+    <p class="text-xs text-slate-600 dark:text-slate-400">
       No taxonomy available (the catalog is empty or the taxonomy service is offline).
       Leaving this empty includes all file types.
     </p>
@@ -87,7 +87,7 @@
                 class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs {on
                   ? 'border-transparent bg-[var(--accent)]/10 text-[var(--accent)]'
                   : groups.includes(g.key)
-                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                     : 'border-slate-300 dark:border-slate-700'}"
                 title={on ? "Included via the whole category" : g.description || g.label}>
                 <input
@@ -103,7 +103,7 @@
         {/if}
       </div>
     {/each}
-    <p class="text-xs {nothingSelected ? 'text-slate-500' : 'text-slate-400'}">
+    <p class="text-xs {nothingSelected ? 'text-slate-500' : 'text-slate-600 dark:text-slate-400'}">
       {nothingSelected
         ? "Nothing selected — all file types are included."
         : "Only the selected categories/groups will be scanned."}

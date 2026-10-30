@@ -62,7 +62,7 @@
         </th>
         <td class="py-2">
           {#if value === null || value === undefined || value === ""}
-            <span class="text-slate-400">—</span>
+            <span class="text-slate-600 dark:text-slate-400">—</span>
           {:else if isComplex(value) || long}
             <pre class="overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs">{open ? text : text.slice(0, clampAt(text))}{#if !open}…{/if}</pre>
             {#if long}
@@ -80,7 +80,7 @@
         <td class="w-10 py-2 pl-2 text-right align-top">
           <button
             type="button"
-            class="text-xs text-slate-400 hover:text-[var(--accent)]"
+            class="text-xs text-slate-600 dark:text-slate-400 hover:text-[var(--accent)]"
             title="Copy value (full value, even when collapsed)"
             onclick={() => copy(key, value)}>{copied === key ? "✓" : "⧉"}</button>
         </td>

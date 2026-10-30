@@ -140,7 +140,7 @@
       bind:value={newGroupName} />
     <input class="rounded border px-2 py-1 text-sm" placeholder="description (optional)"
       bind:value={newGroupDesc} />
-    <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={addGroup}>
+    <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={addGroup}>
       Add group
     </button>
   </div>
@@ -151,7 +151,7 @@
     <tbody>
       {#each groups as g (g.id)}
         <tr class="border-t">
-          <td class="py-1">{g.name}{#if g.description}<span class="ml-1 text-slate-400">— {g.description}</span>{/if}</td>
+          <td class="py-1">{g.name}{#if g.description}<span class="ml-1 text-slate-600 dark:text-slate-400">— {g.description}</span>{/if}</td>
           <td>{g.source}</td>
           <td>{g.member_count}</td>
           <td class="text-right">
@@ -175,14 +175,14 @@
             <ul class="mt-2">
               {#each members as m (m.principal_id)}
                 <li class="flex items-center gap-2">
-                  <span>{m.username ?? m.principal_id} <span class="text-slate-400">({m.global_role})</span></span>
+                  <span>{m.username ?? m.principal_id} <span class="text-slate-600 dark:text-slate-400">({m.global_role})</span></span>
                   <button class="text-red-600" onclick={() => doRemoveMember(m.principal_id)}>remove</button>
                 </li>
-              {:else}<li class="text-slate-400">no members</li>{/each}
+              {:else}<li class="text-slate-600 dark:text-slate-400">no members</li>{/each}
             </ul>
           </td></tr>
         {/if}
-      {:else}<tr><td colspan="4" class="py-2 text-slate-400">no groups yet</td></tr>{/each}
+      {:else}<tr><td colspan="4" class="py-2 text-slate-600 dark:text-slate-400">no groups yet</td></tr>{/each}
     </tbody>
   </table></div>
 
@@ -215,7 +215,7 @@
         <option value="allow">allow</option>
         <option value="deny">deny</option>
       </select>
-      <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={addGrant}>Add</button>
+      <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={addGrant}>Add</button>
     </div>
   </div>
   <button class="mt-1 text-xs text-[var(--accent)]"
@@ -233,14 +233,14 @@
     <tbody>
       {#each grants as gr (gr.id)}
         <tr class="border-t">
-          <td class="py-1">{gr.subject_label ?? gr.subject_id} <span class="text-slate-400">({gr.subject_kind})</span></td>
+          <td class="py-1">{gr.subject_label ?? gr.subject_id} <span class="text-slate-600 dark:text-slate-400">({gr.subject_kind})</span></td>
           <td>{libName(gr.library_id)}</td>
           <td class="font-mono text-xs">{gr.scope}</td>
           <td>{gr.action}</td>
           <td class={gr.effect === "deny" ? "text-red-600" : "text-green-700"}>{gr.effect}</td>
           <td class="text-right"><button class="text-red-600" onclick={() => removeGrant(gr.id)}>delete</button></td>
         </tr>
-      {:else}<tr><td colspan="6" class="py-2 text-slate-400">no grants yet</td></tr>{/each}
+      {:else}<tr><td colspan="6" class="py-2 text-slate-600 dark:text-slate-400">no grants yet</td></tr>{/each}
     </tbody>
   </table></div>
 

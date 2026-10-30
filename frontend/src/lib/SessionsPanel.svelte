@@ -176,7 +176,7 @@
           {#if s.current}
             <span class="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">this session</span>
           {/if}
-          <div class="text-xs text-slate-400">last seen {when(s.last_seen_at)}</div>
+          <div class="text-xs text-slate-600 dark:text-slate-400">last seen {when(s.last_seen_at)}</div>
         </div>
         {#if !s.current}
           <button class="text-xs text-red-600 underline" onclick={() => revokeOne(s.id)}>revoke</button>
@@ -184,7 +184,7 @@
       </li>
     {/each}
     {#if mine.length === 0}
-      <li class="py-2 text-slate-400">No active sessions.</li>
+      <li class="py-2 text-slate-600 dark:text-slate-400">No active sessions.</li>
     {/if}
   </ul>
 
@@ -206,7 +206,7 @@
             <span class="text-xs text-slate-500">Idle timeout (hours)</span>
             <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
               type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssIdle} />
-            <span class="text-xs text-slate-400">
+            <span class="text-xs text-slate-600 dark:text-slate-400">
               currently: {ss.inactivity_hours} h — {sourceLabel(ss.inactivity_source)}
               {#if ss.inactivity_source !== "env"}(env default {ss.env_inactivity_hours} h){/if}
             </span>
@@ -218,7 +218,7 @@
             <span class="text-xs text-slate-500">Absolute lifetime (hours)</span>
             <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
               type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssTtl} />
-            <span class="text-xs text-slate-400">
+            <span class="text-xs text-slate-600 dark:text-slate-400">
               currently: {ss.ttl_hours} h — {sourceLabel(ss.ttl_source)}
               {#if ss.ttl_source !== "env"}(env default {ss.env_ttl_hours} h){/if}
             </span>
@@ -227,15 +227,15 @@
               onclick={() => resetSetting("ttl_hours")}>Reset to default</button>
           </label>
           <div class="flex items-center gap-2 pb-6">
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">Save</button>
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)]">Save</button>
             {#if ssSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
           </div>
-          <p class="basis-full text-xs text-slate-400">
+          <p class="basis-full text-xs text-slate-600 dark:text-slate-400">
             Allowed range {fmtHours(ss.min_hours)}–{fmtHours(ss.max_hours)} h; 0 clears back to the env default.
           </p>
         </form>
       {:else}
-        <p class="mt-2 text-xs text-slate-400">Loading…</p>
+        <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">Loading…</p>
       {/if}
     </div>
 
@@ -259,11 +259,11 @@
             <li class="py-1.5">
               <span class="font-mono text-xs text-slate-500">{s.ip_address ?? "—"}</span>
               <span class="ml-2">{ua(s.user_agent)}</span>
-              <span class="ml-2 text-xs text-slate-400">last seen {when(s.last_seen_at)}</span>
+              <span class="ml-2 text-xs text-slate-600 dark:text-slate-400">last seen {when(s.last_seen_at)}</span>
             </li>
           {/each}
           {#if theirs.length === 0}
-            <li class="py-1.5 text-slate-400">No active sessions.</li>
+            <li class="py-1.5 text-slate-600 dark:text-slate-400">No active sessions.</li>
           {/if}
         </ul>
       {/if}

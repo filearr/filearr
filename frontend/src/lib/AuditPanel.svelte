@@ -97,7 +97,7 @@
 
   <div class="mt-3 overflow-x-auto">
     <table class="w-full text-sm">
-      <thead class="text-left text-xs uppercase text-slate-400">
+      <thead class="text-left text-xs uppercase text-slate-600 dark:text-slate-400">
         <tr>
           <th class="py-1 pr-3">When</th>
           <th class="py-1 pr-3">Event</th>
@@ -123,7 +123,7 @@
           </tr>
         {/each}
         {#if events.length === 0 && !loading}
-          <tr><td colspan="5" class="py-3 text-slate-400">No events.</td></tr>
+          <tr><td colspan="5" class="py-3 text-slate-600 dark:text-slate-400">No events.</td></tr>
         {/if}
       </tbody>
     </table>

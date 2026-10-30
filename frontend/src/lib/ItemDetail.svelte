@@ -540,12 +540,12 @@
       <!-- Typed card tab first, Raw last. -->
       <button
         class="rounded-lg px-3 py-1 text-sm {active === 'card'
-          ? 'bg-[var(--accent)] text-white'
+          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'text-slate-500'}"
         onclick={() => (active = "card")}>{cardTabLabel}</button>
       <button
         class="rounded-lg px-3 py-1 text-sm {active === 'raw'
-          ? 'bg-[var(--accent)] text-white'
+          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'text-slate-500'}"
         onclick={() => (active = "raw")}>Raw</button>
       <!-- IN-T4: the ONLY metadata-writing surface for a single item. Only ever
@@ -554,7 +554,7 @@
            break. -->
       <button
         class="rounded-lg px-3 py-1 text-sm {active === 'edit'
-          ? 'bg-[var(--accent)] text-white'
+          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'text-slate-500'}"
         disabled={!item}
         onclick={startEdit}>Edit</button>
@@ -647,7 +647,7 @@
 
           <div class="mt-2 flex items-center gap-2">
             <button
-              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
+              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
               disabled={saving}
               onclick={saveEdit}>{saving ? "Saving…" : "Save changes"}</button>
             <button
@@ -722,7 +722,7 @@
           {#if (perms.aces ?? []).length}
             <div class="mt-2 overflow-x-auto">
               <table class="w-full text-xs">
-                <thead class="text-left text-slate-400">
+                <thead class="text-left text-slate-600 dark:text-slate-400">
                   <tr><th class="py-1 pr-2">Principal</th><th class="py-1 pr-2">Access</th><th class="py-1 pr-2">Rights</th><th class="py-1 pr-2">Layer · scope</th></tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
@@ -829,12 +829,12 @@
           onclick={toggleSimilar}>Similar items {similarOpen ? "▲" : "▾"}</button>
         {#if similarOpen}
           <span class="ml-2 inline-flex overflow-hidden rounded border border-slate-300 text-[10px] dark:border-slate-700">
-            <button type="button" class="px-1.5 py-0.5 {similarView === 'grid' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'text-slate-500'}"
               onclick={() => setSimilarView("grid")}>grid</button>
-            <button type="button" class="px-1.5 py-0.5 {similarView === 'table' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'table' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'text-slate-500'}"
               onclick={() => setSimilarView("table")}>table</button>
           </span>
-          <span class="ml-1 cursor-help text-[10px] text-slate-400"
+          <span class="ml-1 cursor-help text-[10px] text-slate-600 dark:text-slate-400"
             title="How this list is built: each embedded item carries a vector computed locally from its text (title/filename, tags, extracted body/OCR text). These are the nearest items by cosine similarity of those vectors — similar DESCRIBED CONTENT, not similar bytes (byte-identical copies are the Copies section). The % is the normalised similarity score the ranking sorted by: ~100% = near-duplicate text signal, ~80%+ = same topic/series.">ⓘ why these?</span>
         {/if}
         {#if similarOpen}
@@ -858,7 +858,7 @@
                         <td class="pr-2 text-slate-500">{h.file_group ?? h.file_category ?? "—"}</td>
                         <td class="pr-2 text-slate-500">{simSize(h)}</td>
                         <td class="pr-2 text-slate-500">{simWhen(h)}</td>
-                        <td class="max-w-[18rem] truncate font-mono text-[10px] text-slate-400" title={hitPath(h)}>{hitPath(h)}</td>
+                        <td class="max-w-[18rem] truncate font-mono text-[10px] text-slate-600 dark:text-slate-400" title={hitPath(h)}>{hitPath(h)}</td>
                       </tr>
                     {/each}
                   </tbody>
@@ -878,8 +878,8 @@
                         <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
                       </div>
                       <p class="mt-1 truncate text-xs">{hitLabel(h)}
-                        {#if typeof h.similarity === "number"}<span class="ml-1 text-[10px] text-slate-400">{simPct(h)}</span>{/if}</p>
-                      <p class="truncate font-mono text-[10px] text-slate-400">{hitPath(h)}</p>
+                        {#if typeof h.similarity === "number"}<span class="ml-1 text-[10px] text-slate-600 dark:text-slate-400">{simPct(h)}</span>{/if}</p>
+                      <p class="truncate font-mono text-[10px] text-slate-600 dark:text-slate-400">{hitPath(h)}</p>
                     </button>
                   </li>
                 {/each}

@@ -62,7 +62,7 @@
       onclick={() => (showCompare = !showCompare)}>
       {showCompare ? "Hide comparison" : "Compare roles"}
     </button>
-    <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white"
+    <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
       onclick={() => (editing = editing === "new" ? null : "new")}>New role</button>
   </div>
   <p class="text-xs text-slate-500">
@@ -75,7 +75,7 @@
 
   <div class="mt-3 overflow-x-auto">
     <table class="w-full text-sm">
-      <thead class="text-left text-xs uppercase text-slate-400">
+      <thead class="text-left text-xs uppercase text-slate-600 dark:text-slate-400">
         <tr>
           <th class="py-1 pr-3">Role</th>
           <th class="py-1 pr-3">Scopes</th>
@@ -89,7 +89,7 @@
           <tr>
             <td class="py-2 pr-3">
               <span class="font-medium">{r.display_name || r.name}</span>
-              <span class="ml-1 font-mono text-xs text-slate-400">{r.name}</span>
+              <span class="ml-1 font-mono text-xs text-slate-600 dark:text-slate-400">{r.name}</span>
               {#if r.builtin}
                 <span class="ml-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800">builtin</span>
               {/if}
@@ -102,10 +102,10 @@
             <td class="py-2 pr-3">
               {#each r.scopes as s (s)}
                 <span class="mr-1 rounded bg-indigo-100 px-1.5 py-0.5 font-mono text-xs text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">{s}</span>
-              {:else}<span class="text-xs text-slate-400">none</span>{/each}
+              {:else}<span class="text-xs text-slate-600 dark:text-slate-400">none</span>{/each}
             </td>
             <td class="py-2 pr-3" title={r.ceiling_actions.join(", ")}>
-              {#if r.bypass}<span class="text-xs text-slate-400">n/a</span>
+              {#if r.bypass}<span class="text-xs text-slate-600 dark:text-slate-400">n/a</span>
               {:else}{r.ceiling_actions.length} action{r.ceiling_actions.length === 1 ? "" : "s"}{/if}
             </td>
             <td class="py-2 pr-3">{r.users}</td>
@@ -120,7 +120,7 @@
             </td>
           </tr>
         {:else}
-          <tr><td colspan="5" class="py-3 text-slate-400">No roles.</td></tr>
+          <tr><td colspan="5" class="py-3 text-slate-600 dark:text-slate-400">No roles.</td></tr>
         {/each}
       </tbody>
     </table>
@@ -143,7 +143,7 @@
       </p>
       <div class="mt-2 overflow-x-auto">
         <table class="w-full text-sm">
-          <thead class="text-left text-xs uppercase text-slate-400">
+          <thead class="text-left text-xs uppercase text-slate-600 dark:text-slate-400">
             <tr>
               <th class="py-1 pr-3">Permission</th>
               {#each cmp.roles as r (r.name)}
@@ -155,7 +155,7 @@
             {#each cmp.scopes as s (s)}
               <tr>
                 <td class="py-1 pr-3" title={cmp.scope_help?.[s] ?? ""}>
-                  <span class="text-xs text-slate-400">scope</span> <span class="font-mono">{s}</span>
+                  <span class="text-xs text-slate-600 dark:text-slate-400">scope</span> <span class="font-mono">{s}</span>
                 </td>
                 {#each cmp.roles as r (r.name)}
                   <td class="px-2 py-1 text-center {cell(r.name, `scope:${s}`) ? 'text-emerald-600' : 'text-slate-300 dark:text-slate-700'}">
@@ -167,7 +167,7 @@
             {#each cmp.actions as a (a)}
               <tr>
                 <td class="py-1 pr-3" title={cmp.action_help?.[a] ?? ""}>
-                  <span class="text-xs text-slate-400">action</span> <span class="font-mono">{a}</span>
+                  <span class="text-xs text-slate-600 dark:text-slate-400">action</span> <span class="font-mono">{a}</span>
                 </td>
                 {#each cmp.roles as r (r.name)}
                   <td class="px-2 py-1 text-center {cell(r.name, `action:${a}`) ? 'text-emerald-600' : 'text-slate-300 dark:text-slate-700'}"

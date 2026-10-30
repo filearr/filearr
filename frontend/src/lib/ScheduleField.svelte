@@ -160,7 +160,7 @@
       <button
         type="button"
         class="rounded-full border px-3 py-1 text-xs {mode === m.id
-          ? 'border-transparent bg-[var(--accent)] text-white'
+          ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'border-slate-300 dark:border-slate-700'}"
         onclick={() => (mode = m.id)}>{m.label}</button>
     {/each}
@@ -192,7 +192,7 @@
         <button
           type="button"
           class="rounded-full border px-2 py-1 text-xs {daysOfWeek.includes(day.d)
-            ? 'border-transparent bg-[var(--accent)] text-white'
+            ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
             : 'border-slate-300 dark:border-slate-700'}"
           onclick={() => toggleDay(day.d)}>{day.label}</button>
       {/each}
@@ -222,7 +222,7 @@
         bind:value={timeStr} />
       ({tzName})
     </label>
-    <p class="text-xs text-slate-400">
+    <p class="text-xs text-slate-600 dark:text-slate-400">
       Day 29-31 is skipped in months without that day.
     </p>
   {:else if mode === "advanced"}
@@ -237,7 +237,7 @@
 
   <p class="text-xs text-slate-500">{summary}</p>
   {#if showTzNote}
-    <p class="text-xs text-slate-400">
+    <p class="text-xs text-slate-600 dark:text-slate-400">
       Runs at {parseTimeStr(timeStr)[0].toString().padStart(2, "0")}:{parseTimeStr(
         timeStr,
       )[1]

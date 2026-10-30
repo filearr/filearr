@@ -115,7 +115,7 @@
 <div class="text-sm">
   <div class="flex flex-wrap items-center gap-x-0.5 gap-y-1">
     {#each crumbs as c, i (i)}
-      {#if i > 0}<span class="px-0.5 text-slate-400">/</span>{/if}
+      {#if i > 0}<span class="px-0.5 text-slate-600 dark:text-slate-400">/</span>{/if}
       <span class="relative inline-flex items-center">
         {#if c.isDir}
           <button
@@ -128,7 +128,7 @@
         {/if}
         <button
           type="button"
-          class="rounded px-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+          class="rounded px-1 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
           aria-label="Path actions for {c.label}"
           title="Path actions"
           onclick={() => toggleMenu(i)}>⋯</button>
@@ -185,7 +185,7 @@
         {copied === "file" ? "Copied!" : "Copy path"}
       </button>
       {#if !sharePrefix}
-        <span class="text-slate-400">Set a share location on the library to enable Open links.</span>
+        <span class="text-slate-600 dark:text-slate-400">Set a share location on the library to enable Open links.</span>
       {/if}
     </div>
   {/if}

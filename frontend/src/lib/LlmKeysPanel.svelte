@@ -115,7 +115,7 @@
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">LLM access keys</h2>
     <button
-      class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-white"
+      class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
       onclick={() => { showMint = !showMint; minted = null; }}
     >{showMint ? "Cancel" : "Mint key"}</button>
   </div>
@@ -185,7 +185,7 @@
         </label>
       </div>
       <div>
-        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-white" type="submit">Mint</button>
+        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-[var(--accent-fg)]" type="submit">Mint</button>
       </div>
     </form>
   {/if}

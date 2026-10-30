@@ -139,7 +139,7 @@
     {#if lastVerifiedAt}
       <span class="text-slate-500" title={lastVerifiedAt}>last verified {relTime(lastVerifiedAt)}</span>
     {:else}
-      <span class="text-slate-400">never verified</span>
+      <span class="text-slate-600 dark:text-slate-400">never verified</span>
     {/if}
 
     <span class="grow"></span>
