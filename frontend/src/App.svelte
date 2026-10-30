@@ -1,31 +1,55 @@
+<script module lang="ts">
+  // UI-T9 — hash-based routing so a refresh keeps the current tab and
+  // back/forward toggles between them. `#/search` (default), `#/libraries`
+  // (library management, split from admin 2026-08-19), `#/admin`, `#/jobs`
+  // (UI-T10 jobs dashboard).
+  type Page = "search" | "libraries" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
+
+  // Route-level code splitting: importing all pages statically made the entry
+  // chunk ~870 kB, so each page is its own chunk fetched only when its route is
+  // first shown. LoginPage stays eager (it is the first paint when gated).
+  // `satisfies` makes a new Page without a loader a type error.
+  const pageLoaders = {
+    search: () => import("./lib/SearchPage.svelte"),
+    libraries: () => import("./lib/LibrariesPage.svelte"),
+    admin: () => import("./lib/AdminPage.svelte"),
+    jobs: () => import("./lib/JobsPage.svelte"),
+    alerts: () => import("./lib/AlertsPage.svelte"),
+    browse: () => import("./lib/BrowsePage.svelte"),
+    timeline: () => import("./lib/TimelinePage.svelte"),
+    reports: () => import("./lib/ReportsPage.svelte"),
+    agents: () => import("./lib/AgentsPage.svelte"),
+    taxonomy: () => import("./lib/TaxonomyPage.svelte"),
+    "filter-builder": () => import("./lib/FilterBuilderPage.svelte"),
+    help: () => import("./lib/HelpPage.svelte"),
+    about: () => import("./lib/AboutPage.svelte"),
+    account: () => import("./lib/AccountPage.svelte"),
+  } satisfies Record<Page, () => Promise<unknown>>;
+
+  // One promise per page for the app's lifetime: `{#await}` gets the same
+  // already-settled promise when a route is revisited, so it neither re-fetches
+  // nor flashes "Loading…". A rejection stays cached too — the only recovery
+  // offered is a full reload, which resets this map anyway.
+  const pageModules = new Map<Page, Promise<unknown>>();
+  function loadPage<P extends Page>(p: P): ReturnType<(typeof pageLoaders)[P]> {
+    let mod = pageModules.get(p);
+    if (!mod) {
+      mod = pageLoaders[p]();
+      pageModules.set(p, mod);
+    }
+    return mod as ReturnType<(typeof pageLoaders)[P]>;
+  }
+</script>
+
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import AdminPage from "./lib/AdminPage.svelte";
-  import LibrariesPage from "./lib/LibrariesPage.svelte";
-  import JobsPage from "./lib/JobsPage.svelte";
-  import AlertsPage from "./lib/AlertsPage.svelte";
-  import BrowsePage from "./lib/BrowsePage.svelte";
-  import SearchPage from "./lib/SearchPage.svelte";
-  import TimelinePage from "./lib/TimelinePage.svelte";
-  import ReportsPage from "./lib/ReportsPage.svelte";
-  import AgentsPage from "./lib/AgentsPage.svelte";
-  import TaxonomyPage from "./lib/TaxonomyPage.svelte";
-  import FilterBuilderPage from "./lib/FilterBuilderPage.svelte";
-  import HelpPage from "./lib/HelpPage.svelte";
-  import AboutPage from "./lib/AboutPage.svelte";
   import LoginPage from "./lib/LoginPage.svelte";
-  import AccountPage from "./lib/AccountPage.svelte";
   import { getVersion, authStatus, authMe, authLogout, type AuthMode, type AuthPrincipal } from "./lib/api";
   import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./lib/osFormat.svelte";
   import type { FormatPref } from "./lib/osFormat";
   import { parseBrowseHash } from "./lib/routes";
 
-  // UI-T9 — hash-based routing so a refresh keeps the current tab and
-  // back/forward toggles between them. `#/search` (default), `#/libraries`
-  // (library management, split from admin 2026-08-19), `#/admin`, `#/jobs`
-  // (UI-T10 jobs dashboard).
-  type Page = "search" | "libraries" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help" | "about" | "account";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
@@ -218,38 +242,53 @@
     </div>
   </header>
 
+  <!-- Each branch awaits its own page chunk (see pageLoaders); the branches
+       stay separate because every page takes different props. -->
+  {#snippet pageLoading()}
+    <p class="py-8 text-sm text-slate-500">Loading…</p>
+  {/snippet}
+  {#snippet pageLoadFailed()}
+    <!-- Realistic cause: a deploy replaced the hashed chunk this tab still
+         references. A reload picks up the new index.html and its chunk names. -->
+    <div class="py-8 text-sm text-slate-500">
+      <p>This page failed to load — Filearr may have been updated since this tab was opened.</p>
+      <button class="mt-2 rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+        onclick={() => location.reload()}>Reload</button>
+    </div>
+  {/snippet}
+
   {#if page === "libraries"}
-    <LibrariesPage {me} />
+    {#await loadPage("libraries")}{@render pageLoading()}{:then m}<m.default {me} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "admin"}
-    <AdminPage {me} authDisabled={authMode === "disabled"} />
+    {#await loadPage("admin")}{@render pageLoading()}{:then m}<m.default {me} authDisabled={authMode === "disabled"} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "jobs"}
-    <JobsPage />
+    {#await loadPage("jobs")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "alerts"}
-    <AlertsPage />
+    {#await loadPage("alerts")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "browse"}
-    <BrowsePage libraryId={browseLib} path={browsePath} />
+    {#await loadPage("browse")}{@render pageLoading()}{:then m}<m.default libraryId={browseLib} path={browsePath} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "timeline"}
-    <TimelinePage />
+    {#await loadPage("timeline")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "reports"}
-    <ReportsPage />
+    {#await loadPage("reports")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "agents"}
-    <AgentsPage />
+    {#await loadPage("agents")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "taxonomy"}
-    <TaxonomyPage {me} authDisabled={authMode === "disabled"} />
+    {#await loadPage("taxonomy")}{@render pageLoading()}{:then m}<m.default {me} authDisabled={authMode === "disabled"} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "filter-builder"}
-    <FilterBuilderPage />
+    {#await loadPage("filter-builder")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "help"}
-    <HelpPage {sourceUrl} />
+    {#await loadPage("help")}{@render pageLoading()}{:then m}<m.default {sourceUrl} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "about"}
-    <AboutPage />
+    {#await loadPage("about")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "account"}
     {#if me}
-      <AccountPage {me} onUpdated={(p) => (me = p)} />
+      {#await loadPage("account")}{@render pageLoading()}{:then m}<m.default {me} onUpdated={(p) => (me = p)} />{:catch}{@render pageLoadFailed()}{/await}
     {:else}
       <p class="py-8 text-sm text-slate-500">Authentication is disabled on this deployment — there is no account to manage.</p>
     {/if}
   {:else}
-    <SearchPage />
+    {#await loadPage("search")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {/if}
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
