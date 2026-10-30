@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import {
     ApiError,
     clearFailedJobs,
@@ -327,8 +328,8 @@
     return "bg-slate-400 text-white";
   }
 
-  let pollTimer: ReturnType<typeof setInterval>;
-  let tickTimer: ReturnType<typeof setInterval>;
+  let poller: Poller | undefined;
+  let ticker: Poller | undefined;
 
   async function refresh() {
     if (loading) return;
@@ -668,24 +669,17 @@
 
   onMount(() => {
     refresh();
-    // Poll only while the tab is the visible foreground document.
-    pollTimer = setInterval(() => {
-      if (document.visibilityState === "visible") refresh();
-    }, POLL_MS);
-    // Local 1s tick for the running-for counters (cheap, no network).
-    tickTimer = setInterval(() => (now = Date.now()), 1000);
-    document.addEventListener("visibilitychange", onVisible);
+    // Poll only while the tab is the visible foreground document; the helper
+    // also refreshes immediately when the tab is brought back.
+    poller = usePolling(refresh, POLL_MS);
+    // Local 1s tick for the running-for counters (cheap, no network). Paused
+    // while hidden too; refresh-on-return snaps the counters to the real time.
+    ticker = usePolling(() => (now = Date.now()), 1000);
   });
 
-  function onVisible() {
-    // Refresh immediately when the tab is brought back to the foreground.
-    if (document.visibilityState === "visible") refresh();
-  }
-
   onDestroy(() => {
-    clearInterval(pollTimer);
-    clearInterval(tickTimer);
-    document.removeEventListener("visibilitychange", onVisible);
+    poller?.stop();
+    ticker?.stop();
   });
 </script>
 

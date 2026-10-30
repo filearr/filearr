@@ -4,6 +4,7 @@
   // optional auto-refresh (re-fetches page one — a tail, not a live stream).
   import { untrack } from "svelte";
   import { fetchLogs, friendlyError, type LogRow } from "./api";
+  import { usePolling } from "./polling";
 
   let rows = $state<LogRow[]>([]);
   let enabled = $state(true);
@@ -19,7 +20,6 @@
   let expanded = $state<Record<number, boolean>>({});
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  let autoTimer: ReturnType<typeof setInterval> | undefined;
 
   async function load(older = false) {
     loading = true;
@@ -57,10 +57,12 @@
     searchTimer = setTimeout(() => void load(), 350);
   }
 
+  // The effect owns the poller: toggling `auto` (or unmounting) runs the
+  // cleanup, so no separate onDestroy is needed here.
   $effect(() => {
-    clearInterval(autoTimer);
-    if (auto) autoTimer = setInterval(() => void load(), 10_000);
-    return () => clearInterval(autoTimer);
+    if (!auto) return;
+    const poller = usePolling(() => void load(), 10_000);
+    return () => poller.stop();
   });
 
   function levelClass(level: string): string {

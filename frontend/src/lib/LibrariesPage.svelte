@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
@@ -638,7 +639,7 @@
     refresh();
   }
 
-  let safety: ReturnType<typeof setInterval>;
+  let safety: Poller | undefined;
   onMount(() => {
     refresh();
     loadLibStats();
@@ -650,10 +651,11 @@
     getTaxonomy()
       .then((t) => (taxonomyTree = t.tree))
       .catch(() => (taxonomyTree = []));
-    safety = setInterval(refresh, 30000);
+    // Safety-net refresh; paused while the tab is hidden.
+    safety = usePolling(refresh, 30000);
   });
   onDestroy(() => {
-    clearInterval(safety);
+    safety?.stop();
     for (const id of [...streams.keys()]) closeStream(id);
   });
 </script>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import { copyText } from "./clipboard";
   import ScheduleField from "./ScheduleField.svelte";
   import {
@@ -198,7 +199,7 @@
     }
   }
 
-  let summaryTimer: ReturnType<typeof setInterval>;
+  let summaryPoller: Poller | undefined;
   onMount(() => {
     refresh();
     loadToolMinimums();
@@ -207,13 +208,13 @@
     // finished re-extract clears its badge without a manual reload. Rollouts
     // ride it too — the engine promotes on central's own minute tick, so a
     // static card would show a stale tier for as long as the page is open.
-    summaryTimer = setInterval(() => {
+    summaryPoller = usePolling(() => {
       refreshSummary();
       refreshSweeps();
       reloadRollouts();
     }, 15000);
   });
-  onDestroy(() => clearInterval(summaryTimer));
+  onDestroy(() => summaryPoller?.stop());
 
   function fmt(iso: string | null): string {
     return iso ? new Date(iso).toLocaleString() : "—";
