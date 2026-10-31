@@ -12,6 +12,8 @@ export { default as ConfirmDialog } from "./ConfirmDialog.svelte";
 export { default as ConfirmHost } from "./ConfirmHost.svelte";
 export { default as Toast } from "./Toast.svelte";
 export { default as ToastHost } from "./ToastHost.svelte";
+export { default as Tabs } from "./Tabs.svelte";
+export { default as Popover } from "./Popover.svelte";
 export { confirm } from "./confirm.svelte.ts";
 export { toast } from "./toast.svelte.ts";
 export { controlClass, type ControlSize } from "./control.ts";
