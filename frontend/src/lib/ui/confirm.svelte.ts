@@ -38,17 +38,30 @@ export function hasPendingConfirm(): boolean {
 
 const settled = new WeakSet<ConfirmRequest>();
 
+// Resolves `req` once; returns false if it was already answered.
+function settle(req: ConfirmRequest, ok: boolean): boolean {
+  if (settled.has(req)) return false;
+  settled.add(req);
+  req.resolve(ok);
+  return true;
+}
+
 /** Answer `req` and let the next queued request show. Ignores a request that
  *  is already answered or no longer the head, so a stray second answer cannot
  *  resolve the next one. */
 export function settleConfirm(req: ConfirmRequest, ok: boolean): void {
-  if (queue[0] !== req || settled.has(req)) return;
-  settled.add(req);
-  req.resolve(ok);
+  if (queue[0] !== req || !settle(req, ok)) return;
   // Shift on a later task: the closing dialog first returns focus to its
   // opener, so the next dialog's focus scope records that opener, not the
   // dying dialog's Cancel button.
   setTimeout(() => {
     if (queue[0] === req) queue.shift();
   }, 0);
+}
+
+/** Answer every queued request `false` and empty the queue. App.svelte calls
+ *  it when the ConfirmHost chunk fails to load, so callers awaiting confirm()
+ *  get "no" instead of hanging and later calls are not stuck behind them. */
+export function cancelAllConfirms(): void {
+  for (const req of queue.splice(0)) settle(req, false);
 }

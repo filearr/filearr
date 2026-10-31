@@ -65,16 +65,17 @@
     <AlertDialog.Overlay class="fixed inset-0 z-50 bg-black/50" />
     <!-- Cancel is the safe default, so it takes the initial focus rather than
          the content box. Deferred a frame because the button's ref is attached
-         after the focus scope mounts. -->
+         after the focus scope mounts. The panel scrolls, not the wrapper, for
+         the same reason as in Modal (the wrapper is pointer-events: none). -->
     <AlertDialog.Content
-      class="relative mx-auto my-8 w-full max-w-md rounded-panel bg-surface-2 p-5 shadow-xl"
+      class="relative max-h-[calc(100dvh-4rem)] w-full max-w-md overflow-y-auto rounded-panel bg-surface-2 p-5 shadow-xl"
       onOpenAutoFocus={(e) => {
         e.preventDefault();
         requestAnimationFrame(() => cancelEl?.focus());
       }}
     >
       {#snippet child({ props })}
-        <div class="fixed inset-0 z-50 overflow-y-auto px-4">
+        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 py-8">
           <div {...props}>
             <AlertDialog.Title>
               {#snippet child({ props: titleProps })}
@@ -89,12 +90,19 @@
             {#if typedName !== undefined}
               <!-- Not Field: its label is a plain string and this one needs the
                    name in bold. Same label styling and id wiring by hand. -->
-              <div class="mt-4 flex flex-col gap-1">
+              <!-- A form so Enter in the field confirms once the name matches. -->
+              <form
+                class="mt-4 flex flex-col gap-1"
+                onsubmit={(e) => {
+                  e.preventDefault();
+                  handleConfirm();
+                }}
+              >
                 <label for={fieldId} class="text-xs font-medium text-fg">
                   Type <strong>{typedName}</strong> to confirm
                 </label>
                 <Input id={fieldId} bind:value={typed} autocomplete="off" spellcheck={false} />
-              </div>
+              </form>
             {/if}
             <div class="mt-5 flex flex-wrap justify-end gap-2">
               <AlertDialog.Cancel bind:ref={cancelEl}>

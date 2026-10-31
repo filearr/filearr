@@ -5,9 +5,10 @@
 export type ControlSize = "sm" | "md";
 
 // Full literal class strings (never assembled from fragments) so Tailwind's
-// source scanner can see every utility and generate it.
-const BASE =
-  "w-full rounded-control border bg-surface text-fg placeholder:text-muted focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-hidden disabled:opacity-50";
+// source scanner can see every utility and generate it. No focus ring here:
+// an accent ring fails 3:1 on dark surfaces, so the global :focus-visible
+// outline in app.css (lightened under .dark) is the single indicator.
+const BASE = "w-full rounded-control border bg-surface text-fg placeholder:text-muted disabled:opacity-50";
 
 const SIZES: Record<ControlSize, string> = {
   md: "px-3 py-1.5 text-sm",

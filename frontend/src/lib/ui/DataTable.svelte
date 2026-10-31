@@ -7,6 +7,9 @@
       rows={files} rowKey={(f) => f.id} bind:sort
     />
     {#snippet size(f: FileRow)}{formatBytes(f.size)}{/snippet}
+
+  Cell snippets render twice (the table and the card list both stay in the
+  DOM), so a cell must not contain a static `id`.
 -->
 <script lang="ts" generics="T">
   import type { Snippet } from "svelte";
@@ -110,9 +113,11 @@
               class="px-3 py-2 {alignClass(col)}"
             >
               {#if col.sortable}
+                <!-- Buttons don't inherit text-transform, so the thead's case
+                     and tracking are repeated here. -->
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1 font-medium hover:text-fg"
+                  class="inline-flex items-center gap-1 font-medium uppercase tracking-wide hover:text-fg"
                   onclick={() => (sort = nextSort(sort, col.key))}
                 >
                   {col.label}

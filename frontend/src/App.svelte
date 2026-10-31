@@ -52,7 +52,8 @@
   // Direct paths, not the ./lib/ui barrel: ToastHost has no bits-ui
   // dependency, and ConfirmHost (which does) is imported lazily below.
   import ToastHost from "./lib/ui/ToastHost.svelte";
-  import { hasPendingConfirm } from "./lib/ui/confirm.svelte";
+  import { cancelAllConfirms, hasPendingConfirm } from "./lib/ui/confirm.svelte";
+  import { toast } from "./lib/ui/toast.svelte";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -180,6 +181,19 @@
     });
     routed = true;
   });
+
+  // The ConfirmHost chunk failed to load (offline, or a deploy replaced it):
+  // without this every pending and future confirm() would await forever.
+  // Called from the template's {:catch}, which runs inside a derived where
+  // writing $state throws (state_unsafe_mutation), so the work is deferred a
+  // microtask. Returns "" so the template renders nothing.
+  function onConfirmHostFailed(): string {
+    queueMicrotask(() => {
+      cancelAllConfirms();
+      toast("Couldn't open the confirmation dialog — reload Filearr", { tone: "danger" });
+    });
+    return "";
+  }
 
   onMount(() => {
     applyTheme();
@@ -323,7 +337,7 @@
        mounted across route changes. ConfirmHost is a lazy chunk: bits-ui
        roughly doubled the entry bundle when it was imported eagerly. -->
   {#if hasPendingConfirm()}
-    {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{/await}
+    {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{:catch}{onConfirmHostFailed()}{/await}
   {/if}
   <ToastHost />
 

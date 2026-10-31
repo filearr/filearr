@@ -346,7 +346,7 @@
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-popover">
     <h2 id="kit-popover" class="mb-3 text-lg font-semibold">Popover</h2>
-    <Popover bind:open={popoverOpen}>
+    <Popover bind:open={popoverOpen} ariaLabel="Filters">
       {#snippet trigger({ props })}<Button variant="secondary" {...props}>Filters</Button>{/snippet}
       <div class="flex w-64 max-w-full flex-col gap-3">
         <Field label="Type">

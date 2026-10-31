@@ -17,7 +17,9 @@
 
   let {
     tabs,
-    value = $bindable(""),
+    // Default to the first enabled tab: an empty value makes bits-ui give every
+    // trigger tabindex=0 and leaves the panel unnamed.
+    value = $bindable(tabs.find((t) => !t.disabled)?.value ?? ""),
     ariaLabel,
     class: className = "",
     children,

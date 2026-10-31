@@ -29,13 +29,17 @@
      twice while the Dismiss/action buttons stay reachable and named.
      Countdowns pause while the pointer or keyboard focus is in the stack, so a
      toast cannot vanish while it is being read or its action reached. z-[60]
-     keeps toasts above modals. -->
+     keeps toasts above modals; pointer-events-auto because an open bits-ui
+     dialog sets `pointer-events: none` on <body>, which this fixed region
+     would otherwise inherit. Modal reads data-toast-region to treat clicks
+     here as inside, not as an outside-click dismissal. -->
 {#if toasts.length}
   <div
     bind:this={stack}
     role="region"
     aria-label="Notifications"
-    class="fixed bottom-4 right-4 z-[60] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+    data-toast-region
+    class="pointer-events-auto fixed bottom-4 right-4 z-[60] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
     onpointerenter={() => (hovered = true)}
     onpointerleave={() => (hovered = false)}
     onfocusin={() => (focused = true)}

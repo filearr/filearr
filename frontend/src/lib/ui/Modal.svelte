@@ -49,26 +49,39 @@
     <!-- Every modal shares this one z-index and this one backdrop. -->
     <Dialog.Overlay class="fixed inset-0 z-50 bg-black/50" />
     <!-- The content props land on the panel (via `child`), not on the full-
-         screen scroll container: bits-ui treats a click outside the content
-         element as an outside click, so the area around the panel dismisses.
-         px-4 keeps the panel off the screen edge on a phone. -->
+         screen wrapper: bits-ui treats a click outside the content element as
+         an outside click, so the area around the panel dismisses. The panel
+         scrolls, not the wrapper: the body scroll lock leaves the wrapper at
+         `pointer-events: none`, so a wrapper scrollbar could not be dragged and
+         clicking it fell through to the overlay and closed the modal. Title
+         and footer stay put while only the body scrolls, which also keeps the
+         Close button in view. px-4 keeps the panel off the screen edge on a phone. -->
     <Dialog.Content
-      class="relative mx-auto my-8 w-full {widths[size]} rounded-panel bg-surface-2 p-5 shadow-xl {className}"
+      class="relative flex max-h-[calc(100dvh-4rem)] w-full flex-col overflow-y-auto {widths[size]} rounded-panel bg-surface-2 p-5 shadow-xl {className}"
+      onInteractOutside={(e) => {
+        // A click on a toast over the modal (e.g. its Undo) is not a dismissal.
+        if ((e.target as Element | null)?.closest?.("[data-toast-region]")) e.preventDefault();
+      }}
     >
       {#snippet child({ props })}
-        <div class="fixed inset-0 z-50 overflow-y-auto px-4">
+        <div class="fixed inset-0 z-50 flex items-start justify-center px-4 py-8">
           <div {...props}>
-            <Dialog.Title>
-              {#snippet child({ props: titleProps })}
-                <h2 {...titleProps} class="pr-8 text-lg font-semibold">{title}</h2>
-              {/snippet}
-            </Dialog.Title>
-            {#if description}
-              <Dialog.Description class="mt-1 text-sm text-muted">{description}</Dialog.Description>
-            {/if}
-            <div class="mt-4">{@render children()}</div>
+            <div class="shrink-0">
+              <Dialog.Title>
+                {#snippet child({ props: titleProps })}
+                  <h2 {...titleProps} class="pr-8 text-lg font-semibold">{title}</h2>
+                {/snippet}
+              </Dialog.Title>
+              {#if description}
+                <Dialog.Description class="mt-1 text-sm text-muted">{description}</Dialog.Description>
+              {/if}
+            </div>
+            <!-- Bleeds into the panel padding (-mx-5 px-5, py-1) so the global
+                 focus outline of a control at the body's edge is not clipped
+                 by the scroll container. -->
+            <div class="-mx-5 mt-3 min-h-0 overflow-y-auto px-5 py-1">{@render children()}</div>
             {#if footer}
-              <div class="mt-5 flex flex-wrap justify-end gap-2">{@render footer()}</div>
+              <div class="mt-4 flex shrink-0 flex-wrap justify-end gap-2">{@render footer()}</div>
             {/if}
             <!-- Last in DOM order so the initial focus lands on the body's first
                  control rather than on Close. -->

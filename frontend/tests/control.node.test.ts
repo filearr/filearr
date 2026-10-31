@@ -6,8 +6,7 @@ import { test } from "node:test";
 
 import { controlClass } from "../src/lib/ui/control.ts";
 
-const BASE =
-  "w-full rounded-control border bg-surface text-fg placeholder:text-muted focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-hidden disabled:opacity-50";
+const BASE = "w-full rounded-control border bg-surface text-fg placeholder:text-muted disabled:opacity-50";
 
 function classes(s: string): string[] {
   return s.split(/\s+/).filter(Boolean);
@@ -19,6 +18,12 @@ test("controlClass always carries the shared base utilities", () => {
       const got = classes(controlClass(size, invalid));
       for (const c of classes(BASE)) assert.ok(got.includes(c), `${size}/${invalid} missing ${c}`);
     }
+  }
+});
+
+test("controlClass leaves focus to the global :focus-visible outline", () => {
+  for (const c of classes(controlClass("md", false))) {
+    assert.ok(!c.startsWith("focus-visible:"), `unexpected ${c}`);
   }
 });
 
