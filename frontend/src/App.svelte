@@ -48,6 +48,7 @@
   import type { FormatPref } from "./lib/osFormat";
   import { routeFromHash, pageTitle } from "./lib/routes";
   import { announcement, announce } from "./lib/announce.svelte";
+  import { ConfirmHost, ToastHost } from "./lib/ui";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -308,6 +309,11 @@
   <!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
        <main> so page swaps never unmount it mid-announcement. -->
   <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
+  <!-- confirm() / toast() render here; both portal or position themselves
+       over the page, so where they sit in the tree only matters for staying
+       mounted across route changes. -->
+  <ConfirmHost />
+  <ToastHost />
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
     <span title={buildStamp ?? "no build stamp (dev)"}>
