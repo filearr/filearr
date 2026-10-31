@@ -103,3 +103,29 @@ test("sortRows keeps null values last in both directions", () => {
   const desc: SortState = { key: "n", dir: "desc" };
   assert.deepEqual(sortRows(rows, desc, get).map((r) => r.id), ["b", "d", "a", "c"]);
 });
+
+test("compareValues treats NaN as missing and orders Infinity after finite numbers", () => {
+  assert.ok(compareValues(NaN, 1) > 0);
+  assert.ok(compareValues(1, NaN) < 0);
+  assert.equal(compareValues(NaN, null), 0);
+  assert.ok(compareValues(Infinity, 1e300) > 0);
+  assert.ok(compareValues(-Infinity, -1e300) < 0);
+  assert.equal(compareValues(Infinity, Infinity), 0);
+});
+
+test("compareValues treats an invalid Date as missing", () => {
+  const bad = new Date("not a date");
+  assert.ok(compareValues(bad, new Date(0)) > 0);
+  assert.ok(compareValues(new Date(0), bad) < 0);
+});
+
+test("sortRows keeps NaN and invalid Dates last in both directions", () => {
+  const nums = [{ v: NaN }, { v: 2 }, { v: Infinity }, { v: 1 }];
+  const byV = (r: { v: unknown }) => r.v;
+  assert.deepEqual(sortRows(nums, { key: "v", dir: "asc" }, byV).map((r) => r.v), [1, 2, Infinity, NaN]);
+  assert.deepEqual(sortRows(nums, { key: "v", dir: "desc" }, byV).map((r) => r.v), [Infinity, 2, 1, NaN]);
+  const dates = [{ v: new Date("x") }, { v: new Date(2000) }, { v: new Date(1000) }];
+  const t = (rows: { v: Date }[]) => rows.map((r) => r.v.getTime());
+  assert.deepEqual(t(sortRows(dates, { key: "v", dir: "asc" }, byV)), [1000, 2000, NaN]);
+  assert.deepEqual(t(sortRows(dates, { key: "v", dir: "desc" }, byV)), [2000, 1000, NaN]);
+});

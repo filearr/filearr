@@ -10,14 +10,23 @@ export function nextSort(current: SortState, key: string): SortState {
   return current.dir === "asc" ? { key, dir: "desc" } : null;
 }
 
-const isNil = (v: unknown): v is null | undefined => v === null || v === undefined;
+// NaN and invalid Dates have no place in an order (every comparison with NaN
+// is false), so they count as missing and sort with null/undefined.
+const isNil = (v: unknown): boolean =>
+  v === null ||
+  v === undefined ||
+  (typeof v === "number" && Number.isNaN(v)) ||
+  (v instanceof Date && Number.isNaN(v.getTime()));
 
-/** Ascending comparator; null/undefined always sort after every value. */
+// Relational rather than `a - b`, which gives NaN for Infinity - Infinity.
+const cmp = (a: number, b: number): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Ascending comparator; null, undefined, NaN and invalid Dates sort after every value. */
 export function compareValues(a: unknown, b: unknown): number {
   if (isNil(a) || isNil(b)) return isNil(a) ? (isNil(b) ? 0 : 1) : -1;
-  if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "number" && typeof b === "number") return cmp(a, b);
   if (typeof a === "boolean" && typeof b === "boolean") return Number(a) - Number(b);
-  if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
+  if (a instanceof Date && b instanceof Date) return cmp(a.getTime(), b.getTime());
   // Strings, and the fallback for mixed types: natural order ("file2" < "file10"),
   // ignoring case and accents.
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });

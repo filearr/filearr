@@ -10,6 +10,7 @@
 -->
 <script lang="ts" generics="T">
   import type { Snippet } from "svelte";
+  import Button from "./Button.svelte";
   import StateBlock from "./StateBlock.svelte";
   import { nextSort, sortRows, type SortState } from "./sort.ts";
 
@@ -57,16 +58,27 @@
     return sort.dir === "asc" ? "ascending" : "descending";
   }
 
-  // Rows stay <tr> (a role="button" row would hide its cells from table
-  // navigation), so clickability is a tab stop plus Enter/Space.
-  function onKey(e: KeyboardEvent, row: T) {
-    // Ignore keys bubbling from a control inside the row (a cell's own button).
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      onRowClick?.(row);
-    }
+  const controls = "a,button,input,select,textarea,label,summary,[role=button]";
+
+  // One guard for click and keyboard: a click or key that starts on a control
+  // inside a cell (a link, a cell's own button) belongs to that control, not
+  // to the row. Returns whether the row was activated.
+  function activate(e: Event, row: T): boolean {
+    const hit = (e.target as Element).closest(controls);
+    if (hit !== null && hit !== e.currentTarget) return false;
+    onRowClick?.(row);
+    return true;
   }
+
+  function onRowKey(e: KeyboardEvent, row: T) {
+    // preventDefault only once the row took the key, so Space still types in a
+    // cell's input and does not scroll the page from the row.
+    if ((e.key === "Enter" || e.key === " ") && activate(e, row)) e.preventDefault();
+  }
+
+  // Distinguishes each card's Open button for screen readers by the first column.
+  const openLabel = (row: T) =>
+    `Open ${columns.length ? String(accessor(row, columns[0].key) ?? "") : ""}`.trim();
 </script>
 
 {#snippet value(col: Column, row: T)}
@@ -117,11 +129,15 @@
       </thead>
       <tbody>
         {#each sorted as row (rowKey(row))}
+          <!-- Rows stay <tr> (role="button" would hide the cells from table
+               navigation). tabindex and handlers are conditional so a table
+               without onRowClick has no stray tab stops, and so svelte-check
+               accepts the interactive <tr>. -->
           <tr
             class="border-t border-border {onRowClick ? 'cursor-pointer hover:bg-surface-3' : ''}"
             tabindex={onRowClick ? 0 : undefined}
-            onclick={onRowClick ? () => onRowClick(row) : undefined}
-            onkeydown={onRowClick ? (e) => onKey(e, row) : undefined}
+            onclick={onRowClick ? (e) => activate(e, row) : undefined}
+            onkeydown={onRowClick ? (e) => onRowKey(e, row) : undefined}
           >
             {#each columns as col (col.key)}
               <td class="px-3 py-2 {alignClass(col)}">{@render value(col, row)}</td>
@@ -144,23 +160,19 @@
     {:else}
       <ul aria-label={caption} class="flex flex-col gap-2">
         {#each sorted as row (rowKey(row))}
-          {@const card = "block rounded-control border border-border bg-surface-2 p-3 text-sm"}
+          <!-- The card stays a plain container so its <dl> and any controls in
+               the cells keep their own semantics; the row action gets its own button. -->
           <li>
-            {#if onRowClick}
-              <!-- A card is not a table row, so it can take the button role a
-                   clickable <tr> must not; a <button> element itself cannot hold a <dl>. -->
-              <div
-                role="button"
-                tabindex="0"
-                class="{card} cursor-pointer hover:bg-surface-3"
-                onclick={() => onRowClick(row)}
-                onkeydown={(e) => onKey(e, row)}
-              >
-                {@render fields(row)}
-              </div>
-            {:else}
-              <div class={card}>{@render fields(row)}</div>
-            {/if}
+            <div class="rounded-control border border-border bg-surface-2 p-3 text-sm">
+              {@render fields(row)}
+              {#if onRowClick}
+                <div class="mt-2 flex justify-end">
+                  <Button variant="secondary" size="sm" aria-label={openLabel(row)} onclick={() => onRowClick(row)}>
+                    Open
+                  </Button>
+                </div>
+              {/if}
+            </div>
           </li>
         {/each}
       </ul>
