@@ -52,7 +52,8 @@ export type Page =
   | "filter-builder"
   | "help"
   | "about"
-  | "account";
+  | "account"
+  | "kit";
 
 // Human label per page; `Record<Page, …>` makes a new Page without a label a
 // type error. Doubles as the set of plain `#/<page>` routes.
@@ -74,6 +75,9 @@ const PAGE_LABELS: Record<Page, string> = {
   about: "About",
   // #/account — self-service profile/password/preferences (header badge link).
   account: "Account",
+  // #/kit — UI-kit development gallery. URL only: deliberately absent from the
+  // nav and footer, it is an acceptance surface rather than a user feature.
+  kit: "UI kit",
 };
 
 /** Resolve a location hash to the page (and browse target) it shows. Empty or

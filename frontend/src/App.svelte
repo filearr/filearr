@@ -22,6 +22,7 @@
     help: () => import("./lib/HelpPage.svelte"),
     about: () => import("./lib/AboutPage.svelte"),
     account: () => import("./lib/AccountPage.svelte"),
+    kit: () => import("./lib/KitPage.svelte"),
   } satisfies Record<Page, () => Promise<unknown>>;
 
   // One promise per page for the app's lifetime: `{#await}` gets the same
@@ -301,6 +302,8 @@
     {#await loadPage("help")}{@render pageLoading()}{:then m}<m.default {sourceUrl} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "about"}
     {#await loadPage("about")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
+  {:else if page === "kit"}
+    {#await loadPage("kit")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "account"}
     {#if me}
       {#await loadPage("account")}{@render pageLoading()}{:then m}<m.default {me} onUpdated={(p) => (me = p)} />{:catch}{@render pageLoadFailed()}{/await}

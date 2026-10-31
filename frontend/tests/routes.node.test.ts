@@ -22,6 +22,7 @@ test("routeFromHash maps every plain route hash to its page", () => {
     "help",
     "about",
     "account",
+    "kit",
   ];
   for (const p of pages) {
     assert.deepEqual(routeFromHash(`#/${p}`), { page: p, browseLib: "", browsePath: "" }, p);
@@ -48,4 +49,5 @@ test("pageTitle labels the page and suffixes the app name", () => {
   assert.equal(pageTitle("search"), "Search · Filearr");
   assert.equal(pageTitle("filter-builder"), "Filter builder · Filearr");
   assert.equal(pageTitle("account"), "Account · Filearr");
+  assert.equal(pageTitle("kit"), "UI kit · Filearr");
 });
