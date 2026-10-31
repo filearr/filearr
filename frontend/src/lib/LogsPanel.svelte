@@ -4,6 +4,7 @@
   // optional auto-refresh (re-fetches page one — a tail, not a live stream).
   import { untrack } from "svelte";
   import { fetchLogs, friendlyError, type LogRow } from "./api";
+  import { usePolling } from "./polling";
 
   let rows = $state<LogRow[]>([]);
   let enabled = $state(true);
@@ -19,7 +20,6 @@
   let expanded = $state<Record<number, boolean>>({});
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  let autoTimer: ReturnType<typeof setInterval> | undefined;
 
   async function load(older = false) {
     loading = true;
@@ -57,10 +57,12 @@
     searchTimer = setTimeout(() => void load(), 350);
   }
 
+  // The effect owns the poller: toggling `auto` (or unmounting) runs the
+  // cleanup, so no separate onDestroy is needed here.
   $effect(() => {
-    clearInterval(autoTimer);
-    if (auto) autoTimer = setInterval(() => void load(), 10_000);
-    return () => clearInterval(autoTimer);
+    if (!auto) return;
+    const poller = usePolling(() => void load(), 10_000);
+    return () => poller.stop();
   });
 
   function levelClass(level: string): string {
@@ -125,12 +127,12 @@
         <tbody>
           {#each rows as r (r.id)}
             <tr class="border-b border-slate-100 align-top dark:border-slate-800">
-              <td class="whitespace-nowrap py-1 pr-2 tabular-nums text-slate-400" title={new Date(r.ts).toLocaleString()}>{fmtTs(r.ts)}</td>
+              <td class="whitespace-nowrap py-1 pr-2 tabular-nums text-slate-600 dark:text-slate-400" title={new Date(r.ts).toLocaleString()}>{fmtTs(r.ts)}</td>
               <td class="py-1 pr-2">
                 <span class="rounded px-1 py-0.5 text-[10px] font-medium {levelClass(r.level)}">{r.level.toLowerCase()}</span>
               </td>
-              <td class="whitespace-nowrap py-1 pr-2 text-slate-400">{r.source}</td>
-              <td class="hidden whitespace-nowrap py-1 pr-2 text-slate-400 sm:table-cell" title={r.logger}>{r.logger.replace(/^filearr\./, "")}</td>
+              <td class="whitespace-nowrap py-1 pr-2 text-slate-600 dark:text-slate-400">{r.source}</td>
+              <td class="hidden whitespace-nowrap py-1 pr-2 text-slate-600 dark:text-slate-400 sm:table-cell" title={r.logger}>{r.logger.replace(/^filearr\./, "")}</td>
               <td class="w-full py-1 text-slate-700 dark:text-slate-300">
                 <span class="break-all whitespace-pre-wrap">{r.message}</span>
                 {#if r.exc}

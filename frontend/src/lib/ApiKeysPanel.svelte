@@ -125,7 +125,7 @@
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">API keys</h2>
     <button
-      class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-white"
+      class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
       onclick={() => { showMint = !showMint; minted = null; }}
     >{showMint ? "Cancel" : "Create key"}</button>
   </div>
@@ -193,7 +193,7 @@
         <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" type="number" min="1" max="3650" bind:value={mintExpires} />
       </label>
       <div>
-        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-white" type="submit">Create</button>
+        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-[var(--accent-fg)]" type="submit">Create</button>
       </div>
     </form>
   {/if}

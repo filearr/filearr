@@ -186,7 +186,7 @@
             <td class="py-2 pr-3 text-xs text-slate-500">{f.data_type}</td>
             <td class="py-2 pr-3 text-xs text-slate-500">
               {#if f.library_ids.length === 0}
-                <span class="text-slate-400">all</span>
+                <span class="text-slate-600 dark:text-slate-400">all</span>
               {:else}
                 {f.library_ids.map(libName).join(", ")}
               {/if}
@@ -252,7 +252,7 @@
     <div class="-mt-2 flex flex-wrap gap-2">
       {#each libraries as l (l.id)}
         <button type="button"
-          class="rounded-full border px-3 py-1 text-sm {cLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-slate-300 dark:border-slate-700'}"
+          class="rounded-full border px-3 py-1 text-sm {cLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]' : 'border-slate-300 dark:border-slate-700'}"
           onclick={() => (cLibraryIds = toggle(cLibraryIds, l.id))}>{l.name}</button>
       {/each}
       <span class="self-center text-xs text-slate-500">(none = all libraries)</span>
@@ -278,7 +278,7 @@
     {/if}
 
     <button
-      class="self-start rounded-lg bg-[var(--accent)] px-4 py-2 text-white disabled:opacity-50"
+      class="self-start rounded-lg bg-[var(--accent)] px-4 py-2 text-[var(--accent-fg)] disabled:opacity-50"
       disabled={creating}>{creating ? "Adding…" : "Add custom field"}</button>
   </form>
 </section>
@@ -313,7 +313,7 @@
         <div class="-mt-2 flex flex-wrap gap-2">
           {#each libraries as l (l.id)}
             <button type="button"
-              class="rounded-full border px-3 py-1 text-sm {eLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-slate-300 dark:border-slate-700'}"
+              class="rounded-full border px-3 py-1 text-sm {eLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]' : 'border-slate-300 dark:border-slate-700'}"
               onclick={() => (eLibraryIds = toggle(eLibraryIds, l.id))}>{l.name}</button>
           {/each}
           <span class="self-center text-xs text-slate-500">(none = all libraries)</span>
@@ -342,7 +342,7 @@
           class="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
           onclick={() => (editing = null)}>Cancel</button>
         <button
-          class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
+          class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           disabled={saving} onclick={saveEdit}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </div>

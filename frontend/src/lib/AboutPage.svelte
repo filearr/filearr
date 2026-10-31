@@ -80,7 +80,7 @@
     // you think. Amber, matching the outdated chips on the Agents page — the
     // two surfaces report the same tools and must look the same doing it.
     warn: "text-amber-600 dark:text-amber-400",
-    muted: "text-slate-400 dark:text-slate-500",
+    muted: "text-slate-600 dark:text-slate-500",
   };
 </script>
 
@@ -121,7 +121,7 @@
         </div>
         <div class="flex gap-2">
           <dt class="w-36 shrink-0 text-slate-500" title="Written into the image by the deploy script — the ground truth for which source this container is running.">Build stamp</dt>
-          <dd class="font-mono break-all {app.build_stamp ? 'text-slate-800 dark:text-slate-100' : 'text-slate-400'}">
+          <dd class="font-mono break-all {app.build_stamp ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
             {app.build_stamp ?? "none (dev checkout)"}
           </dd>
         </div>
@@ -208,7 +208,7 @@
                   <a class="underline hover:text-[var(--accent)]" href={s.url} target="_blank" rel="noopener noreferrer">{s.name}</a>
                 </td>
                 <td class="py-1.5 pr-4 font-mono break-all {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
-                <td class="py-1.5 text-slate-400">{s.detail ?? ""}</td>
+                <td class="py-1.5 text-slate-600 dark:text-slate-400">{s.detail ?? ""}</td>
               </tr>
             {/each}
           </tbody>
@@ -235,7 +235,7 @@
               {@const cell = packageCell(p)}
               <tr class="border-t border-slate-100 dark:border-slate-800">
                 <td class="py-1.5 pr-4 text-slate-700 dark:text-slate-200">
-                  {p.name}{#if p.optional}<span class="ml-1 text-slate-400" title="Installed as an optional extra.">(extra)</span>{/if}
+                  {p.name}{#if p.optional}<span class="ml-1 text-slate-600 dark:text-slate-400" title="Installed as an optional extra.">(extra)</span>{/if}
                 </td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}">{cell.text}</td>
                 <td class="py-1.5 break-all">
@@ -271,7 +271,7 @@
                 <tr class="border-t border-slate-100 dark:border-slate-800">
                   <td class="py-1.5 pr-4 text-slate-700 dark:text-slate-200">{p.name}</td>
                   <td class="py-1.5 pr-4 font-mono text-slate-800 dark:text-slate-100">{p.version}</td>
-                  <td class="py-1.5 pr-4 text-slate-400">{p.kind === "runtime" ? "ships in the bundle" : "build tooling"}</td>
+                  <td class="py-1.5 pr-4 text-slate-600 dark:text-slate-400">{p.kind === "runtime" ? "ships in the bundle" : "build tooling"}</td>
                   <td class="py-1.5 break-all">
                     <a class="text-slate-500 underline hover:text-[var(--accent)]" href={p.url} target="_blank" rel="noopener noreferrer">{p.url}</a>
                   </td>
@@ -281,7 +281,7 @@
           </table>
         </div>
       {:else}
-        <p class="text-xs text-slate-400">
+        <p class="text-xs text-slate-600 dark:text-slate-400">
           Build-time frontend information is unavailable in this build.
         </p>
       {/if}
@@ -314,7 +314,7 @@
                 </td>
                 <td class="py-1.5 pr-4 text-slate-500">{t.purpose}</td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
-                <td class="py-1.5 font-mono break-all text-slate-400">{t.path ?? "—"}</td>
+                <td class="py-1.5 font-mono break-all text-slate-600 dark:text-slate-400">{t.path ?? "—"}</td>
               </tr>
             {/each}
           </tbody>
@@ -335,7 +335,7 @@
         {#if about.agents.error}
           <p class="text-xs text-red-600 dark:text-red-400">{about.agents.error}</p>
         {:else if about.agents.versions.length === 0}
-          <p class="text-xs text-slate-400">No agents enrolled.</p>
+          <p class="text-xs text-slate-600 dark:text-slate-400">No agents enrolled.</p>
         {:else}
           <div class="overflow-x-auto">
             <table class="w-full min-w-[20rem] text-left text-xs">
@@ -345,7 +345,7 @@
               <tbody>
                 {#each about.agents.versions as v (v.version ?? "unknown")}
                   <tr class="border-t border-slate-100 dark:border-slate-800">
-                    <td class="py-1.5 pr-4 font-mono {v.version ? 'text-slate-800 dark:text-slate-100' : 'text-slate-400'}">
+                    <td class="py-1.5 pr-4 font-mono {v.version ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
                       {v.version ?? "unknown (never reported)"}
                     </td>
                     <td class="py-1.5 text-slate-600 dark:text-slate-300">{v.count}</td>
@@ -378,7 +378,7 @@
               <td class="py-1.5 pr-4 text-slate-500">Hugging Face repository</td>
               <td class="py-1.5 break-all">
                 <a class="underline hover:text-[var(--accent)]" href={e.model_url} target="_blank" rel="noopener noreferrer">{e.repo}</a>
-                <span class="text-slate-400"> · {e.file}</span>
+                <span class="text-slate-600 dark:text-slate-400"> · {e.file}</span>
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
@@ -388,9 +388,9 @@
                   <a class="font-mono underline hover:text-[var(--accent)]" href={e.revision_url} target="_blank" rel="noopener noreferrer" title={e.revision}>
                     {shortSha(e.revision)}
                   </a>
-                  <span class="text-slate-400"> — the exact upstream commit these weights came from</span>
+                  <span class="text-slate-600 dark:text-slate-400"> — the exact upstream commit these weights came from</span>
                 {:else}
-                  <span class="text-slate-400">not downloaded</span>
+                  <span class="text-slate-600 dark:text-slate-400">not downloaded</span>
                 {/if}
               </td>
             </tr>
@@ -399,9 +399,9 @@
               <td class="py-1.5 break-all">
                 {#if e.downloaded}
                   <span class="text-slate-800 dark:text-slate-100">{formatBytes(e.size)}</span>
-                  <span class="font-mono text-slate-400"> · {e.path}</span>
+                  <span class="font-mono text-slate-600 dark:text-slate-400"> · {e.path}</span>
                 {:else}
-                  <span class="text-slate-400">nothing cached under {e.cache_dir}</span>
+                  <span class="text-slate-600 dark:text-slate-400">nothing cached under {e.cache_dir}</span>
                 {/if}
               </td>
             </tr>
@@ -413,7 +413,7 @@
                   Downloaded here
                 </span>
               </td>
-              <td class="py-1.5 {e.downloaded_at ? 'text-slate-800 dark:text-slate-100' : 'text-slate-400'}">
+              <td class="py-1.5 {e.downloaded_at ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
                 {e.downloaded_at ? formatWhen(e.downloaded_at) : "never"}
               </td>
             </tr>

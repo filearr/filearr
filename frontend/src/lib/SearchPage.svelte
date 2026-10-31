@@ -1,8 +1,21 @@
+<script module lang="ts">
+  // Heavy panels shown only on demand are split into their own chunks so the
+  // page chunk stays small. Promises are cached at module level so `{#await}`
+  // sees the same settled promise on every reopen (no re-fetch, no flash).
+  let itemDetailModule: Promise<typeof import("./ItemDetail.svelte")> | undefined;
+  function loadItemDetail() {
+    return (itemDetailModule ??= import("./ItemDetail.svelte"));
+  }
+  let mapPanelModule: Promise<typeof import("./map/MapPanel.svelte")> | undefined;
+  function loadMapPanel() {
+    return (mapPanelModule ??= import("./map/MapPanel.svelte"));
+  }
+</script>
+
 <script lang="ts">
   import { copyText } from "./clipboard";
   import { onMount, onDestroy } from "svelte";
   import { VList, type VListHandle } from "virtua/svelte";
-  import ItemDetail from "./ItemDetail.svelte";
   import Thumb from "./Thumb.svelte";
   import DslHelp from "./DslHelp.svelte";
   import BulkEditBar from "./BulkEditBar.svelte";
@@ -44,7 +57,6 @@
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import { encodeSearchHash, parseSearchHash } from "./searchparams";
-  import MapPanel from "./map/MapPanel.svelte";
   import {
     MAP_POINT_CAP,
     boxParams,
@@ -1275,7 +1287,7 @@
 <div>
   <input
     bind:this={searchInput}
-    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg outline-none
+    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
            focus:border-[var(--accent)] dark:border-slate-700"
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
@@ -1287,7 +1299,7 @@
   <div class="mt-3 flex flex-wrap items-center gap-2">
     <button
       class="rounded-full border px-3 py-1 text-sm {selectedCategories.length === 0
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       onclick={() => { selectedCategories = []; reset(); }}>all</button>
     {#each categoryOptions as c (c.key)}
@@ -1295,7 +1307,7 @@
       {@const on = selectedCategories.includes(c.key)}
       <button
         class="rounded-full border px-3 py-1 text-sm {on
-          ? 'border-transparent bg-[var(--accent)] text-white'
+          ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
           : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
           ? 'opacity-40'
           : ''}"
@@ -1337,20 +1349,20 @@
     <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Result layout">
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'list' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'list' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'list'}
         title="List view"
         onclick={() => setView('list')}>List</button>
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'grid'}
         title="Grid view"
         onclick={() => setView('grid')}>Grid</button>
       <!-- R8-UI: the map is a third view of the SAME query, not a separate page. -->
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={view === 'map'}
         title="Map view — plot the results that carry GPS coordinates, and drag an area to filter by it"
         onclick={() => setView('map')}>Map</button>
@@ -1360,14 +1372,14 @@
          not a legible state indicator. Open/closed persists per browser. -->
     <button
       class="rounded-full border px-3 py-1 text-sm {savedOpen
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={savedOpen}
       title={savedOpen ? "Hide the saved-searches panel" : "Show saved searches"}
       onclick={toggleSavedOpen}>Saved {savedOpen ? "▲" : "▾"}</button>
     <button
       class="rounded-full border px-3 py-1 text-sm {filtersOpen
-        ? 'border-transparent bg-[var(--accent)] text-white'
+        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
         : 'border-slate-300 dark:border-slate-700'}"
       aria-expanded={filtersOpen}
       title={filtersOpen ? "Hide the filters panel" : "Show filters (group, extension, tags, ranges)"}
@@ -1382,7 +1394,7 @@
     <div class="mt-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
       <div class="flex items-center gap-2">
         <button
-          class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm text-white"
+          class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
           onclick={saveCurrent}>Save current search</button>
         {#if savedError}<span class="text-xs text-red-500">{savedError}</span>{/if}
       </div>
@@ -1441,7 +1453,7 @@
                 {@const allOn = ids.every((id) => selectedLibraries.includes(id))}
                 <button
                   class="rounded-full border border-dashed px-2 py-0.5 text-xs {allOn
-                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                     : 'border-slate-400 dark:border-slate-600'}"
                   title="every library on this machine"
                   aria-pressed={allOn}
@@ -1454,7 +1466,7 @@
                 {@const on = selectedLibraries.includes(l.id)}
                 <button
                   class="rounded-full border px-3 py-1 text-sm {on
-                    ? 'border-transparent bg-[var(--accent)] text-white'
+                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                     : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
                     ? 'opacity-40'
                     : ''}"
@@ -1481,7 +1493,7 @@
             {@const on = selectedGroups.includes(g.key)}
             <button
               class="rounded-full border px-3 py-1 text-sm {on
-                ? 'border-transparent bg-[var(--accent)] text-white'
+                ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                 : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
                 ? 'opacity-40'
                 : ''}"
@@ -1497,14 +1509,14 @@
       <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
         <span class="w-10 font-medium">Type</span>
         <input
-          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                  focus:border-[var(--accent)] dark:border-slate-700"
           placeholder="ext…"
           bind:value={extQuery} />
         {#each topExtensions as [ext, count] (ext)}
           <button
             class="rounded-full border px-2 py-0.5 {extension === ext
-              ? 'border-transparent bg-[var(--accent)] text-white'
+              ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
               : 'border-slate-300 dark:border-slate-700'}"
             onclick={() => toggleExtension(ext)}>
             {ext}<span class="ml-1 opacity-70">{count}</span>
@@ -1538,7 +1550,7 @@
         <span class="mt-1 w-10 font-medium" title="File permissions read by agents on the machine that owns the files (enable an agent's 'permissions' inventory collector). Only items with a collected ACL can match.">Access</span>
         <div class="relative">
           <input
-            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="readable by principal… (name or SID)"
             role="combobox"
@@ -1598,7 +1610,7 @@
         <span class="mt-1 w-10 font-medium">Tags</span>
         <div class="relative">
           <input
-            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs outline-none
+            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                    focus:border-[var(--accent)] dark:border-slate-700"
             placeholder="add tag…"
             role="combobox"
@@ -1656,7 +1668,7 @@
           <span class="tabular-nums">{fmtBytes(sizeLo)} – {fmtBytes(sizeHi)}</span>
         </div>
       {:else}
-        <div class="mt-3 flex items-center gap-3 text-xs text-slate-400">
+        <div class="mt-3 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
           <span class="w-10 font-medium">Size</span>
           <span>range unavailable (no matching results)</span>
         </div>
@@ -1677,7 +1689,7 @@
           <span class="tabular-nums">{fmtDate(mtimeLo)} – {fmtDate(mtimeHi)}</span>
         </div>
       {:else}
-        <div class="mt-2 flex items-center gap-3 text-xs text-slate-400">
+        <div class="mt-2 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
           <span class="w-10 font-medium">Date</span>
           <span>range unavailable (no matching results)</span>
         </div>
@@ -1692,17 +1704,27 @@
          viewport; the area it reports comes straight back into this page's param
          state. -->
     {#if error}<p class="mt-6 text-red-500">{error}</p>{/if}
-    <MapPanel
-      points={mapPoints}
-      {geoTotal}
-      queryTotal={total}
-      loading={mapLoading}
-      box={geoBox}
-      {gpsGated}
-      docsUrl={DOCS_URL}
-      onBoxChange={onMapBox}
-      onOpenItem={(id) => (selected = id)}
-    />
+    {#await loadMapPanel()}
+      <p class="py-8 text-sm text-slate-500">Loading…</p>
+    {:then m}
+      <m.default
+        points={mapPoints}
+        {geoTotal}
+        queryTotal={total}
+        loading={mapLoading}
+        box={geoBox}
+        {gpsGated}
+        docsUrl={DOCS_URL}
+        onBoxChange={onMapBox}
+        onOpenItem={(id) => (selected = id)}
+      />
+    {:catch}
+      <div class="py-8 text-sm text-slate-500">
+        <p>The map failed to load — Filearr may have been updated since this tab was opened.</p>
+        <button class="mt-2 rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+          onclick={() => location.reload()}>Reload</button>
+      </div>
+    {/await}
   {:else if !searched}
     <!-- Roadmap §20 empty start: nothing has been queried yet — an honest blank
          slate instead of a match-all dump of the whole catalog. -->
@@ -1959,12 +1981,24 @@
     {/if}
 
     {#if loading}
-      <p class="mt-2 text-center text-xs text-slate-400">Loading…</p>
+      <p class="mt-2 text-center text-xs text-slate-600 dark:text-slate-400">Loading…</p>
     {/if}
   {/if}
 
   {#if selected}
-    <ItemDetail id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+    <!-- No pending markup: a "Loading…" line at the foot of the page would go
+         unseen, and the modal appears as soon as its chunk lands. A failure
+         (stale chunk after a deploy) is pinned to the viewport instead, so it
+         is seen wherever the user has scrolled to. -->
+    {#await loadItemDetail() then m}
+      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+    {:catch}
+      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+        Item details failed to load — Filearr may have been updated.
+        <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+          onclick={() => location.reload()}>Reload</button>
+      </div>
+    {/await}
   {/if}
 
   {#if toast}

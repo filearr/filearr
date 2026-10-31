@@ -271,7 +271,7 @@
     <h2 class="text-lg font-semibold">Custom reports</h2>
     <div class="grow"></div>
     <button
-      class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white"
+      class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
       onclick={openCreate}>New custom report</button>
   </div>
 
@@ -351,7 +351,7 @@
 
       <div class="mt-4 flex items-center gap-2">
         <button
-          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           onclick={save}
           disabled={saving || !vOk || !fName || !formColumns().length}>
           {saving ? "Saving…" : editingId ? "Save changes" : "Create"}

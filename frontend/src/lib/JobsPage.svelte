@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import {
     ApiError,
     clearFailedJobs,
@@ -327,8 +328,8 @@
     return "bg-slate-400 text-white";
   }
 
-  let pollTimer: ReturnType<typeof setInterval>;
-  let tickTimer: ReturnType<typeof setInterval>;
+  let poller: Poller | undefined;
+  let ticker: Poller | undefined;
 
   async function refresh() {
     if (loading) return;
@@ -668,24 +669,17 @@
 
   onMount(() => {
     refresh();
-    // Poll only while the tab is the visible foreground document.
-    pollTimer = setInterval(() => {
-      if (document.visibilityState === "visible") refresh();
-    }, POLL_MS);
-    // Local 1s tick for the running-for counters (cheap, no network).
-    tickTimer = setInterval(() => (now = Date.now()), 1000);
-    document.addEventListener("visibilitychange", onVisible);
+    // Poll only while the tab is the visible foreground document; the helper
+    // also refreshes immediately when the tab is brought back.
+    poller = usePolling(refresh, POLL_MS);
+    // Local 1s tick for the running-for counters (cheap, no network). Paused
+    // while hidden too; refresh-on-return snaps the counters to the real time.
+    ticker = usePolling(() => (now = Date.now()), 1000);
   });
 
-  function onVisible() {
-    // Refresh immediately when the tab is brought back to the foreground.
-    if (document.visibilityState === "visible") refresh();
-  }
-
   onDestroy(() => {
-    clearInterval(pollTimer);
-    clearInterval(tickTimer);
-    document.removeEventListener("visibilitychange", onVisible);
+    poller?.stop();
+    ticker?.stop();
   });
 </script>
 
@@ -841,7 +835,7 @@
           <div class="flex items-center justify-between gap-2">
             <span class="font-medium">Disk space</span>
             <span
-              class="text-xs text-slate-400"
+              class="text-xs text-slate-600 dark:text-slate-400"
               title="Free headroom on each filesystem the app monitors: the thumbnail cache, the app container's temp dir (i.e. the disk the app itself runs on), and — when the pgdata volume is mounted (compose default) — the filesystem holding the Postgres database. Roles on the same filesystem merge into one row. Rows turn amber/red as they approach the low-space floors that pause thumbnail writes.">
               monitored paths
             </span>
@@ -930,7 +924,7 @@
           <div class="flex items-center justify-between gap-2">
             <span class="font-medium">I/O &amp; network</span>
             <span
-              class="text-xs text-slate-400"
+              class="text-xs text-slate-600 dark:text-slate-400"
               title="Left: whole-disk read/write throughput across physical block devices (cumulative /proc/diskstats deltas between polls; partitions and loop/dm excluded). Right: receive/transmit summed across all interfaces except loopback (/proc/net/dev deltas).">
               throughput
             </span>
@@ -938,31 +932,31 @@
           <div class="mt-2 grid grid-cols-2 gap-3">
             {#if summary?.resources?.io}
               <div>
-                <div class="text-xs text-slate-400">disk</div>
+                <div class="text-xs text-slate-600 dark:text-slate-400">disk</div>
                 {#if ioRate}
                   <div class="tabular-nums text-sm text-slate-600 dark:text-slate-300">
-                    {fmtRate(ioRate.read)} <span class="text-xs text-slate-400">read</span>
+                    {fmtRate(ioRate.read)} <span class="text-xs text-slate-600 dark:text-slate-400">read</span>
                   </div>
                   <div class="mt-0.5 tabular-nums text-sm text-slate-600 dark:text-slate-300">
-                    {fmtRate(ioRate.write)} <span class="text-xs text-slate-400">write</span>
+                    {fmtRate(ioRate.write)} <span class="text-xs text-slate-600 dark:text-slate-400">write</span>
                   </div>
                 {:else}
-                  <div class="text-sm text-slate-400">—</div>
+                  <div class="text-sm text-slate-600 dark:text-slate-400">—</div>
                 {/if}
               </div>
             {/if}
             {#if summary?.resources?.net}
               <div>
-                <div class="text-xs text-slate-400">network</div>
+                <div class="text-xs text-slate-600 dark:text-slate-400">network</div>
                 {#if netRate}
                   <div class="tabular-nums text-sm text-slate-600 dark:text-slate-300">
-                    {fmtRate(netRate.rx)} <span class="text-xs text-slate-400">rx</span>
+                    {fmtRate(netRate.rx)} <span class="text-xs text-slate-600 dark:text-slate-400">rx</span>
                   </div>
                   <div class="mt-0.5 tabular-nums text-sm text-slate-600 dark:text-slate-300">
-                    {fmtRate(netRate.tx)} <span class="text-xs text-slate-400">tx</span>
+                    {fmtRate(netRate.tx)} <span class="text-xs text-slate-600 dark:text-slate-400">tx</span>
                   </div>
                 {:else}
-                  <div class="text-sm text-slate-400">—</div>
+                  <div class="text-sm text-slate-600 dark:text-slate-400">—</div>
                 {/if}
               </div>
             {/if}
@@ -993,7 +987,7 @@
             <span class="{idleHot ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500'}"
               title="Backends idle inside an open transaction, and the age of the longest such session. Amber above 60s (informational — a long idle-in-transaction can hold locks / bloat).">
               idle-in-tx <b class="tabular-nums">{db.idle_in_tx}</b>
-              {#if db.longest_idle_in_tx_s > 0}<span class="text-slate-400">({fmtDuration(db.longest_idle_in_tx_s)})</span>{/if}
+              {#if db.longest_idle_in_tx_s > 0}<span class="text-slate-600 dark:text-slate-400">({fmtDuration(db.longest_idle_in_tx_s)})</span>{/if}
             </span>
             {#if db.waiting > 0}
               <span class="text-slate-500">waiting <b class="tabular-nums">{db.waiting}</b></span>
@@ -1056,7 +1050,7 @@
           <div class="mt-1 text-xs text-slate-500">
             ETA {queueEta("extract", summary?.extract.depth ?? 0)}
             {#if rates["extract"] != null && rates["extract"] > 0}
-              <span class="text-slate-400">· {rates["extract"].toFixed(1)}/s</span>
+              <span class="text-slate-600 dark:text-slate-400">· {rates["extract"].toFixed(1)}/s</span>
             {/if}
           </div>
           {#if summary?.staged_pipeline && summary.scans_running.length > 0}
@@ -1149,7 +1143,7 @@
         <div class="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
           <div class="flex items-center justify-between gap-2">
             <label class="text-xs text-slate-500" for={`prio-${q}`}>priority</label>
-            <span class="text-[10px] text-slate-400">default {summary?.priorities?.[q] ?? 0}</span>
+            <span class="text-[10px] text-slate-600 dark:text-slate-400">default {summary?.priorities?.[q] ?? 0}</span>
           </div>
           <div class="mt-1 flex items-center gap-1">
             <button
@@ -1183,14 +1177,14 @@
              poll (summary.upcoming). Omitted entirely when the queue has none. -->
         {#if summary?.upcoming?.[q]?.length}
           <div class="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
-            <div class="text-[10px] font-medium uppercase tracking-wide text-slate-400">Upcoming</div>
+            <div class="text-[10px] font-medium uppercase tracking-wide text-slate-600 dark:text-slate-400">Upcoming</div>
             <ul class="mt-1 space-y-0.5">
               {#each summary.upcoming[q] as u (u.label + u.at)}
                 <li
                   class="flex items-baseline justify-between gap-2 text-[11px] text-slate-500"
                   title="{u.task} — {u.label} at {new Date(u.at).toLocaleString()}">
                   <span class="truncate">{u.label}</span>
-                  <span class="shrink-0 tabular-nums text-slate-400">{hhmm(u.at)} · {relFuture(u.at)}</span>
+                  <span class="shrink-0 tabular-nums text-slate-600 dark:text-slate-400">{hhmm(u.at)} · {relFuture(u.at)}</span>
                 </li>
               {/each}
             </ul>
@@ -1361,7 +1355,7 @@
             <td class="py-2 pr-3 text-slate-500">{job.queue}</td>
             <td class="max-w-[28rem] truncate py-2 pr-3 font-mono text-xs text-slate-500" title={jobTargetDisplay(job)}>{jobTargetDisplay(job)}</td>
             <td class="py-2 pr-3 text-right tabular-nums text-slate-500" title={av.tooltip}>
-              {av.main}{#if av.extra > 0}<span class="ml-1 text-[10px] font-normal text-slate-400">{av.extraLabel}</span>{/if}
+              {av.main}{#if av.extra > 0}<span class="ml-1 text-[10px] font-normal text-slate-600 dark:text-slate-400">{av.extraLabel}</span>{/if}
             </td>
             <td class="py-2 pr-3 text-right tabular-nums text-slate-500">{secs === null ? "—" : fmtDuration(secs)}</td>
           </tr>
@@ -1412,7 +1406,7 @@
             <td class="py-2 pr-3 font-mono text-xs">{j.task}</td>
             <td class="py-2 pr-3 text-slate-500">{j.queue}</td>
             <td class="py-2 pr-3 tabular-nums text-slate-500" title={av.tooltip}>
-              {av.main}{#if av.extra > 0}<span class="ml-1 text-[10px] font-normal text-slate-400">{av.extraLabel}</span>{/if}
+              {av.main}{#if av.extra > 0}<span class="ml-1 text-[10px] font-normal text-slate-600 dark:text-slate-400">{av.extraLabel}</span>{/if}
             </td>
             <td class="py-2 pr-3 text-slate-500">{j.attempted_at ? new Date(j.attempted_at).toLocaleString() : "—"}</td>
             <td
@@ -1469,7 +1463,7 @@
           {@const rows = maint.filter((t) => t.category === cat)}
           {#if rows.length > 0}
             <tr>
-              <td colspan="5" class="pb-1 pt-3 text-[10px] font-medium uppercase tracking-wide text-slate-400">{catLabel}</td>
+              <td colspan="5" class="pb-1 pt-3 text-[10px] font-medium uppercase tracking-wide text-slate-600 dark:text-slate-400">{catLabel}</td>
             </tr>
             {#each rows as t (t.key)}
               <tr class={t.enabled ? "" : "opacity-60"}>
@@ -1494,13 +1488,13 @@
                     {#if t.overridden}
                       <span class="ml-1 rounded-full bg-sky-500 px-1.5 py-0.5 text-[10px] font-medium text-white" title="Custom schedule — the registry default is {t.default_cron}">custom</span>
                     {:else if !t.editable}
-                      <span class="ml-1 text-[10px] text-slate-400" title="This cadence is part of the task's semantics and cannot be changed.">fixed</span>
+                      <span class="ml-1 text-[10px] text-slate-600 dark:text-slate-400" title="This cadence is part of the task's semantics and cannot be changed.">fixed</span>
                     {/if}
                     {#if !t.enabled}
                       <span class="ml-1 rounded-full bg-slate-400 px-1.5 py-0.5 text-[10px] font-medium text-white">disabled</span>
                     {/if}
                   {:else}
-                    <span class="text-xs text-slate-400">on demand</span>
+                    <span class="text-xs text-slate-600 dark:text-slate-400">on demand</span>
                   {/if}
                 </td>
                 <td class="py-2 pr-3 tabular-nums text-slate-500">
@@ -1509,7 +1503,7 @@
                   {:else if !t.enabled}
                     —
                   {:else}
-                    <span class="text-slate-400">—</span>
+                    <span class="text-slate-600 dark:text-slate-400">—</span>
                   {/if}
                 </td>
                 <td class="py-2 pr-3 text-slate-500">
@@ -1519,12 +1513,12 @@
                       <span class="ml-1 tabular-nums" title={new Date(t.last_run.at).toLocaleString()}>{relTime(t.last_run.at)}</span>
                     {/if}
                     {#if t.last_run.status === "doing" && t.last_run.started_at}
-                      <span class="ml-1 tabular-nums text-slate-400" title="Elapsed so far (refreshes with the page poll)">· {fmtDuration((Date.now() - new Date(t.last_run.started_at).getTime()) / 1000)}</span>
+                      <span class="ml-1 tabular-nums text-slate-600 dark:text-slate-400" title="Elapsed so far (refreshes with the page poll)">· {fmtDuration((Date.now() - new Date(t.last_run.started_at).getTime()) / 1000)}</span>
                     {:else if t.last_run.duration_seconds != null}
-                      <span class="ml-1 tabular-nums text-slate-400" title="Wall time of the last completed run{t.last_run.started_at ? ` (started ${new Date(t.last_run.started_at).toLocaleString()})` : ''}">· took {fmtDuration(t.last_run.duration_seconds)}</span>
+                      <span class="ml-1 tabular-nums text-slate-600 dark:text-slate-400" title="Wall time of the last completed run{t.last_run.started_at ? ` (started ${new Date(t.last_run.started_at).toLocaleString()})` : ''}">· took {fmtDuration(t.last_run.duration_seconds)}</span>
                     {/if}
                   {:else}
-                    <span class="text-xs text-slate-400" title="No run within the job-history retention window (succeeded runs are kept ~48h).">no recent run</span>
+                    <span class="text-xs text-slate-600 dark:text-slate-400" title="No run within the job-history retention window (succeeded runs are kept ~48h).">no recent run</span>
                   {/if}
                 </td>
                 <td class="py-2 pr-3 text-right">
@@ -1573,7 +1567,7 @@
                         disabled={maintBusy[t.key]}
                         title={t.enabled ? "Stop scheduling this task (it can still be run manually)." : "Resume the schedule."}>
                         {t.enabled ? "Disable schedule" : "Enable schedule"}</button>
-                      <span class="text-[10px] text-slate-400">five fields: min hour day month weekday — e.g. “0 4 * * *” = daily 04:00 UTC</span>
+                      <span class="text-[10px] text-slate-600 dark:text-slate-400">five fields: min hour day month weekday — e.g. “0 4 * * *” = daily 04:00 UTC</span>
                     </div>
                   </td>
                 </tr>

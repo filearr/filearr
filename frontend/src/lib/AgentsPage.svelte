@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import { copyText } from "./clipboard";
   import ScheduleField from "./ScheduleField.svelte";
   import {
@@ -198,7 +199,7 @@
     }
   }
 
-  let summaryTimer: ReturnType<typeof setInterval>;
+  let summaryPoller: Poller | undefined;
   onMount(() => {
     refresh();
     loadToolMinimums();
@@ -207,13 +208,13 @@
     // finished re-extract clears its badge without a manual reload. Rollouts
     // ride it too — the engine promotes on central's own minute tick, so a
     // static card would show a stale tier for as long as the page is open.
-    summaryTimer = setInterval(() => {
+    summaryPoller = usePolling(() => {
       refreshSummary();
       refreshSweeps();
       reloadRollouts();
     }, 15000);
   });
-  onDestroy(() => clearInterval(summaryTimer));
+  onDestroy(() => summaryPoller?.stop());
 
   function fmt(iso: string | null): string {
     return iso ? new Date(iso).toLocaleString() : "—";
@@ -356,7 +357,7 @@
   }
   function tokenStatusClass(s: string): string {
     if (s === "active") return "text-emerald-600";
-    if (s === "consumed") return "text-slate-400";
+    if (s === "consumed") return "text-slate-600 dark:text-slate-400";
     return "text-amber-600";
   }
 
@@ -876,7 +877,7 @@
     ok: "text-slate-700 dark:text-slate-200",
     bad: "text-red-600 dark:text-red-400",
     warn: "text-amber-600 dark:text-amber-400",
-    muted: "text-slate-400",
+    muted: "text-slate-600 dark:text-slate-400",
   };
 
   function fmtPolicyValue(v: unknown): string {
@@ -1937,7 +1938,7 @@ ${detail}
     </div>
   </div>
   {#if summary}
-    <p class="mt-1 text-xs text-slate-400">{summary.total} agent(s) total.</p>
+    <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">{summary.total} agent(s) total.</p>
   {/if}
 
   <!-- Per-agent detail row: what this agent can DO (its advertised capability +
@@ -1950,7 +1951,7 @@ ${detail}
       <div class="flex flex-wrap items-center gap-2">
         <span class="font-medium text-slate-500">Capabilities</span>
         {#if caps === null}
-          <span class="text-slate-400">
+          <span class="text-slate-600 dark:text-slate-400">
             Not reported yet — an agent advertises its capabilities on its command
             poll (about a minute after it starts).
           </span>
@@ -1987,7 +1988,7 @@ ${detail}
             </span>
           {/each}
           {#if caps.formats?.length}
-            <span class="text-slate-400">formats:</span>
+            <span class="text-slate-600 dark:text-slate-400">formats:</span>
             {#each caps.formats as f (f)}
               <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{f}</span>
             {/each}
@@ -2002,7 +2003,7 @@ ${detail}
       <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
         <div class="flex flex-wrap items-center gap-2">
           <span class="font-medium text-slate-500">Configuration groups</span>
-          <span class="text-slate-400">
+          <span class="text-slate-600 dark:text-slate-400">
             applied in priority order, lowest first — the last group to set a key wins it
           </span>
         </div>
@@ -2019,7 +2020,7 @@ ${detail}
                 disabled={g.is_system || savingMembers[a.id] || a.status === "revoked"}
                 onchange={(e) => toggleMembership(a, g.id, e.currentTarget.checked)} />
               <span>{g.name}</span>
-              <span class="tabular-nums text-slate-400">p{g.priority}</span>
+              <span class="tabular-nums text-slate-600 dark:text-slate-400">p{g.priority}</span>
               {#if g.is_system}
                 <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">always</span>
               {/if}
@@ -2029,7 +2030,7 @@ ${detail}
         {#if membersDirty(a)}
           <div class="mt-1.5 flex items-center gap-2">
             <button
-              class="rounded-lg bg-[var(--accent)] px-2 py-1 text-[11px] text-white disabled:opacity-50"
+              class="rounded-lg bg-[var(--accent)] px-2 py-1 text-[11px] text-[var(--accent-fg)] disabled:opacity-50"
               disabled={savingMembers[a.id]}
               onclick={() => saveMembership(a)}>
               {savingMembers[a.id] ? "Saving…" : "Save membership"}
@@ -2045,7 +2046,7 @@ ${detail}
       <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
         <span class="font-medium text-slate-500">Effective content-extraction settings</span>
         {#if effLoading[a.id]}
-          <p class="mt-1 text-slate-400">Loading…</p>
+          <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
         {:else if effError[a.id]}
           <p class="mt-1 text-red-600">Could not load the effective configuration: {effError[a.id]}</p>
         {:else if effective[a.id]}
@@ -2057,7 +2058,7 @@ ${detail}
               <span class="text-slate-500">
                 <code class="font-mono text-[11px]">{f.key}</code>
                 <b class="text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[f.key])}</b>
-                <span class="text-slate-400">
+                <span class="text-slate-600 dark:text-slate-400">
                   ({provenanceFor(eff.provenance, eff.groups, "policy", f.key)})
                 </span>
               </span>
@@ -2096,7 +2097,7 @@ ${detail}
               onclick={() => (effFull[a.id] = !effFull[a.id])}>
               {effFull[a.id] ? "▾" : "▸"} Effective configuration
             </button>
-            <span class="text-slate-400" title="The delivered generation: max(version seq) across the group snapshots that composed this document. The agent echoes it back on its next poll.">
+            <span class="text-slate-600 dark:text-slate-400" title="The delivered generation: max(version seq) across the group snapshots that composed this document. The agent echoes it back on its next poll.">
               generation <b class="tabular-nums text-slate-600 dark:text-slate-300">{eff.generation}</b>
             </span>
             {#if eff.confirmed_generation !== eff.generation}
@@ -2109,7 +2110,7 @@ ${detail}
               <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                 title="The agent has echoed back this exact generation, so what is shown below is what it is running.">confirmed</span>
             {/if}
-            <span class="font-mono text-slate-400" title="First 12 hex of the sha256 over the canonical document — the same hash that rides the delivery ETag.">{eff.hash}</span>
+            <span class="font-mono text-slate-600 dark:text-slate-400" title="First 12 hex of the sha256 over the canonical document — the same hash that rides the delivery ETag.">{eff.hash}</span>
           </div>
 
           {#if effFull[a.id]}
@@ -2124,7 +2125,7 @@ ${detail}
             <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
               <span class="text-slate-500">Layers:</span>
               {#each eff.groups as g, i (g.id)}
-                {#if i > 0}<span class="text-slate-400">→</span>{/if}
+                {#if i > 0}<span class="text-slate-600 dark:text-slate-400">→</span>{/if}
                 <span
                   class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
                   title={`Priority ${g.priority}, version ${g.version_used}${g.via_rollout ? " — delivered by a phased rollout this agent's bucket is covered by, so other members of the same group may still be on the previous version" : ""}.`}>
@@ -2159,7 +2160,7 @@ ${detail}
             {#if extraPolicyKeys(eff).length}
               <div class="mt-2">
                 <span class="font-medium text-slate-500">Other delivered keys</span>
-                <span class="text-slate-400"> — set by a group but not modelled by this console</span>
+                <span class="text-slate-600 dark:text-slate-400"> — set by a group but not modelled by this console</span>
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each extraPolicyKeys(eff) as key (key)}
                     <div class="flex flex-wrap items-baseline gap-1.5">
@@ -2177,9 +2178,9 @@ ${detail}
             <!-- The settings half, delivered under the document's `group` key. -->
             <div class="mt-2">
               <span class="font-medium text-slate-500">Group settings</span>
-              <span class="text-slate-400"> — delivered under <code class="font-mono">group</code></span>
+              <span class="text-slate-600 dark:text-slate-400"> — delivered under <code class="font-mono">group</code></span>
               {#if Object.keys(settingsOf(eff)).length === 0}
-                <p class="mt-1 text-slate-400">No group supplies any settings — the agent uses its own configuration.</p>
+                <p class="mt-1 text-slate-600 dark:text-slate-400">No group supplies any settings — the agent uses its own configuration.</p>
               {:else}
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each Object.entries(settingsOf(eff)) as [key, value] (key)}
@@ -2242,7 +2243,7 @@ ${detail}
                 (v) => (rehashBand[a.id] = { ...bandOf(a.id), items: String(v ?? "") })
               } />
           </label>
-          <span class="text-[11px] text-slate-400">
+          <span class="text-[11px] text-slate-600 dark:text-slate-400">
             Widening the floor to 1 runs the separate small-file content-hash
             backfill instead — roughly ten times the reads, for exact identity on
             files that were never mis-hashed. Not the default for that reason.
@@ -2276,7 +2277,7 @@ ${detail}
 
         {#if aboutOpen[a.id]}
           {#if aboutLoading[a.id]}
-            <p class="mt-1 text-slate-400">Loading…</p>
+            <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
           {:else if aboutError[a.id]}
             <p class="mt-1 text-red-600">Could not load this agent's About report: {aboutError[a.id]}</p>
           {:else if about[a.id]}
@@ -2286,7 +2287,7 @@ ${detail}
               <!-- Not an error and not zeros: an enrolled agent that has not
                    polled yet genuinely has nothing to report, and saying so is
                    a different statement from "everything is absent". -->
-              <p class="mt-1 text-slate-400">
+              <p class="mt-1 text-slate-600 dark:text-slate-400">
                 This agent has never sent a capability advertisement — it has not polled
                 yet (a fresh enrollment), or it runs a build older than the capability
                 channel. Nothing below is missing; there is nothing yet to report.
@@ -2318,7 +2319,7 @@ ${detail}
               </span>
               <b class="{ABOUT_TONE_CLASS[rehash.tone]}" title={rehash.hint}>{rehash.text}</b>
               {#if rep.rehash?.fp}
-                <span class="font-mono text-[11px] text-slate-400"
+                <span class="font-mono text-[11px] text-slate-600 dark:text-slate-400"
                   title="The scheme and size band this cursor belongs to. A repeat sweep at the same fingerprint short-circuits; changing the band, or a future change to the hashing itself, invalidates it and re-sweeps.">{rep.rehash.fp}</span>
               {/if}
             </div>
@@ -2327,12 +2328,12 @@ ${detail}
                  boolean matrix above cannot say. -->
             <div class="mt-3">
               <span class="font-medium text-slate-500">Host tools on this agent</span>
-              <span class="text-slate-400">
+              <span class="text-slate-600 dark:text-slate-400">
                 — the resolved path is which copy the agent will actually run; the agent
                 only ever resolves tools from machine-wide, admin-writable locations
               </span>
               {#if rep.host_tools.length === 0}
-                <p class="mt-1 text-slate-400">Not reported.</p>
+                <p class="mt-1 text-slate-600 dark:text-slate-400">Not reported.</p>
               {:else}
                 <div class="mt-1 overflow-x-auto">
                   <table class="w-full min-w-[46rem] text-[11px]">
@@ -2359,7 +2360,7 @@ ${detail}
                             {:else}
                               <span>{t.name}</span>
                             {/if}
-                            <div class="text-slate-400">{orUnknown(t.purpose, "purpose not published")}</div>
+                            <div class="text-slate-600 dark:text-slate-400">{orUnknown(t.purpose, "purpose not published")}</div>
                           </td>
                           <td class="py-1 pr-3 {ABOUT_TONE_CLASS[cell.tone]}" title={cell.hint}>{cell.text}</td>
                           <td class="py-1 pr-3 font-mono break-all {ABOUT_TONE_CLASS[path.tone]}" title={path.hint}>{path.text}</td>
@@ -2438,7 +2439,7 @@ ${detail}
       effective configuration. Changes land on the agent's next poll.
     </p>
     {#if agentsTotal === 0}
-      <p class="py-2 text-slate-400">No agents registered.</p>
+      <p class="py-2 text-slate-600 dark:text-slate-400">No agents registered.</p>
     {:else}
       <div class="mt-1 overflow-x-auto">
         <table class="w-full min-w-[64rem] text-sm">
@@ -2471,7 +2472,7 @@ ${detail}
                 {#if isOnline(a)}
                   <span class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400" title={healthTitle(a)}>
                     <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>online
-                    <span class="tabular-nums text-slate-400" title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">· {relTime(a.last_seen_at)}</span>
+                    <span class="tabular-nums text-slate-600 dark:text-slate-400" title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">· {relTime(a.last_seen_at)}</span>
                   </span>
                 {:else}
                   <span class="inline-flex items-center gap-1 text-xs text-slate-500" title={healthTitle(a)}>
@@ -2527,7 +2528,7 @@ ${detail}
                     {g.name}
                   </span>
                 {:else}
-                  <span class="text-[11px] text-slate-400" title="This agent is only in the implicit Global group, so it receives the fleet-wide baseline and nothing else.">Global only</span>
+                  <span class="text-[11px] text-slate-600 dark:text-slate-400" title="This agent is only in the implicit Global group, so it receives the fleet-wide baseline and nothing else.">Global only</span>
                 {/each}
               </td>
               <td class="py-2 pr-3 text-slate-500">
@@ -2666,7 +2667,7 @@ ${detail}
               {g.name}
             </label>
           {:else}
-            <span class="text-slate-400">No groups beyond Global — the agent enrolls into the fleet-wide baseline.</span>
+            <span class="text-slate-600 dark:text-slate-400">No groups beyond Global — the agent enrolls into the fleet-wide baseline.</span>
           {/each}
         </div>
       </div>
@@ -2677,7 +2678,7 @@ ${detail}
           title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes)."
           type="number" min="1" placeholder="60" bind:value={newTtl} />
       </label>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
         disabled={minting} onclick={mint}>Mint token</button>
     </div>
 
@@ -2718,7 +2719,7 @@ ${detail}
                 {g.name}
               </label>
             {:else}
-              <span class="text-slate-400">Global only</span>
+              <span class="text-slate-600 dark:text-slate-400">Global only</span>
             {/each}
           </div>
         </div>
@@ -2734,7 +2735,7 @@ ${detail}
             {/each}
           </select>
         </label>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           disabled={issuing} onclick={issueInstaller}>Generate</button>
       </div>
 
@@ -2750,7 +2751,7 @@ ${detail}
             <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700" onclick={copySidecar}>
               {sidecarCopied ? "Copied" : "Copy JSON"}
             </button>
-            <button class="rounded bg-[var(--accent)] px-2 py-1 text-xs text-white" onclick={downloadSidecar}>
+            <button class="rounded bg-[var(--accent)] px-2 py-1 text-xs text-[var(--accent-fg)]" onclick={downloadSidecar}>
               Download filearr-agent.json
             </button>
           </div>
@@ -2769,7 +2770,7 @@ ${detail}
                 <pre class="mt-1 overflow-auto rounded bg-slate-100 p-2 font-mono text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-200">{installer.install_hint[os as "windows" | "linux" | "macos"]}</pre>
               </div>
             {/each}
-            <p class="mt-1 text-[11px] text-slate-400">
+            <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
               Replace <code class="font-mono">{"{agent_id}"}</code> / <code class="font-mono">{"{version}"}</code>
               from the fleet console after enrollment (the artifact path is agent-authenticated).
             </p>
@@ -2781,7 +2782,7 @@ ${detail}
     <!-- Enrollment tokens -->
     <h4 class="mt-5 text-sm font-medium">Enrollment tokens</h4>
     {#if tokens.length === 0}
-      <p class="py-2 text-slate-400">No tokens.</p>
+      <p class="py-2 text-slate-600 dark:text-slate-400">No tokens.</p>
     {:else}
       <div class="overflow-x-auto">
         <table class="mt-1 w-full text-sm">
@@ -2860,7 +2861,7 @@ ${detail}
               bind:value={t.delay_minutes} />
           </label>
           <button class="text-xs text-red-600" onclick={() => (relTiers = relTiers.filter((_, j) => j !== i))}>remove</button>
-          <span class="text-[11px] text-slate-400">≈ {tierEtaMinutes(relTiers, i)} min after start</span>
+          <span class="text-[11px] text-slate-600 dark:text-slate-400">≈ {tierEtaMinutes(relTiers, i)} min after start</span>
         </div>
       {/each}
       <div class="mt-3 flex flex-wrap items-center gap-3">
@@ -2870,7 +2871,7 @@ ${detail}
         {#if relTierError}<span class="text-xs text-red-600">{relTierError}</span>{/if}
         <div class="grow"></div>
         <button class="text-sm text-slate-500" onclick={() => (relFormOpen = false)}>Cancel</button>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           disabled={relBusy || !!relTierError || !relVersion.trim()}
           onclick={submitRelRollout}>Start rollout</button>
       </div>
@@ -2979,7 +2980,7 @@ ${detail}
       <h3 class="font-medium">Configuration groups</h3>
       <span class="text-xs text-slate-500">layered per key, lowest priority first</span>
       <div class="grow"></div>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={openCreate}>New group</button>
+      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={openCreate}>New group</button>
     </div>
     <p class="mt-1 text-xs text-slate-500">
       Rows are listed in <b>merge order</b>: each group applies over the ones
@@ -2991,7 +2992,7 @@ ${detail}
     </p>
 
     {#if groups.length === 0}
-      <p class="py-2 text-slate-400">No configuration groups yet.</p>
+      <p class="py-2 text-slate-600 dark:text-slate-400">No configuration groups yet.</p>
     {:else}
       <div class="mt-2 overflow-x-auto">
         <table class="w-full min-w-[48rem] text-sm">
@@ -3046,7 +3047,7 @@ ${detail}
                       → v{g.active_rollout.target_version} · {describeRollout(g.active_rollout)}
                     </span>
                   {:else}
-                    <span class="text-slate-400">—</span>
+                    <span class="text-slate-600 dark:text-slate-400">—</span>
                   {/if}
                 </td>
                 <td class="max-w-[18rem] truncate py-2 pr-3 text-slate-500" title={g.description ?? ""}>{g.description ?? "—"}</td>
@@ -3074,7 +3075,7 @@ ${detail}
   <button
     class="flex w-full items-baseline gap-2 rounded-lg border border-slate-200 px-3 py-2 text-left dark:border-slate-800"
     onclick={() => toggleSection(id)}>
-    <span class="text-slate-400">{openSections[id] ? "▾" : "▸"}</span>
+    <span class="text-slate-600 dark:text-slate-400">{openSections[id] ? "▾" : "▸"}</span>
     <span class="text-sm font-medium">{label}</span>
     <span class="text-xs text-slate-500">{blurb}</span>
   </button>
@@ -3116,11 +3117,11 @@ ${detail}
         <div class="mt-3">
           <button class="text-xs text-[var(--accent)]" onclick={() => (historyView = false)}>← back to editing</button>
           {#if historyLoading}
-            <p class="mt-2 text-sm text-slate-400">Loading version history…</p>
+            <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Loading version history…</p>
           {:else if historyError}
             <p class="mt-2 text-sm text-red-600">Could not load the history: {historyError}</p>
           {:else if historyRows.length === 0}
-            <p class="mt-2 text-sm text-slate-400">No versions recorded for this group.</p>
+            <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">No versions recorded for this group.</p>
           {:else}
             <div class="overflow-x-auto"><table class="mt-2 w-full text-xs">
               <thead class="text-left text-slate-500">
@@ -3210,7 +3211,7 @@ ${detail}
             title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0."
             disabled={dialog.isSystem}
             bind:value={dialog.priority} />
-          <span class="mt-0.5 block text-[11px] text-slate-400">
+          <span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400">
             Lower applies first; a higher number wins the keys it sets.
           </span>
         </label>
@@ -3278,7 +3279,7 @@ ${detail}
         )}
         {#if openSections.surface}
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <p class="text-xs text-slate-400">
+          <p class="text-xs text-slate-600 dark:text-slate-400">
             Inherit = this group says nothing, so a lower-priority group or the
             agent's built-in default supplies the value. These three exist in
             BOTH halves of the document: a non-null value here is lifted over the
@@ -3352,13 +3353,13 @@ ${detail}
               <span class="text-xs font-medium text-slate-500"
                 title="Which inventory collectors this group's members should run. The list below is a CATALOGUE, not a whitelist: it is the union of the collectors this Filearr release can describe and every collector name your enrolled agents advertise. Central deliberately does not hard-code the vocabulary, so a newer agent build's collector still works — use 'add another' for a name nothing here knows yet. Max 64.">Collectors</span>
               {#if !dialog.inventoryEnabled}
-                <span class="text-[11px] text-slate-400"
+                <span class="text-[11px] text-slate-600 dark:text-slate-400"
                   title="Inventory collection is switched off for this group, so nothing below runs. The selection is still saved — author it now and tick the master switch when you want it live.">inventory collection is off — this selection is saved but inert</span>
               {/if}
             </div>
 
             {#if collectorEditor.mode === "loading"}
-              <p class="mt-1 text-xs text-slate-400"
+              <p class="mt-1 text-xs text-slate-600 dark:text-slate-400"
                 title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">Loading the collector catalogue…</p>
             {:else if collectorEditor.mode === "list"}
               <div class="mt-1 flex flex-col gap-1.5">
@@ -3389,7 +3390,7 @@ ${detail}
                       </span>
                       <span class="mt-0.5 block text-xs text-slate-500">{c.description}</span>
                       {#if c.described}
-                        <span class="mt-0.5 block text-[11px] text-slate-400"
+                        <span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400"
                           title={st.note}>{c.platforms.length ? c.platforms.join(" · ") : "platform not recorded"} — cost: {c.cost}</span>
                       {/if}
                     </span>
@@ -3452,7 +3453,7 @@ ${detail}
               <div class="flex flex-wrap items-baseline gap-2">
                 <span class="text-xs font-medium text-slate-500"
                   title="When a schedule is set, central enqueues an inventory command for every member agent on each occurrence — the same run the per-agent Inventory button fires, so collectors, results and permission snapshots all ride the existing pipeline. An unfinished scheduled run suppresses the next occurrence.">Scheduled collection</span>
-                <span class="text-[11px] text-slate-400"
+                <span class="text-[11px] text-slate-600 dark:text-slate-400"
                   title="Without a schedule nothing collects on its own — inventory runs only when you press an agent's Inventory button.">Off = manual runs only (the per-agent Inventory button)</span>
               </div>
               <div class="mt-2">
@@ -3487,7 +3488,7 @@ ${detail}
                 </label>
               </div>
               {#if dialog.invScheduleTz === "agent"}
-                <p class="mt-1 text-[11px] text-slate-400"
+                <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400"
                   title="Agents advertise their current UTC offset on every command poll, so a DST change reaches central within one poll interval. A build that predates the advertisement is scheduled on UTC until it upgrades.">
                   Uses the UTC offset each agent reports; an agent that has not reported one yet runs on UTC.
                 </p>
@@ -3496,7 +3497,7 @@ ${detail}
                 <label class="inline-flex items-start gap-2 text-xs text-slate-500"
                   title="Also walk what the agent scans: its library roots (as central knows them) plus the explicit paths of this group's enabled scan selections. Combined with any paths listed below. With no paths and no preset the run walks the scan roots anyway — ticking this makes that explicit and lets you add extra paths on top.">
                   <input type="checkbox" class="mt-0.5" bind:checked={dialog.invInheritScanPaths} />
-                  <span>Inherit the scan paths<span class="block text-[11px] text-slate-400">agent's library roots + this group's scan selections</span></span>
+                  <span>Inherit the scan paths<span class="block text-[11px] text-slate-600 dark:text-slate-400">agent's library roots + this group's scan selections</span></span>
                 </label>
                 <label class="block text-xs text-slate-500"
                   title="Maximum entries one run collects before the agent stops walking (the summary then says entries_capped). The agent default is 100,000 — a drive with more files than that is silently truncated unless this is raised. 1,000 – 5,000,000.">
@@ -3588,7 +3589,7 @@ ${detail}
                     <input type="checkbox" bind:checked={dialog.auditConfigured} />
                     Include a change-audit block
                   </label>
-                  <p class="mt-0.5 text-xs text-slate-400">
+                  <p class="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
                     Snapshot-diff + alert routing for watched paths. Stored ahead of
                     the collector; nothing consumes it yet.
                   </p>
@@ -3644,7 +3645,7 @@ ${detail}
               onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</button>
           </div>
           {#if dialog.selections.length === 0}
-            <p class="mt-2 text-xs text-slate-400">No selections — the agent falls back to its defaults.</p>
+            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">No selections — the agent falls back to its defaults.</p>
           {/if}
           {#each dialog.selections as sel, i (i)}
             <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
@@ -3714,7 +3715,7 @@ ${detail}
                         </span>
                       {/if}
                     </div>
-                    <code class="text-[11px] text-slate-400" title={fieldTitle(f)}>{f.key}</code>
+                    <code class="text-[11px] text-slate-600 dark:text-slate-400" title={fieldTitle(f)}>{f.key}</code>
                     <p class="mt-0.5 text-xs text-slate-500" title={fieldTitle(f)}>{f.hint}</p>
                   </div>
 
@@ -3758,7 +3759,7 @@ ${detail}
                               class="w-32 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
                               value={dialog.policyForm[f.key].value}
                               oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
-                            <span class="text-xs text-slate-400">seconds</span>
+                            <span class="text-xs text-slate-600 dark:text-slate-400">seconds</span>
                           </div>
                         {:else if f.kind === "int"}
                           <input
@@ -3772,7 +3773,7 @@ ${detail}
                             <ScheduleField value={dialog.policyForm[f.key].value || null} offsetMinutes={0}
                               tzLabel="the agent's local time" dstNote={false}
                               onChange={(c) => setPolicyValue(f.key, c ?? "")} />
-                            <p class="mt-1 text-[11px] text-slate-400">Times are the agent's own local clock. Off leaves the key set-but-empty (a save error) — untick “set in this group” to inherit instead.</p>
+                            <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">Times are the agent's own local clock. Off leaves the key set-but-empty (a save error) — untick “set in this group” to inherit instead.</p>
                           </div>
                         {:else if f.kind === "text"}
                           <input
@@ -3790,7 +3791,7 @@ ${detail}
                                 .includes(p)}
                               <button type="button"
                                 class="rounded-full border px-2 py-0.5 text-[11px] {chosen
-                                  ? 'border-transparent bg-[var(--accent)] text-white'
+                                  ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
                                   : 'border-slate-300 dark:border-slate-700'}"
                                 onclick={() => {
                                   const cur = dialog!.policyForm[f.key].value
@@ -3824,7 +3825,7 @@ ${detail}
                       <p class="mt-1 text-xs text-red-600">{policyErrors[f.key]}</p>
                     {/if}
                     {#if !dialog.policyForm[f.key]?.set}
-                      <p class="mt-1 text-[11px] text-slate-400">
+                      <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
                         Not set here → a lower-priority group supplies it, or {f.fallback}.
                       </p>
                     {/if}
@@ -3852,7 +3853,7 @@ ${detail}
                 <li>
                   <code class="font-mono text-slate-600 dark:text-slate-300">{key}</code> — {why}
                   {#if key in dialog.storedPolicy}
-                    <span class="text-slate-400">(present in this group; preserved as-is)</span>
+                    <span class="text-slate-600 dark:text-slate-400">(present in this group; preserved as-is)</span>
                   {/if}
                 </li>
               {/each}
@@ -3938,7 +3939,7 @@ ${detail}
               <div class="grow"></div>
               <button class="text-xs text-slate-500" onclick={() => (rolloutOpen = false)}>cancel rollout</button>
             </div>
-            <p class="mt-1 text-xs text-slate-400">
+            <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">
               Coverage is picked by a stable hash of each agent's id, so an agent
               never flaps in and out between polls. Members outside the active
               tier keep receiving version {dialog.currentVersion} until the last
@@ -3966,7 +3967,7 @@ ${detail}
                 <!-- The running sum, because each row's number is a delay after
                      the PREVIOUS tier and operators reliably read it as "minutes
                      from the start". -->
-                <span class="text-[11px] text-slate-400"
+                <span class="text-[11px] text-slate-600 dark:text-slate-400"
                   title="Cumulative wait from the rollout's start until this tier activates — the sum of every delay up to and including this row.">
                   ≈ {tierEtaMinutes(tiers, i)} min after start
                 </span>
@@ -3991,7 +3992,7 @@ ${detail}
         {/if}
 
         <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
-          <span class="mr-auto text-xs text-slate-400">
+          <span class="mr-auto text-xs text-slate-600 dark:text-slate-400">
             {policyKeyCount} policy key(s) will be written for this group.
           </span>
           <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
@@ -4002,13 +4003,13 @@ ${detail}
               onclick={openRollout}>Save &amp; phased rollout…</button>
           {/if}
           {#if rolloutOpen}
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
               disabled={dialogBusy || tierError !== null}
               onclick={() => saveGroup("rollout")}>
               {dialogBusy ? "Publishing…" : "Publish with rollout"}
             </button>
           {:else}
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
               disabled={dialogBusy}
               title="Publish a new version immediately — every member receives it on its next poll (~1 min)."
               onclick={() => saveGroup("now")}>

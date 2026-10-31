@@ -502,13 +502,13 @@
     <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Drag behaviour">
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'select' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 {dragMode === 'select' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={dragMode === "select"}
         title="Drag on the map to select an area (filters the search)"
         onclick={() => (dragMode = "select")}>Select area</button>
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'pan' ? 'bg-[var(--accent)] text-white' : ''}"
+        class="px-3 py-1 {dragMode === 'pan' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
         aria-pressed={dragMode === "pan"}
         title="Drag on the map to pan (Shift+drag always pans)"
         onclick={() => (dragMode = "pan")}>Pan</button>
@@ -551,7 +551,7 @@
            server should not have to leave the page, and seeing the template
            makes it obvious where the requests go. -->
       <input
-        class="w-72 rounded border border-slate-300 bg-transparent px-2 py-1 outline-none
+        class="w-72 rounded border border-slate-300 bg-transparent px-2 py-1 focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                focus:border-[var(--accent)] dark:border-slate-700"
         aria-label="Tile URL template"
         title="XYZ tile URL template, with the z / x / y placeholders in braces"
@@ -769,7 +769,7 @@
       <label class="flex flex-col gap-0.5 text-slate-500">
         {f.label}
         <input
-          class="w-24 rounded border border-slate-300 bg-transparent px-2 py-1 tabular-nums outline-none
+          class="w-24 rounded border border-slate-300 bg-transparent px-2 py-1 tabular-nums focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
                  focus:border-[var(--accent)] dark:border-slate-700"
           type="text"
           inputmode="decimal"
@@ -780,7 +780,7 @@
     {/each}
     <button
       type="button"
-      class="rounded-full bg-[var(--accent)] px-3 py-1 text-white"
+      class="rounded-full bg-[var(--accent)] px-3 py-1 text-[var(--accent-fg)]"
       onclick={applyDraft}>Apply area</button>
     <button
       type="button"

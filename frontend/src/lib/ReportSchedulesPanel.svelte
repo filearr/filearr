@@ -223,7 +223,7 @@
       <ScheduleField value={cron} onChange={(c) => (cron = c)} />
     </div>
     <button
-      class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+      class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
       onclick={create}
       disabled={creating}>
       {creating ? "Creating…" : "Create schedule"}

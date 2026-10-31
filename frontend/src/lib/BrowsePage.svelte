@@ -1,3 +1,13 @@
+<script module lang="ts">
+  // Heavy panels shown only on demand are split into their own chunks so the
+  // page chunk stays small. Promises are cached at module level so `{#await}`
+  // sees the same settled promise on every reopen (no re-fetch, no flash).
+  let itemDetailModule: Promise<typeof import("./ItemDetail.svelte")> | undefined;
+  function loadItemDetail() {
+    return (itemDetailModule ??= import("./ItemDetail.svelte"));
+  }
+</script>
+
 <script lang="ts">
   import { copyText } from "./clipboard";
   // UI-T12 Part 3 — in-page folder navigation. Renders the breadcrumb header
@@ -17,7 +27,6 @@
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import { gotoBrowse } from "./routes";
   import Breadcrumbs from "./Breadcrumbs.svelte";
-  import ItemDetail from "./ItemDetail.svelte";
   import Thumb from "./Thumb.svelte";
 
   let { libraryId, path }: { libraryId: string; path: string } = $props();
@@ -237,7 +246,7 @@
         <button
           type="submit"
           disabled={scanBusy}
-          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white disabled:opacity-50">
+          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-xs font-medium text-[var(--accent-fg)] disabled:opacity-50">
           {scanBusy ? "Queueing…" : "Scan"}
         </button>
       </form>
@@ -272,13 +281,13 @@
               type="button"
               class="flex min-w-0 grow items-center gap-2 text-left"
               onclick={() => gotoBrowse(libraryId, folderRel(f.name))}>
-              <span class="text-slate-400">📁</span>
+              <span class="text-slate-600 dark:text-slate-400">📁</span>
               <span class="truncate font-medium" title={f.name}>{f.name}</span>
-              <span class="ml-auto shrink-0 text-xs text-slate-400">{f.item_count}</span>
+              <span class="ml-auto shrink-0 text-xs text-slate-600 dark:text-slate-400">{f.item_count}</span>
             </button>
             <button
               type="button"
-              class="rounded px-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+              class="rounded px-1 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
               aria-label="Folder actions for {f.name}"
               title="Folder actions"
               onclick={() => (openFolderMenu = openFolderMenu === f.name ? null : f.name)}>⋯</button>
@@ -327,17 +336,17 @@
     {#if tree.items.length > 0}
       <div class="mt-6 flex items-baseline gap-3">
         <h3 class="text-sm font-semibold text-slate-500">Files</h3>
-        <span class="text-xs text-slate-400">showing {shownFrom}–{shownTo} of {tree.total_items}</span>
+        <span class="text-xs text-slate-600 dark:text-slate-400">showing {shownFrom}–{shownTo} of {tree.total_items}</span>
         <span class="grow"></span>
         <div class="flex items-center overflow-hidden rounded-full border border-slate-300 text-xs dark:border-slate-700" role="group" aria-label="File layout">
           <button
             type="button"
-            class="px-2 py-0.5 {filesView === 'list' ? 'bg-[var(--accent)] text-white' : ''}"
+            class="px-2 py-0.5 {filesView === 'list' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
             aria-pressed={filesView === 'list'}
             onclick={() => (filesView = 'list')}>List</button>
           <button
             type="button"
-            class="px-2 py-0.5 {filesView === 'grid' ? 'bg-[var(--accent)] text-white' : ''}"
+            class="px-2 py-0.5 {filesView === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
             aria-pressed={filesView === 'grid'}
             onclick={() => (filesView = 'grid')}>Grid</button>
         </div>
@@ -354,7 +363,7 @@
                 <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 <span class="flex items-center gap-1">
                   <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{it.file_category}</span>
-                  <span class="ml-auto shrink-0 text-[10px] text-slate-400">{fmtSize(it.size)}</span>
+                  <span class="ml-auto shrink-0 text-[10px] text-slate-600 dark:text-slate-400">{fmtSize(it.size)}</span>
                 </span>
               </div>
             </button>
@@ -373,11 +382,11 @@
               <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
               {#if it.year}<span class="text-sm text-slate-500">({it.year})</span>{/if}
               <span class="grow"></span>
-              <span class="shrink-0 text-xs text-slate-400">{fmtSize(it.size)}</span>
+              <span class="shrink-0 text-xs text-slate-600 dark:text-slate-400">{fmtSize(it.size)}</span>
             </button>
             <button
               type="button"
-              class="shrink-0 rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+              class="shrink-0 rounded px-2 py-1 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
               title="Rescan just this file"
               aria-label="Rescan {it.filename}"
               onclick={() => scanTarget(it.rel_path, false, it.filename)}>Rescan</button>
@@ -402,6 +411,18 @@
   {/if}
 
   {#if selected}
-    <ItemDetail id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+    <!-- No pending markup: a "Loading…" line at the foot of the page would go
+         unseen, and the modal appears as soon as its chunk lands. A failure
+         (stale chunk after a deploy) is pinned to the viewport instead, so it
+         is seen wherever the user has scrolled to. -->
+    {#await loadItemDetail() then m}
+      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+    {:catch}
+      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+        Item details failed to load — Filearr may have been updated.
+        <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+          onclick={() => location.reload()}>Reload</button>
+      </div>
+    {/await}
   {/if}
 </div>

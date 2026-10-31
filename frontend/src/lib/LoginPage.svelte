@@ -94,7 +94,7 @@
       class="mb-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
       Sign in with SSO
     </button>
-    <div class="mb-3 flex items-center gap-2 text-xs text-slate-400">
+    <div class="mb-3 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
       <span class="h-px flex-1 bg-slate-200 dark:bg-slate-700"></span>
       or
       <span class="h-px flex-1 bg-slate-200 dark:bg-slate-700"></span>
@@ -122,7 +122,7 @@
     </label>
 
     {#if isBootstrap}
-      <p class="text-xs text-slate-400">Minimum 8 characters.</p>
+      <p class="text-xs text-slate-600 dark:text-slate-400">Minimum 8 characters.</p>
     {/if}
 
     {#if error}
@@ -133,7 +133,7 @@
     {/if}
 
     <button
-      class="mt-1 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+      class="mt-1 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
       type="submit"
       disabled={busy}>
       {busy ? "Please wait…" : isBootstrap ? "Create admin & sign in" : "Sign in"}

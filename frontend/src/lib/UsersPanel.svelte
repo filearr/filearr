@@ -164,7 +164,7 @@
 
   <div class="mt-3 overflow-x-auto">
     <table class="w-full text-sm">
-      <thead class="text-left text-xs uppercase text-slate-400">
+      <thead class="text-left text-xs uppercase text-slate-600 dark:text-slate-400">
         <tr>
           <th class="py-1 pr-3">User</th>
           <th class="py-1 pr-3">Source</th>
@@ -179,10 +179,10 @@
             <td class="py-2 pr-3">
               {#if u.display_name}
                 <span class="font-medium">{u.display_name}</span>
-                <div class="text-xs text-slate-400">{u.username}{#if u.email} · {u.email}{/if}</div>
+                <div class="text-xs text-slate-600 dark:text-slate-400">{u.username}{#if u.email} · {u.email}{/if}</div>
               {:else}
                 <span class="font-medium">{u.username}</span>
-                {#if u.email}<span class="ml-1 text-xs text-slate-400">{u.email}</span>{/if}
+                {#if u.email}<span class="ml-1 text-xs text-slate-600 dark:text-slate-400">{u.email}</span>{/if}
               {/if}
             </td>
             <td class="py-2 pr-3">
@@ -236,7 +236,7 @@
                     class="rounded border border-slate-300 px-2 py-0.5 text-sm dark:border-slate-700 dark:bg-slate-900"
                     type="password" placeholder="new password (min 8)"
                     bind:value={resetPass} />
-                  <button class="rounded bg-[var(--accent)] px-2 py-0.5 text-xs text-white"
+                  <button class="rounded bg-[var(--accent)] px-2 py-0.5 text-xs text-[var(--accent-fg)]"
                     disabled={resetPass.length < 8}
                     onclick={() => doReset(u)}>save</button>
                 </div>
@@ -267,7 +267,7 @@
                     <input class="w-28 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
                       type="number" min="0" step="any" placeholder="global" bind:value={dTtl} />
                   </label>
-                  <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">Save</button>
+                  <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)]">Save</button>
                   {#if dSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
                   <p class="basis-full text-xs text-slate-500">
                     Timeouts override the global setting for this user only — blank or 0
@@ -290,7 +290,7 @@
                       {#if prof.upn}<dt class="text-slate-500">UPN</dt><dd class="font-mono break-all">{prof.upn}</dd>{/if}
                       {#if prof.netbios}<dt class="text-slate-500">NetBIOS name</dt><dd class="font-mono break-all">{prof.netbios}</dd>{/if}
                       {#if prof.sam}<dt class="text-slate-500">Account name</dt><dd class="font-mono break-all">{prof.sam}</dd>{/if}
-                      {#if prof.mapped_role}<dt class="text-slate-500">Role from directory</dt><dd>{prof.mapped_role} <span class="text-slate-400">(re-applied at every login — a manual role change lasts until then)</span></dd>{/if}
+                      {#if prof.mapped_role}<dt class="text-slate-500">Role from directory</dt><dd>{prof.mapped_role} <span class="text-slate-600 dark:text-slate-400">(re-applied at every login — a manual role change lasts until then)</span></dd>{/if}
                       {#if u.last_login_at}<dt class="text-slate-500">Last login</dt><dd>{new Date(u.last_login_at).toLocaleString()}</dd>{/if}
                       {#if groups.length}
                         <dt class="text-slate-500">Directory groups</dt>
@@ -306,7 +306,7 @@
           {/if}
         {/each}
         {#if users.length === 0}
-          <tr><td colspan="5" class="py-3 text-slate-400">No users yet.</td></tr>
+          <tr><td colspan="5" class="py-3 text-slate-600 dark:text-slate-400">No users yet.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -339,7 +339,7 @@
         {/each}
       </select>
     </label>
-    <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white"
+    <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)]"
       disabled={nuName.trim().length === 0 || nuPass.length < 8}>Add user</button>
   </form>
 </section>

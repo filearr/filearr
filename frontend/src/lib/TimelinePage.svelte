@@ -98,7 +98,7 @@
       {#each ["month", "year"] as b (b)}
         <button
           class="rounded-lg px-3 py-1 text-sm {bucket === b
-            ? 'bg-[var(--accent)] text-white'
+            ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
             : 'border border-slate-300 text-slate-500 dark:border-slate-700'}"
           onclick={() => { bucket = b as "month" | "year"; load(); }}>{b}</button>
       {/each}
@@ -126,7 +126,7 @@
             style="width: 32px;"
             title={`${label(b)}: ${b.count} item${b.count === 1 ? "" : "s"}`}
             onclick={() => openBucket(b)}>
-            <span class="mb-1 text-[10px] tabular-nums text-slate-400 group-hover:text-[var(--accent)]"
+            <span class="mb-1 text-[10px] tabular-nums text-slate-600 dark:text-slate-400 group-hover:text-[var(--accent)]"
               >{b.count}</span>
             <div
               class="w-5 rounded-t bg-[var(--accent)]/60 group-hover:bg-[var(--accent)]"

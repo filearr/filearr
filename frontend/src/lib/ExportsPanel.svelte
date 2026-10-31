@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import {
     listExports,
     downloadExport,
@@ -13,7 +14,7 @@
   let exports = $state<ReportExport[]>([]);
   let error = $state("");
   let loading = $state(false);
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let poller: Poller | undefined;
 
   const anyRunning = $derived(
     exports.some((e) => e.status === "queued" || e.status === "running"),
@@ -48,11 +49,13 @@
 
   onMount(() => {
     refresh();
-    timer = setInterval(() => {
+    // The anyRunning gate lives inside fn so it is read fresh on every tick
+    // (and on return to the tab), not captured once at mount.
+    poller = usePolling(() => {
       if (anyRunning) refresh();
     }, 4000);
   });
-  onDestroy(() => timer && clearInterval(timer));
+  onDestroy(() => poller?.stop());
 </script>
 
 <section class="mt-8">

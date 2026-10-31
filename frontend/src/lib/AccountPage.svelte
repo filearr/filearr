@@ -12,7 +12,7 @@
     type MySessionTimeouts,
     type ProfilePatch,
   } from "./api";
-  import { theme, applyTheme, applyServerPreferences, type Mode } from "./theme.svelte";
+  import { theme, applyTheme, applyServerPreferences, DEFAULT_ACCENT, type Mode } from "./theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./osFormat.svelte";
   import type { FormatPref } from "./osFormat";
   import SessionsPanel from "./SessionsPanel.svelte";
@@ -170,7 +170,7 @@
   <h2 class="text-lg font-semibold">Account</h2>
   <p class="text-xs text-slate-500">
     Signed in as <span class="font-mono">{me.username}</span>
-    <span class="text-slate-400">· {me.global_role} · {providerLabel}</span>
+    <span class="text-slate-600 dark:text-slate-400">· {me.global_role} · {providerLabel}</span>
   </p>
 
   <div class="mt-4 space-y-8 text-sm">
@@ -199,7 +199,7 @@
           bind:value={phone} autocomplete="tel" />
       </div>
       <div class="mt-3 flex items-center gap-3">
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-40"
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-40"
           disabled={!profileDirty || profileBusy} onclick={saveProfile}>
           {profileBusy ? "Saving…" : "Save profile"}
         </button>
@@ -236,7 +236,7 @@
         </p>
         {#if pwProblem}<p class="mt-1 text-xs text-amber-600 dark:text-amber-400">{pwProblem}</p>{/if}
         <div class="mt-3 flex items-center gap-3">
-          <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-40"
+          <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-40"
             disabled={!pwReady || pwBusy} onclick={savePassword}>
             {pwBusy ? "Changing…" : "Change password"}
           </button>
@@ -263,7 +263,7 @@
           <input id="acct-accent" type="color" class="h-9 w-14 cursor-pointer rounded border border-slate-300 bg-transparent dark:border-slate-700"
             bind:value={accent} oninput={previewTheme} />
           <span class="font-mono text-xs text-slate-500">{accent}</span>
-          <button class="text-xs text-slate-500 underline" onclick={() => { accent = "#6366f1"; previewTheme(); }}>default</button>
+          <button class="text-xs text-slate-500 underline" onclick={() => { accent = DEFAULT_ACCENT; previewTheme(); }}>default</button>
         </div>
         <label class="text-slate-600 dark:text-slate-300" for="acct-fmt">Paths</label>
         <select id="acct-fmt" class="w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-2 dark:border-slate-700 dark:bg-slate-800"
@@ -277,7 +277,7 @@
         Changes preview immediately in this browser; Save stores them on your account so they apply wherever you sign in.
       </p>
       <div class="mt-3 flex items-center gap-3">
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white disabled:opacity-40"
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-40"
           disabled={prefBusy} onclick={savePrefs}>{prefBusy ? "Saving…" : "Save preferences"}</button>
         {#if prefMsg}
           <span class="text-xs {prefMsg.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600'}">{prefMsg.text}</span>
@@ -291,15 +291,15 @@
       {#if timeoutsErr}
         <p class="text-xs text-red-600">{timeoutsErr}</p>
       {:else if !timeouts}
-        <p class="text-xs text-slate-400">Loading…</p>
+        <p class="text-xs text-slate-600 dark:text-slate-400">Loading…</p>
       {:else}
         <div class="grid grid-cols-1 gap-2 sm:grid-cols-[10rem_1fr]">
           <span class="text-slate-600 dark:text-slate-300">Idle timeout</span>
           <span>{hours(timeouts.inactivity_hours)}
-            <span class="text-xs text-slate-400">— {sourceLabel(timeouts.inactivity_source)}</span></span>
+            <span class="text-xs text-slate-600 dark:text-slate-400">— {sourceLabel(timeouts.inactivity_source)}</span></span>
           <span class="text-slate-600 dark:text-slate-300">Absolute lifetime</span>
           <span>{hours(timeouts.ttl_hours)}
-            <span class="text-xs text-slate-400">— {sourceLabel(timeouts.ttl_source)}</span></span>
+            <span class="text-xs text-slate-600 dark:text-slate-400">— {sourceLabel(timeouts.ttl_source)}</span></span>
         </div>
       {/if}
     </section>

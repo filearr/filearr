@@ -140,7 +140,7 @@
         </div>
       {/each}
     </dl>
-    <p class="mt-2 text-xs text-slate-400 dark:text-slate-500">
+    <p class="mt-2 text-xs text-slate-600 dark:text-slate-500">
       The bare <kbd class="rounded border border-slate-300 bg-slate-100 px-1 font-mono text-[11px] dark:border-slate-700 dark:bg-slate-800">/</kbd>
       shortcut only fires when you are not already typing in a field.
     </p>

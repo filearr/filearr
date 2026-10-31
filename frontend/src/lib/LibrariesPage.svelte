@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { usePolling, type Poller } from "./polling";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
@@ -638,7 +639,7 @@
     refresh();
   }
 
-  let safety: ReturnType<typeof setInterval>;
+  let safety: Poller | undefined;
   onMount(() => {
     refresh();
     loadLibStats();
@@ -650,10 +651,11 @@
     getTaxonomy()
       .then((t) => (taxonomyTree = t.tree))
       .catch(() => (taxonomyTree = []));
-    safety = setInterval(refresh, 30000);
+    // Safety-net refresh; paused while the tab is hidden.
+    safety = usePolling(refresh, 30000);
   });
   onDestroy(() => {
-    clearInterval(safety);
+    safety?.stop();
     for (const id of [...streams.keys()]) closeStream(id);
   });
 </script>
@@ -797,7 +799,7 @@
                     <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300" title="group">{g}</span>
                   {/each}
                 {:else}
-                  <span class="text-xs text-slate-400">all</span>
+                  <span class="text-xs text-slate-600 dark:text-slate-400">all</span>
                 {/if}
               </span>
             </td>
@@ -853,18 +855,18 @@
                 <!-- Optimistic: the job is deferred but the worker has not
                      created its ScanRun yet. Without this the click produced no
                      visible change for up to 30s. -->
-                <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-medium text-white">
+                <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-fg)]">
                   <span class="inline-block h-1.5 w-1.5 animate-ping rounded-full bg-white"></span>
                   queued
                 </span>
-                <span class="ml-1 text-slate-400">waiting for a worker…</span>
+                <span class="ml-1 text-slate-600 dark:text-slate-400">waiting for a worker…</span>
               {:else if scan && (scan.status === "running" || scan.status === "stopping")}
                 {fmtStats(scan)}
               {:else if lib.last_scan}
                 {@const ls = lib.last_scan}
                 <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {lastScanClass(ls.status)}">{ls.status}</span>
                 <span class="ml-1" title={new Date(ls.finished_at ?? ls.started_at).toLocaleString()}>{relTime(ls.finished_at ?? ls.started_at)}</span>
-                {#if lastScanCounts(ls)}<span class="ml-1 text-slate-400">— {lastScanCounts(ls)}</span>{/if}
+                {#if lastScanCounts(ls)}<span class="ml-1 text-slate-600 dark:text-slate-400">— {lastScanCounts(ls)}</span>{/if}
                 {@const slow = slowScan(ls)}
                 {#if slow}
                   <span
@@ -955,7 +957,7 @@
                   class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
                   onclick={() => (deleting = lib)}>Delete</button>
                 <button
-                  class="rounded-lg bg-[var(--accent)] px-2 py-1 text-xs text-white disabled:opacity-50"
+                  class="rounded-lg bg-[var(--accent)] px-2 py-1 text-xs text-[var(--accent-fg)] disabled:opacity-50"
                   disabled={busy[lib.id]}
                   onclick={() => runScan(lib)}>
                   {#if busy[lib.id]}
@@ -1138,7 +1140,7 @@
   {/if}
 
   <div class="mt-6">
-    <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-white"
+    <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-[var(--accent-fg)]"
       onclick={() => (adding = true)}>Add library…</button>
   </div>
 
@@ -1286,7 +1288,7 @@
           <button
             type="submit"
             disabled={tgtBusy}
-            class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm font-medium text-white disabled:opacity-50">
+            class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50">
             {tgtBusy ? "Queueing…" : "Scan"}
           </button>
         </div>

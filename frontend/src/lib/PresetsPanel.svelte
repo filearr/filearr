@@ -88,7 +88,7 @@
 <section class="mt-8">
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">Exclusion presets</h2>
-    <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={openCreate}>New preset</button>
+    <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={openCreate}>New preset</button>
   </div>
   <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
     Named bundles of gitignore-style exclude patterns that libraries toggle on
@@ -126,7 +126,7 @@
         <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900" bind:value={fCaveat} />
       </label>
       <div class="flex gap-2">
-        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-white disabled:opacity-50"
+        <button class="rounded bg-[var(--accent)] px-4 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
           disabled={busy || !fName.trim() || !fLabel.trim() || patternList.length === 0} onclick={save}>Save</button>
         <button class="rounded border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700" onclick={() => (editor = null)}>Cancel</button>
       </div>

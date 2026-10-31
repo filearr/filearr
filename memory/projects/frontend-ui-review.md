@@ -1,7 +1,8 @@
 # Frontend UI review — findings & plan
 
 **Date:** 2026-10-30 · **Scope:** `frontend/src` (Svelte 5 + Tailwind 4 + Vite 8, ~23k lines)
-**Status:** findings recorded; no code changes yet. Line refs are approximate — re-verify before editing.
+**Status:** P1 implemented on branch `claude/frontend-p1-shell-baseline` (2026-10-30, plan in `frontend-p1-shell-baseline.md`); P2–P6 not started. Line refs below predate P1 — re-verify before editing.
+**P1 outcome:** entry chunk 871 kB → 46 kB; skip link, `<main>`, nav links with `aria-current`, route titles, focus + live region; global `:focus-visible` ring; secondary text `slate-600/dark:slate-400`; accent `#4f46e5` with computed `--accent-fg`; `usePolling` pauses hidden tabs. Deferred to P2: visual toast, `--accent-text` for dark-mode accent text contrast, `text-slate-500` dark nav contrast. Deferred to P3: JobsPage elapsed-time component.
 
 ## Key facts (verified)
 - `bits-ui` and `meilisearch` are in package.json but **imported nowhere** in src/.

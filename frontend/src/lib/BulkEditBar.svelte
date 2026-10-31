@@ -163,10 +163,10 @@
   // operations without retyping them.
 
   const CHIP = "rounded-full border px-3 py-1 text-sm";
-  const ON = "border-transparent bg-[var(--accent)] text-white";
+  const ON = "border-transparent bg-[var(--accent)] text-[var(--accent-fg)]";
   const OFF = "border-slate-300 dark:border-slate-700";
   const BOX =
-    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm outline-none " +
+    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden " +
     "focus:border-[var(--accent)] dark:border-slate-700";
 </script>
 
@@ -177,7 +177,7 @@
   role="region"
   aria-label="Bulk edit selected items">
   <div class="flex flex-wrap items-center gap-2">
-    <span class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm font-medium text-white">
+    <span class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm font-medium text-[var(--accent-fg)]">
       {count} selected
     </span>
     <button type="button" class="{CHIP} {OFF}" onclick={onClear}>Clear selection</button>
@@ -185,7 +185,7 @@
     {#if error}<span class="text-xs text-red-500">{error}</span>{/if}
     <button
       type="button"
-      class="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm text-white disabled:opacity-50"
+      class="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
       disabled={busy || nothingToDo}
       title={nothingToDo ? "Choose a tag, year or custom-field change first" : "Apply to every selected item"}
       onclick={apply}>{busy ? "Applying…" : `Apply to ${count}`}</button>
@@ -248,7 +248,7 @@
       {#each [["none", "No change"], ["set", "Set"], ["clear", "Clear"]] as [mode, lbl] (mode)}
         <button
           type="button"
-          class="px-3 py-1 {yearMode === mode ? 'bg-[var(--accent)] text-white' : ''}"
+          class="px-3 py-1 {yearMode === mode ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
           aria-pressed={yearMode === mode}
           onclick={() => (yearMode = mode as "none" | "set" | "clear")}>{lbl}</button>
       {/each}
@@ -296,7 +296,7 @@
           {#each [["set", "Set"], ["clear", "Clear"]] as [mode, lbl] (mode)}
             <button
               type="button"
-              class="px-3 py-1 {fieldMode === mode ? 'bg-[var(--accent)] text-white' : ''}"
+              class="px-3 py-1 {fieldMode === mode ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
               aria-pressed={fieldMode === mode}
               onclick={() => (fieldMode = mode as "set" | "clear")}>{lbl}</button>
           {/each}

@@ -236,7 +236,7 @@
     {#if !active}
       <button
         type="button"
-        class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white disabled:opacity-50"
+        class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
         onclick={retrieve}
         title="Pull this file from the hosting agent to the server, then download it"
       >{phase === "idle" ? "Retrieve" : "Retrieve again"}</button>

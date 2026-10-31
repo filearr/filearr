@@ -366,7 +366,7 @@
       {nlBusy ? "Translating…" : "Translate"}
     </button>
     {#if nlSource}
-      <span class="text-xs text-slate-400" title="Which engine produced the filters — the deterministic pattern translator, or the configured local model.">
+      <span class="text-xs text-slate-600 dark:text-slate-400" title="Which engine produced the filters — the deterministic pattern translator, or the configured local model.">
         via {nlSource === "ollama" ? "local model" : "pattern rules"}
       </span>
     {/if}
@@ -553,7 +553,7 @@
         <button
           class="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
           onclick={addRow}>+ Add condition</button>
-        <p class="mt-1 text-xs text-slate-400">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
+        <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
         <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="search" />
       {/if}
 
@@ -570,7 +570,7 @@
       </div>
 
       <div class="mt-3 flex flex-wrap gap-2">
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-white" onclick={saveAsReport}>Save as custom report</button>
+        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={saveAsReport}>Save as custom report</button>
         <button
           class="rounded-lg border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-700"
           onclick={openInSearch} disabled={rawMode} title={rawMode ? "Switch back to rows to map into search" : ""}>Open in search</button>
@@ -594,7 +594,7 @@
             {preview.total}{preview.total_capped ? "+" : ""} match{preview.total === 1 && !preview.total_capped ? "" : "es"}
           </span>
         {/if}
-        {#if loading}<span class="text-xs text-slate-400">testing…</span>{/if}
+        {#if loading}<span class="text-xs text-slate-600 dark:text-slate-400">testing…</span>{/if}
       </div>
 
       {#if vErrors.length}
@@ -639,7 +639,7 @@
           </table>
         </div>
         {#if preview.has_more}
-          <p class="mt-2 text-xs text-slate-400">Showing the first {preview.count}. Save as a custom report to export the full result.</p>
+          <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">Showing the first {preview.count}. Save as a custom report to export the full result.</p>
         {/if}
       {:else}
         <p class="text-sm text-slate-500">Add a condition to see matching items.</p>

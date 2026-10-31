@@ -73,7 +73,7 @@
       Type the library name <span class="font-mono font-semibold">{library.name}</span> to confirm:
     </p>
     <input
-      class="mt-2 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none
+      class="mt-2 w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
              focus:border-red-500 dark:border-slate-700"
       placeholder="library name"
       autocomplete="off"

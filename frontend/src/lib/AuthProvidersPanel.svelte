@@ -230,7 +230,7 @@
           <span class="font-medium">{p.title}</span>
           <span class="ml-2 block text-xs text-slate-500 sm:inline">{p.blurb}</span>
         </span>
-        <span class="text-slate-400">{open[p.id] ? "▲" : "▼"}</span>
+        <span class="text-slate-600 dark:text-slate-400">{open[p.id] ? "▲" : "▼"}</span>
       </button>
 
       {#if open[p.id] && form[p.id]}
@@ -281,7 +281,7 @@
                         {/each}
                         <div class="mt-1 text-slate-600 dark:text-slate-300">{fetched.note}</div>
                         <button type="button"
-                          class="mt-1 rounded bg-[var(--accent)] px-2 py-0.5 text-xs font-medium text-white"
+                          class="mt-1 rounded bg-[var(--accent)] px-2 py-0.5 text-xs font-medium text-[var(--accent-fg)]"
                           onclick={() => useFetchedCert(p)}>
                           Use this CA (fills the box — review, then Save)
                         </button>
@@ -299,14 +299,14 @@
                     class="mt-1 w-full rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800"
                     bind:value={form[p.id][fld.key]} />
                 {/if}
-                {#if fld.help}<span class="mt-0.5 block text-[11px] text-slate-400">{fld.help}</span>{/if}
+                {#if fld.help}<span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400">{fld.help}</span>{/if}
               </label>
             {/each}
           </div>
 
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <button
-              class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+              class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
               disabled={busy[p.id]} onclick={() => save(p)}>
               {busy[p.id] ? "…" : "Save"}
             </button>

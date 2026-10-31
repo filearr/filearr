@@ -126,7 +126,7 @@
     {/if}
   </div>
 
-  <h4 class="mt-3 text-xs font-semibold uppercase text-slate-400">API scopes</h4>
+  <h4 class="mt-3 text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">API scopes</h4>
   <div class="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
     {#each SCOPES as s (s)}
       <label class="flex items-start gap-2 rounded border border-slate-200 p-2 dark:border-slate-800"
@@ -137,7 +137,7 @@
           onchange={() => toggleScope(s)} />
         <span>
           <span class="font-mono">{s}</span>
-          {#if implied(s)}<span class="ml-1 text-xs text-slate-400">(implied)</span>{/if}
+          {#if implied(s)}<span class="ml-1 text-xs text-slate-600 dark:text-slate-400">(implied)</span>{/if}
           <span class="block text-xs text-slate-500">{meta?.scope_help?.[s] ?? ""}</span>
         </span>
       </label>
@@ -148,7 +148,7 @@
     <strong>bypasses path grants entirely</strong>.
   </p>
 
-  <h4 class="mt-3 text-xs font-semibold uppercase text-slate-400">Ceiling actions</h4>
+  <h4 class="mt-3 text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">Ceiling actions</h4>
   <p class="text-xs text-slate-500">
     The ceiling is the maximum a path grant can hand this role — grants narrow it,
     never widen it (admin bypasses the ceiling).
@@ -166,12 +166,12 @@
         </span>
       </label>
     {:else}
-      <p class="text-xs text-slate-400">No actions published by the server.</p>
+      <p class="text-xs text-slate-600 dark:text-slate-400">No actions published by the server.</p>
     {/each}
   </div>
 
   <div class="mt-3 flex gap-2">
-    <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-white disabled:opacity-40"
+    <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[var(--accent-fg)] disabled:opacity-40"
       disabled={busy || !displayName.trim() || (!isEdit && !name.trim())}>
       {isEdit ? "Save changes" : "Create role"}
     </button>

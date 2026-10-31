@@ -107,7 +107,7 @@
               <button
                 class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
                 onclick={() => go(view!.parent ?? "")}>
-                <span class="text-slate-400">↑</span> ..
+                <span class="text-slate-600 dark:text-slate-400">↑</span> ..
               </button>
             </li>
           {/if}
@@ -117,7 +117,7 @@
                 <button
                   class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
                   onclick={() => go(r)}>
-                  <span class="text-slate-400">▸</span>
+                  <span class="text-slate-600 dark:text-slate-400">▸</span>
                   <span class="font-mono">{r}</span>
                 </button>
               </li>
@@ -128,7 +128,7 @@
                 <button
                   class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
                   onclick={() => go(d.path)}>
-                  <span class="text-slate-400">▸</span> {d.name}
+                  <span class="text-slate-600 dark:text-slate-400">▸</span> {d.name}
                 </button>
               </li>
             {/each}
@@ -142,7 +142,7 @@
     <div class="mt-4 flex items-center gap-2">
       <span class="grow truncate font-mono text-xs text-slate-500">{view?.path || "(no folder selected)"}</span>
       <button
-        class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-white disabled:opacity-50"
+        class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
         disabled={!view?.path}
         onclick={() => view?.path && onPick(view.path)}>
         Use this folder

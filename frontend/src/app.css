@@ -2,7 +2,8 @@
 
 /* Theme tokens — dark mode via .dark on <html>, accent user-configurable */
 @theme {
-  --color-accent: var(--accent, #6366f1);
+  --color-accent: var(--accent, #4f46e5);
+  --color-accent-fg: var(--accent-fg, #ffffff);
 }
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -19,6 +20,32 @@ html {
 html.dark {
   color-scheme: dark;
   @apply bg-slate-950 text-slate-100;
+}
+
+/* Wrapped in @layer base so Tailwind utilities (which live in @layer utilities)
+   still win: unlayered CSS beats every layer, which would make the
+   `outline-none` on <main> and `focus-visible:outline-hidden` on ring inputs inert. */
+@layer base {
+  /* One keyboard focus indicator for the whole app. :focus-visible leaves mouse
+     clicks alone; the ring uses the accent, which meets 3:1 on light surfaces.
+     Dark surfaces need the lighter variant below. */
+  :focus-visible {
+    outline: 2px solid var(--accent, #4f46e5);
+    outline-offset: 2px;
+  }
+  /* Dark surfaces: the accent alone drops under 3:1 on slate-900 cards, so the
+     ring is lightened toward white. color-mix keeps it tied to the user's accent. */
+  .dark :focus-visible {
+    outline-color: color-mix(in srgb, var(--accent, #4f46e5) 55%, white);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Belt-and-suspenders (FIX-13): explicitly theme option/optgroup lists so they
