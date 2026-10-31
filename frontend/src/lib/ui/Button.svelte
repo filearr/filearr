@@ -26,13 +26,15 @@
     href,
     class: className = "",
     children,
+    onclick,
     ...rest
   }: Props = $props();
 
   const variants: Record<Variant, string> = {
     primary: "bg-accent text-accent-fg hover:opacity-90",
     secondary: "border border-border-strong bg-transparent text-fg hover:bg-surface-3",
-    danger: "bg-danger text-white hover:opacity-90",
+    // The dark danger token is a pale red, so white text drops to ~1.9:1; dark surface text gives ~11:1.
+    danger: "bg-danger text-white dark:text-surface hover:opacity-90",
     ghost: "text-muted hover:bg-surface-3 hover:text-fg",
   };
   // min-h-8 keeps the md hit area at 32px even when the label is a lone icon.
@@ -49,11 +51,14 @@
 </script>
 
 {#if href !== undefined}
-  <!-- A disabled link drops its href (so it cannot navigate) and leaves the tab
-       order; aria-disabled tells assistive tech why it does nothing. -->
+  <!-- A disabled link drops its href (so it cannot navigate) and its click
+       handler, and leaves the tab order; aria-disabled tells assistive tech why
+       it does nothing, and role="link" restores the role an href-less <a> loses. -->
   <a
     {...rest}
     href={disabled ? undefined : href}
+    role={disabled ? "link" : rest.role}
+    onclick={disabled ? undefined : onclick}
     aria-disabled={disabled ? "true" : undefined}
     tabindex={disabled ? -1 : rest.tabindex}
     class={classes}
@@ -61,7 +66,7 @@
     {@render children?.()}
   </a>
 {:else}
-  <button {...rest} {type} {disabled} class={classes}>
+  <button {...rest} {type} {disabled} onclick={disabled ? undefined : onclick} class={classes}>
     {@render children?.()}
   </button>
 {/if}
