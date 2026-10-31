@@ -40,9 +40,9 @@
   let typed = $state("");
   let cancelEl = $state<HTMLElement | null>(null);
 
-  // Case-sensitive on purpose: the name is the thing being destroyed. Only the
-  // input is trimmed, so a stray space from copy-paste still matches.
-  const canConfirm = $derived(typedName === undefined || typed.trim() === typedName);
+  // Case-sensitive on purpose: the name is the thing being destroyed. Both
+  // sides are trimmed, so a stray space from copy-paste still matches.
+  const canConfirm = $derived(typedName === undefined || typed.trim() === typedName.trim());
 
   // A reopened dialog starts with an empty field, never a stale match.
   $effect(() => {

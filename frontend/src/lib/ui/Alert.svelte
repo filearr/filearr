@@ -5,19 +5,23 @@
   let {
     tone = "info",
     title,
+    live = true,
     onDismiss,
     class: className = "",
     children,
   }: {
     tone?: Exclude<Tone, "neutral" | "accent">;
     title?: string;
+    /** false: no live role, for callers that already announce the text
+     *  elsewhere (toasts speak through announce()). */
+    live?: boolean;
     onDismiss?: () => void;
     class?: string;
     children?: Snippet;
   } = $props();
 
   // Only problems interrupt the screen reader; ok/info announce politely.
-  const role = $derived(tone === "warn" || tone === "danger" ? "alert" : "status");
+  const role = $derived(!live ? undefined : tone === "warn" || tone === "danger" ? "alert" : "status");
 </script>
 
 <div {role} class="flex items-start gap-2 rounded-control px-3 py-2 text-sm {toneClasses(tone)} {className}">

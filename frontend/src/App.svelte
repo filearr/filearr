@@ -48,7 +48,10 @@
   import type { FormatPref } from "./lib/osFormat";
   import { routeFromHash, pageTitle } from "./lib/routes";
   import { announcement, announce } from "./lib/announce.svelte";
-  import { ConfirmHost, ToastHost } from "./lib/ui";
+  // Direct paths, not the ./lib/ui barrel: ToastHost has no bits-ui
+  // dependency, and ConfirmHost (which does) is imported lazily below.
+  import ToastHost from "./lib/ui/ToastHost.svelte";
+  import { hasPendingConfirm } from "./lib/ui/confirm.svelte";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -179,6 +182,9 @@
 
   onMount(() => {
     applyTheme();
+    // Fetch the ConfirmHost chunk while idle so the first confirm() opens without a network wait.
+    const warm = () => void import("./lib/ui/ConfirmHost.svelte").catch(() => {});
+    "requestIdleCallback" in window ? requestIdleCallback(warm) : setTimeout(warm, 2000);
     // Normalise a bare URL to the default route so refresh/bookmark is stable.
     if (!location.hash) location.replace("#/search");
     window.addEventListener("hashchange", onHashChange);
@@ -311,8 +317,11 @@
   <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
   <!-- confirm() / toast() render here; both portal or position themselves
        over the page, so where they sit in the tree only matters for staying
-       mounted across route changes. -->
-  <ConfirmHost />
+       mounted across route changes. ConfirmHost is a lazy chunk: bits-ui
+       roughly doubled the entry bundle when it was imported eagerly. -->
+  {#if hasPendingConfirm()}
+    {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{/await}
+  {/if}
   <ToastHost />
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">

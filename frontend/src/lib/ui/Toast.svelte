@@ -46,7 +46,8 @@
   }
 </script>
 
-<Alert {tone} {onDismiss} class="shadow-lg {className}">
+<!-- live={false}: toast() already spoke this through announce(). -->
+<Alert {tone} {onDismiss} live={false} class="shadow-lg {className}">
   <p>{message}</p>
   {#if actionLabel}
     <Button variant="ghost" size="sm" class="-ml-2 mt-1" onclick={act}>{actionLabel}</Button>

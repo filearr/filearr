@@ -30,10 +30,25 @@ export function activeConfirm(): ConfirmRequest | undefined {
   return queue[0];
 }
 
+/** True while any request is waiting or on screen. App.svelte uses it to
+ *  load ConfirmHost (and bits-ui) only when a dialog is actually needed. */
+export function hasPendingConfirm(): boolean {
+  return queue.length > 0;
+}
+
+const settled = new WeakSet<ConfirmRequest>();
+
 /** Answer `req` and let the next queued request show. Ignores a request that
- *  is no longer the head, so a stray second answer cannot resolve the next one. */
+ *  is already answered or no longer the head, so a stray second answer cannot
+ *  resolve the next one. */
 export function settleConfirm(req: ConfirmRequest, ok: boolean): void {
-  if (queue[0] !== req) return;
-  queue.shift();
+  if (queue[0] !== req || settled.has(req)) return;
+  settled.add(req);
   req.resolve(ok);
+  // Shift on a later task: the closing dialog first returns focus to its
+  // opener, so the next dialog's focus scope records that opener, not the
+  // dying dialog's Cancel button.
+  setTimeout(() => {
+    if (queue[0] === req) queue.shift();
+  }, 0);
 }
