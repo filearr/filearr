@@ -1,9 +1,74 @@
 @import "tailwindcss";
 
+/* Semantic colour tokens for the UI kit (src/lib/ui). Raw values live in plain
+   custom properties so .dark can override them at runtime — Tailwind 4 @theme
+   values are static, so the light/dark switch can't happen inside @theme. */
+:root {
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --fg: #0f172a;
+  --muted: #475569;
+  --accent-text: var(--accent, #4f46e5);
+  --ok: #047857;
+  --ok-bg: #d1fae5;
+  --warn: #b45309;
+  --warn-bg: #fef3c7;
+  --danger: #b91c1c;
+  --danger-bg: #fee2e2;
+  --info: #0369a1;
+  --info-bg: #e0f2fe;
+}
+.dark {
+  --surface: #020617;
+  --surface-2: #0f172a;
+  --surface-3: #1e293b;
+  --border: #1e293b;
+  --border-strong: #334155;
+  --fg: #f1f5f9;
+  --muted: #94a3b8;
+  /* The raw accent is too dark to read as text on slate-950/900, so accent text
+     is lightened toward white (same idea as the dark focus ring below). */
+  --accent-text: color-mix(in srgb, var(--accent, #4f46e5) 70%, white);
+  --ok: #6ee7b7;
+  --ok-bg: #064e3b;
+  --warn: #fcd34d;
+  --warn-bg: #78350f;
+  --danger: #fca5a5;
+  --danger-bg: #7f1d1d;
+  --info: #7dd3fc;
+  --info-bg: #0c4a6e;
+}
+
 /* Theme tokens — dark mode via .dark on <html>, accent user-configurable */
 @theme {
   --color-accent: var(--accent, #4f46e5);
   --color-accent-fg: var(--accent-fg, #ffffff);
+  --color-accent-text: var(--accent-text);
+
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+
+  --radius-control: 0.5rem;
+  --radius-panel: 1rem;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
 }
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -15,11 +80,12 @@ html {
      browser's light default. Without this, themed near-white text landed on a
      white native popup background and was unreadable in dark mode. */
   color-scheme: light;
-  @apply bg-white text-slate-900;
+  @apply bg-surface text-fg;
 }
 html.dark {
   color-scheme: dark;
-  @apply bg-slate-950 text-slate-100;
+  /* Same tokens; the .dark custom-property overrides above do the switch. */
+  @apply bg-surface text-fg;
 }
 
 /* Wrapped in @layer base so Tailwind utilities (which live in @layer utilities)

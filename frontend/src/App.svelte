@@ -22,6 +22,7 @@
     help: () => import("./lib/HelpPage.svelte"),
     about: () => import("./lib/AboutPage.svelte"),
     account: () => import("./lib/AccountPage.svelte"),
+    kit: () => import("./lib/KitPage.svelte"),
   } satisfies Record<Page, () => Promise<unknown>>;
 
   // One promise per page for the app's lifetime: `{#await}` gets the same
@@ -48,6 +49,11 @@
   import type { FormatPref } from "./lib/osFormat";
   import { routeFromHash, pageTitle } from "./lib/routes";
   import { announcement, announce } from "./lib/announce.svelte";
+  // Direct paths, not the ./lib/ui barrel: ToastHost has no bits-ui
+  // dependency, and ConfirmHost (which does) is imported lazily below.
+  import ToastHost from "./lib/ui/ToastHost.svelte";
+  import { cancelAllConfirms, hasPendingConfirm } from "./lib/ui/confirm.svelte";
+  import { toast } from "./lib/ui/toast.svelte";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -176,8 +182,24 @@
     routed = true;
   });
 
+  // The ConfirmHost chunk failed to load (offline, or a deploy replaced it):
+  // without this every pending and future confirm() would await forever.
+  // Called from the template's {:catch}, which runs inside a derived where
+  // writing $state throws (state_unsafe_mutation), so the work is deferred a
+  // microtask. Returns "" so the template renders nothing.
+  function onConfirmHostFailed(): string {
+    queueMicrotask(() => {
+      cancelAllConfirms();
+      toast("Couldn't open the confirmation dialog — reload Filearr", { tone: "danger" });
+    });
+    return "";
+  }
+
   onMount(() => {
     applyTheme();
+    // Fetch the ConfirmHost chunk while idle so the first confirm() opens without a network wait.
+    const warm = () => void import("./lib/ui/ConfirmHost.svelte").catch(() => {});
+    "requestIdleCallback" in window ? requestIdleCallback(warm) : setTimeout(warm, 2000);
     // Normalise a bare URL to the default route so refresh/bookmark is stable.
     if (!location.hash) location.replace("#/search");
     window.addEventListener("hashchange", onHashChange);
@@ -294,6 +316,8 @@
     {#await loadPage("help")}{@render pageLoading()}{:then m}<m.default {sourceUrl} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "about"}
     {#await loadPage("about")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
+  {:else if page === "kit"}
+    {#await loadPage("kit")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "account"}
     {#if me}
       {#await loadPage("account")}{@render pageLoading()}{:then m}<m.default {me} onUpdated={(p) => (me = p)} />{:catch}{@render pageLoadFailed()}{/await}
@@ -308,6 +332,14 @@
   <!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
        <main> so page swaps never unmount it mid-announcement. -->
   <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
+  <!-- confirm() / toast() render here; both portal or position themselves
+       over the page, so where they sit in the tree only matters for staying
+       mounted across route changes. ConfirmHost is a lazy chunk: bits-ui
+       roughly doubled the entry bundle when it was imported eagerly. -->
+  {#if hasPendingConfirm()}
+    {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{:catch}{onConfirmHostFailed()}{/await}
+  {/if}
+  <ToastHost />
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
     <span title={buildStamp ?? "no build stamp (dev)"}>
