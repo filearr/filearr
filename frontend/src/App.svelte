@@ -127,7 +127,6 @@
       authMode = st.mode;
       oidcEnabled = st.oidc_enabled;
       me = principal;
-      authState = "ready";
       // Server-side preferences follow the person across browsers: they win
       // over whatever this browser's localStorage remembers.
       if (me?.preferences) applyServerPreferences(me.preferences);
@@ -135,9 +134,15 @@
         const back = safeStorage.get(OIDC_RETURN_KEY);
         if (back !== null) {
           safeStorage.remove(OIDC_RETURN_KEY);
-          if (back.startsWith("#/")) location.hash = back;
+          // Before "ready", so the default page never mounts first; replace,
+          // so Back does not return to it.
+          if (back.startsWith("#/")) {
+            history.replaceState(null, "", location.pathname + location.search + back);
+            onHashChange();
+          }
         }
       }
+      authState = "ready";
     } catch {
       // Network error / 5xx from either call (authMe answers a 401 with null).
       // authMode and me stay as they were: we cannot verify, so we do not open.
@@ -242,6 +247,8 @@
     // <main>, so every page's pollers stop in their onDestroy.
     setUnauthorizedHandler(() => {
       if (authMode !== "disabled" && me) {
+        // A probe that read /auth/me just before expiry must not restore me.
+        probeSeq++;
         me = null;
         // The page that asked is gone; its pending confirm must not hang.
         cancelAllConfirms();
@@ -256,9 +263,13 @@
   });
 </script>
 
-<!-- Outside the gate so a toast raised as the wall appears (session expired,
-     sign-out failed, password changed) is still shown. -->
+<!-- Outside the gate: a toast raised as the wall appears (session expired,
+     sign-out failed, password changed) must survive the flip, both the visual
+     stack and its spoken copy in the live region. -->
 <ToastHost />
+<!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
+     <main> so page swaps never unmount it mid-announcement. -->
+<div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
 {#if authState === "probing"}
   <div class="flex min-h-screen items-center justify-center px-4">
     <p role="status" class="text-sm text-slate-500">Connecting…</p>
@@ -389,9 +400,6 @@
   {/if}
   </main>
 
-  <!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
-       <main> so page swaps never unmount it mid-announcement. -->
-  <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
   <!-- confirm() / toast() render here; both portal or position themselves
        over the page, so where they sit in the tree only matters for staying
        mounted across route changes. ConfirmHost is a lazy chunk: bits-ui
