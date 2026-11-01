@@ -96,3 +96,38 @@ test("a run after cancel() works normally", async () => {
   calls[1].resolve("B");
   assert.equal(await p, "B");
 });
+
+test("a synchronously throwing fn rejects the newest run and the loader stays usable", async () => {
+  let throwNow = true;
+  const l = latest(async (_signal: AbortSignal, v: string) => {
+    if (throwNow) throw new Error("sync boom");
+    return v;
+  });
+  const sync = latest((_signal: AbortSignal, v: string): Promise<string> => {
+    if (throwNow) throw new Error("sync boom");
+    return Promise.resolve(v);
+  });
+  await assert.rejects(l.run("a"), /sync boom/);
+  await assert.rejects(sync.run("a"), /sync boom/);
+  throwNow = false;
+  assert.equal(await l.run("b"), "b");
+  assert.equal(await sync.run("b"), "b");
+});
+
+test("a real (non-abort) error from a cancelled run resolves undefined", async () => {
+  const { l, calls } = harness<string>();
+  const p = l.run("a");
+  l.cancel();
+  calls[0].reject(new TypeError("network down"));
+  assert.equal(await p, undefined);
+});
+
+test("a real (non-abort) error from a superseded run resolves undefined", async () => {
+  const { l, calls } = harness<string>();
+  const first = l.run("a");
+  const second = l.run("b");
+  calls[0].reject(new TypeError("network down"));
+  calls[1].resolve("B");
+  assert.equal(await first, undefined);
+  assert.equal(await second, "B");
+});

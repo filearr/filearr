@@ -36,6 +36,7 @@ export function createPoller(
   // until it settles, so a slow API never stacks overlapping requests.
   let inFlight = false;
   const call = () => {
+    // Assumes `fn` settles: every caller sits on `send`, which has a timeout.
     if (inFlight) return;
     lastCall = deps.now();
     const r = fn();

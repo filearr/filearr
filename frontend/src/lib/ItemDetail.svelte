@@ -262,15 +262,21 @@
     }
 
     saving = true;
+    // A16: another item may open mid-save; the PATCH still lands server-side,
+    // but its response must not overwrite the newer item's panel.
+    const mine = itemToken;
     try {
       // The PATCH response IS the updated projection, so the panel refreshes
       // without a second GET (and without waiting on the async index sync).
-      item = await patchItem(id, patch);
+      const r = await patchItem(id, patch);
+      if (mine !== itemToken) return;
+      item = r;
       active = "card";
     } catch (e) {
+      if (mine !== itemToken) return;
       editError = errorMessage(e, { verb: "edit this item" });
     } finally {
-      saving = false;
+      if (mine === itemToken) saving = false;
     }
   }
 
@@ -422,6 +428,7 @@
     similarError = "";
     active = "card"; // reset to the typed card whenever a different item opens
     editError = "";
+    saving = false; // a save for the previous item must not leave the spinner stuck
     // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
     // as KeyFactsCard; a failure just means no custom-field rows to edit.
     listCustomFields(ac.signal)
