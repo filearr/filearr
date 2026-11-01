@@ -2,13 +2,19 @@
   import { onDestroy, onMount } from "svelte";
   import { latest } from "./latest";
   import { listAudit, friendlyError, type SecurityEvent } from "./api";
+  import { Alert, Badge, Button, DataTable, Field, Input, Select, type Tone } from "./ui";
 
   // P6-T9 security audit feed (admin). Filterable by event type + time range,
   // keyset-paginated (Load more appends the next page).
-  let error = $state("");
+  // A failed reset (filter change, Apply, first load) replaces the table with
+  // a retryable error; a failed "Load more" shows under its button and keeps
+  // the rows already loaded.
+  let loadError = $state("");
+  let moreError = $state("");
   let events = $state<SecurityEvent[]>([]);
   let nextCursor = $state<string | null>(null);
   let loading = $state(false);
+  let loadingMore = $state(false);
 
   let fType = $state("");
   let fSince = $state("");
@@ -36,8 +42,10 @@
   onDestroy(() => auditLoader.cancel());
 
   async function load(reset: boolean) {
-    error = "";
+    if (reset) loadError = "";
+    moreError = "";
     loading = true;
+    loadingMore = !reset;
     try {
       const page = await auditLoader.run({
         event_type: fType || undefined,
@@ -51,7 +59,8 @@
       nextCursor = page.next_cursor;
       loading = false;
     } catch (e) {
-      error = friendlyError(e);
+      if (reset) loadError = friendlyError(e);
+      else moreError = friendlyError(e);
       loading = false;
     }
   }
@@ -61,14 +70,22 @@
   function when(ts: string): string {
     try { return new Date(ts).toLocaleString(); } catch { return ts; }
   }
-  function badgeClass(t: string): string {
-    if (t === "login_failure" || t === "lockout" || t === "user_deleted")
-      return "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300";
-    if (t.endsWith("_login") || t === "login_success" || t === "bootstrap")
-      return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
-    return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+  function eventTone(t: string): Tone {
+    if (t === "login_failure" || t === "lockout" || t === "user_deleted") return "danger";
+    if (t.endsWith("_login") || t === "login_success" || t === "bootstrap") return "ok";
+    return "neutral";
   }
 </script>
+
+{#snippet whenCell(e: SecurityEvent)}<span class="whitespace-nowrap text-xs text-muted">{when(e.ts)}</span>{/snippet}
+{#snippet eventCell(e: SecurityEvent)}<Badge tone={eventTone(e.event_type)}>{e.event_type}</Badge>{/snippet}
+{#snippet whoCell(e: SecurityEvent)}
+  <span class="text-xs">{e.username_attempted ?? (e.principal_id ? e.principal_id.slice(0, 8) : "—")}</span>
+{/snippet}
+{#snippet ipCell(e: SecurityEvent)}<span class="font-mono text-xs text-muted">{e.ip ?? "—"}</span>{/snippet}
+{#snippet detailsCell(e: SecurityEvent)}
+  <span class="text-xs text-muted">{e.details ? JSON.stringify(e.details) : ""}</span>
+{/snippet}
 
 <section class="mt-8">
   <h2 class="text-lg font-semibold">Security audit</h2>
@@ -77,71 +94,43 @@
   </p>
 
   <div class="mt-3 flex flex-wrap items-end gap-2">
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="text-xs text-slate-500">Event type</span>
-      <select class="rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-        bind:value={fType} onchange={() => load(true)}>
-        {#each EVENT_TYPES as t}
+    <Field label="Event type">
+      <Select bind:value={fType} onchange={() => load(true)}>
+        {#each EVENT_TYPES as t (t)}
           <option value={t}>{t === "" ? "all" : t}</option>
         {/each}
-      </select>
-    </label>
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="text-xs text-slate-500">Since</span>
-      <input type="datetime-local" class="rounded border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
-        bind:value={fSince} />
-    </label>
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="text-xs text-slate-500">Until</span>
-      <input type="datetime-local" class="rounded border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
-        bind:value={fUntil} />
-    </label>
-    <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
-      onclick={() => load(true)}>Apply</button>
+      </Select>
+    </Field>
+    <Field label="Since"><Input type="datetime-local" bind:value={fSince} /></Field>
+    <Field label="Until"><Input type="datetime-local" bind:value={fUntil} /></Field>
+    <Button onclick={() => load(true)}>Apply</Button>
   </div>
 
-  {#if error}
-    <p class="mt-2 text-sm text-red-600">{error}</p>
-  {/if}
-
-  <div class="mt-3 overflow-x-auto">
-    <table class="w-full text-sm">
-      <thead class="text-left text-xs uppercase text-slate-600 dark:text-slate-400">
-        <tr>
-          <th class="py-1 pr-3">When</th>
-          <th class="py-1 pr-3">Event</th>
-          <th class="py-1 pr-3">Who</th>
-          <th class="py-1 pr-3">IP</th>
-          <th class="py-1 pr-3">Details</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-        {#each events as e (e.id)}
-          <tr>
-            <td class="py-1.5 pr-3 whitespace-nowrap text-xs text-slate-500">{when(e.ts)}</td>
-            <td class="py-1.5 pr-3">
-              <span class="rounded px-1.5 py-0.5 text-xs {badgeClass(e.event_type)}">{e.event_type}</span>
-            </td>
-            <td class="py-1.5 pr-3 text-xs">
-              {e.username_attempted ?? (e.principal_id ? e.principal_id.slice(0, 8) : "—")}
-            </td>
-            <td class="py-1.5 pr-3 font-mono text-xs text-slate-500">{e.ip ?? "—"}</td>
-            <td class="py-1.5 pr-3 text-xs text-slate-500">
-              {e.details ? JSON.stringify(e.details) : ""}
-            </td>
-          </tr>
-        {/each}
-        {#if events.length === 0 && !loading}
-          <tr><td colspan="5" class="py-3 text-slate-600 dark:text-slate-400">No events.</td></tr>
-        {/if}
-      </tbody>
-    </table>
-  </div>
+  <DataTable
+    class="mt-3"
+    caption="Security events"
+    captionHidden
+    columns={[
+      { key: "ts", label: "When", cell: whenCell },
+      { key: "event_type", label: "Event", cell: eventCell },
+      { key: "username_attempted", label: "Who", cell: whoCell },
+      { key: "ip", label: "IP", cell: ipCell },
+      { key: "details", label: "Details", cell: detailsCell },
+    ]}
+    rows={events}
+    rowKey={(e) => e.id}
+    loading={loading && !loadingMore}
+    error={loadError || null}
+    onRetry={() => load(true)}
+    emptyMessage="No events match these filters. Widen the time range or pick all event types."
+  />
 
   {#if nextCursor}
-    <button class="mt-3 rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
-      disabled={loading} onclick={() => load(false)}>
+    <Button class="mt-3" disabled={loading} onclick={() => load(false)}>
       {loading ? "Loading…" : "Load more"}
-    </button>
+    </Button>
+  {/if}
+  {#if moreError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (moreError = "")}>{moreError}</Alert>
   {/if}
 </section>

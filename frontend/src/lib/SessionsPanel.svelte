@@ -7,6 +7,7 @@
     friendlyError, type AuthPrincipal, type AuthSession, type SessionSettings,
   } from "./api";
   import { numOrNull } from "./numInput";
+  import { Alert, Badge, Button, DataTable, Field, Input, Select, StateBlock, confirm } from "./ui";
 
   // P6-T11 session management. Two views of one panel (2026-08-19 split):
   //   "mine"  — the signed-in user's OWN active sessions ("log out everywhere"),
@@ -18,13 +19,19 @@
   let { view = "mine" }: { view?: "mine" | "admin" } = $props();
   const isAdmin = $derived(view === "admin");
 
-  let error = $state("");
   let mine = $state<AuthSession[]>([]);
+  let mineLoading = $state(false);
+  let mineError = $state(""); // load of the own-sessions list
+  let revokeError = $state(""); // revoke one (row action)
+  let revokeAllError = $state("");
 
   // admin view
   let users = $state<AuthPrincipal[]>([]);
   let selected = $state("");
   let theirs = $state<AuthSession[]>([]);
+  let theirsLoading = $state(false);
+  let theirsError = $state(""); // load of the selected user's sessions
+  let forceError = $state("");
 
   // admin: global session-timeout settings (runtime override of the env
   // defaults; 0 clears back to env). Per-user overrides live in UsersPanel.
@@ -33,14 +40,19 @@
   let ssIdle = $state<number | null>(null);
   let ssTtl = $state<number | null>(null);
   let ssSaved = $state(false);
+  let ssLoadError = $state("");
+  let ssSaveError = $state("");
+  // A reset failure shows under the reset button that raised it.
+  let ssResetError = $state<{ which: "inactivity_hours" | "ttl_hours"; message: string } | null>(null);
 
   async function refreshSettings() {
+    ssLoadError = "";
     try {
       ss = await getSessionSettings();
       ssIdle = ss.inactivity_hours;
       ssTtl = ss.ttl_hours;
     } catch (e) {
-      error = friendlyError(e);
+      ssLoadError = friendlyError(e);
     }
   }
   /** Trim float noise (0.08333… → 0.08) without padding whole numbers. */
@@ -52,13 +64,13 @@
   }
   async function saveSettings(e: Event) {
     e.preventDefault();
-    error = ""; ssSaved = false;
+    ssSaveError = ""; ssSaved = false;
     // Blank (null) = leave as is; 0 clears back to env; else within range.
     const idle = numOrNull(ssIdle), ttl = numOrNull(ssTtl);
     const bad = (n: number | null) =>
       n !== null && n !== 0 && (!ss || n < ss.min_hours || n > ss.max_hours);
     if (bad(idle) || bad(ttl)) {
-      error = ss
+      ssSaveError = ss
         ? `Timeouts must be ${fmtHours(ss.min_hours)}–${fmtHours(ss.max_hours)} hours, or 0 to clear.`
         : "Timeouts must be numbers of hours.";
       return;
@@ -74,26 +86,28 @@
       ssIdle = ss.inactivity_hours; ssTtl = ss.ttl_hours;
       ssSaved = true;
     } catch (err) {
-      error = friendlyError(err, "save");
+      ssSaveError = friendlyError(err, "save");
     }
   }
   async function resetSetting(which: "inactivity_hours" | "ttl_hours") {
-    error = ""; ssSaved = false;
+    ssResetError = null; ssSaved = false;
     try {
       ss = await patchSessionSettings({ [which]: 0 });
       ssIdle = ss.inactivity_hours; ssTtl = ss.ttl_hours;
     } catch (err) {
-      error = friendlyError(err, "save");
+      ssResetError = { which, message: friendlyError(err, "save") };
     }
   }
 
   async function refreshMine() {
-    error = "";
+    mineError = "";
+    mineLoading = true;
     try {
       mine = await listMySessions();
     } catch (e) {
-      error = friendlyError(e);
+      mineError = friendlyError(e);
     }
+    mineLoading = false;
   }
 
   async function refreshUsers() {
@@ -106,12 +120,15 @@
 
   async function loadTheirs() {
     theirs = [];
+    theirsError = "";
     if (!selected) return;
+    theirsLoading = true;
     try {
       theirs = await listUserSessions(selected);
     } catch (e) {
-      error = friendlyError(e);
+      theirsError = friendlyError(e);
     }
+    theirsLoading = false;
   }
 
   onMount(() => {
@@ -120,34 +137,49 @@
   });
 
   async function revokeOne(id: string) {
+    revokeError = "";
     try {
       await revokeMySession(id);
       await refreshMine();
     } catch (e) {
-      error = friendlyError(e);
+      revokeError = friendlyError(e);
     }
   }
 
   async function revokeAll() {
-    if (!confirm("Sign out of ALL your sessions, including this one?")) return;
+    const ok = await confirm({
+      title: "Log out everywhere?",
+      message: "Sign out of ALL your sessions, including this one?",
+      confirmLabel: "Log out everywhere",
+      tone: "danger",
+    });
+    if (!ok) return;
+    revokeAllError = "";
     try {
       await revokeAllMySessions();
       // This kills the current session too — reload to hit the login wall.
       location.reload();
     } catch (e) {
-      error = friendlyError(e);
+      revokeAllError = friendlyError(e);
     }
   }
 
   async function forceRevoke() {
     if (!selected) return;
     const u = users.find((x) => x.id === selected);
-    if (!confirm(`Force sign-out ALL sessions for "${u?.username ?? selected}"?`)) return;
+    const ok = await confirm({
+      title: "Force sign-out?",
+      message: `Force sign-out ALL sessions for "${u?.username ?? selected}"?`,
+      confirmLabel: "Revoke all their sessions",
+      tone: "danger",
+    });
+    if (!ok) return;
+    forceError = "";
     try {
       await revokeUserSessions(selected);
       await loadTheirs();
     } catch (e) {
-      error = friendlyError(e);
+      forceError = friendlyError(e);
     }
   }
 
@@ -157,7 +189,24 @@
   function ua(s: string | null): string {
     return s ? (s.length > 60 ? s.slice(0, 60) + "…" : s) : "unknown client";
   }
+  function currentHint(hours: number, src: "env" | "global", envHours: number): string {
+    return `currently: ${hours} h — ${sourceLabel(src)}${src !== "env" ? ` (env default ${envHours} h)` : ""}`;
+  }
 </script>
+
+{#snippet clientCell(s: AuthSession)}
+  <span class="font-mono text-xs text-muted">{s.ip_address ?? "—"}</span>
+  <span class="ml-2">{ua(s.user_agent)}</span>
+  {#if s.current}<Badge tone="ok" class="ml-2">this session</Badge>{/if}
+{/snippet}
+{#snippet lastSeenCell(s: AuthSession)}<span class="text-xs text-muted">{when(s.last_seen_at)}</span>{/snippet}
+{#snippet revokeCell(s: AuthSession)}
+  {#if !s.current}
+    <div class="flex justify-end">
+      <Button size="sm" variant="danger" onclick={() => revokeOne(s.id)}>revoke</Button>
+    </div>
+  {/if}
+{/snippet}
 
 <section class="mt-8">
   {#if isAdmin}
@@ -172,110 +221,116 @@
     </p>
   {/if}
 
-  {#if error}
-    <p class="mt-2 text-sm text-red-600">{error}</p>
-  {/if}
-
   {#if !isAdmin}
-  <ul class="mt-3 divide-y divide-slate-200 text-sm dark:divide-slate-800">
-    {#each mine as s (s.id)}
-      <li class="flex items-center gap-3 py-2">
-        <div class="grow">
-          <span class="font-mono text-xs text-slate-500">{s.ip_address ?? "—"}</span>
-          <span class="ml-2">{ua(s.user_agent)}</span>
-          {#if s.current}
-            <span class="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">this session</span>
-          {/if}
-          <div class="text-xs text-slate-600 dark:text-slate-400">last seen {when(s.last_seen_at)}</div>
-        </div>
-        {#if !s.current}
-          <button class="text-xs text-red-600 underline" onclick={() => revokeOne(s.id)}>revoke</button>
-        {/if}
-      </li>
-    {/each}
-    {#if mine.length === 0}
-      <li class="py-2 text-slate-600 dark:text-slate-400">No active sessions.</li>
+    <DataTable
+      class="mt-3"
+      caption="Your active sessions"
+      captionHidden
+      columns={[
+        { key: "user_agent", label: "Client", cell: clientCell },
+        { key: "last_seen_at", label: "Last seen", cell: lastSeenCell },
+        { key: "actions", label: "Actions", align: "right", cell: revokeCell },
+      ]}
+      rows={mine}
+      rowKey={(s) => s.id}
+      loading={mineLoading}
+      error={mineError || null}
+      onRetry={refreshMine}
+      emptyMessage="No active sessions. Sessions appear here once you sign in."
+    />
+    {#if revokeError}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (revokeError = "")}>{revokeError}</Alert>
     {/if}
-  </ul>
 
-  <button class="mt-3 rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
-    onclick={revokeAll}>Log out everywhere</button>
+    <Button class="mt-3" onclick={revokeAll}>Log out everywhere</Button>
+    {#if revokeAllError}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (revokeAllError = "")}>{revokeAllError}</Alert>
+    {/if}
   {/if}
 
   {#if isAdmin}
-    <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+    <div class="mt-3 rounded-control border border-border p-3">
       <h3 class="text-sm font-semibold">Session timeouts (global)</h3>
-      <p class="text-xs text-slate-500">
+      <p class="text-xs text-muted">
         Runtime override of the env defaults. Idle changes apply live to existing
         sessions; the absolute lifetime applies to new sessions. Per-user overrides
         live in the Users panel and win over these.
       </p>
       {#if ss}
-        <form onsubmit={saveSettings} class="mt-2 flex flex-wrap items-end gap-3">
-          <label class="flex flex-col gap-1 text-sm">
-            <span class="text-xs text-slate-500">Idle timeout (hours)</span>
-            <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-              type="number" step="any" min="0" max={ss.max_hours} bind:value={ssIdle} />
-            <span class="text-xs text-slate-600 dark:text-slate-400">
-              currently: {ss.inactivity_hours} h — {sourceLabel(ss.inactivity_source)}
-              {#if ss.inactivity_source !== "env"}(env default {ss.env_inactivity_hours} h){/if}
-            </span>
-            <button type="button" class="self-start text-xs text-slate-500 underline disabled:opacity-40"
-              disabled={ss.inactivity_source === "env"}
-              onclick={() => resetSetting("inactivity_hours")}>Reset to default</button>
-          </label>
-          <label class="flex flex-col gap-1 text-sm">
-            <span class="text-xs text-slate-500">Absolute lifetime (hours)</span>
-            <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-              type="number" step="any" min="0" max={ss.max_hours} bind:value={ssTtl} />
-            <span class="text-xs text-slate-600 dark:text-slate-400">
-              currently: {ss.ttl_hours} h — {sourceLabel(ss.ttl_source)}
-              {#if ss.ttl_source !== "env"}(env default {ss.env_ttl_hours} h){/if}
-            </span>
-            <button type="button" class="self-start text-xs text-slate-500 underline disabled:opacity-40"
-              disabled={ss.ttl_source === "env"}
-              onclick={() => resetSetting("ttl_hours")}>Reset to default</button>
-          </label>
-          <div class="flex items-center gap-2 pb-6">
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)]">Save</button>
-            {#if ssSaved}<span class="text-xs text-emerald-600">saved</span>{/if}
+        <form onsubmit={saveSettings} class="mt-2 flex flex-wrap items-start gap-3">
+          <div class="flex flex-col items-start gap-1">
+            <Field label="Idle timeout (hours)" class="w-56"
+              hint={currentHint(ss.inactivity_hours, ss.inactivity_source, ss.env_inactivity_hours)}>
+              <Input type="number" step="any" min="0" max={ss.max_hours} bind:value={ssIdle} />
+            </Field>
+            <Button size="sm" variant="ghost" disabled={ss.inactivity_source === "env"}
+              onclick={() => resetSetting("inactivity_hours")}>Reset to default</Button>
+            {#if ssResetError?.which === "inactivity_hours"}
+              <Alert tone="danger" onDismiss={() => (ssResetError = null)}>{ssResetError.message}</Alert>
+            {/if}
           </div>
-          <p class="basis-full text-xs text-slate-600 dark:text-slate-400">
+          <div class="flex flex-col items-start gap-1">
+            <Field label="Absolute lifetime (hours)" class="w-56"
+              hint={currentHint(ss.ttl_hours, ss.ttl_source, ss.env_ttl_hours)}>
+              <Input type="number" step="any" min="0" max={ss.max_hours} bind:value={ssTtl} />
+            </Field>
+            <Button size="sm" variant="ghost" disabled={ss.ttl_source === "env"}
+              onclick={() => resetSetting("ttl_hours")}>Reset to default</Button>
+            {#if ssResetError?.which === "ttl_hours"}
+              <Alert tone="danger" onDismiss={() => (ssResetError = null)}>{ssResetError.message}</Alert>
+            {/if}
+          </div>
+          <div class="flex items-center gap-2 pt-5">
+            <Button type="submit" variant="primary">Save</Button>
+            {#if ssSaved}<span class="text-xs text-ok" role="status">saved</span>{/if}
+          </div>
+          {#if ssSaveError}
+            <Alert tone="danger" class="basis-full" onDismiss={() => (ssSaveError = "")}>{ssSaveError}</Alert>
+          {/if}
+          <p class="basis-full text-xs text-muted">
             Allowed range {fmtHours(ss.min_hours)}–{fmtHours(ss.max_hours)} h; 0 clears back to the env default.
           </p>
         </form>
+      {:else if ssLoadError}
+        <StateBlock state="error" compact message={ssLoadError} onRetry={refreshSettings} />
       {:else}
-        <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">Loading…</p>
+        <StateBlock state="loading" compact />
       {/if}
     </div>
 
-    <div class="mt-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+    <div class="mt-4 rounded-control border border-border p-3">
       <h3 class="text-sm font-semibold">Admin: force sign-out a user</h3>
       <div class="mt-2 flex flex-wrap items-center gap-2">
-        <select class="rounded border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-          bind:value={selected} onchange={loadTheirs}>
-          <option value="">Select a user…</option>
-          {#each users as u (u.id)}
-            <option value={u.id}>{u.username} ({u.global_role})</option>
-          {/each}
-        </select>
-        <button class="rounded-lg border border-red-300 px-3 py-1 text-sm text-red-600 disabled:opacity-40 dark:border-red-800"
-          disabled={!selected || theirs.length === 0}
-          onclick={forceRevoke}>Revoke all their sessions</button>
+        <div class="w-64">
+          <Select aria-label="User" bind:value={selected} onchange={loadTheirs}>
+            <option value="">Select a user…</option>
+            {#each users as u (u.id)}
+              <option value={u.id}>{u.username} ({u.global_role})</option>
+            {/each}
+          </Select>
+        </div>
+        <Button variant="danger" disabled={!selected || theirs.length === 0}
+          onclick={forceRevoke}>Revoke all their sessions</Button>
       </div>
+      {#if forceError}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (forceError = "")}>{forceError}</Alert>
+      {/if}
       {#if selected}
-        <ul class="mt-2 divide-y divide-slate-200 text-sm dark:divide-slate-800">
-          {#each theirs as s (s.id)}
-            <li class="py-1.5">
-              <span class="font-mono text-xs text-slate-500">{s.ip_address ?? "—"}</span>
-              <span class="ml-2">{ua(s.user_agent)}</span>
-              <span class="ml-2 text-xs text-slate-600 dark:text-slate-400">last seen {when(s.last_seen_at)}</span>
-            </li>
-          {/each}
-          {#if theirs.length === 0}
-            <li class="py-1.5 text-slate-600 dark:text-slate-400">No active sessions.</li>
-          {/if}
-        </ul>
+        <DataTable
+          class="mt-2"
+          caption="Sessions of the selected user"
+          captionHidden
+          columns={[
+            { key: "user_agent", label: "Client", cell: clientCell },
+            { key: "last_seen_at", label: "Last seen", cell: lastSeenCell },
+          ]}
+          rows={theirs}
+          rowKey={(s) => s.id}
+          loading={theirsLoading}
+          error={theirsError || null}
+          onRetry={loadTheirs}
+          emptyMessage="No active sessions. This user has nothing to sign out."
+        />
       {/if}
     </div>
   {/if}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { createRole, patchRole, friendlyError, type RoleDef, type RoleCompare } from "./api";
+  import { Alert, Button, Checkbox, Field, Input, Select, StateBlock } from "./ui";
 
   // Create/edit form for a role. Mirrors the server's scope normalisation live
   // (write => read, admin => read+write) so what the operator sees is what gets
@@ -91,56 +92,39 @@
   }
 </script>
 
-<form onsubmit={submit}
-  class="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm dark:border-slate-800 dark:bg-slate-900/40">
+<form onsubmit={submit} class="mt-3 rounded-control border border-border bg-surface-2 p-3 text-sm">
   <h3 class="font-medium">{isEdit ? `Edit role: ${role?.display_name || role?.name}` : "New role"}</h3>
-  {#if error}<p class="mt-1 text-red-600">{error}</p>{/if}
 
   <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
     {#if !isEdit}
-      <label class="flex flex-col gap-1">
-        <span class="text-xs text-slate-500">Name (slug, a-z 0-9 _ -)</span>
-        <input class="rounded border border-slate-300 px-2 py-1 font-mono dark:border-slate-700 dark:bg-slate-900"
-          bind:value={name} required pattern={"[a-z0-9][a-z0-9_-]{1,31}"} placeholder="e.g. curator" />
-      </label>
+      <Field label="Name (slug, a-z 0-9 _ -)" required>
+        <Input class="font-mono" bind:value={name} pattern={"[a-z0-9][a-z0-9_\\-]{1,31}"} placeholder="e.g. curator" />
+      </Field>
     {/if}
-    <label class="flex flex-col gap-1">
-      <span class="text-xs text-slate-500">Display name</span>
-      <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-        bind:value={displayName} required />
-    </label>
-    <label class="flex flex-col gap-1">
-      <span class="text-xs text-slate-500">Description</span>
-      <input class="rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-        bind:value={description} />
-    </label>
+    <Field label="Display name" required><Input bind:value={displayName} /></Field>
+    <Field label="Description"><Input bind:value={description} /></Field>
     {#if !isEdit}
-      <label class="flex flex-col gap-1">
-        <span class="text-xs text-slate-500">Clone permissions from</span>
-        <select class="rounded border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-          bind:value={cloneFrom} onchange={applyClone}>
+      <Field label="Clone permissions from">
+        <Select bind:value={cloneFrom} onchange={applyClone}>
           <option value="">— start empty —</option>
           {#each roles as r (r.name)}<option value={r.name}>{r.display_name || r.name}</option>{/each}
-        </select>
-      </label>
+        </Select>
+      </Field>
     {/if}
   </div>
 
   <h4 class="mt-3 text-xs font-semibold uppercase text-slate-600 dark:text-slate-400">API scopes</h4>
   <div class="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
     {#each SCOPES as s (s)}
-      <label class="flex items-start gap-2 rounded border border-slate-200 p-2 dark:border-slate-800"
+      <div class="rounded-control border border-border p-2"
         title={lockAdmin && s === "admin" ? "The builtin admin role must keep the admin scope" : implied(s) ? `Implied by a higher scope` : ""}>
-        <input type="checkbox" class="mt-0.5"
+        <Checkbox
+          label={implied(s) ? `${s} (implied)` : s}
+          description={meta?.scope_help?.[s] ?? ""}
           checked={effective.includes(s)}
           disabled={(lockAdmin && s === "admin") || implied(s)}
           onchange={() => toggleScope(s)} />
-        <span>
-          <span class="font-mono">{s}</span>
-          {#if implied(s)}<span class="ml-1 text-xs text-slate-600 dark:text-slate-400">(implied)</span>{/if}
-          <span class="block text-xs text-slate-500">{meta?.scope_help?.[s] ?? ""}</span>
-        </span>
-      </label>
+      </div>
     {/each}
   </div>
   <p class="mt-1 text-xs text-slate-500">
@@ -154,28 +138,29 @@
     never widen it (admin bypasses the ceiling).
   </p>
   {#if isAdminScope}
-    <p class="mt-1 text-xs text-amber-600">This role has the admin scope, so the ceiling is not consulted.</p>
+    <p class="mt-1 text-xs text-warn">This role has the admin scope, so the ceiling is not consulted.</p>
   {/if}
   <div class="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
     {#each actionList as a (a)}
-      <label class="flex items-start gap-2 rounded border border-slate-200 p-2 dark:border-slate-800">
-        <input type="checkbox" class="mt-0.5" checked={actions.includes(a)} onchange={() => toggleAction(a)} />
-        <span>
-          <span class="font-mono">{a}</span>
-          <span class="block text-xs text-slate-500">{meta?.action_help?.[a] ?? ""}</span>
-        </span>
-      </label>
+      <div class="rounded-control border border-border p-2">
+        <Checkbox
+          label={a}
+          description={meta?.action_help?.[a] ?? ""}
+          checked={actions.includes(a)}
+          onchange={() => toggleAction(a)} />
+      </div>
     {:else}
-      <p class="text-xs text-slate-600 dark:text-slate-400">No actions published by the server.</p>
+      <StateBlock state="empty" compact class="col-span-full" message="No actions published by the server. Check that the server is up to date." />
     {/each}
   </div>
 
   <div class="mt-3 flex gap-2">
-    <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[var(--accent-fg)] disabled:opacity-40"
-      disabled={busy || !displayName.trim() || (!isEdit && !name.trim())}>
+    <Button type="submit" variant="primary" disabled={busy || !displayName.trim() || (!isEdit && !name.trim())}>
       {isEdit ? "Save changes" : "Create role"}
-    </button>
-    <button type="button" class="rounded-lg border border-slate-300 px-3 py-1.5 dark:border-slate-700"
-      onclick={onCancel}>Cancel</button>
+    </Button>
+    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
   </div>
+  {#if error}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (error = "")}>{error}</Alert>
+  {/if}
 </form>
