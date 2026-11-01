@@ -26,5 +26,5 @@ export { confirm } from "./confirm.svelte.ts";
 export { toast } from "./toast.svelte.ts";
 export { controlClass, type ControlSize } from "./control.ts";
 export { FIELD_CTX, controlAttrs, type FieldCtx } from "./fieldContext.ts";
-export { nextSort, compareValues, sortRows, type SortDir, type SortState } from "./sort.ts";
+export { nextSort, toggleDir, compareValues, sortRows, type SortDir, type SortState } from "./sort.ts";
 export { toneClasses, toneForStatus, type Tone } from "./tone.ts";

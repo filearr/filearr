@@ -10,6 +10,12 @@ export function nextSort(current: SortState, key: string): SortState {
   return current.dir === "asc" ? { key, dir: "desc" } : null;
 }
 
+/** Direction button (the mobile sort row): flips asc/desc on the current key; no sort stays none. */
+export function toggleDir(current: SortState): SortState {
+  if (current === null) return null;
+  return { key: current.key, dir: current.dir === "asc" ? "desc" : "asc" };
+}
+
 // NaN and invalid Dates have no place in an order (every comparison with NaN
 // is false), so they count as missing and sort with null/undefined.
 const isNil = (v: unknown): boolean =>
