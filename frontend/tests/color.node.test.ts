@@ -63,11 +63,15 @@ test("accentTextColor keeps an accent that already meets 4.5:1", () => {
   assert.equal(accentTextColor("#4f46e5", "#ffffff"), "#4f46e5");
 });
 
-test("accentTextColor lightens the default accent on slate-900", () => {
-  const out = accentTextColor("#4f46e5", "#0f172a");
+test("accentTextColor lightens the default accent on dark surface-3 (slate-800)", () => {
+  // applyTheme's dark target: the lightest dark surface, where accent chips sit.
+  const out = accentTextColor("#4f46e5", "#1e293b");
   assert.notEqual(out, "#4f46e5");
   assert.ok(relativeLuminance(out) > relativeLuminance("#4f46e5"));
+  assert.ok(contrastRatio(out, "#1e293b") >= 4.5);
+  // The darker surfaces then clear 4.5:1 too.
   assert.ok(contrastRatio(out, "#0f172a") >= 4.5);
+  assert.ok(contrastRatio(out, "#020617") >= 4.5);
 });
 
 test("accentTextColor darkens a pale accent on white", () => {
@@ -78,11 +82,11 @@ test("accentTextColor darkens a pale accent on white", () => {
 
 test("accentTextColor takes the smallest step that meets the minimum", () => {
   // One 5 % step less than the answer must still fall short.
-  const out = accentTextColor("#4f46e5", "#0f172a");
+  const out = accentTextColor("#4f46e5", "#1e293b");
   let i = 0;
   while (mixHex("#4f46e5", "#ffffff", i / 20) !== out) i++;
   assert.ok(i > 0);
-  assert.ok(contrastRatio(mixHex("#4f46e5", "#ffffff", (i - 1) / 20), "#0f172a") < 4.5);
+  assert.ok(contrastRatio(mixHex("#4f46e5", "#ffffff", (i - 1) / 20), "#1e293b") < 4.5);
 });
 
 test("accentTextColor is monotone: a stricter minimum never yields less contrast", () => {
@@ -108,7 +112,7 @@ test("accentTextColor caps at the 100 % endpoint when the minimum is unreachable
 
 test("accentTextColor always returns 7-char lowercase hex", () => {
   for (const accent of ["#4F46E5", "#facc15", "#000000", "#ffffff", "#ff00aa"]) {
-    for (const surface of ["#ffffff", "#0f172a", "#020617"]) {
+    for (const surface of ["#ffffff", "#1e293b", "#0f172a", "#020617"]) {
       assert.match(accentTextColor(accent.toLowerCase(), surface), HEX7);
     }
   }

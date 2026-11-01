@@ -15,6 +15,15 @@
       {/snippet}
     </Field>
 
+  One control per Field: the context carries a single id, so a second control
+  would duplicate it and steal the label. Checkbox and Switch carry their own
+  label; wrap one in a Field only to wire a hint or error to it — the Field
+  label then names the group:
+
+    <Field label="Notifications" hint="Sent to your account email.">
+      <Checkbox label="Email me when a scan fails" bind:checked />
+    </Field>
+
   Labels are always visible — never use a placeholder as the label.
 -->
 <script lang="ts">

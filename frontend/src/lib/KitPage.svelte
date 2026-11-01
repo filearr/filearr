@@ -9,6 +9,7 @@
     Alert,
     Badge,
     Button,
+    Checkbox,
     DataTable,
     Field,
     Input,
@@ -16,6 +17,7 @@
     Popover,
     Select,
     StateBlock,
+    Switch,
     Tabs,
     Textarea,
     confirm,
@@ -24,6 +26,8 @@
     type SortState,
     type Tone,
   } from "./ui";
+  import { contrastRatio } from "./color";
+  import { theme } from "./theme.svelte";
 
   // Full literal class names (never assembled) so Tailwind's scanner sees them.
   const swatches: { token: string; cls: string }[] = [
@@ -47,6 +51,31 @@
     { token: "info-bg", cls: "bg-info-bg" },
   ];
 
+  // accent-text contrast, read from the live computed tokens so the numbers
+  // follow the theme toggle and the account accent. Keyed on theme.mode/accent:
+  // App sets those and calls applyTheme() synchronously, so by the time this
+  // effect runs the new custom properties are in place.
+  type Contrast = { token: string; cls: string; ratio: number | null };
+  let accentText = $state("");
+  let contrasts = $state<Contrast[]>([]);
+  $effect(() => {
+    void theme.mode;
+    void theme.accent;
+    const css = getComputedStyle(document.documentElement);
+    const read = (name: string) => css.getPropertyValue(name).trim().toLowerCase();
+    const hex = (v: string) => /^#[0-9a-f]{6}$/.test(v);
+    accentText = read("--accent-text");
+    contrasts = [
+      { token: "surface", cls: "bg-surface" },
+      { token: "surface-2", cls: "bg-surface-2" },
+      { token: "surface-3", cls: "bg-surface-3" },
+    ].map(({ token, cls }) => {
+      const bg = read(`--${token}`);
+      // Without applyTheme (no JS ran yet) the token is a color-mix() fallback.
+      return { token, cls, ratio: hex(accentText) && hex(bg) ? contrastRatio(accentText, bg) : null };
+    });
+  });
+
   const variants = ["primary", "secondary", "danger", "ghost"] as const;
   const sizes = ["md", "sm"] as const;
   const tones: Tone[] = ["neutral", "ok", "warn", "danger", "info", "accent"];
@@ -60,6 +89,16 @@
   let scanPath = $state("movies");
   let schedule = $state("nightly");
   let notes = $state("");
+  let sizeLimit = $state("500");
+
+  // Checkbox and Switch
+  let notifyFailures = $state(true);
+  let notifyDigest = $state(false);
+  let selectAll = $state(false);
+  let selectSome = $state(true);
+  let watchFolders = $state(true);
+  let readOnly = $state(false);
+  let scanFailEmail = $state(true);
 
   // Modal: one dialog whose width follows the button that opened it.
   let modalOpen = $state(false);
@@ -67,6 +106,28 @@
   function openModal(size: typeof modalSize) {
     modalSize = size;
     modalOpen = true;
+  }
+
+  // Modal with a dirty check: Escape and outside clicks are off, and every
+  // remaining way out (Close, Cancel) asks before discarding edits.
+  const savedEdit = { name: "Movies", path: "/mnt/media/movies" };
+  let editOpen = $state(false);
+  let editName = $state(savedEdit.name);
+  let editPath = $state(savedEdit.path);
+  const dirty = $derived(editName !== savedEdit.name || editPath !== savedEdit.path);
+  function openEdit() {
+    editName = savedEdit.name;
+    editPath = savedEdit.path;
+    editOpen = true;
+  }
+  function saveEdit() {
+    savedEdit.name = editName;
+    savedEdit.path = editPath;
+    // Values now equal the saved ones, so onBeforeClose lets this close through.
+    editName = savedEdit.name;
+    editPath = savedEdit.path;
+    editOpen = false;
+    toast("Library saved", { tone: "ok" });
   }
 
   async function askDefault() {
@@ -89,11 +150,24 @@
     toast(ok ? "Confirmed" : "Cancelled", { tone: ok ? "ok" : "info" });
   }
 
+  async function askDetails() {
+    const ok = await confirm({
+      title: "Remove library?",
+      message: "Movies will be removed from Filearr.",
+      details: ["Removes 1,204 indexed items", "Cancels 2 queued jobs", "Keeps the files on disk"],
+      confirmLabel: "Remove library",
+      tone: "danger",
+    });
+    toast(ok ? "Confirmed" : "Cancelled", { tone: ok ? "ok" : "info" });
+  }
+
   // Tabs
   let activeTab = $state("files");
 
   // Popover
   let popoverOpen = $state(false);
+  let onlyFailed = $state(false);
+  let includeArchived = $state(false);
 
   // DataTable
   type MediaFile = { id: string; name: string; type: string; size: number; status: string };
@@ -108,6 +182,9 @@
     { id: "f8", name: "cover.jpg", type: "Image", size: 412_672, status: "pending" },
   ];
   let sort = $state<SortState>({ key: "name", dir: "asc" });
+  let tableLoading = $state(false);
+  let tableError = $state(false);
+  let tableEmpty = $state(false);
 
   function formatBytes(n: number): string {
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -140,6 +217,23 @@
         <li class="flex flex-col items-center gap-1">
           <span class="h-12 w-12 rounded-control border border-border {s.cls}"></span>
           <span class="text-2xs text-muted">{s.token}</span>
+        </li>
+      {/each}
+    </ul>
+    <h3 class="mt-4 mb-2 text-sm font-medium">accent-text contrast (current theme)</h3>
+    <p class="mb-2 text-2xs text-muted">
+      Computed per theme by <code>applyTheme</code> for 4.5:1 on the strictest surface; toggle the theme to compare.
+      <code>--accent-text</code> is <code>{accentText || "unset"}</code>.
+    </p>
+    <ul class="grid gap-3 sm:grid-cols-3">
+      {#each contrasts as c (c.token)}
+        <li class="rounded-control border border-border p-3 {c.cls}">
+          <span class="block text-sm font-medium text-accent-text">Accent text on {c.token}</span>
+          <span class="text-2xs text-muted tabular-nums">
+            {#if c.ratio === null}ratio unavailable (fallback token){:else}{c.ratio.toFixed(2)}:1 · {c.ratio >= 4.5
+                ? "meets"
+                : "fails"} AA{/if}
+          </span>
         </li>
       {/each}
     </ul>
@@ -221,42 +315,63 @@
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-forms">
     <h2 id="kit-forms" class="mb-3 text-lg font-semibold">Form fields</h2>
+    <p class="mb-3 text-sm text-muted">
+      Short form: the kit controls wire themselves to the Field (id, hint/error, required). "Size limit" uses the
+      explicit snippet form, as a custom control would.
+    </p>
     <div class="grid gap-4 md:grid-cols-2">
-      <Field label="Library name" hint="Shown in the sidebar and in search filters.">
-        {#snippet children({ id, describedBy, invalid })}
-          <Input {id} aria-describedby={describedBy} {invalid} bind:value={libraryName} />
-        {/snippet}
+      <Field label="Library name" required><Input bind:value={libraryName} /></Field>
+      <Field label="Scan schedule" hint="Nightly scans start at 02:00 server time.">
+        <Select bind:value={schedule}>
+          <option value="hourly">Hourly</option>
+          <option value="nightly">Nightly</option>
+          <option value="weekly">Weekly</option>
+          <option value="manual">Manual only</option>
+        </Select>
       </Field>
-      <Field label="Share path" error="Path must be absolute, e.g. /mnt/media/movies.">
-        {#snippet children({ id, describedBy, invalid })}
-          <Input {id} aria-describedby={describedBy} {invalid} bind:value={scanPath} />
-        {/snippet}
-      </Field>
-      <Field label="Scan schedule" required>
-        {#snippet children({ id, describedBy, invalid })}
-          <Select {id} aria-describedby={describedBy} {invalid} required bind:value={schedule}>
-            <option value="hourly">Hourly</option>
-            <option value="nightly">Nightly</option>
-            <option value="weekly">Weekly</option>
-            <option value="manual">Manual only</option>
-          </Select>
+      <Field label="Share path" error="Path must be absolute, e.g. /mnt/media/movies."><Input bind:value={scanPath} /></Field>
+      <Field label="Size limit" hint="Custom control: Input plus a unit. Larger files are skipped during scans.">
+        {#snippet children({ id, describedBy, invalid, required })}
+          <div class="flex items-center gap-2">
+            <Input {id} aria-describedby={describedBy} {invalid} {required} type="number" min="1" class="w-32" bind:value={sizeLimit} />
+            <span class="text-sm text-muted">GB per file</span>
+          </div>
         {/snippet}
       </Field>
       <Field label="Notes" hint="Optional. Markdown is not rendered.">
-        {#snippet children({ id, describedBy, invalid })}
-          <Textarea {id} aria-describedby={describedBy} {invalid} rows={3} placeholder="Who owns this share…" bind:value={notes} />
-        {/snippet}
+        <Textarea rows={3} placeholder="Who owns this share…" bind:value={notes} />
       </Field>
-      <Field label="Small input">
-        {#snippet children({ id, describedBy, invalid })}
-          <Input {id} aria-describedby={describedBy} {invalid} size="sm" placeholder="size=&quot;sm&quot;" />
-        {/snippet}
+      <div class="flex flex-col gap-4">
+        <Field label="Small input"><Input size="sm" placeholder="size=&quot;sm&quot;" /></Field>
+        <Field label="Disabled input"><Input disabled value="Read-only on this deployment" /></Field>
+      </div>
+    </div>
+
+    <h3 class="mt-6 mb-2 text-sm font-medium">Checkbox</h3>
+    <div class="grid gap-3 md:grid-cols-2">
+      <div class="flex flex-col gap-2">
+        <Checkbox label="Email me when a scan fails" bind:checked={notifyFailures} />
+        <Checkbox label="Weekly digest" bind:checked={notifyDigest} />
+        <Checkbox
+          label="Select all libraries"
+          bind:checked={selectAll}
+          bind:indeterminate={selectSome}
+          description="Indeterminate: some libraries are selected."
+        />
+        <Checkbox label="Sync to cloud (not available on this plan)" disabled />
+        <Checkbox label="Follow symlinks" description="Scans the target of each link. Can loop on misconfigured shares." />
+      </div>
+      <Field label="Notifications" hint="Sent to the address on your account.">
+        <Checkbox label="Email me when a scheduled scan fails" bind:checked={scanFailEmail} />
       </Field>
-      <Field label="Disabled input">
-        {#snippet children({ id, describedBy, invalid })}
-          <Input {id} aria-describedby={describedBy} {invalid} disabled value="Read-only on this deployment" />
-        {/snippet}
-      </Field>
+    </div>
+
+    <h3 class="mt-6 mb-2 text-sm font-medium">Switch</h3>
+    <p class="mb-2 text-2xs text-muted">Space or Enter toggles a focused switch.</p>
+    <div class="flex flex-col gap-2">
+      <Switch label="Watch folders for changes" description="Picks up new files without waiting for a scan." bind:checked={watchFolders} />
+      <Switch label="Read-only mode" bind:checked={readOnly} />
+      <Switch label="Hardware transcoding (no GPU detected)" disabled />
     </div>
   </section>
 
@@ -276,11 +391,7 @@
       description="Changes apply to the next scan."
       onClose={() => toast("Modal dismissed", { tone: "info" })}
     >
-      <Field label="Library name">
-        {#snippet children({ id, describedBy, invalid })}
-          <Input {id} aria-describedby={describedBy} {invalid} bind:value={libraryName} />
-        {/snippet}
-      </Field>
+      <Field label="Library name"><Input bind:value={libraryName} /></Field>
       <p class="mt-3 text-sm text-muted">This dialog is size <code>{modalSize}</code>.</p>
       {#snippet footer()}
         <Button variant="secondary" onclick={() => (modalOpen = false)}>Cancel</Button>
@@ -292,6 +403,35 @@
         >
       {/snippet}
     </Modal>
+
+    <h3 class="mt-4 mb-2 text-sm font-medium">Unsaved changes</h3>
+    <p class="mb-3 text-sm text-muted">
+      <code>dismissible=&#123;false&#125;</code>: Escape and outside clicks do nothing. Edit a field, then Cancel or
+      Close to get the discard prompt. Focus starts on the second input.
+    </p>
+    <Button variant="secondary" onclick={openEdit}>Edit with unsaved changes</Button>
+    <Modal
+      bind:open={editOpen}
+      title="Edit library"
+      description="Escape and outside clicks are disabled while editing."
+      dismissible={false}
+      onBeforeClose={async () =>
+        !dirty ||
+        confirm({ title: "Discard changes?", message: "Your edits to Movies will be lost.", tone: "danger", confirmLabel: "Discard" })}
+      initialFocus={() => document.getElementById("kit-edit-path")}
+    >
+      <div class="flex flex-col gap-3">
+        <Field label="Library name"><Input bind:value={editName} /></Field>
+        <!-- An explicit Field id: Input forwards no element ref, so initialFocus
+             finds the second input by the id Field hands it. -->
+        <Field label="Share path" id="kit-edit-path" hint="Absolute path on the agent host."><Input bind:value={editPath} /></Field>
+      </div>
+      <p class="mt-3 text-2xs text-muted">{dirty ? "Unsaved changes" : "No changes"}</p>
+      {#snippet footer()}
+        <Button variant="secondary" onclick={() => (editOpen = false)}>Cancel</Button>
+        <Button onclick={saveEdit}>Save</Button>
+      {/snippet}
+    </Modal>
   </section>
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-confirm">
@@ -300,6 +440,7 @@
     <div class="flex flex-wrap gap-2">
       <Button variant="secondary" onclick={askDefault}>Rescan library…</Button>
       <Button variant="danger" onclick={askDanger}>Delete library…</Button>
+      <Button variant="danger" onclick={askDetails}>Remove library (with details)…</Button>
     </div>
   </section>
 
@@ -346,29 +487,47 @@
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-popover">
     <h2 id="kit-popover" class="mb-3 text-lg font-semibold">Popover</h2>
-    <Popover bind:open={popoverOpen} ariaLabel="Filters">
-      {#snippet trigger({ props })}<Button variant="secondary" {...props}>Filters</Button>{/snippet}
-      <div class="flex w-64 max-w-full flex-col gap-3">
-        <Field label="Type">
-          {#snippet children({ id, describedBy, invalid })}
-            <Select {id} aria-describedby={describedBy} {invalid} size="sm">
+    <p class="mb-3 text-sm text-muted">
+      Left: the <code>label</code> shorthand (a kit Button with ▾). Right: a custom trigger snippet.
+    </p>
+    <div class="flex flex-wrap gap-2">
+      <Popover label="Filters">
+        <div class="flex w-64 max-w-full flex-col gap-2">
+          <Checkbox label="Only failed scans" bind:checked={onlyFailed} />
+          <Checkbox label="Include archived libraries" bind:checked={includeArchived} />
+        </div>
+      </Popover>
+      <Popover bind:open={popoverOpen} ariaLabel="Filters">
+        {#snippet trigger({ props })}<Button variant="secondary" {...props}>Filters</Button>{/snippet}
+        <div class="flex w-64 max-w-full flex-col gap-3">
+          <Field label="Type">
+            <Select size="sm">
               <option>Any</option>
               <option>Video</option>
               <option>Audio</option>
               <option>Image</option>
             </Select>
-          {/snippet}
-        </Field>
-        <div class="flex justify-end">
-          <Button size="sm" onclick={() => (popoverOpen = false)}>Apply</Button>
+          </Field>
+          <div class="flex justify-end">
+            <Button size="sm" onclick={() => (popoverOpen = false)}>Apply</Button>
+          </div>
         </div>
-      </div>
-    </Popover>
+      </Popover>
+    </div>
   </section>
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-table">
     <h2 id="kit-table" class="mb-3 text-lg font-semibold">Data table</h2>
-    <p class="mb-3 text-sm text-muted">Narrow the window below the <code>md</code> breakpoint to see the card fallback.</p>
+    <p class="mb-3 text-sm text-muted">
+      Narrow the window below the <code>md</code> breakpoint to see the card fallback; the "Sort by" row above the
+      cards appears there too. Error wins over loading, loading over empty; Loading keeps existing rows dimmed, so
+      add Empty to see the loading block.
+    </p>
+    <div class="mb-3 flex flex-wrap gap-4">
+      <Switch label="Loading" bind:checked={tableLoading} />
+      <Switch label="Error" bind:checked={tableError} />
+      <Switch label="Empty" bind:checked={tableEmpty} />
+    </div>
     <DataTable
       caption="Recently scanned files"
       columns={[
@@ -377,7 +536,11 @@
         { key: "size", label: "Size", align: "right", sortable: true, cell: sizeCell },
         { key: "status", label: "Status", cell: statusCell },
       ]}
-      rows={files}
+      rows={tableEmpty ? [] : files}
+      loading={tableLoading}
+      error={tableError ? "Could not load files from nas-01." : null}
+      onRetry={() => toast("Retried", { tone: "ok" })}
+      emptyMessage="No files scanned yet."
       rowKey={(f) => f.id}
       bind:sort
       onRowClick={(f) => toast(f.name)}

@@ -24,9 +24,10 @@ export function applyTheme() {
   // Text on the accent flips to dark when the chosen accent is too pale for white.
   document.documentElement.style.setProperty("--accent-fg", onAccentColor(theme.accent));
   // Accent-as-text, nudged just far enough for 4.5:1 per theme. Dark targets
-  // surface-2 (#0f172a), the lighter — so stricter — of the two dark surfaces.
+  // surface-3 (#1e293b), where accent chips sit and the lightest — so
+  // strictest — dark surface; surface/surface-2 then clear it with margin.
   document.documentElement.style.setProperty("--accent-text-light", accentTextColor(theme.accent, "#ffffff"));
-  document.documentElement.style.setProperty("--accent-text-dark", accentTextColor(theme.accent, "#0f172a"));
+  document.documentElement.style.setProperty("--accent-text-dark", accentTextColor(theme.accent, "#1e293b"));
   safeStorage.set("theme", theme.mode);
   safeStorage.set("accent", theme.accent);
 }

@@ -33,7 +33,7 @@
   --fg: #f1f5f9;
   --muted: #94a3b8;
   /* applyTheme computes --accent-text-dark: the accent lightened just enough for
-     4.5:1 on slate-900. The fixed 70 % mix is only the no-JS fallback. */
+     4.5:1 on slate-800 (surface-3). The fixed 70 % mix is only the no-JS fallback. */
   --accent-text: var(--accent-text-dark, color-mix(in srgb, var(--accent, #4f46e5) 70%, white));
   --ok: #6ee7b7;
   --ok-bg: #064e3b;
