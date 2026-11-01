@@ -175,12 +175,10 @@
         continue;
       }
       if (fld.type === "bool") out[fld.key] = Boolean(raw);
-      else if (fld.type === "number") {
-        // bind:value on type="number" writes null when emptied; omit the key
-        // rather than send Number(null) === 0.
-        const n = numOrNull(raw);
-        if (n !== null) out[fld.key] = n;
-      }
+      // An emptied type="number" binds null: send null (set_config pops the
+      // override so the env value applies; an omitted key stays unchanged),
+      // never Number(null) === 0.
+      else if (fld.type === "number") out[fld.key] = numOrNull(raw);
       else if (fld.type === "json") {
         try { out[fld.key] = JSON.parse((raw as string) || "[]"); }
         catch { throw new Error(`${fld.label}: invalid JSON`); }

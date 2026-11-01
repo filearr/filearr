@@ -1591,6 +1591,11 @@ ${detail}
   // Mirrors the agent's inventory.max_entries bound (and the input's min/max).
   const INV_MAX_ENTRIES = { min: 1000, max: 5_000_000 };
 
+  /** Whether buildSettings writes an `inventory` block (so its fields matter). */
+  function emitsInventory(f: GroupForm, collectors: string[]): boolean {
+    return f.inventoryEnabled || collectors.length > 0 || f.permsConfigured || !!f.invScheduleCron.trim();
+  }
+
   function buildSettings(f: GroupForm, collectors: string[]): GroupSettings {
     const settings: GroupSettings = {};
     if (f.logLevel) settings.log_level = f.logLevel as GroupSettings["log_level"];
@@ -1598,7 +1603,7 @@ ${detail}
     if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
     if (f.authRequired) settings.auth_required = f.authRequired === "on";
     if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
-    if (f.inventoryEnabled || collectors.length || f.permsConfigured || f.invScheduleCron.trim()) {
+    if (emitsInventory(f, collectors)) {
       const inventory: InventoryConfig = {
         enabled: f.inventoryEnabled,
         // Unticking every box emits `[]`, NOT a dropped key: "inventory on,
@@ -1699,13 +1704,19 @@ ${detail}
       dialogError = `Audit "retain snapshots" must be a whole number from 1 to ${MAX_RETAIN_SNAPSHOTS}.`;
       return;
     }
-    if (dialog.invMaxEntries !== null && intOrNull(dialog.invMaxEntries, INV_MAX_ENTRIES) === null) {
-      dialogError = `Inventory "max entries per run" must be a whole number from ${INV_MAX_ENTRIES.min.toLocaleString()} to ${INV_MAX_ENTRIES.max.toLocaleString()}, or blank for the agent default.`;
-      return;
-    }
     const collectors = collectorsToSave(collectorEditor, dialog.collectorsText);
     if (collectors.length > MAX_COLLECTORS) {
       dialogError = `At most ${MAX_COLLECTORS} inventory collectors can be selected (${collectors.length} selected).`;
+      return;
+    }
+    // Only when the inventory block is written; a stray value in the dimmed
+    // section must not block an unrelated edit.
+    if (
+      emitsInventory(dialog, collectors) &&
+      dialog.invMaxEntries !== null &&
+      intOrNull(dialog.invMaxEntries, INV_MAX_ENTRIES) === null
+    ) {
+      dialogError = `Inventory "max entries per run" must be a whole number from ${INV_MAX_ENTRIES.min.toLocaleString()} to ${INV_MAX_ENTRIES.max.toLocaleString()}, or blank for the agent default.`;
       return;
     }
     dialogBusy = true;

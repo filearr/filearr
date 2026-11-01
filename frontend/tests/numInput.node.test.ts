@@ -27,6 +27,19 @@ test("numOrNull: numeric strings parse (trimmed, dot decimal)", () => {
   assert.equal(numOrNull("0"), 0);
 });
 
+test("numOrNull: forms a number input also accepts (exponent, bare dot, sign)", () => {
+  assert.equal(numOrNull("1e3"), 1000);
+  assert.equal(numOrNull("2.5E-1"), 0.25);
+  assert.equal(numOrNull(".5"), 0.5);
+  assert.equal(numOrNull("5."), 5);
+  assert.equal(numOrNull("+5"), 5);
+});
+
+test("numOrNull: overflow to Infinity is null", () => {
+  assert.equal(numOrNull("1e400"), null);
+  assert.equal(numOrNull("-1e400"), null);
+});
+
 test("numOrNull: non-numeric and non-finite are null", () => {
   assert.equal(numOrNull(NaN), null);
   assert.equal(numOrNull(Infinity), null);
