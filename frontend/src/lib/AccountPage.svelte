@@ -1,7 +1,7 @@
 <script lang="ts">
   // Self-service account page (#/account): profile, password, appearance
   // defaults (persisted server-side so they follow the person), session info.
-  import { onDestroy, onMount } from "svelte";
+  import { onMount } from "svelte";
   import {
     patchMyProfile,
     putMyPreferences,
@@ -17,8 +17,13 @@
   import { shareFormat, setShareFormat, detectedPlatform } from "./osFormat.svelte";
   import type { FormatPref } from "./osFormat";
   import SessionsPanel from "./SessionsPanel.svelte";
+  import { toast } from "./ui/toast.svelte";
 
-  let { me, onUpdated }: { me: AuthPrincipal; onUpdated: (p: AuthPrincipal) => void } = $props();
+  let {
+    me,
+    onUpdated,
+    onSignedOut,
+  }: { me: AuthPrincipal; onUpdated: (p: AuthPrincipal) => void; onSignedOut: () => void } = $props();
 
   const isLocal = $derived((me.auth_provider ?? "local") === "local");
   const providerLabel = $derived((me.auth_provider ?? "local").toUpperCase());
@@ -91,23 +96,19 @@
   );
   const pwReady = $derived(curPw.length > 0 && newPw.length >= 8 && confirmPw === newPw);
 
-  // Every session (this one included) is revoked on success; reload into the
-  // login wall. Task 3 replaces the reload with the app's sign-out path.
-  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
-  onDestroy(() => clearTimeout(reloadTimer));
-
   async function savePassword() {
     if (!pwReady) return;
     pwBusy = true;
     pwMsg = null;
     try {
       await changeMyPassword(curPw, newPw);
-      pwMsg = { ok: true, text: "Password changed. You have been signed out everywhere." };
+      // Every session (this one included) is revoked: re-probe into the wall.
+      // The toast carries the message there, since this page unmounts.
+      const done = "Password changed. You have been signed out everywhere.";
+      pwMsg = { ok: true, text: done };
       curPw = newPw = confirmPw = "";
-      reloadTimer = setTimeout(() => {
-        location.hash = "";
-        location.reload();
-      }, 1500);
+      toast(done, { tone: "ok" });
+      onSignedOut();
     } catch (e) {
       // 403 = wrong current password; 401 only means the session itself expired.
       pwMsg = {

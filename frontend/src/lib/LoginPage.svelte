@@ -1,5 +1,6 @@
 <script lang="ts">
   import { authLogin, authBootstrap, oidcLoginUrl, errorMessage, errorStatus, type AuthMode } from "./api";
+  import * as safeStorage from "./safeStorage";
 
   // `mode` is "bootstrap" (no users yet → create the first admin) or "enabled"
   // (normal login). `onAuthed` is called after a successful login/bootstrap so
@@ -26,8 +27,19 @@
     typeof location !== "undefined"
       ? new URLSearchParams(location.search).get("sso_error")
       : null;
+  if (ssoError !== null) {
+    // Shown once: drop the param so a reload or bookmark does not repeat it,
+    // and the failed round trip's saved deep link with it.
+    const params = new URLSearchParams(location.search);
+    params.delete("sso_error");
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : "") + location.hash);
+    safeStorage.remove("oidc.returnHash");
+  }
 
   function startSso() {
+    // The callback returns to "/"; App restores this hash once signed in.
+    safeStorage.set("oidc.returnHash", location.hash);
     // A real top-level navigation (not fetch) so the IdP round-trip + the
     // Set-Cookie on the callback return actually take effect.
     window.location.assign(oidcLoginUrl("/"));
