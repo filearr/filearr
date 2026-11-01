@@ -194,3 +194,26 @@ test("per-item failures inside a 200 are kept in the summary", async () => {
   assert.deepEqual(out.summary.failures, [{ id: "x", reason: "403 path not granted" }]);
   assert.deepEqual(Object.keys(out.patchesApplied), ["x", "y"]);
 });
+
+test("an abort during an in-flight chunk that then rejects reports aborted, not failed", async () => {
+  const targets = Array.from({ length: 700 }, (_, i) => target(`i${i}`));
+  const ac = new AbortController();
+  let n = 0;
+  const api: BulkApi = {
+    async getItem() {
+      return { tags: [] };
+    },
+    async batchPatch(body) {
+      if (n++ === 1) {
+        ac.abort();
+        throw new Error("network dropped");
+      }
+      return { results: Object.fromEntries(Object.keys(body).map((k) => [k, "ok"])) };
+    },
+  };
+  const out = await runBulk(targets, ops({ yearMode: "clear" }), api, { signal: ac.signal });
+  assert.equal(out.aborted, true);
+  assert.equal(out.failed, null);
+  assert.equal(out.summary.ok.length, 500);
+  assert.equal(out.notAttempted.length, 200);
+});

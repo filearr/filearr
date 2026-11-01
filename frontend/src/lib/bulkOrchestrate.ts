@@ -125,6 +125,13 @@ export async function runBulk(
       Object.assign(out.patchesApplied, body);
       onChunk?.(k + 1, groups.length);
     } catch (error) {
+      // Cancelled while this chunk was in flight: the run was abandoned, so
+      // its failure is not reported as one (the caller shows the cancel copy).
+      if (signal?.aborted) {
+        out.aborted = true;
+        out.notAttempted = groups.slice(k).flat();
+        break;
+      }
       out.failed = { chunkIndex: k, error };
       out.notAttempted = groups.slice(k).flat();
       break;

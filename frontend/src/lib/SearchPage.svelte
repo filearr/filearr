@@ -515,7 +515,10 @@
       );
       // Whatever committed is mirrored, even when the run was cut short.
       applyLocally(out.summary.ok, out.patchesApplied);
-      if (out.aborted) {
+      // Cancelled or superseded: only the local mirror and the cancel toast —
+      // no error, summary or "nothing to change" for a run the user left,
+      // which would also overwrite a newer run's state.
+      if (out.aborted || bulkController !== ctrl) {
         if (Object.keys(out.patchesApplied).length) {
           toast(`Bulk edit cancelled — ${out.summary.ok.length} items were already updated.`, { tone: "warn" });
         }

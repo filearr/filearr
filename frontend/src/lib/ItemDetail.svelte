@@ -284,22 +284,25 @@
     // A16: another item may open mid-save; the PATCH still lands server-side,
     // but its response must not overwrite the newer item's panel.
     const mine = itemToken;
+    let saved: ItemRecord | null = null;
     try {
       // The PATCH response IS the updated projection, so the panel refreshes
       // without a second GET (and without waiting on the async index sync).
       const r = await patchItem(id, patch);
-      // The save landed even if another item opened meanwhile; the parent
-      // matches its row by the response's id, so it is told either way.
-      onChanged?.(r);
-      if (mine !== itemToken) return;
-      item = r;
-      active = "card";
+      saved = r;
+      if (mine === itemToken) {
+        item = r;
+        active = "card";
+      }
     } catch (e) {
-      if (mine !== itemToken) return;
-      editError = errorMessage(e, { verb: "edit this item" });
+      if (mine === itemToken) editError = errorMessage(e, { verb: "edit this item" });
     } finally {
       if (mine === itemToken) saving = false;
     }
+    // Outside the try: a throwing parent callback cannot turn a save that
+    // landed into "edit failed". Told even if another item opened meanwhile —
+    // the parent matches its row by the response's id.
+    if (saved) onChanged?.(saved);
   }
 
   // P10-T3/T10: agent-hosted items (library owned by an agent) surface the
