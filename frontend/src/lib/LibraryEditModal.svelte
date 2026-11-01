@@ -1,5 +1,5 @@
 <script lang="ts">
-  // UI-T1 — full library edit modal (same overlay pattern as ItemDetail). Exposes
+  // UI-T1 — full library edit modal (kit Modal, mount-style). Exposes
   // every editable field consolidated into labelled sections: identity (name,
   // root_path + warning, native_prefix, enabled), content (types + include/exclude
   // globs), schedule (cron/watch), hashing (policy/ceiling), and the P2-T5 indexing
@@ -26,6 +26,7 @@
   import FolderPicker from "./FolderPicker.svelte";
   import ScheduleField from "./ScheduleField.svelte";
   import TaxonomySelector from "./TaxonomySelector.svelte";
+  import { Alert, Button, Checkbox, Field, Input, Modal, Select, Textarea } from "./ui";
 
   let {
     library,
@@ -208,7 +209,29 @@
 
   let error = $state("");
   let busy = $state(false);
+  // The FolderPicker is its own Modal stacked over this one; Escape and clicks
+  // inside it belong to the picker (bits-ui's layer stack + the Modal's
+  // nested-dialog guard), so no Escape guard is needed here.
   let showPicker = $state(false);
+  // Mount-style: the parent mounts this per target and unmounts it from
+  // onClose / onSaved. A successful save sets `open = false` (a caller close,
+  // which skips the dirty check) before calling onSaved.
+  let open = $state(true);
+
+  // Every edited value, in one comparable shape. The dirty check compares it
+  // against the snapshot taken at mount, so reverting an edit by hand reads as
+  // clean again. An unparseable ceiling (badInput) binds null, so it is
+  // counted separately.
+  function snapshot(): string {
+    return JSON.stringify({
+      name, rootPath, nativePrefix, sharePrefix, enabled,
+      enabledCategories, enabledGroups, includeGlobs, excludeGlobs, scanCron,
+      watchMode, hashPolicy, hashCeiling, hashCeilingBad, presets, groups,
+      ocrEnabled, chunkingEnabled, exposeGps, countPrunedFiles, overrideInputs,
+    });
+  }
+  const initialSnapshot = untrack(snapshot);
+  const isDirty = () => snapshot() !== initialSnapshot;
   let showPatterns = $state<Record<string, boolean>>({});
 
   // Agent-owned libraries hold their content on a remote machine central cannot
@@ -280,6 +303,7 @@
           count_pruned_files: countPrunedFiles,
           extract_overrides: overridesPayload(),
         });
+        open = false;
         onSaved();
         return;
       }
@@ -305,6 +329,7 @@
         count_pruned_files: countPrunedFiles,
         extract_overrides: overridesPayload(),
       });
+      open = false;
       onSaved();
     } catch (e) {
       // 422s (invalid cron, network watch path, unknown preset/group, non-positive
@@ -315,340 +340,304 @@
     }
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape" && !showPicker) onClose();
-  }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<Modal
+  bind:open
+  title={creating ? "Add library" : "Edit library"}
+  size="lg"
+  {onClose}
+  dirty={isDirty}
+>
+  <!-- Help sits beside each Field/Checkbox, not inside its label, so the labels
+       stay plain strings and the "?" button is not nested in a label. -->
+  <div class="space-y-6 text-sm">
+    <!-- Identity -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Identity</h3>
+      <div class="flex items-start gap-2">
+        <Field label="Name" required class="flex-1">
+          <Input placeholder="Name" bind:value={name} />
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.name} label="name" /></span>
+      </div>
 
-<div class="fixed inset-0 z-50 overflow-y-auto">
-  <button
-    type="button"
-    class="absolute inset-0 h-full w-full cursor-default bg-black/50"
-    aria-label="Close editor"
-    onclick={onClose}
-  ></button>
-
-  <div
-    class="relative z-10 mx-auto mt-12 mb-8 w-full max-w-2xl rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900"
-    role="dialog"
-    aria-modal="true"
-    aria-label={creating ? "Add library" : "Edit library"}
-  >
-    <div class="flex items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
-      <h3 class="text-base font-semibold">{creating ? "Add library" : "Edit library"}</h3>
-      <span class="grow"></span>
-      <button
-        class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-        onclick={onClose}>Close</button>
-    </div>
-
-    {#if error}<p class="mt-3 text-sm text-red-500">{error}</p>{/if}
-
-    <div class="mt-4 space-y-6 text-sm">
-      <!-- Identity -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Identity</h4>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Name <Help text={HELP.name} label="name" />
-          </label>
-          <input class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-            placeholder="Name" bind:value={name} required />
-
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Root path <Help text={HELP.root_path} label="root path" />
-          </label>
-          <div>
+      <div class="flex items-start gap-2">
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <Field label="Root path" required>
             <div class="flex gap-2">
-              <input class="grow rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-                placeholder="Root path (e.g. /data/media/media)" bind:value={rootPath} required />
-              <button type="button"
-                class="rounded-lg border border-slate-300 px-3 py-2 text-xs dark:border-slate-700"
-                onclick={() => (showPicker = true)}>Browse…</button>
+              <span class="min-w-0 flex-1">
+                <Input class="font-mono" placeholder="Root path (e.g. /data/media/media)" bind:value={rootPath} />
+              </span>
+              <Button onclick={() => (showPicker = true)}>Browse…</Button>
             </div>
-            {#if rootChanged}
-              <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                Identity is (library_id, rel_path); moving the root re-anchors rel_paths — the next
-                scan treats unchanged rel_paths as the same items, but a different tree shape will
-                tombstone/move items.
-              </p>
-            {/if}
-          </div>
+          </Field>
+          {#if rootChanged}
+            <p class="text-xs text-warn">
+              Identity is (library_id, rel_path); moving the root re-anchors rel_paths — the next
+              scan treats unchanged rel_paths as the same items, but a different tree shape will
+              tombstone/move items.
+            </p>
+          {/if}
+        </div>
+        <span class="pt-0.5"><Help text={HELP.root_path} label="root path" /></span>
+      </div>
 
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Native prefix <Help text={HELP.native_prefix} label="native prefix" />
-          </label>
-          <input class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-            placeholder="(optional) e.g. /mnt/user/media" bind:value={nativePrefix} />
+      <div class="flex items-start gap-2">
+        <Field label="Native prefix" class="flex-1">
+          <Input class="font-mono" placeholder="(optional) e.g. /mnt/user/media" bind:value={nativePrefix} />
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.native_prefix} label="native prefix" /></span>
+      </div>
 
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Share location <Help text={HELP.share_prefix} label="share location" />
-          </label>
-          <input class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-            placeholder={autoShareHint
-              ? `auto from mount: ${autoShareHint}`
-              : "(optional) e.g. \\tower\media, smb://tower/media, /Volumes/media"}
-            bind:value={sharePrefix} />
+      <div class="flex items-start gap-2">
+        <div class="flex min-w-0 flex-1 flex-col gap-1">
+          <Field label="Share location">
+            <Input
+              class="font-mono"
+              placeholder={autoShareHint
+                ? `auto from mount: ${autoShareHint}`
+                : "(optional) e.g. \\tower\media, smb://tower/media, /Volumes/media"}
+              bind:value={sharePrefix} />
+          </Field>
           {#if autoShareHint && !sharePrefix.trim()}
-            <p class="text-xs text-slate-500">
+            <p class="text-xs text-muted">
               Auto-detected from the deploy mount map:
-              <span class="font-mono text-[var(--accent)]">{autoShareHint}</span>.
+              <span class="font-mono text-accent-text">{autoShareHint}</span>.
               Leave blank to use it, or type a value to override.
             </p>
           {/if}
-
-          {#if !creating}
-            <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-              Enabled <Help text={HELP.enabled} label="enabled" />
-            </label>
-            <label class="inline-flex items-center gap-2">
-              <input type="checkbox" bind:checked={enabled} />
-              <span class="text-slate-500">library participates in scheduled scans</span>
-            </label>
-          {/if}
         </div>
-      </section>
+        <span class="pt-0.5"><Help text={HELP.share_prefix} label="share location" /></span>
+      </div>
 
-      <!-- Content -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Content</h4>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            File types <Help text={HELP.media_types} label="file types" />
-          </label>
-          <TaxonomySelector tree={taxonomyTree} bind:categories={enabledCategories} bind:groups={enabledGroups} />
-
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Include globs <Help text={HELP.include_globs} label="include globs" />
-          </label>
-          <textarea rows="2"
-            class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-            placeholder="one glob per line (blank = include all)" bind:value={includeGlobs}></textarea>
-
-          <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Exclude globs <Help text={HELP.exclude_globs} label="exclude globs" />
-          </label>
-          <textarea rows="2"
-            class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-            placeholder="one glob per line" bind:value={excludeGlobs}></textarea>
+      {#if !creating}
+        <div class="flex items-start gap-2">
+          <Checkbox label="Enabled" description="library participates in scheduled scans" bind:checked={enabled} />
+          <Help text={HELP.enabled} label="enabled" />
         </div>
-      </section>
+      {/if}
+    </section>
 
-      <!-- Schedule -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Schedule</h4>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
-          <label class="flex items-center gap-1 pt-1 text-slate-600 dark:text-slate-300">
-            Scan schedule <Help text={HELP.scan_cron} label="scan schedule" />
-          </label>
-          <ScheduleField value={scanCron || null} onChange={(c) => (scanCron = c ?? "")} />
+    <!-- Content -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Content</h3>
+      <div class="flex flex-col gap-1">
+        <span class="flex items-center gap-1 text-xs font-medium text-fg">
+          File types <Help text={HELP.media_types} label="file types" />
+        </span>
+        <TaxonomySelector tree={taxonomyTree} bind:categories={enabledCategories} bind:groups={enabledGroups} />
+      </div>
 
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Watch mode <Help text={HELP.watch_mode} label="watch mode" />
-          </label>
-          <label class="inline-flex items-center gap-2">
-            <input type="checkbox" bind:checked={watchMode} />
-            <span class="text-slate-500">watch filesystem (local paths only)</span>
-          </label>
-        </div>
-      </section>
+      <div class="flex items-start gap-2">
+        <Field label="Include globs" class="flex-1">
+          <Textarea rows={2} size="sm" class="font-mono"
+            placeholder="one glob per line (blank = include all)" bind:value={includeGlobs} />
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.include_globs} label="include globs" /></span>
+      </div>
 
-      <!-- Hashing -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Hashing</h4>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-center">
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Policy <Help text={HELP.hash_policy} label="hash policy" />
-          </label>
-          <select class="w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-2 dark:border-slate-700"
-            bind:value={hashPolicy}>
+      <div class="flex items-start gap-2">
+        <Field label="Exclude globs" class="flex-1">
+          <Textarea rows={2} size="sm" class="font-mono"
+            placeholder="one glob per line" bind:value={excludeGlobs} />
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.exclude_globs} label="exclude globs" /></span>
+      </div>
+    </section>
+
+    <!-- Schedule -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Schedule</h3>
+      <div class="flex flex-col gap-1">
+        <span class="flex items-center gap-1 text-xs font-medium text-fg">
+          Scan schedule <Help text={HELP.scan_cron} label="scan schedule" />
+        </span>
+        <ScheduleField value={scanCron || null} onChange={(c) => (scanCron = c ?? "")} />
+      </div>
+
+      <div class="flex items-start gap-2">
+        <Checkbox label="Watch mode" description="watch filesystem (local paths only)" bind:checked={watchMode} />
+        <Help text={HELP.watch_mode} label="watch mode" />
+      </div>
+    </section>
+
+    <!-- Hashing -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Hashing</h3>
+      <div class="flex items-start gap-2">
+        <Field label="Policy" class="w-48">
+          <Select bind:value={hashPolicy}>
             {#each HASH_POLICIES as hp}
               <option value={hp}>{hp === "quick_only" ? "quick only" : hp}</option>
             {/each}
-          </select>
+          </Select>
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.hash_policy} label="hash policy" /></span>
+      </div>
 
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Full-hash ceiling <Help text={HELP.hash_ceiling} label="hash ceiling" />
-          </label>
-          <input class="w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs dark:border-slate-700"
-            type="number" min="1" step="1" placeholder="bytes (blank = global default)"
-            aria-invalid={hashCeilingError ? "true" : undefined} bind:value={hashCeiling} bind:this={hashCeilingEl}
+      <div class="flex items-start gap-2">
+        <Field label="Full-hash ceiling" class="w-56" error={hashCeilingError || undefined}>
+          <Input
+            size="sm" type="number" min="1" step="1" placeholder="bytes (blank = global default)"
+            bind:value={hashCeiling} bind:ref={hashCeilingEl}
             oninput={readHashCeilingValidity} onchange={readHashCeilingValidity} />
-          {#if hashCeilingError}
-            <p class="text-2xs text-danger sm:col-start-2" role="alert">{hashCeilingError}</p>
-          {/if}
-        </div>
-      </section>
+        </Field>
+        <span class="pt-0.5"><Help text={HELP.hash_ceiling} label="hash ceiling" /></span>
+      </div>
+    </section>
 
-      <!-- Per-library extraction-limit overrides -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Extraction limits</h4>
-        <p class="mb-2 text-xs text-slate-500">
-          Override the global extraction ceilings for this library only — blank fields keep
-          the global <code class="font-mono">FILEARR_*</code> defaults. Changes apply to future
-          extractions; use <em>retry</em> on failed items to re-run them under the new limits.
-        </p>
-        <div class="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
-          {#each OVERRIDE_FIELDS as f (f.key)}
-            <label class="flex items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"
-              title={f.help}>
-              <span>{f.label} <span class="text-slate-600 dark:text-slate-400">({f.unit})</span></span>
-              <input class="w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700"
-                type="number" min="0" step="any" placeholder="global" bind:value={overrideInputs[f.key]} />
-            </label>
-          {/each}
-        </div>
-      </section>
+    <!-- Per-library extraction-limit overrides -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Extraction limits</h3>
+      <p class="text-xs text-muted">
+        Override the global extraction ceilings for this library only — blank fields keep
+        the global <code class="font-mono">FILEARR_*</code> defaults. Changes apply to future
+        extractions; use <em>retry</em> on failed items to re-run them under the new limits.
+      </p>
+      <div class="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+        {#each OVERRIDE_FIELDS as f (f.key)}
+          <Field label="{f.label} ({f.unit})" hint={f.help}>
+            <Input size="sm" type="number" min="0" step="any" placeholder="global" bind:value={overrideInputs[f.key]} />
+          </Field>
+        {/each}
+      </div>
+    </section>
 
-      <!-- Content processing (OCR + privacy) -->
-      <section>
-        <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Content processing</h4>
+    <!-- Content processing (OCR + privacy) -->
+    <section class="flex flex-col gap-3">
+      <h3 class="text-xs font-semibold uppercase tracking-wide text-muted">Content processing</h3>
+      {#if agentOwned}
+        <Alert tone="info" live={false}>
+          This library's files live on a remote agent. Central never opens
+          them, so <b>central-side OCR cannot run</b> — turn on
+          <code class="font-mono">extract_ocr</code> in the agent's policy
+          instead (Agents → Agent policy → Content extraction), on hosts that
+          have tesseract. RAG chunking below <em>does</em> work: it consumes
+          whatever text the agent extracted and replicated.
+        </Alert>
+      {/if}
+      <div class="flex items-start gap-2">
+        <Checkbox
+          label="OCR text"
+          description="OCR images & scanned PDFs so their text is searchable (CPU-heavy; off by default)."
+          bind:checked={ocrEnabled}
+          disabled={agentOwned} />
+        <Help text={HELP.ocr_enabled} label="OCR" />
+      </div>
+
+      <div class="flex flex-col gap-1">
+        <div class="flex items-start gap-2">
+          <Checkbox
+            label="RAG chunking"
+            description="Chunk extracted document text for LLM passage retrieval (retrieve_passages). Off by default; after enabling, run “Chunk documents for RAG” on the Jobs page."
+            bind:checked={chunkingEnabled} />
+          <Help text={HELP.chunking_enabled} label="RAG chunking" />
+        </div>
         {#if agentOwned}
-          <p class="mb-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600
-                    dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
-            This library's files live on a remote agent. Central never opens
-            them, so <b>central-side OCR cannot run</b> — turn on
-            <code class="font-mono">extract_ocr</code> in the agent's policy
-            instead (Agents → Agent policy → Content extraction), on hosts that
-            have tesseract. RAG chunking below <em>does</em> work: it consumes
-            whatever text the agent extracted and replicated.
+          <p class="ml-6 text-2xs text-muted">
+            For this agent-owned library the text comes from the agent's own
+            extraction pass, so it needs <code class="font-mono">extract_enabled</code>
+            + <code class="font-mono">extract_body_text</code> in the agent's policy too.
           </p>
         {/if}
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            OCR text <Help text={HELP.ocr_enabled} label="OCR" />
-          </label>
-          <label class="inline-flex items-start gap-2 {agentOwned ? 'opacity-50' : ''}">
-            <input type="checkbox" class="mt-1" bind:checked={ocrEnabled} disabled={agentOwned} />
-            <span class="text-slate-500">
-              OCR images &amp; scanned PDFs so their text is searchable (CPU-heavy; off by default).
+      </div>
+
+      <div class="flex items-start gap-2">
+        <Checkbox
+          label="Expose GPS"
+          description="Show photo GPS/location in search & API. Hidden by default for privacy (CWE-1230)."
+          bind:checked={exposeGps} />
+        <Help text={HELP.expose_gps} label="expose GPS" />
+      </div>
+
+      <Checkbox
+        label="Count pruned"
+        description="Count files inside pruned folders (e.g. .git, .venv) so the scan's seen + excluded + pruned adds up to the file count your OS reports. Those folders are normally skipped without being read at all, which is why a library can show far fewer files than the folder's properties. Costs an extra directory listing per pruned folder — slow over SMB/rclone, so leave it off unless you are investigating a mismatch."
+        bind:checked={countPrunedFiles} />
+    </section>
+
+    <!-- Presets -->
+    <section class="flex flex-col gap-2">
+      <h3 class="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted">
+        Preset exclusions <Help text={HELP.presets} label="presets" />
+      </h3>
+      {#each presetsMeta.presets as p (p.name)}
+        {@const active = isPresetActive(p)}
+        <div>
+          <div class="flex flex-wrap items-start gap-2">
+            <Checkbox
+              label={p.default_enabled ? `${p.label} (default on)` : p.label}
+              checked={active}
+              onchange={() => togglePreset(p)} />
+            <button type="button" class="text-xs text-accent-text underline"
+              aria-expanded={!!showPatterns[p.name]}
+              onclick={() => (showPatterns = { ...showPatterns, [p.name]: !showPatterns[p.name] })}>
+              {showPatterns[p.name] ? "hide" : "show"} patterns
+            </button>
+          </div>
+          {#if p.name === "hidden_dotfiles" && !active}
+            <span class="ml-6 block text-xs text-warn">
+              Warning: disabling will surface previously hidden files on the next scan.
             </span>
-          </label>
-
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            RAG chunking <Help text={HELP.chunking_enabled} label="RAG chunking" />
-          </label>
-          <label class="inline-flex items-start gap-2">
-            <input type="checkbox" class="mt-1" bind:checked={chunkingEnabled} />
-            <span class="text-slate-500">
-              Chunk extracted document text for LLM passage retrieval (retrieve_passages).
-              Off by default; after enabling, run &ldquo;Chunk documents for RAG&rdquo; on the Jobs page.
-              {#if agentOwned}
-                For this agent-owned library the text comes from the agent's own
-                extraction pass, so it needs <code class="font-mono">extract_enabled</code>
-                + <code class="font-mono">extract_body_text</code> in the agent's policy too.
-              {/if}
-            </span>
-          </label>
-
-          <label class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Expose GPS <Help text={HELP.expose_gps} label="expose GPS" />
-          </label>
-          <label class="inline-flex items-start gap-2">
-            <input type="checkbox" class="mt-1" bind:checked={exposeGps} />
-            <span class="text-slate-500">
-              Show photo GPS/location in search &amp; API. Hidden by default for privacy (CWE-1230).
-            </span>
-          </label>
-
-          <!-- A span, not a <label>: the real label is the one wrapping the
-               checkbox below. (The sibling rows get away with <label> only
-               because a <Help> component inside suppresses the a11y check.) -->
-          <span class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
-            Count pruned
-          </span>
-          <label class="inline-flex items-start gap-2">
-            <input type="checkbox" class="mt-1" bind:checked={countPrunedFiles} />
-            <span class="text-slate-500">
-              Count files inside pruned folders (e.g. <code>.git</code>, <code>.venv</code>)
-              so the scan's <b>seen + excluded + pruned</b> adds up to the file count your OS
-              reports. Those folders are normally skipped without being read at all, which is
-              why a library can show far fewer files than the folder's properties. Costs an
-              extra directory listing per pruned folder — slow over SMB/rclone, so leave it off
-              unless you are investigating a mismatch.
-            </span>
-          </label>
-        </div>
-      </section>
-
-      <!-- Presets -->
-      <section>
-        <h4 class="mb-2 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Preset exclusions <Help text={HELP.presets} label="presets" />
-        </h4>
-        <div class="flex flex-col gap-2">
-          {#each presetsMeta.presets as p (p.name)}
-            {@const active = isPresetActive(p)}
-            <div>
-              <label class="inline-flex items-center gap-2">
-                <input type="checkbox" checked={active} onchange={() => togglePreset(p)} />
-                <span class="font-medium">{p.label}</span>
-                {#if p.default_enabled}<span class="text-slate-600 dark:text-slate-400">(default on)</span>{/if}
-                <button type="button" class="text-[var(--accent)] underline"
-                  onclick={() => (showPatterns = { ...showPatterns, [p.name]: !showPatterns[p.name] })}>
-                  {showPatterns[p.name] ? "hide" : "show"} patterns
-                </button>
-              </label>
-              {#if p.name === "hidden_dotfiles" && !active}
-                <span class="ml-6 block text-xs text-amber-600 dark:text-amber-400">
-                  Warning: disabling will surface previously hidden files on the next scan.
-                </span>
-              {:else if p.caveat}
-                <span class="ml-6 block text-xs text-slate-600 dark:text-slate-400">{p.caveat}</span>
-              {/if}
-              {#if showPatterns[p.name]}
-                <code class="ml-6 block whitespace-pre-wrap font-mono text-xs text-slate-500">{p.patterns.join("  ")}</code>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      </section>
-
-      <!-- Extension groups -->
-      <section>
-        <h4 class="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Extension groups <Help text={HELP.extension_groups} label="extension groups" />
-        </h4>
-        <p class="mb-2 text-xs text-slate-600 dark:text-slate-400">
-          Enabling a group narrows that media type to the listed extensions (union of enabled
-          groups). No group = all extensions of the type.
-        </p>
-        {#each ALL_TYPES as mt}
-          {@const gs = groupsForType(mt)}
-          {#if gs.length}
-            <div class="mb-1 text-xs">
-              <span class="font-medium">{mt}</span>
-              <span class="ml-2 inline-flex flex-wrap gap-3">
-                {#each gs as g (g.name)}
-                  <label class="inline-flex items-center gap-1" title={g.extensions.join(", ")}>
-                    <input type="checkbox" checked={groups.includes(g.name)} onchange={() => toggleGroup(g.name)} />
-                    {g.label}
-                  </label>
-                {/each}
-              </span>
-            </div>
+          {:else if p.caveat}
+            <span class="ml-6 block text-xs text-muted">{p.caveat}</span>
           {/if}
-        {/each}
-      </section>
-    </div>
+          {#if showPatterns[p.name]}
+            <code class="ml-6 block whitespace-pre-wrap font-mono text-xs text-muted">{p.patterns.join("  ")}</code>
+          {/if}
+        </div>
+      {/each}
+    </section>
 
-    <div class="mt-6 flex justify-end gap-2 border-t border-slate-200 pt-4 dark:border-slate-800">
-      <button class="rounded-lg border border-slate-300 px-4 py-2 text-sm dark:border-slate-700"
-        onclick={onClose}>Cancel</button>
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-        disabled={busy || !!hashCeilingError || (creating && (!name.trim() || !rootPath.trim()))} onclick={save}>
-        {#if creating}{busy ? "Adding…" : "Add library"}{:else}{busy ? "Saving…" : "Save changes"}{/if}
-      </button>
-    </div>
+    <!-- Extension groups -->
+    <section class="flex flex-col gap-2">
+      <h3 class="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted">
+        Extension groups <Help text={HELP.extension_groups} label="extension groups" />
+      </h3>
+      <p class="text-xs text-muted">
+        Enabling a group narrows that media type to the listed extensions (union of enabled
+        groups). No group = all extensions of the type.
+      </p>
+      {#each ALL_TYPES as mt}
+        {@const gs = groupsForType(mt)}
+        {#if gs.length}
+          <div class="flex flex-wrap items-start gap-x-3 gap-y-1 text-xs">
+            <span class="font-medium">{mt}</span>
+            {#each gs as g (g.name)}
+              <Checkbox
+                size="sm"
+                label={g.label}
+                title={g.extensions.join(", ")}
+                checked={groups.includes(g.name)}
+                onchange={() => toggleGroup(g.name)} />
+            {/each}
+          </div>
+        {/if}
+      {/each}
+    </section>
   </div>
-</div>
 
-{#if showPicker}
-  <FolderPicker
-    initial={rootPath}
-    onPick={(p) => { rootPath = p; showPicker = false; }}
-    onClose={() => (showPicker = false)}
-  />
-{/if}
+  {#if showPicker}
+    <FolderPicker
+      initial={rootPath}
+      onPick={(p) => { rootPath = p; showPicker = false; }}
+      onClose={() => (showPicker = false)}
+    />
+  {/if}
+
+  {#snippet footer({ close })}
+    {#if error}
+      <!-- 422s (invalid cron, network watch path, unknown preset/group, …)
+           land here, right above the Save that raised them. -->
+      <Alert tone="danger" class="w-full" onDismiss={() => (error = "")}>{error}</Alert>
+    {/if}
+    <Button onclick={close}>Cancel</Button>
+    <Button
+      variant="primary"
+      disabled={busy || !!hashCeilingError || (creating && (!name.trim() || !rootPath.trim()))}
+      onclick={save}>
+      {#if creating}{busy ? "Adding…" : "Add library"}{:else}{busy ? "Saving…" : "Save changes"}{/if}
+    </Button>
+  {/snippet}
+</Modal>

@@ -13,7 +13,7 @@ function classes(s: string): string[] {
 }
 
 test("controlClass always carries the shared base utilities", () => {
-  for (const size of ["sm", "md"] as const) {
+  for (const size of ["sm", "md", "lg"] as const) {
     for (const invalid of [false, true]) {
       const got = classes(controlClass(size, invalid));
       for (const c of classes(BASE)) assert.ok(got.includes(c), `${size}/${invalid} missing ${c}`);
@@ -37,6 +37,12 @@ test("controlClass sm size uses px-2 py-1 text-xs", () => {
   const got = classes(controlClass("sm", false));
   for (const c of ["px-2", "py-1", "text-xs"]) assert.ok(got.includes(c), c);
   for (const c of ["px-3", "py-1.5", "text-sm"]) assert.ok(!got.includes(c), c);
+});
+
+test("controlClass lg size uses min-h-11 px-4 text-base", () => {
+  const got = classes(controlClass("lg", false));
+  for (const c of ["min-h-11", "px-4", "text-base"]) assert.ok(got.includes(c), c);
+  for (const c of ["px-3", "py-1.5", "text-sm", "px-2", "py-1", "text-xs"]) assert.ok(!got.includes(c), c);
 });
 
 test("controlClass swaps border-border-strong for border-danger when invalid", () => {

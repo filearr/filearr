@@ -11,6 +11,9 @@
 //    only for custom controls, and keep one control per Field. Wrap a
 //    Checkbox/Switch in a Field only for hint/error wiring — the Field label
 //    then names the group.
+// ScrollRegion is the single home of the tabindex-on-scroll-region spread:
+// a scroll container keyboard users must reach is a <ScrollRegion label>, never
+// a hand-rolled role/tabindex spread or a lint suppression.
 export { default as Button } from "./Button.svelte";
 export { default as Badge } from "./Badge.svelte";
 export { default as Alert } from "./Alert.svelte";
@@ -27,7 +30,8 @@ export { default as Toast } from "./Toast.svelte";
 export { default as Tabs } from "./Tabs.svelte";
 export { default as Popover } from "./Popover.svelte";
 export { default as DataTable } from "./DataTable.svelte";
-export { confirm } from "./confirm.svelte.ts";
+export { default as ScrollRegion } from "./ScrollRegion.svelte";
+export { confirm, promptText, type ConfirmOptions, type PromptOptions } from "./confirm.svelte.ts";
 export { toast } from "./toast.svelte.ts";
 export { controlClass, type ControlSize } from "./control.ts";
 export { FIELD_CTX, controlAttrs, type FieldCtx } from "./fieldContext.ts";

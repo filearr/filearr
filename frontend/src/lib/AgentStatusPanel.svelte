@@ -13,12 +13,15 @@
     verifyItem,
     type ItemAgentStatus,
   } from "./api";
+  import { Alert, Badge, Button, toneForStatus } from "./ui";
 
   let { itemId }: { itemId: string } = $props();
 
   let status = $state<ItemAgentStatus | null>(null);
   let verifying = $state(false);
   let message = $state<string | null>(null);
+  // A failed Verify request; shown as a dismissable Alert under the buttons.
+  let verifyError = $state<string | null>(null);
 
   // Bumped whenever the item changes; async loops capture it and bail if stale.
   let token = 0;
@@ -83,12 +86,16 @@
     verifying = true;
     const baseline = lastVerifiedAt;
     message = mode === "stat" ? "Verification requested…" : "Full rehash requested…";
+    verifyError = null;
     try {
       await verifyItem(itemId, mode);
       await refresh(); // reflect verify_in_flight immediately
       await pollUntilVerified(baseline);
     } catch (e) {
-      if (mine === token) message = friendlyError(e);
+      if (mine === token) {
+        message = null;
+        verifyError = friendlyError(e);
+      }
     } finally {
       // A newer item reset `verifying` already and may have its own run going.
       if (mine === token) verifying = false;
@@ -101,6 +108,7 @@
     status = null;
     verifying = false;
     message = null;
+    verifyError = null;
     void refresh();
   });
 
@@ -111,63 +119,57 @@
 </script>
 
 {#if status && status.agent_hosted}
-  <div
-    class="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3 text-sm dark:border-slate-800"
-  >
-    <span class="font-medium text-slate-600 dark:text-slate-300">Agent-hosted</span>
+  <div class="flex flex-wrap items-center gap-2 border-b border-border pb-3 text-sm">
+    <span class="font-medium text-muted">Agent-hosted</span>
     {#if status.agent_name}
-      <span class="font-mono text-slate-500">{status.agent_name}</span>
+      <span class="font-mono text-muted">{status.agent_name}</span>
     {/if}
 
     <!-- Online / offline badge. -->
     {#if online}
-      <span
-        class="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-      >
-        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>online
-      </span>
+      <Badge tone="ok" class="gap-1">
+        <span class="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true"></span>online
+      </Badge>
     {:else}
-      <span
-        class="inline-flex items-center gap-1 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400"
-        title={lastSeenAt ?? "never seen"}
-      >
-        <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
-        offline{#if lastSeenAt} · seen {relTime(lastSeenAt)}{/if}
+      <span title={lastSeenAt ?? "never seen"}>
+        <Badge class="gap-1">
+          <span class="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true"></span>
+          offline{#if lastSeenAt} · seen {relTime(lastSeenAt)}{/if}
+        </Badge>
       </span>
     {/if}
 
     <!-- Lifecycle chip for a non-active agent. -->
-    {#if agentStatus === "revoked"}
-      <span class="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300">revoked</span>
-    {:else if agentStatus === "pending"}
-      <span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">pending</span>
+    {#if agentStatus === "revoked" || agentStatus === "pending"}
+      <Badge tone={toneForStatus(agentStatus)}>{agentStatus}</Badge>
     {/if}
 
     <!-- Freshness. -->
     {#if lastVerifiedAt}
-      <span class="text-slate-500" title={lastVerifiedAt}>last verified {relTime(lastVerifiedAt)}</span>
+      <span class="text-muted" title={lastVerifiedAt}>last verified {relTime(lastVerifiedAt)}</span>
     {:else}
-      <span class="text-slate-600 dark:text-slate-400">never verified</span>
+      <span class="text-muted">never verified</span>
     {/if}
 
     <span class="grow"></span>
-    <div class="inline-flex overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700">
-      <button
-        type="button"
-        class="px-3 py-1 disabled:opacity-50"
+    <div class="inline-flex gap-1">
+      <Button
+        size="sm"
         disabled={verifying || inFlight || agentStatus === "revoked"}
         onclick={() => runVerify("stat")}
-        title="Ask the agent to confirm the file still exists (fast)">Verify</button>
-      <button
-        type="button"
-        class="border-l border-slate-300 px-3 py-1 disabled:opacity-50 dark:border-slate-700"
+        title="Ask the agent to confirm the file still exists (fast)">Verify</Button>
+      <Button
+        size="sm"
         disabled={verifying || inFlight || agentStatus === "revoked"}
         onclick={() => runVerify("rehash")}
         title="Ask the agent to re-hash the file's contents (slower, detects silent changes)"
-        >Full rehash</button>
+        >Full rehash</Button>
     </div>
   </div>
+  {#if verifyError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (verifyError = null)}>{verifyError}</Alert>
+  {/if}
   {#if message}
-    <p class="mt-2 text-xs text-[var(--accent)]" role="status">{message}</p>
+    <p class="mt-2 text-xs text-accent-text" role="status">{message}</p>
   {/if}
 {/if}

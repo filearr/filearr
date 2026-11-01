@@ -28,7 +28,7 @@
     <span class="text-sm text-slate-500">
       Access control, users, API keys and the security audit.
       Libraries, presets and scans are on the
-      <a class="underline hover:text-[var(--accent)]" href="#/libraries">Libraries</a> tab.
+      <a class="underline hover:text-accent-text" href="#/libraries">Libraries</a> tab.
     </span>
   </div>
 

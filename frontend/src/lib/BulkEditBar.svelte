@@ -14,6 +14,7 @@
   // decision, not an omission.
   import { onMount } from "svelte";
   import CustomFieldInput from "./CustomFieldInput.svelte";
+  import { Alert, Button, Field, Input, Select } from "./ui";
   import { listCustomFields, type CustomField } from "./api";
   import {
     applicableFields,
@@ -162,50 +163,50 @@
   // operator can hit "Select only the failed" and re-apply the very same
   // operations without retyping them.
 
-  const CHIP = "rounded-full border px-3 py-1 text-sm";
-  const ON = "border-transparent bg-[var(--accent)] text-[var(--accent-fg)]";
-  const OFF = "border-slate-300 dark:border-slate-700";
-  const BOX =
-    "rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden " +
-    "focus:border-[var(--accent)] dark:border-slate-700";
+  // Segmented toggles (year / custom-field action): the pressed option is
+  // accent-filled.
+  const SEG_ON = "bg-accent text-accent-fg";
 </script>
 
 <!-- Same chip-bar visual convention as the filter rows above it, one step more
      prominent (accent-tinted panel) because it WRITES. -->
 <div
-  class="mt-2 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/5 p-3"
+  class="mt-2 rounded-panel border border-accent/40 bg-accent/5 p-3"
   role="region"
   aria-label="Bulk edit selected items">
   <div class="flex flex-wrap items-center gap-2">
-    <span class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm font-medium text-[var(--accent-fg)]">
+    <span class="rounded-full bg-accent px-3 py-1 text-sm font-medium text-accent-fg">
       {count} selected
     </span>
-    <button type="button" class="{CHIP} {OFF}" onclick={onClear}>Clear selection</button>
+    <Button size="sm" onclick={onClear}>Clear selection</Button>
     <span class="grow"></span>
-    {#if error}<span class="text-xs text-red-500">{error}</span>{/if}
-    <button
-      type="button"
-      class="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+    <Button
+      variant="primary"
       disabled={busy || nothingToDo}
       title={nothingToDo ? "Choose a tag, year or custom-field change first" : "Apply to every selected item"}
-      onclick={apply}>{busy ? "Applying…" : `Apply to ${count}`}</button>
+      onclick={apply}>{busy ? "Applying…" : `Apply to ${count}`}</Button>
   </div>
+  <!-- Validation of the operations above, right under the Apply button. -->
+  {#if error}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (error = "")}>{error}</Alert>
+  {/if}
 
   <!-- TAGS -->
-  <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-slate-500">
+  <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-muted">
     <span class="mt-1.5 w-14 font-medium">Tags</span>
     <div class="flex flex-col gap-1">
       <div class="flex flex-wrap items-center gap-1">
-        <label class="sr-only" for="bulk-tag-add">Tags to add</label>
-        <input
-          id="bulk-tag-add"
-          class="{BOX} w-44"
-          placeholder="add tag…"
-          bind:value={addDraft}
-          onkeydown={(e) => tagKey(e, "add")}
-          onblur={commitAdd} />
+        <span class="w-44">
+          <Input
+            size="sm"
+            aria-label="Tags to add"
+            placeholder="add tag…"
+            bind:value={addDraft}
+            onkeydown={(e) => tagKey(e, "add")}
+            onblur={commitAdd} />
+        </span>
         {#each tagsAdd as t (t)}
-          <span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-1 text-emerald-700 dark:text-emerald-300">
+          <span class="inline-flex items-center gap-1 rounded-full bg-ok-bg px-2 py-1 text-ok">
             +{t}
             <button
               type="button"
@@ -216,16 +217,17 @@
         {/each}
       </div>
       <div class="flex flex-wrap items-center gap-1">
-        <label class="sr-only" for="bulk-tag-remove">Tags to remove</label>
-        <input
-          id="bulk-tag-remove"
-          class="{BOX} w-44"
-          placeholder="remove tag…"
-          bind:value={removeDraft}
-          onkeydown={(e) => tagKey(e, "remove")}
-          onblur={commitRemove} />
+        <span class="w-44">
+          <Input
+            size="sm"
+            aria-label="Tags to remove"
+            placeholder="remove tag…"
+            bind:value={removeDraft}
+            onkeydown={(e) => tagKey(e, "remove")}
+            onblur={commitRemove} />
+        </span>
         {#each tagsRemove as t (t)}
-          <span class="inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-1 text-red-700 dark:text-red-300">
+          <span class="inline-flex items-center gap-1 rounded-full bg-danger-bg px-2 py-1 text-danger">
             −{t}
             <button
               type="button"
@@ -235,76 +237,81 @@
           </span>
         {/each}
       </div>
-      <span class="opacity-70">
+      <span>
         Each item keeps its own other tags — add/remove are computed per file.
       </span>
     </div>
   </div>
 
   <!-- YEAR -->
-  <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+  <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
     <span class="w-14 font-medium">Year</span>
-    <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Year action">
+    <div class="flex items-center overflow-hidden rounded-full border border-border-strong" role="group" aria-label="Year action">
       {#each [["none", "No change"], ["set", "Set"], ["clear", "Clear"]] as [mode, lbl] (mode)}
         <button
           type="button"
-          class="px-3 py-1 {yearMode === mode ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+          class="px-3 py-1 {yearMode === mode ? SEG_ON : ''}"
           aria-pressed={yearMode === mode}
           onclick={() => (yearMode = mode as "none" | "set" | "clear")}>{lbl}</button>
       {/each}
     </div>
     {#if yearMode === "set"}
-      <label class="sr-only" for="bulk-year">Year</label>
       <!-- value/oninput, NOT bind:value: Svelte's number binding rewrites the
            bound variable to a `number | null`, which would turn `yearText` into
            a number behind its own type and blow up the `.trim()` in apply(). -->
-      <input
-        id="bulk-year"
-        class="{BOX} w-24"
-        type="number"
-        min="1"
-        max="9999"
-        step="1"
-        placeholder="1999"
-        value={yearText}
-        oninput={(e) => (yearText = e.currentTarget.value)} />
+      <span class="w-24">
+        <Input
+          size="sm"
+          aria-label="Year"
+          type="number"
+          min="1"
+          max="9999"
+          step="1"
+          placeholder="1999"
+          value={yearText}
+          oninput={(e) => (yearText = e.currentTarget.value)} />
+      </span>
     {:else if yearMode === "clear"}
-      <span class="opacity-70">Removes the year from every selected item.</span>
+      <span>Removes the year from every selected item.</span>
     {/if}
   </div>
 
   <!-- CUSTOM FIELD -->
-  <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+  <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted">
     <span class="w-14 font-medium">Field</span>
     {#if defsError}
-      <span class="opacity-70">{defsError}</span>
+      <span>{defsError}</span>
     {:else if !usable.length}
-      <span class="opacity-70">
+      <span>
         No custom field applies to all {count} selected items
         {defs.length ? " (narrow the selection to one category/library)" : ""}.
       </span>
     {:else}
-      <label class="sr-only" for="bulk-field">Custom field</label>
-      <select id="bulk-field" class="{BOX} w-48" bind:value={fieldName}>
-        <option value="">— no change —</option>
-        {#each usable as d (d.id)}
-          <option value={d.name}>{d.label}</option>
-        {/each}
-      </select>
+      <span class="w-48">
+        <Select size="sm" aria-label="Custom field" bind:value={fieldName}>
+          <option value="">— no change —</option>
+          {#each usable as d (d.id)}
+            <option value={d.name}>{d.label}</option>
+          {/each}
+        </Select>
+      </span>
       {#if fieldName}
-        <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Custom field action">
+        <div class="flex items-center overflow-hidden rounded-full border border-border-strong" role="group" aria-label="Custom field action">
           {#each [["set", "Set"], ["clear", "Clear"]] as [mode, lbl] (mode)}
             <button
               type="button"
-              class="px-3 py-1 {fieldMode === mode ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+              class="px-3 py-1 {fieldMode === mode ? SEG_ON : ''}"
               aria-pressed={fieldMode === mode}
               onclick={() => (fieldMode = mode as "set" | "clear")}>{lbl}</button>
           {/each}
         </div>
         {#if fieldMode === "set" && chosen}
-          <CustomFieldInput def={chosen} bind:value={fieldRaw} id="bulk-field-value" />
+          <!-- CustomFieldInput's kit controls read this Field's context. -->
+          <Field label={`${chosen.label} value`}>
+            <CustomFieldInput def={chosen} bind:value={fieldRaw} />
+          </Field>
         {:else if fieldMode === "clear"}
-          <span class="opacity-70">Removes this key from every selected item.</span>
+          <span>Removes this key from every selected item.</span>
         {/if}
       {/if}
     {/if}

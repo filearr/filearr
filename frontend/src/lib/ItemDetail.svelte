@@ -47,6 +47,7 @@
   import Thumb from "./Thumb.svelte";
   import RetrievePanel from "./RetrievePanel.svelte";
   import AgentStatusPanel from "./AgentStatusPanel.svelte";
+  import { Alert, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm } from "./ui";
 
   let {
     id,
@@ -62,6 +63,11 @@
 
   let item = $state<ItemRecord | null>(null);
   let error = $state("");
+  // Mount-style: the parent mounts this per item and unmounts it from onClose.
+  let open = $state(true);
+  // The breadcrumb header: focused on open, so a screen reader starts at the
+  // item's location and Tab continues into the header's links.
+  let headerEl = $state<HTMLElement | null>(null);
 
   // Narrow the untyped record to the breadcrumb fields (all optional).
   const str = (k: string): string | null => {
@@ -147,6 +153,24 @@
   let defs = $state<CustomField[]>([]);
   let saving = $state(false);
   let editError = $state("");
+  // The form as seeded by startEdit(); the Modal's dirty check compares the
+  // live values against it, so reverting an edit by hand reads as clean.
+  let seeded = "";
+  const editSnapshot = () => JSON.stringify([eTitle, eYear, eTags, eTagDraft, eFields]);
+  const isDirty = () => active === "edit" && editSnapshot() !== seeded;
+  // Leaving the edit form by any route other than the Modal's own dismissal
+  // (breadcrumb, principal search, a Similar item, the Card/Raw tabs) asks too.
+  async function guardDirty(): Promise<boolean> {
+    return (
+      !isDirty() ||
+      confirm({
+        title: "Discard changes?",
+        message: "Your edits will be lost.",
+        confirmLabel: "Discard",
+        tone: "danger",
+      })
+    );
+  }
 
   // Only fields whose applies_to / library_ids cover THIS item (same rule the
   // key-facts card uses to decide what to display).
@@ -182,9 +206,10 @@
       ),
     ];
     eTagDraft = "";
-    const seeded: Record<string, string | boolean> = {};
-    for (const d of editableFields) seeded[d.name] = toRaw(userMeta[d.name]);
-    eFields = seeded;
+    const fields: Record<string, string | boolean> = {};
+    for (const d of editableFields) fields[d.name] = toRaw(userMeta[d.name]);
+    eFields = fields;
+    seeded = editSnapshot();
     active = "edit";
   }
 
@@ -292,7 +317,8 @@
   const fileName = $derived(str("filename") ?? relPath.split("/").pop() ?? "download");
 
   // Navigating a breadcrumb folder closes the modal and switches to browse.
-  function navigate(folderRelPath: string) {
+  async function navigate(folderRelPath: string) {
+    if (!(await guardDirty())) return;
     onClose();
     if (libId) gotoBrowse(libId, folderRelPath);
   }
@@ -324,10 +350,15 @@
     return v.join(", ");
   }
   /** Deep link to the Search page scoped to one principal. */
-  function searchByPrincipal(value: string) {
+  async function searchByPrincipal(value: string) {
+    if (!(await guardDirty())) return;
     const qs = new URLSearchParams({ principal: value });
     window.location.hash = `#/search?${qs}`;
     onClose?.();
+  }
+  async function openSimilar(id: string) {
+    if (!onOpen || !(await guardDirty())) return;
+    onOpen(id);
   }
   let copiedPath = $state<string | null>(null);
   let copiedTimer: ReturnType<typeof setTimeout>;
@@ -373,6 +404,10 @@
   async function toggleSimilar() {
     similarOpen = !similarOpen;
     if (!similarOpen || similarLoaded || similarLoading) return;
+    await loadSimilar();
+  }
+
+  async function loadSimilar() {
     similarLoading = true;
     similarError = "";
     const mine = itemToken;
@@ -409,8 +444,12 @@
   // the lazy Similar fetch) checks it, so a fast second open cannot interleave
   // the first item's responses into the second item's panel.
   let itemToken = 0;
+  // Bumped by the load error's Retry; read inside the effect so it re-runs.
+  let reloadKey = $state(0);
+  let touchedId: typeof id | null = null;
 
   $effect(() => {
+    void reloadKey;
     const mine = ++itemToken;
     const live = () => mine === itemToken;
     const ac = new AbortController();
@@ -449,7 +488,11 @@
     // the caller's personal ranking profile. Fire-and-forget: errors (older
     // backend, feature off, rate budget) are deliberately invisible. Not
     // aborted: the open already happened, and it writes no panel state.
-    touchItem(id).catch(() => {});
+    // A Retry re-runs this effect for the same id; that is not another open.
+    if (touchedId !== id) {
+      touchedId = id;
+      touchItem(id).catch(() => {});
+    }
     // Runs before the next item's effect and on destroy.
     return () => {
       itemToken++;
@@ -457,36 +500,19 @@
     };
   });
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onClose();
-  }
+  // Segment toggles (card/raw/edit tabs, similar grid/table): pressed = accent.
+  const TAB_ON = "bg-accent text-accent-fg";
+  const TAB_OFF = "text-muted";
 </script>
 
-<svelte:window onkeydown={onKey} />
-
-<div class="fixed inset-0 z-50 overflow-y-auto">
-  <!-- Backdrop: a real <button> so click-to-close carries no a11y warnings.
-       FIXED, not absolute (roadmap §20): an absolute backdrop scrolls away with
-       the container, so on a long details page clicking beside the panel after
-       scrolling missed it — "click outside doesn't close" (live report). A
-       fixed backdrop covers the viewport at every scroll offset. Text-selection
-       drags that end outside the panel are naturally safe: a cross-element
-       mousedown/mouseup pair fires click on the common ancestor, never here. -->
-  <button
-    type="button"
-    class="fixed inset-0 cursor-default bg-black/50"
-    aria-label="Close details"
-    onclick={onClose}
-  ></button>
-
-  <div
-    class="relative z-10 mx-auto mt-16 mb-8 w-full max-w-3xl rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Item details"
-  >
-    {#if item}
-      <div class="mb-3 border-b border-slate-200 pb-3 dark:border-slate-800">
+<!-- Escape, outside click, ×, focus trap and focus return are the Modal's. A
+     dirty Edit tab asks "Discard changes?" before any of them closes it. -->
+<Modal bind:open title="Item details" size="xl" {onClose} dirty={isDirty} initialFocus={() => headerEl}>
+  {#snippet children({ close })}
+    <!-- Rendered (empty) while the item loads, so the open-time focus can land
+         here before the fetch returns. -->
+    <div bind:this={headerEl} tabindex="-1" class={item ? "mb-3 border-b border-border pb-3" : ""}>
+      {#if item}
         <Breadcrumbs
           libraryName={libName}
           {shareUrl}
@@ -505,7 +531,7 @@
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
             {#if itemShareHref}
               <a
-                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+                class="min-w-0 max-w-full truncate rounded-control border border-border-strong px-2 py-1 font-mono text-muted hover:border-accent hover:text-accent-text"
                 href={itemShareHref}
                 target="_blank"
                 rel="noopener noreferrer"
@@ -513,22 +539,19 @@
                 >{itemShareUrl}</a>
             {:else}
               <span
-                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                class="min-w-0 max-w-full truncate rounded-control border border-border-strong px-2 py-1 font-mono text-muted"
                 title={itemShareUrl}>{itemShareUrl}</span>
             {/if}
-            <button
-              type="button"
-              class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
-              onclick={() => copyShare(itemShareUrl)}>{shareCopied ? "Copied!" : "Copy"}</button>
+            <Button size="sm" onclick={() => copyShare(itemShareUrl)}>{shareCopied ? "Copied!" : "Copy"}</Button>
             {#if shareSourceLabel}
               <span
-                class="rounded-full bg-slate-200 px-2 py-0.5 font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                class="rounded-full bg-surface-3 px-2 py-0.5 font-medium text-muted"
                 title="Source of this network location">{shareSourceLabel}</span>
             {/if}
           </div>
         {/if}
-      </div>
-    {/if}
+      {/if}
+    </div>
 
     {#if item}
       <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
@@ -546,44 +569,39 @@
       </div>
       <!-- P10-T6/T7: pull the file from the hosting agent to the server, then
            download it. Offline agents show a clear waiting state, never a spinner. -->
-      <div class="mb-3 border-b border-slate-200 pb-3 dark:border-slate-800">
+      <div class="mb-3 border-b border-border pb-3">
         <RetrievePanel itemId={id} filename={fileName} />
       </div>
     {/if}
 
-    <div class="flex items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
+    <div class="flex items-center gap-2 border-b border-border pb-3">
       <!-- Typed card tab first, Raw last. -->
       <button
-        class="rounded-lg px-3 py-1 text-sm {active === 'card'
-          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
-          : 'text-slate-500'}"
-        onclick={() => (active = "card")}>{cardTabLabel}</button>
+        class="rounded-control px-3 py-1 text-sm {active === 'card' ? TAB_ON : TAB_OFF}"
+        aria-pressed={active === "card"}
+        onclick={async () => { if (await guardDirty()) active = "card"; }}>{cardTabLabel}</button>
       <button
-        class="rounded-lg px-3 py-1 text-sm {active === 'raw'
-          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
-          : 'text-slate-500'}"
-        onclick={() => (active = "raw")}>Raw</button>
+        class="rounded-control px-3 py-1 text-sm {active === 'raw' ? TAB_ON : TAB_OFF}"
+        aria-pressed={active === "raw"}
+        onclick={async () => { if (await guardDirty()) active = "raw"; }}>Raw</button>
       <!-- IN-T4: the ONLY metadata-writing surface for a single item. Only ever
            writes `user_metadata` + the editable columns — invariant 2 (extracted
            `metadata` belongs to scans) is a backend rule this UI never asks to
            break. -->
       <button
-        class="rounded-lg px-3 py-1 text-sm {active === 'edit'
-          ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
-          : 'text-slate-500'}"
+        class="rounded-control px-3 py-1 text-sm disabled:opacity-50 {active === 'edit' ? TAB_ON : TAB_OFF}"
+        aria-pressed={active === "edit"}
         disabled={!item}
         onclick={startEdit}>Edit</button>
       <span class="grow"></span>
-      <button
-        class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-        onclick={onClose}>Close</button>
+      <Button size="sm" onclick={close}>Close</Button>
     </div>
 
     <div class="mt-4">
       {#if error}
-        <p class="text-red-500">{error}</p>
+        <StateBlock state="error" message={error} onRetry={() => reloadKey++} />
       {:else if !item}
-        <p class="text-slate-500">Loading…</p>
+        <StateBlock state="loading" />
       {:else if active === "raw"}
         <RawView {item} />
       {:else if active === "edit"}
@@ -591,86 +609,75 @@
              coercion rules (bulkEdit.coerceCustomValue) — one implementation, so
              the two surfaces cannot disagree about what a field accepts. -->
         <div class="flex flex-col gap-3">
-          {#if editError}
-            <p class="rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-              {editError}
-            </p>
-          {/if}
+          <Field label="Title">
+            <Input placeholder="(empty clears the title)" bind:value={eTitle} />
+          </Field>
 
-          <label class="text-xs text-slate-500" for="edit-title">Title</label>
-          <input
-            id="edit-title"
-            class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
-            placeholder="(empty clears the title)"
-            bind:value={eTitle} />
-
-          <label class="text-xs text-slate-500" for="edit-year">Year</label>
           <!-- value/oninput, NOT bind:value: Svelte's number binding would
                rewrite `eYear` to a `number | null` behind its declared string
                type, breaking the empty-means-clear check in saveEdit(). -->
-          <input
-            id="edit-year"
-            type="number"
-            min="1"
-            max="9999"
-            step="1"
-            class="-mt-2 w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
-            placeholder="(empty)"
-            value={eYear}
-            oninput={(e) => (eYear = e.currentTarget.value)} />
+          <Field label="Year" class="w-32">
+            <Input
+              type="number"
+              min="1"
+              max="9999"
+              step="1"
+              placeholder="(empty)"
+              value={eYear}
+              oninput={(e) => (eYear = e.currentTarget.value)} />
+          </Field>
 
-          <label class="text-xs text-slate-500" for="edit-tags">Tags</label>
-          <div class="-mt-2 flex flex-wrap items-center gap-1">
-            <input
-              id="edit-tags"
-              class="w-44 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
-              placeholder="add tag…"
-              bind:value={eTagDraft}
-              onkeydown={onTagKey}
-              onblur={commitTagDraft} />
-            {#each eTags as t (t)}
-              <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-xs text-[var(--accent)]">
-                {t}
-                <button
-                  type="button"
-                  class="rounded-full px-1 leading-none"
-                  aria-label={`Remove tag ${t}`}
-                  onclick={() => (eTags = eTags.filter((x) => x !== t))}>×</button>
-              </span>
-            {/each}
+          <div class="flex flex-col gap-1">
+            <Field label="Tags" class="w-44">
+              <Input
+                size="sm"
+                placeholder="add tag…"
+                bind:value={eTagDraft}
+                onkeydown={onTagKey}
+                onblur={commitTagDraft} />
+            </Field>
+            {#if eTags.length}
+              <div class="flex flex-wrap items-center gap-1">
+                {#each eTags as t (t)}
+                  <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-xs text-accent-text">
+                    {t}
+                    <button
+                      type="button"
+                      class="rounded-full px-1 leading-none"
+                      aria-label={`Remove tag ${t}`}
+                      onclick={() => (eTags = eTags.filter((x) => x !== t))}>×</button>
+                  </span>
+                {/each}
+              </div>
+            {/if}
           </div>
 
           {#if editableFields.length}
-            <div class="mt-1 border-t border-slate-200 pt-3 dark:border-slate-800">
-              <p class="mb-2 text-xs text-slate-500">
+            <div class="mt-1 border-t border-border pt-3">
+              <p class="mb-2 text-xs text-muted">
                 Custom fields — leaving one empty removes it from this item.
               </p>
               <div class="flex flex-col gap-2">
                 {#each editableFields as d (d.id)}
-                  <div class="flex flex-wrap items-center gap-2">
-                    <label class="w-40 shrink-0 text-xs text-slate-500" for={`edit-cf-${d.id}`}
-                      >{d.label}</label>
-                    <CustomFieldInput
-                      def={d}
-                      id={`edit-cf-${d.id}`}
-                      bind:value={eFields[d.name]} />
-                  </div>
+                  <!-- CustomFieldInput's kit controls read this Field's context. -->
+                  <Field label={d.label}>
+                    <CustomFieldInput def={d} bind:value={eFields[d.name]} />
+                  </Field>
                 {/each}
               </div>
             </div>
           {/if}
 
           <div class="mt-2 flex items-center gap-2">
-            <button
-              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+            <Button variant="primary" disabled={saving} onclick={saveEdit}>{saving ? "Saving…" : "Save changes"}</Button>
+            <Button
               disabled={saving}
-              onclick={saveEdit}>{saving ? "Saving…" : "Save changes"}</button>
-            <button
-              class="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
-              disabled={saving}
-              onclick={() => { editError = ""; active = "card"; }}>Cancel</button>
-            <span class="text-xs text-slate-500">Search results update shortly after saving.</span>
+              onclick={() => { editError = ""; active = "card"; }}>Cancel</Button>
+            <span class="text-xs text-muted">Search results update shortly after saving.</span>
           </div>
+          {#if editError}
+            <Alert tone="danger" onDismiss={() => (editError = "")}>{editError}</Alert>
+          {/if}
         </div>
       {:else}
         {@const Card = CardComponent}
@@ -681,13 +688,13 @@
     <!-- Permissions (2026-08-23): the newest agent-collected ACL snapshot (W7).
          Central-scanned items explain why there is none instead of hiding. -->
     {#if item && perms}
-      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+      <div class="mt-5 border-t border-border pt-4">
         <h3 class="mb-2 text-sm font-semibold">Permissions</h3>
         {#if !perms.available}
-          <p class="text-xs text-slate-500">{perms.reason}</p>
+          <p class="text-xs text-muted">{perms.reason}</p>
         {:else}
           <dl class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs">
-            <dt class="text-slate-500">Owner</dt>
+            <dt class="text-muted">Owner</dt>
             <dd class="min-w-0 truncate" title={principalId(perms.owner)}>
               {principalLabel(perms.owner)}
               {#if principalId(perms.owner)}
@@ -697,10 +704,10 @@
               {/if}
             </dd>
             {#if perms.group}
-              <dt class="text-slate-500">Group</dt>
+              <dt class="text-muted">Group</dt>
               <dd class="min-w-0 truncate" title={principalId(perms.group)}>{principalLabel(perms.group)}</dd>
             {/if}
-            <dt class="text-slate-500">Readable by</dt>
+            <dt class="text-muted">Readable by</dt>
             <dd>
               {#if perms.summary?.perm_exposure === "anonymous"}
                 anyone — no sign-in needed (Everyone / POSIX other)
@@ -715,8 +722,8 @@
             </dd>
             {#if perms.summary?.layers?.share}
               {@const ly = perms.summary.layers}
-              <dt class="text-slate-500">Share vs file</dt>
-              <dd class={ly.share && (ly.share.anonymous !== ly.local.anonymous || ly.share.authenticated !== ly.local.authenticated) ? "text-amber-700 dark:text-amber-300" : ""}>
+              <dt class="text-muted">Share vs file</dt>
+              <dd class={ly.share && (ly.share.anonymous !== ly.local.anonymous || ly.share.authenticated !== ly.local.authenticated) ? "text-warn" : ""}>
                 {#if ly.share && (ly.share.anonymous !== ly.local.anonymous || ly.share.authenticated !== ly.local.authenticated)}
                   they disagree —
                   share: {ly.share.anonymous ? "anyone" : ly.share.authenticated ? "signed-in accounts" : "named principals"};
@@ -727,7 +734,7 @@
                 {/if}
               </dd>
             {/if}
-            <dt class="text-slate-500">Collected</dt>
+            <dt class="text-muted">Collected</dt>
             <dd class="min-w-0 truncate">
               {perms.collected_at ? new Date(perms.collected_at).toLocaleString() : "—"}
               {#if perms.agent_name} · by agent {perms.agent_name}{/if}
@@ -737,12 +744,18 @@
           {#if (perms.aces ?? []).length}
             <div class="mt-2 overflow-x-auto">
               <table class="w-full text-xs">
-                <thead class="text-left text-slate-600 dark:text-slate-400">
-                  <tr><th class="py-1 pr-2">Principal</th><th class="py-1 pr-2">Access</th><th class="py-1 pr-2">Rights</th><th class="py-1 pr-2">Layer · scope</th></tr>
+                <caption class="sr-only">Access control entries</caption>
+                <thead class="text-left text-muted">
+                  <tr>
+                    <th scope="col" class="py-1 pr-2">Principal</th>
+                    <th scope="col" class="py-1 pr-2">Access</th>
+                    <th scope="col" class="py-1 pr-2">Rights</th>
+                    <th scope="col" class="py-1 pr-2">Layer · scope</th>
+                  </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
+                <tbody class="divide-y divide-border">
                   {#each visibleAces as a, i (i)}
-                    <tr class={a.type === "deny" ? "text-red-600 dark:text-red-400" : ""}>
+                    <tr class={a.type === "deny" ? "text-danger" : ""}>
                       <td class="py-1 pr-2">
                         <button type="button" class="text-left hover:underline" title={principalId(a.principal)}
                           onclick={() => searchByPrincipal(principalId(a.principal) || principalLabel(a.principal))}>
@@ -772,20 +785,20 @@
          Zone.Identifier read at extract time). Rendered only when present; the
          link is rel=noopener and never auto-fetched. -->
     {#if item && (originUrl || referrerUrl)}
-      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+      <div class="mt-5 border-t border-border pt-4">
         <h3 class="mb-2 text-sm font-semibold">Origin</h3>
         <dl class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs">
           {#if originUrl}
-            <dt class="text-slate-500">Downloaded from</dt>
+            <dt class="text-muted">Downloaded from</dt>
             <dd class="min-w-0 truncate">
-              <a class="font-mono underline hover:text-[var(--accent)]" href={originUrl}
+              <a class="font-mono underline hover:text-accent-text" href={originUrl}
                 target="_blank" rel="noopener noreferrer" title={originUrl}>{originUrl}</a>
             </dd>
           {/if}
           {#if referrerUrl}
-            <dt class="text-slate-500">Referrer</dt>
+            <dt class="text-muted">Referrer</dt>
             <dd class="min-w-0 truncate">
-              <a class="font-mono underline hover:text-[var(--accent)]" href={referrerUrl}
+              <a class="font-mono underline hover:text-accent-text" href={referrerUrl}
                 target="_blank" rel="noopener noreferrer" title={referrerUrl}>{referrerUrl}</a>
             </dd>
           {/if}
@@ -803,10 +816,10 @@
          has more than one active member). Each row lists the owning library +
          path with a copy-path action (native_prefix-resolved, invariant 3). -->
     {#if copies && copies.count > 1}
-      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+      <div class="mt-5 border-t border-border pt-4">
         <h3 class="mb-2 text-sm font-semibold">
           {copies.count} copies
-          <span class="ml-1 font-normal text-slate-500">
+          <span class="ml-1 font-normal text-muted">
             ({copies.copies.length} other{copies.copies.length === 1 ? "" : "s"}
             {copies.capped ? ", showing first 50" : ""})
           </span>
@@ -815,18 +828,15 @@
           {#each copies.copies as c (c.id)}
             {@const path = c.native_path ?? c.path}
             <li class="flex items-center gap-2 text-xs">
-              <span class="shrink-0 rounded bg-slate-200 px-2 py-0.5 dark:bg-slate-800"
+              <span class="shrink-0 rounded-control bg-surface-3 px-2 py-0.5"
                 >{c.library_name ?? "?"}</span>
               <span class="min-w-0 flex-1 truncate font-mono" title={path}>{path}</span>
-              <button
-                type="button"
-                class="shrink-0 rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
-                onclick={() => copyCopyPath(path)}>Copy path</button>
+              <Button size="sm" class="shrink-0" onclick={() => copyCopyPath(path)}>Copy path</Button>
             </li>
           {/each}
         </ul>
         {#if copiedPath}
-          <p class="mt-2 text-xs text-[var(--accent)]" role="status">Copied {copiedPath}</p>
+          <p class="mt-2 text-xs text-accent-text" role="status">Copied {copiedPath}</p>
         {/if}
       </div>
     {/if}
@@ -836,75 +846,87 @@
          thumbnail grid — a tile navigates this panel to that item. A 409
          (this item not embedded yet) degrades to an "unavailable" note. -->
     {#if item && semanticOn}
-      <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+      <div class="mt-5 border-t border-border pt-4">
         <button
           type="button"
           class="text-sm font-semibold"
           aria-expanded={similarOpen}
           onclick={toggleSimilar}>Similar items {similarOpen ? "▲" : "▾"}</button>
         {#if similarOpen}
-          <span class="ml-2 inline-flex overflow-hidden rounded border border-slate-300 text-[10px] dark:border-slate-700">
-            <button type="button" class="px-1.5 py-0.5 {similarView === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'text-slate-500'}"
+          <span class="ml-2 inline-flex overflow-hidden rounded-control border border-border-strong text-2xs">
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'grid' ? TAB_ON : TAB_OFF}"
+              aria-pressed={similarView === "grid"}
               onclick={() => setSimilarView("grid")}>grid</button>
-            <button type="button" class="px-1.5 py-0.5 {similarView === 'table' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'text-slate-500'}"
+            <button type="button" class="px-1.5 py-0.5 {similarView === 'table' ? TAB_ON : TAB_OFF}"
+              aria-pressed={similarView === "table"}
               onclick={() => setSimilarView("table")}>table</button>
           </span>
-          <span class="ml-1 cursor-help text-[10px] text-slate-600 dark:text-slate-400"
+          <span class="ml-1 cursor-help text-2xs text-muted"
             title="How this list is built: each embedded item carries a vector computed locally from its text (title/filename, tags, extracted body/OCR text). These are the nearest items by cosine similarity of those vectors — similar DESCRIBED CONTENT, not similar bytes (byte-identical copies are the Copies section). The % is the normalised similarity score the ranking sorted by: ~100% = near-duplicate text signal, ~80%+ = same topic/series.">ⓘ why these?</span>
         {/if}
         {#if similarOpen}
           <div class="mt-2">
             {#if similarLoading}
-              <p class="text-xs text-slate-500">Loading…</p>
+              <StateBlock state="loading" compact />
             {:else if similarError}
-              <p class="text-xs text-slate-500">{similarError}</p>
+              <StateBlock state="error" compact message={similarError} onRetry={loadSimilar} />
             {:else if similar && similar.hits.length && similarView === "table"}
-              <div class="overflow-x-auto">
+              <!-- Wide and free of focusable cells, so the scroll container takes
+                   focus itself (ScrollRegion) to stay keyboard-scrollable. -->
+              <ScrollRegion label="Similar items table">
                 <table class="w-full text-xs">
-                  <thead class="text-left text-slate-500">
-                    <tr><th class="py-1 pr-2">Name</th><th class="pr-2">Similarity</th><th class="pr-2">Type</th><th class="pr-2">Size</th><th class="pr-2">Modified</th><th>Path</th></tr>
+                  <caption class="sr-only">Similar items</caption>
+                  <thead class="text-left text-muted">
+                    <tr>
+                      <th scope="col" class="py-1 pr-2">Name</th>
+                      <th scope="col" class="pr-2">Similarity</th>
+                      <th scope="col" class="pr-2">Type</th>
+                      <th scope="col" class="pr-2">Size</th>
+                      <th scope="col" class="pr-2">Modified</th>
+                      <th scope="col">Path</th>
+                    </tr>
                   </thead>
-                  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+                  <tbody class="divide-y divide-border">
                     {#each similar.hits as h (h.id)}
-                      <tr class={onOpen ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900" : ""}
-                        onclick={() => onOpen?.(String(h.id))}>
+                      <tr class={onOpen ? "cursor-pointer hover:bg-surface-3" : ""}
+                        onclick={() => void openSimilar(String(h.id))}>
                         <td class="max-w-[16rem] truncate py-1 pr-2" title={hitLabel(h)}>{hitLabel(h)}</td>
                         <td class="pr-2 font-mono">{simPct(h)}</td>
-                        <td class="pr-2 text-slate-500">{h.file_group ?? h.file_category ?? "—"}</td>
-                        <td class="pr-2 text-slate-500">{simSize(h)}</td>
-                        <td class="pr-2 text-slate-500">{simWhen(h)}</td>
-                        <td class="max-w-[18rem] truncate font-mono text-[10px] text-slate-600 dark:text-slate-400" title={hitPath(h)}>{hitPath(h)}</td>
+                        <td class="pr-2 text-muted">{h.file_group ?? h.file_category ?? "—"}</td>
+                        <td class="pr-2 text-muted">{simSize(h)}</td>
+                        <td class="pr-2 text-muted">{simWhen(h)}</td>
+                        <td class="max-w-[18rem] truncate font-mono text-2xs text-muted" title={hitPath(h)}>{hitPath(h)}</td>
                       </tr>
                     {/each}
                   </tbody>
                 </table>
-              </div>
+              </ScrollRegion>
             {:else if similar && similar.hits.length}
               <ul class="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {#each similar.hits as h (h.id)}
                   <li>
                     <button
                       type="button"
-                      class="w-full rounded-lg border border-slate-200 p-2 text-left hover:border-[var(--accent)] disabled:cursor-default disabled:hover:border-slate-200 dark:border-slate-800 dark:disabled:hover:border-slate-800"
+                      class="w-full rounded-panel border border-border p-2 text-left hover:border-accent disabled:cursor-default disabled:hover:border-border"
                       disabled={!onOpen}
                       title={hitPath(h)}
-                      onclick={() => onOpen?.(String(h.id))}>
+                      onclick={() => void openSimilar(String(h.id))}>
                       <div class="flex h-20 items-center justify-center overflow-hidden">
                         <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
                       </div>
                       <p class="mt-1 truncate text-xs">{hitLabel(h)}
-                        {#if typeof h.similarity === "number"}<span class="ml-1 text-[10px] text-slate-600 dark:text-slate-400">{simPct(h)}</span>{/if}</p>
-                      <p class="truncate font-mono text-[10px] text-slate-600 dark:text-slate-400">{hitPath(h)}</p>
+                        {#if typeof h.similarity === "number"}<span class="ml-1 text-2xs text-muted">{simPct(h)}</span>{/if}</p>
+                      <p class="truncate font-mono text-2xs text-muted">{hitPath(h)}</p>
                     </button>
                   </li>
                 {/each}
               </ul>
             {:else}
-              <p class="text-xs text-slate-500">No similar items found.</p>
+              <StateBlock state="empty" compact message="No similar items found." />
             {/if}
           </div>
         {/if}
       </div>
     {/if}
-  </div>
-</div>
+  {/snippet}
+</Modal>

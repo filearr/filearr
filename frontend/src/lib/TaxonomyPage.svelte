@@ -29,6 +29,7 @@
     errorMessage,
   } from "./api";
   import { intOrNull } from "./numInput";
+  import { Alert, Badge, Button, Field, Input, Modal, Select, StateBlock, confirm } from "./ui";
 
   let { me = null, authDisabled = false }: { me?: AuthPrincipal | null; authDisabled?: boolean } =
     $props();
@@ -37,10 +38,15 @@
 
   let tree = $state<TaxonomyNode[]>([]);
   let version = $state<number | null>(null);
-  let error = $state("");
+  let loadError = $state(""); // replaces the tree with a retry block
   let loading = $state(true);
+  // Per-origin action errors, each shown under the control that raised it.
+  let seedError = $state("");
+  let reclassError = $state("");
+  let categoryError = $state<{ key: string; message: string } | null>(null);
+  let groupError = $state<{ key: string; message: string } | null>(null);
 
-  // Per-group extension add: input text + inline error / success notice.
+  // Per-group extension add/remove: input text + inline error / success notice.
   let extInput = $state<Record<string, string>>({});
   let extError = $state<Record<string, string>>({});
   let extNotice = $state<Record<string, string>>({});
@@ -53,7 +59,7 @@
 
   async function syncSeed() {
     if (seedBusy) return;
-    seedBusy = true; error = ""; actionNotice = "";
+    seedBusy = true; seedError = ""; actionNotice = "";
     try {
       const r = await syncTaxonomySeed();
       actionNotice = r.added_count
@@ -63,7 +69,7 @@
         : "Seed sync: nothing new — this taxonomy already covers the shipped defaults.";
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "edit the taxonomy" });
+      seedError = errorMessage(e, { verb: "edit the taxonomy" });
     } finally {
       seedBusy = false;
     }
@@ -71,27 +77,27 @@
 
   async function reclassify() {
     if (reclassBusy) return;
-    reclassBusy = true; error = ""; actionNotice = "";
+    reclassBusy = true; reclassError = ""; actionNotice = "";
     try {
       const r = await reclassifyExtensions();
       actionNotice = r.changed
         ? `Reclassified ${r.changed.toLocaleString()} item(s); their search docs are re-syncing.`
         : "Reclassify: every item already matches the current taxonomy.";
     } catch (e) {
-      error = errorMessage(e, { verb: "edit the taxonomy" });
+      reclassError = errorMessage(e, { verb: "edit the taxonomy" });
     } finally {
       reclassBusy = false;
     }
   }
 
   async function refresh() {
-    error = "";
+    loadError = "";
     try {
       const t = await getTaxonomy();
       tree = t.tree;
       version = t.version;
     } catch (e) {
-      error = errorMessage(e);
+      loadError = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -108,30 +114,34 @@
   let dialog = $state<Dialog | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
+  // The dialog's values as opened, for its "Discard changes?" check.
+  let dialogInitial = "";
+  const dialogDirty = $derived(!!dialog && JSON.stringify(dialog) !== dialogInitial);
 
-  function newCategory() {
+  function openDialog(d: Dialog) {
     dialogError = "";
-    dialog = { kind: "category", mode: "create", key: "", label: "", description: "", extractor: "none", sortOrder: null };
+    dialogInitial = JSON.stringify(d);
+    dialog = d;
+  }
+  function newCategory() {
+    openDialog({ kind: "category", mode: "create", key: "", label: "", description: "", extractor: "none", sortOrder: null });
   }
   function editCategory(n: TaxonomyNode) {
-    dialogError = "";
-    dialog = {
+    openDialog({
       kind: "category", mode: "edit",
       key: n.category.key, label: n.category.label, description: n.category.description ?? "",
       extractor: n.category.extractor || "none", sortOrder: n.category.sort_order ?? null,
-    };
+    });
   }
   function newGroup(categoryKey: string) {
-    dialogError = "";
-    dialog = { kind: "group", mode: "create", key: "", label: "", description: "", categoryKey, sortOrder: null };
+    openDialog({ kind: "group", mode: "create", key: "", label: "", description: "", categoryKey, sortOrder: null });
   }
   function editGroup(categoryKey: string, g: TaxonomyNode["groups"][number]) {
-    dialogError = "";
-    dialog = {
+    openDialog({
       kind: "group", mode: "edit",
       key: g.key, label: g.label, description: g.description ?? "",
       categoryKey, sortOrder: g.sort_order ?? null,
-    };
+    });
   }
 
   // bind:value on the type="number" input writes a number, or null when
@@ -139,6 +149,10 @@
   function sortNum(v: number | null): number | undefined {
     return intOrNull(v) ?? undefined;
   }
+
+  // The select's "none" option means no extractor; the API spells that null
+  // and rejects the string "none" with a 422.
+  const extractorOut = (v: string): string | null => (v === "none" || v === "" ? null : v);
 
   async function saveDialog() {
     if (!dialog) return;
@@ -163,14 +177,14 @@
             key: dialog.key.trim(),
             label: dialog.label.trim(),
             description: dialog.description.trim() || undefined,
-            extractor: dialog.extractor,
+            extractor: extractorOut(dialog.extractor),
             sort_order: sortNum(dialog.sortOrder),
           });
         } else {
           await updateTaxonomyCategory(dialog.key, {
             label: dialog.label.trim(),
             description: dialog.description.trim(),
-            extractor: dialog.extractor,
+            extractor: extractorOut(dialog.extractor),
             ...(sortNum(dialog.sortOrder) != null ? { sort_order: sortNum(dialog.sortOrder) } : {}),
           });
         }
@@ -204,25 +218,36 @@
   }
 
   async function removeCategory(n: TaxonomyNode) {
-    if (!confirm(`Delete category "${n.category.label}"?`)) return;
-    error = "";
+    const ok = await confirm({
+      title: `Delete category "${n.category.label}"?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    categoryError = null;
     try {
       await deleteTaxonomyCategory(n.category.key);
       await refresh();
     } catch (e) {
       // 409 when the category still has groups — surface the server's message.
-      error = errorMessage(e, { verb: "edit the taxonomy" });
+      categoryError = { key: n.category.key, message: errorMessage(e, { verb: "edit the taxonomy" }) };
     }
   }
 
   async function removeGroup(g: TaxonomyNode["groups"][number]) {
-    if (!confirm(`Delete group "${g.label}"? Its ${g.extensions.length} extension(s) will be removed from the taxonomy.`)) return;
-    error = "";
+    const ok = await confirm({
+      title: `Delete group "${g.label}"?`,
+      message: `Its ${g.extensions.length} extension(s) will be removed from the taxonomy.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    groupError = null;
     try {
       await deleteTaxonomyGroup(g.key);
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "edit the taxonomy" });
+      groupError = { key: g.key, message: errorMessage(e, { verb: "edit the taxonomy" }) };
     }
   }
 
@@ -246,13 +271,14 @@
     }
   }
 
-  async function removeExt(ext: string) {
-    error = "";
+  async function removeExt(groupKey: string, ext: string) {
+    extError = { ...extError, [groupKey]: "" };
+    extNotice = { ...extNotice, [groupKey]: "" };
     try {
       await deleteTaxonomyExtension(ext);
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "edit the taxonomy" });
+      extError = { ...extError, [groupKey]: errorMessage(e, { verb: "edit the taxonomy" }) };
     }
   }
 
@@ -263,95 +289,110 @@
 
 <div class="mt-4">
   <div class="flex flex-wrap items-center gap-3">
-    <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300"
-      onclick={goBack}>← Admin</button>
+    <Button size="sm" onclick={goBack}>← Admin</Button>
     <h2 class="text-lg font-semibold">File taxonomy</h2>
     {#if version != null}
-      <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800" title="Schema version (bumps on every change)">v{version}</span>
+      <span title="Schema version (bumps on every change)"><Badge>v{version}</Badge></span>
     {/if}
-    <span class="text-xs text-slate-500">category → group → extensions</span>
+    <span class="text-xs text-muted">category → group → extensions</span>
     <div class="grow"></div>
-    <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300"
-      onclick={refresh}>Refresh</button>
+    <Button size="sm" onclick={refresh}>Refresh</Button>
     {#if isAdmin}
-      <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+      <Button size="sm"
         title="Adopt extensions the shipped built-in seed has gained since this database was set up. Add-only: anything you moved or removed stays exactly where you put it."
-        disabled={seedBusy} onclick={syncSeed}>{seedBusy ? "syncing…" : "Sync built-in seed"}</button>
-      <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+        disabled={seedBusy} onclick={syncSeed}>{seedBusy ? "syncing…" : "Sync built-in seed"}</Button>
+      <Button size="sm"
         title="Apply the current taxonomy to items already in the catalogue (updates file category/group + search docs in place — no rescan)."
-        disabled={reclassBusy} onclick={reclassify}>{reclassBusy ? "reclassifying…" : "Reclassify items"}</button>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={newCategory}>New category</button>
+        disabled={reclassBusy} onclick={reclassify}>{reclassBusy ? "reclassifying…" : "Reclassify items"}</Button>
+      <Button size="sm" variant="primary" onclick={newCategory}>New category</Button>
     {/if}
   </div>
+  {#if seedError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (seedError = "")}>{seedError}</Alert>
+  {/if}
+  {#if reclassError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (reclassError = "")}>{reclassError}</Alert>
+  {/if}
   {#if actionNotice}
-    <p class="mt-2 rounded-lg border border-emerald-300 bg-emerald-50 p-2 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">{actionNotice}</p>
+    <Alert tone="ok" class="mt-2" onDismiss={() => (actionNotice = "")}>{actionNotice}</Alert>
   {/if}
 
   {#if !isAdmin}
-    <p class="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+    <Alert tone="warn" live={false} class="mt-2">
       Read-only — editing the taxonomy requires an admin account.
-    </p>
+    </Alert>
   {/if}
-  {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
 
-  {#if loading}
-    <p class="mt-4 text-sm text-slate-600 dark:text-slate-400">Loading…</p>
+  {#if loadError}
+    <StateBlock state="error" message={loadError} onRetry={refresh} />
+  {:else if loading}
+    <StateBlock state="loading" />
   {:else if tree.length === 0}
-    <p class="mt-4 text-sm text-slate-600 dark:text-slate-400">
-      No categories yet.{#if isAdmin} Use “New category” to start building the taxonomy.{/if}
-    </p>
+    <StateBlock state="empty"
+      message={isAdmin
+        ? "No categories yet. Use “New category” to start building the taxonomy."
+        : "No categories yet. An admin can build the taxonomy here."} />
   {:else}
     <div class="mt-4 flex flex-col gap-4">
       {#each tree as node (node.category.key)}
         {@const cat = node.category}
-        <div class="rounded-xl border border-slate-200 dark:border-slate-800">
+        <div class="rounded-panel border border-border">
           <!-- Category header -->
-          <div class="flex flex-wrap items-center gap-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800/70">
-            <span class="text-base font-semibold">{cat.label}</span>
-            <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-500 dark:bg-slate-800">{cat.key}</span>
-            <span class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]" title="extractor family">{cat.extractor || "none"}</span>
-            {#if cat.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-400 dark:bg-slate-800">built-in</span>{/if}
-            <span class="text-[11px] text-slate-600 dark:text-slate-400">sort {cat.sort_order}</span>
-            {#if cat.description}<span class="hidden text-xs text-slate-600 dark:text-slate-400 sm:inline">— {cat.description}</span>{/if}
-            <div class="grow"></div>
-            {#if isAdmin}
-              <button class="text-xs text-[var(--accent)]" onclick={() => newGroup(cat.key)}>+ group</button>
-              <button class="text-xs text-[var(--accent)]" onclick={() => editCategory(node)}>edit</button>
-              <button class="text-xs text-red-600" onclick={() => removeCategory(node)}>delete</button>
+          <div class="border-b border-border px-4 py-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-base font-semibold">{cat.label}</span>
+              <Badge class="font-mono">{cat.key}</Badge>
+              <span title="extractor family"><Badge tone="accent">{cat.extractor || "none"}</Badge></span>
+              {#if cat.is_builtin}<Badge>built-in</Badge>{/if}
+              <span class="text-2xs text-muted">sort {cat.sort_order}</span>
+              {#if cat.description}<span class="hidden text-xs text-muted sm:inline">— {cat.description}</span>{/if}
+              <div class="grow"></div>
+              {#if isAdmin}
+                <Button size="sm" variant="ghost" onclick={() => newGroup(cat.key)}>+ group</Button>
+                <Button size="sm" variant="ghost" onclick={() => editCategory(node)}>edit</Button>
+                <Button size="sm" variant="danger" onclick={() => removeCategory(node)}>delete</Button>
+              {/if}
+            </div>
+            {#if categoryError?.key === cat.key}
+              <Alert tone="danger" class="mt-2" onDismiss={() => (categoryError = null)}>{categoryError.message}</Alert>
             {/if}
           </div>
 
           <!-- Groups -->
           {#if node.groups.length === 0}
-            <p class="px-4 py-3 text-xs text-slate-600 dark:text-slate-400">No groups in this category.</p>
+            <p class="px-4 py-3 text-xs text-muted">No groups in this category.{#if isAdmin} Use “+ group” to add one.{/if}</p>
           {:else}
-            <div class="divide-y divide-slate-100 dark:divide-slate-800/70">
+            <div class="divide-y divide-border">
               {#each node.groups as g (g.key)}
                 <div class="px-4 py-3">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="font-medium">{g.label}</span>
-                    <span class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-500 dark:bg-slate-800">{g.key}</span>
-                    {#if g.is_builtin}<span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:text-slate-400 dark:bg-slate-800">built-in</span>{/if}
-                    <span class="text-[11px] text-slate-600 dark:text-slate-400">sort {g.sort_order}</span>
-                    {#if g.description}<span class="hidden text-xs text-slate-600 dark:text-slate-400 sm:inline">— {g.description}</span>{/if}
+                    <Badge class="font-mono">{g.key}</Badge>
+                    {#if g.is_builtin}<Badge>built-in</Badge>{/if}
+                    <span class="text-2xs text-muted">sort {g.sort_order}</span>
+                    {#if g.description}<span class="hidden text-xs text-muted sm:inline">— {g.description}</span>{/if}
                     <div class="grow"></div>
                     {#if isAdmin}
-                      <button class="text-xs text-[var(--accent)]" onclick={() => editGroup(cat.key, g)} title="Rename or reparent (change category)">edit / reparent</button>
-                      <button class="text-xs text-red-600" onclick={() => removeGroup(g)}>delete</button>
+                      <Button size="sm" variant="ghost" onclick={() => editGroup(cat.key, g)} title="Rename or reparent (change category)">edit / reparent</Button>
+                      <Button size="sm" variant="danger" onclick={() => removeGroup(g)}>delete</Button>
                     {/if}
                   </div>
+                  {#if groupError?.key === g.key}
+                    <Alert tone="danger" class="mt-2" onDismiss={() => (groupError = null)}>{groupError.message}</Alert>
+                  {/if}
 
-                  <!-- Extensions -->
+                  <!-- Extensions. The chip's × is icon-only chrome: a raw
+                       button with token classes. -->
                   <div class="mt-2 flex flex-wrap items-center gap-1.5">
                     {#if g.extensions.length === 0}
-                      <span class="text-xs text-slate-600 dark:text-slate-400">no extensions</span>
+                      <span class="text-xs text-muted">no extensions</span>
                     {:else}
                       {#each g.extensions as ext (ext)}
-                        <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        <span class="inline-flex items-center gap-1 rounded-full bg-surface-3 px-2 py-0.5 font-mono text-xs text-fg">
                           .{ext}
                           {#if isAdmin}
-                            <button class="rounded-full px-0.5 leading-none text-slate-600 dark:text-slate-400 hover:text-red-600"
-                              aria-label={`Remove .${ext}`} title="Remove extension" onclick={() => removeExt(ext)}>×</button>
+                            <button type="button" class="rounded-full px-0.5 leading-none text-muted hover:text-danger"
+                              aria-label={`Remove .${ext}`} title="Remove extension" onclick={() => removeExt(g.key, ext)}>×</button>
                           {/if}
                         </span>
                       {/each}
@@ -362,16 +403,21 @@
                     <!-- Add / move an extension. Adding one that lives in another
                          group reparents it here (upsert) and reports the move. -->
                     <div class="mt-2 flex flex-wrap items-center gap-2">
-                      <input
-                        class="w-40 rounded border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden focus:border-[var(--accent)] dark:border-slate-700"
-                        placeholder="add ext (e.g. mkv)"
-                        value={extInput[g.key] ?? ""}
-                        oninput={(e) => (extInput = { ...extInput, [g.key]: (e.currentTarget as HTMLInputElement).value })}
-                        onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addExt(g.key); } }} />
-                      <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700" onclick={() => addExt(g.key)}>add</button>
-                      {#if extError[g.key]}<span class="text-xs text-red-600">{extError[g.key]}</span>{/if}
-                      {#if extNotice[g.key]}<span class="text-xs text-emerald-600">{extNotice[g.key]}</span>{/if}
+                      <!-- Sized by the wrapper: the kit control is w-full. -->
+                      <div class="w-40">
+                        <Input size="sm" class="font-mono"
+                          aria-label={`Add extension to ${g.label}`}
+                          placeholder="add ext (e.g. mkv)"
+                          value={extInput[g.key] ?? ""}
+                          oninput={(e) => (extInput = { ...extInput, [g.key]: e.currentTarget.value })}
+                          onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addExt(g.key); } }} />
+                      </div>
+                      <Button size="sm" onclick={() => addExt(g.key)}>add</Button>
+                      {#if extNotice[g.key]}<span class="text-xs text-ok" role="status">{extNotice[g.key]}</span>{/if}
                     </div>
+                  {/if}
+                  {#if extError[g.key]}
+                    <Alert tone="danger" class="mt-2" onDismiss={() => (extError = { ...extError, [g.key]: "" })}>{extError[g.key]}</Alert>
                   {/if}
                 </div>
               {/each}
@@ -384,63 +430,56 @@
 </div>
 
 <!-- Create / edit dialog (category or group) -->
-{#if dialog}
-  <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-    <div class="my-8 w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-      <div class="flex items-center gap-3">
-        <h3 class="text-lg font-semibold">
-          {dialog.mode === "create" ? "New" : "Edit"} {dialog.kind}
-        </h3>
-        <div class="grow"></div>
-        <button class="text-slate-500" onclick={() => (dialog = null)}>✕</button>
-      </div>
+<Modal
+  open={!!dialog}
+  onClose={() => (dialog = null)}
+  title={dialog ? `${dialog.mode === "create" ? "New" : "Edit"} ${dialog.kind}` : ""}
+  size="md"
+  dirty={() => dialogDirty}
+>
+  {#if dialog}
+    <div class="flex flex-col gap-3">
+      <Field label={dialog.mode === "edit" ? "Key (immutable)" : "Key"}>
+        <Input class="font-mono" placeholder="lowercase-key" disabled={dialog.mode === "edit"} bind:value={dialog.key} />
+      </Field>
+      <Field label="Label">
+        <Input bind:value={dialog.label} />
+      </Field>
+      <Field label="Description">
+        <Input bind:value={dialog.description} />
+      </Field>
 
-      {#if dialogError}
-        <p class="mt-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{dialogError}</p>
+      {#if dialog.kind === "category"}
+        <Field label="Extractor" class="w-56">
+          <Select bind:value={dialog.extractor}>
+            {#each TAXONOMY_EXTRACTORS as ex}
+              <option value={ex}>{ex}</option>
+            {/each}
+          </Select>
+        </Field>
+      {:else}
+        <Field label={dialog.mode === "edit" ? "Category (change to reparent)" : "Category"} class="w-56">
+          <Select bind:value={dialog.categoryKey}>
+            {#each allCategoryKeys as ck}
+              <option value={ck}>{ck}</option>
+            {/each}
+          </Select>
+        </Field>
       {/if}
 
-      <div class="mt-3 flex flex-col gap-3">
-        <label class="text-xs text-slate-500">Key {#if dialog.mode === "edit"}<span class="text-slate-600 dark:text-slate-400">(immutable)</span>{/if}
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm disabled:opacity-60 dark:border-slate-700"
-            placeholder="lowercase-key" disabled={dialog.mode === "edit"} bind:value={dialog.key} />
-        </label>
-        <label class="text-xs text-slate-500">Label
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" bind:value={dialog.label} />
-        </label>
-        <label class="text-xs text-slate-500">Description
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700" bind:value={dialog.description} />
-        </label>
+      <Field label="Sort order" class="w-32">
+        <Input type="number" step="1" placeholder="(auto)" bind:value={dialog.sortOrder} />
+      </Field>
 
-        {#if dialog.kind === "category"}
-          <label class="text-xs text-slate-500">Extractor
-            <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.extractor}>
-              {#each TAXONOMY_EXTRACTORS as ex}
-                <option value={ex}>{ex}</option>
-              {/each}
-            </select>
-          </label>
-        {:else}
-          <label class="text-xs text-slate-500">Category {#if dialog.mode === "edit"}<span class="text-slate-600 dark:text-slate-400">(change to reparent)</span>{/if}
-            <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" bind:value={dialog.categoryKey}>
-              {#each allCategoryKeys as ck}
-                <option value={ck}>{ck}</option>
-              {/each}
-            </select>
-          </label>
-        {/if}
-
-        <label class="text-xs text-slate-500">Sort order
-          <input type="number" step="1" class="mt-1 block w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-            placeholder="(auto)" bind:value={dialog.sortOrder} />
-        </label>
-      </div>
-
-      <div class="mt-4 flex justify-end gap-2">
-        <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700" onclick={() => (dialog = null)}>Cancel</button>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50" disabled={dialogBusy} onclick={saveDialog}>
-          {dialogBusy ? "Saving…" : dialog.mode === "create" ? "Create" : "Save"}
-        </button>
-      </div>
+      {#if dialogError}
+        <Alert tone="danger" onDismiss={() => (dialogError = "")}>{dialogError}</Alert>
+      {/if}
     </div>
-  </div>
-{/if}
+  {/if}
+  {#snippet footer({ close })}
+    <Button onclick={close}>Cancel</Button>
+    <Button variant="primary" disabled={dialogBusy} onclick={saveDialog}>
+      {dialogBusy ? "Saving…" : dialog?.mode === "create" ? "Create" : "Save"}
+    </Button>
+  {/snippet}
+</Modal>

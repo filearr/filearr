@@ -9,11 +9,20 @@
     type RbacGrant, type RbacGroup, type RbacMember,
     errorMessage,
   } from "./api";
+  import { Alert, Badge, Button, DataTable, Field, Input, Select, StateBlock, confirm } from "./ui";
+  import { focusPanel } from "./rowPanel";
 
   // P6-T2 RBAC admin panel: groups + members, path grants, and a decision
   // preview. Functional, not fancy. Enforcement lives in security.require_permission
   // (search scope + data endpoints) with the generation-invalidated grant cache.
-  let error = $state("");
+  let loadError = $state("");
+  let loading = $state(false);
+  // Action errors by area, each rendered next to the control that raised it:
+  // group (add group), groups (row actions), members, grant (add form),
+  // grants (row delete), preview.
+  type Area = "group" | "groups" | "members" | "grant" | "grants" | "preview";
+  let errors = $state<Partial<Record<Area, string>>>({});
+  const fail = (area: Area, e: unknown) => (errors[area] = errorMessage(e, { verb: "manage permissions" }));
   let users = $state<AuthPrincipal[]>([]);
   let groups = $state<RbacGroup[]>([]);
   let grants = $state<RbacGrant[]>([]);
@@ -25,6 +34,7 @@
   let newGroupDesc = $state("");
   let openGroup = $state<string | null>(null);
   let members = $state<RbacMember[]>([]);
+  let membersLoading = $state(false);
   let addMemberId = $state("");
 
   // grant create form
@@ -44,7 +54,8 @@
   let decision = $state<RbacDecision | null>(null);
 
   async function refresh() {
-    error = "";
+    loadError = "";
+    loading = true;
     try {
       [users, groups, grants, libraries, meta] = await Promise.all([
         listUsers().catch(() => []),
@@ -55,39 +66,68 @@
       ]);
       if (meta.actions.length && !meta.actions.includes(gAction)) gAction = meta.actions[0];
     } catch (e) {
-      error = errorMessage(e, { verb: "manage permissions" });
+      loadError = errorMessage(e, { verb: "manage permissions" });
     }
+    loading = false;
   }
   onMount(refresh);
 
   async function addGroup() {
     if (!newGroupName.trim()) return;
+    errors.group = undefined;
     try {
       await createGroup(newGroupName.trim(), newGroupDesc.trim() || null);
       newGroupName = "";
       newGroupDesc = "";
       await refresh();
-    } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    } catch (e) { fail("group", e); }
   }
-  async function removeGroup(id: string) {
-    if (!confirm("Delete this group and its grants?")) return;
-    try { await deleteGroup(id); if (openGroup === id) openGroup = null; await refresh(); }
-    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+  async function removeGroup(g: RbacGroup) {
+    const ok = await confirm({
+      title: `Delete group "${g.name}"?`,
+      message: "Delete this group and its grants?",
+      confirmLabel: "Delete group",
+      tone: "danger",
+    });
+    if (!ok) return;
+    errors.groups = undefined;
+    try { await deleteGroup(g.id); if (openGroup === g.id) openGroup = null; await refresh(); }
+    catch (e) { fail("groups", e); }
   }
+  // The members editor renders below the table (see rowPanel.ts).
+  const uid = $props.id();
+  const membersPanelId = (groupId: string) => `${uid}-members-${groupId}`;
+
   async function toggleMembers(id: string) {
     if (openGroup === id) { openGroup = null; return; }
     openGroup = id;
-    try { members = await listMembers(id); } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    // Another group's list must not show under this group's heading while
+    // its own members load.
+    members = [];
+    membersLoading = true;
+    void focusPanel(membersPanelId(id));
+    errors.groups = undefined;
+    errors.members = undefined;
+    try {
+      const list = await listMembers(id);
+      if (openGroup === id) members = list;
+    } catch (e) {
+      if (openGroup === id) fail("members", e);
+    } finally {
+      if (openGroup === id) membersLoading = false;
+    }
   }
   async function doAddMember() {
     if (!openGroup || !addMemberId) return;
+    errors.members = undefined;
     try { await addMember(openGroup, addMemberId); members = await listMembers(openGroup); await refresh(); }
-    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    catch (e) { fail("members", e); }
   }
   async function doRemoveMember(pid: string) {
     if (!openGroup) return;
+    errors.members = undefined;
     try { await removeMember(openGroup, pid); members = await listMembers(openGroup); await refresh(); }
-    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    catch (e) { fail("members", e); }
   }
 
   function onPickPath(abs: string) {
@@ -100,8 +140,13 @@
     }
   }
 
+  function browseFolder() {
+    if (!gLibraryId) { errors.grant = "Pick a library first"; } else { errors.grant = undefined; showPicker = true; }
+  }
+
   async function addGrant() {
-    if (!gSubjectId || !gLibraryId) { error = "Pick a subject and a library"; return; }
+    errors.grant = undefined;
+    if (!gSubjectId || !gLibraryId) { errors.grant = "Pick a subject and a library"; return; }
     try {
       await createGrant({
         subject_kind: gSubjectKind, subject_id: gSubjectId, library_id: gLibraryId,
@@ -109,20 +154,61 @@
       });
       gRelPath = "";
       await refresh();
-    } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    } catch (e) { fail("grant", e); }
   }
   async function removeGrant(id: string) {
-    try { await deleteGrant(id); await refresh(); } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
+    errors.grants = undefined;
+    try { await deleteGrant(id); await refresh(); } catch (e) { fail("grants", e); }
   }
 
   async function runPreview() {
-    if (!pPrincipal || !pLibrary) { error = "Pick a user and a library"; return; }
+    errors.preview = undefined;
+    if (!pPrincipal || !pLibrary) { errors.preview = "Pick a user and a library"; return; }
     try { decision = await rbacPreview(pPrincipal, pLibrary, pPath, pAction); }
-    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); decision = null; }
+    catch (e) { fail("preview", e); decision = null; }
   }
 
   const libName = (id: string) => libraries.find((l) => l.id === id)?.name ?? id;
+  const openGroupRow = $derived(openGroup ? groups.find((g) => g.id === openGroup) ?? null : null);
 </script>
+
+{#snippet errorFor(area: Area)}
+  {#if errors[area]}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (errors[area] = undefined)}>{errors[area]}</Alert>
+  {/if}
+{/snippet}
+
+{#snippet groupNameCell(g: RbacGroup)}
+  {g.name}{#if g.description}<span class="ml-1 text-muted">— {g.description}</span>{/if}
+{/snippet}
+
+{#snippet groupActionsCell(g: RbacGroup)}
+  <div class="flex justify-end gap-1">
+    <Button size="sm" variant="ghost" aria-expanded={openGroup === g.id}
+      aria-controls={openGroup === g.id ? membersPanelId(g.id) : undefined}
+      data-members-for={g.id}
+      onclick={() => toggleMembers(g.id)}>
+      {openGroup === g.id ? "hide" : "members"}
+    </Button>
+    {#if g.source === "local"}
+      <Button size="sm" variant="danger" onclick={() => removeGroup(g)}>delete</Button>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet subjectCell(gr: RbacGrant)}
+  {gr.subject_label ?? gr.subject_id} <span class="text-muted">({gr.subject_kind})</span>
+{/snippet}
+{#snippet libraryCell(gr: RbacGrant)}{libName(gr.library_id)}{/snippet}
+{#snippet scopeCell(gr: RbacGrant)}<span class="font-mono text-xs">{gr.scope}</span>{/snippet}
+{#snippet effectCell(gr: RbacGrant)}
+  <Badge tone={gr.effect === "deny" ? "danger" : "ok"}>{gr.effect}</Badge>
+{/snippet}
+{#snippet grantActionsCell(gr: RbacGrant)}
+  <div class="flex justify-end">
+    <Button size="sm" variant="danger" onclick={() => removeGrant(gr.id)}>delete</Button>
+  </div>
+{/snippet}
 
 <section class="mt-8">
   <h2 class="text-lg font-semibold">Access control (RBAC)</h2>
@@ -132,143 +218,167 @@
     (items, browse, timeline, reports). Use the preview below to check what a
     principal can see before saving.
   </p>
-  {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
 
   <!-- Groups -->
   <h3 class="mt-4 font-medium">Groups</h3>
-  <div class="mt-2 flex flex-wrap gap-2">
-    <input class="rounded border px-2 py-1 text-sm" placeholder="new group name"
-      bind:value={newGroupName} />
-    <input class="rounded border px-2 py-1 text-sm" placeholder="description (optional)"
-      bind:value={newGroupDesc} />
-    <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={addGroup}>
-      Add group
-    </button>
+  <div class="mt-2 flex flex-wrap items-end gap-2">
+    <Field label="Group name"><Input placeholder="new group name" bind:value={newGroupName} /></Field>
+    <Field label="Description (optional)"><Input bind:value={newGroupDesc} /></Field>
+    <Button variant="primary" onclick={addGroup}>Add group</Button>
   </div>
-  <div class="overflow-x-auto"><table class="mt-2 w-full text-sm">
-    <thead><tr class="text-left text-slate-500">
-      <th class="py-1">Name</th><th>Source</th><th>Members</th><th></th>
-    </tr></thead>
-    <tbody>
-      {#each groups as g (g.id)}
-        <tr class="border-t">
-          <td class="py-1">{g.name}{#if g.description}<span class="ml-1 text-slate-600 dark:text-slate-400">— {g.description}</span>{/if}</td>
-          <td>{g.source}</td>
-          <td>{g.member_count}</td>
-          <td class="text-right">
-            <button class="text-[var(--accent)]" onclick={() => toggleMembers(g.id)}>
-              {openGroup === g.id ? "hide" : "members"}
-            </button>
-            {#if g.source === "local"}
-              <button class="ml-2 text-red-600" onclick={() => removeGroup(g.id)}>delete</button>
-            {/if}
-          </td>
-        </tr>
-        {#if openGroup === g.id}
-          <tr class="bg-slate-50"><td colspan="4" class="p-2">
-            <div class="flex flex-wrap items-center gap-2">
-              <select class="rounded border px-2 py-1 text-sm" bind:value={addMemberId}>
-                <option value="">add member…</option>
-                {#each users as u (u.id)}<option value={u.id}>{u.username} ({u.global_role})</option>{/each}
-              </select>
-              <button class="rounded border px-2 py-1 text-sm" onclick={doAddMember}>Add</button>
-            </div>
-            <ul class="mt-2">
-              {#each members as m (m.principal_id)}
-                <li class="flex items-center gap-2">
-                  <span>{m.username ?? m.principal_id} <span class="text-slate-600 dark:text-slate-400">({m.global_role})</span></span>
-                  <button class="text-red-600" onclick={() => doRemoveMember(m.principal_id)}>remove</button>
-                </li>
-              {:else}<li class="text-slate-600 dark:text-slate-400">no members</li>{/each}
-            </ul>
-          </td></tr>
+  {@render errorFor("group")}
+  <DataTable
+    class="mt-2"
+    caption="Groups"
+    captionHidden
+    columns={[
+      { key: "name", label: "Name", cell: groupNameCell },
+      { key: "source", label: "Source" },
+      { key: "member_count", label: "Members" },
+      { key: "actions", label: "Actions", align: "right", cell: groupActionsCell },
+    ]}
+    rows={groups}
+    rowKey={(g) => g.id}
+    {loading}
+    error={loadError || null}
+    onRetry={refresh}
+    emptyMessage="No groups yet. Add one with the form above."
+  />
+  {@render errorFor("groups")}
+  {#if openGroupRow}
+    {#key openGroupRow.id}
+      <section id={membersPanelId(openGroupRow.id)} tabindex="-1" aria-labelledby="{membersPanelId(openGroupRow.id)}-heading"
+        class="mt-2 rounded-control border border-border bg-surface-2 p-3 text-sm">
+        <h4 id="{membersPanelId(openGroupRow.id)}-heading" class="font-medium">Members of {openGroupRow.name}</h4>
+        <div class="mt-2 flex flex-wrap items-end gap-2">
+          <Field label="Add member">
+            <Select bind:value={addMemberId}>
+              <option value="">add member…</option>
+              {#each users as u (u.id)}<option value={u.id}>{u.username} ({u.global_role})</option>{/each}
+            </Select>
+          </Field>
+          <Button onclick={doAddMember}>Add</Button>
+        </div>
+        {@render errorFor("members")}
+        {#if membersLoading}
+          <StateBlock state="loading" compact />
+        {:else}
+        <ul class="mt-2 flex flex-col gap-1">
+          {#each members as m (m.principal_id)}
+            <li class="flex items-center gap-2">
+              <span>{m.username ?? m.principal_id} <span class="text-muted">({m.global_role})</span></span>
+              <Button size="sm" variant="ghost" onclick={() => doRemoveMember(m.principal_id)}>remove</Button>
+            </li>
+          {:else}
+            <li><StateBlock state="empty" compact message="No members yet. Add one above." /></li>
+          {/each}
+        </ul>
         {/if}
-      {:else}<tr><td colspan="4" class="py-2 text-slate-600 dark:text-slate-400">no groups yet</td></tr>{/each}
-    </tbody>
-  </table></div>
+      </section>
+    {/key}
+  {/if}
 
   <!-- Grants -->
   <h3 class="mt-6 font-medium">Path grants</h3>
-  <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-    <select class="rounded border px-2 py-1 text-sm" bind:value={gSubjectKind}>
-      <option value="group">group</option>
-      <option value="principal">user</option>
-    </select>
-    <select class="rounded border px-2 py-1 text-sm" bind:value={gSubjectId}>
-      <option value="">subject…</option>
-      {#if gSubjectKind === "group"}
-        {#each groups as g (g.id)}<option value={g.id}>{g.name}</option>{/each}
-      {:else}
-        {#each users as u (u.id)}<option value={u.id}>{u.username}</option>{/each}
-      {/if}
-    </select>
-    <select class="rounded border px-2 py-1 text-sm" bind:value={gLibraryId}>
-      <option value="">library…</option>
-      {#each libraries as l (l.id)}<option value={l.id}>{l.name}</option>{/each}
-    </select>
-    <input class="rounded border px-2 py-1 text-sm" placeholder="rel path (blank = whole library)"
-      bind:value={gRelPath} />
-    <select class="rounded border px-2 py-1 text-sm" bind:value={gAction}>
-      {#each meta.actions as a}<option value={a}>{a}</option>{/each}
-    </select>
-    <div class="flex gap-2">
-      <select class="rounded border px-2 py-1 text-sm" bind:value={gEffect}>
-        <option value="allow">allow</option>
-        <option value="deny">deny</option>
-      </select>
-      <button class="rounded bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={addGrant}>Add</button>
+  <div class="mt-2 grid grid-cols-1 items-start gap-2 sm:grid-cols-3 lg:grid-cols-6">
+    <Field label="Subject type">
+      <Select bind:value={gSubjectKind}>
+        <option value="group">group</option>
+        <option value="principal">user</option>
+      </Select>
+    </Field>
+    <Field label="Subject">
+      <Select bind:value={gSubjectId}>
+        <option value="">subject…</option>
+        {#if gSubjectKind === "group"}
+          {#each groups as g (g.id)}<option value={g.id}>{g.name}</option>{/each}
+        {:else}
+          {#each users as u (u.id)}<option value={u.id}>{u.username}</option>{/each}
+        {/if}
+      </Select>
+    </Field>
+    <Field label="Library">
+      <Select bind:value={gLibraryId}>
+        <option value="">library…</option>
+        {#each libraries as l (l.id)}<option value={l.id}>{l.name}</option>{/each}
+      </Select>
+    </Field>
+    <Field label="Path" hint="Blank = whole library">
+      <Input placeholder="rel path" bind:value={gRelPath} />
+    </Field>
+    <Field label="Action">
+      <Select bind:value={gAction}>
+        {#each meta.actions as a (a)}<option value={a}>{a}</option>{/each}
+      </Select>
+    </Field>
+    <div class="flex items-end gap-2">
+      <Field label="Effect">
+        <Select bind:value={gEffect}>
+          <option value="allow">allow</option>
+          <option value="deny">deny</option>
+        </Select>
+      </Field>
+      <Button variant="primary" onclick={addGrant}>Add</Button>
     </div>
   </div>
-  <button class="mt-1 text-xs text-[var(--accent)]"
-    onclick={() => { if (!gLibraryId) { error = "Pick a library first"; } else { showPicker = true; } }}>
-    browse folder…
-  </button>
+  <Button class="mt-1" size="sm" variant="ghost" onclick={browseFolder}>browse folder…</Button>
+  {@render errorFor("grant")}
   {#if showPicker}
     {@const lib = libraries.find((l) => l.id === gLibraryId)}
     <FolderPicker initial={lib?.root_path ?? ""} onPick={onPickPath} onClose={() => (showPicker = false)} />
   {/if}
-  <div class="overflow-x-auto"><table class="mt-2 w-full text-sm">
-    <thead><tr class="text-left text-slate-500">
-      <th class="py-1">Subject</th><th>Library</th><th>Scope</th><th>Action</th><th>Effect</th><th></th>
-    </tr></thead>
-    <tbody>
-      {#each grants as gr (gr.id)}
-        <tr class="border-t">
-          <td class="py-1">{gr.subject_label ?? gr.subject_id} <span class="text-slate-600 dark:text-slate-400">({gr.subject_kind})</span></td>
-          <td>{libName(gr.library_id)}</td>
-          <td class="font-mono text-xs">{gr.scope}</td>
-          <td>{gr.action}</td>
-          <td class={gr.effect === "deny" ? "text-red-600" : "text-green-700"}>{gr.effect}</td>
-          <td class="text-right"><button class="text-red-600" onclick={() => removeGrant(gr.id)}>delete</button></td>
-        </tr>
-      {:else}<tr><td colspan="6" class="py-2 text-slate-600 dark:text-slate-400">no grants yet</td></tr>{/each}
-    </tbody>
-  </table></div>
+  <DataTable
+    class="mt-2"
+    caption="Path grants"
+    captionHidden
+    columns={[
+      { key: "subject_id", label: "Subject", cell: subjectCell },
+      { key: "library_id", label: "Library", cell: libraryCell },
+      { key: "scope", label: "Scope", cell: scopeCell },
+      { key: "action", label: "Action" },
+      { key: "effect", label: "Effect", cell: effectCell },
+      { key: "actions", label: "Actions", align: "right", cell: grantActionsCell },
+    ]}
+    rows={grants}
+    rowKey={(gr) => gr.id}
+    {loading}
+    emptyMessage={loadError
+      ? "Grants could not be loaded — use Retry under Groups above."
+      : "No grants yet. Add one with the form above."}
+  />
+  {@render errorFor("grants")}
 
   <!-- Preview -->
   <h3 class="mt-6 font-medium">Decision preview</h3>
-  <div class="mt-2 flex flex-wrap gap-2">
-    <select class="rounded border px-2 py-1 text-sm" bind:value={pPrincipal}>
-      <option value="">user…</option>
-      {#each users as u (u.id)}<option value={u.id}>{u.username} ({u.global_role})</option>{/each}
-    </select>
-    <select class="rounded border px-2 py-1 text-sm" bind:value={pLibrary}>
-      <option value="">library…</option>
-      {#each libraries as l (l.id)}<option value={l.id}>{l.name}</option>{/each}
-    </select>
-    <input class="rounded border px-2 py-1 text-sm" placeholder="rel path" bind:value={pPath} />
-    <select class="rounded border px-2 py-1 text-sm" bind:value={pAction}>
-      {#each meta.actions as a}<option value={a}>{a}</option>{/each}
-    </select>
-    <button class="rounded border px-3 py-1 text-sm" onclick={runPreview}>Evaluate</button>
+  <div class="mt-2 flex flex-wrap items-end gap-2">
+    <Field label="User">
+      <Select bind:value={pPrincipal}>
+        <option value="">user…</option>
+        {#each users as u (u.id)}<option value={u.id}>{u.username} ({u.global_role})</option>{/each}
+      </Select>
+    </Field>
+    <Field label="Library">
+      <Select bind:value={pLibrary}>
+        <option value="">library…</option>
+        {#each libraries as l (l.id)}<option value={l.id}>{l.name}</option>{/each}
+      </Select>
+    </Field>
+    <Field label="Path"><Input placeholder="rel path" bind:value={pPath} /></Field>
+    <Field label="Action">
+      <Select bind:value={pAction}>
+        {#each meta.actions as a (a)}<option value={a}>{a}</option>{/each}
+      </Select>
+    </Field>
+    <Button onclick={runPreview}>Evaluate</Button>
   </div>
+  {@render errorFor("preview")}
   {#if decision}
-    <div class="mt-2 rounded border p-2 text-sm">
-      <span class={decision.allowed ? "font-semibold text-green-700" : "font-semibold text-red-600"}>
+    <div class="mt-2 rounded-control border border-border p-2 text-sm" role="status">
+      <span class="font-semibold {decision.allowed ? 'text-ok' : 'text-danger'}">
         {decision.allowed ? "ALLOWED" : "DENIED"}
       </span>
-      <span class="ml-2 text-slate-500">reason: {decision.reason} · role: {decision.role}</span>
-      <div class="mt-1 font-mono text-xs text-slate-500">scope: {decision.item_scope}</div>
+      <span class="ml-2 text-muted">reason: {decision.reason} · role: {decision.role}</span>
+      <div class="mt-1 font-mono text-xs text-muted">scope: {decision.item_scope}</div>
       {#if decision.winning_grant}
         <div class="mt-1 text-xs">
           winning grant: {decision.winning_grant.effect} {decision.winning_grant.action}

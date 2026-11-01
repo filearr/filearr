@@ -24,8 +24,8 @@ export function toneClasses(tone: Tone): string {
 const STATUS_TONES = new Map<string, Tone>();
 const groups: [Tone, string[]][] = [
   ["danger", ["critical", "error", "failed", "failure", "fatal", "offline", "revoked", "disabled"]],
-  ["warn", ["warning", "warn", "degraded", "stale", "pending", "queued", "held"]],
-  ["ok", ["ok", "success", "succeeded", "completed", "done", "healthy", "online", "active", "enabled", "verified"]],
+  ["warn", ["warning", "warn", "degraded", "stale", "pending", "queued", "held", "stopped", "stopping", "cancelled", "canceled"]],
+  ["ok", ["ok", "success", "succeeded", "completed", "done", "healthy", "online", "active", "enabled", "verified", "finished"]],
   ["info", ["running", "info", "in_progress", "scanning", "syncing"]],
 ];
 for (const [tone, words] of groups) for (const w of words) STATUS_TONES.set(w, tone);

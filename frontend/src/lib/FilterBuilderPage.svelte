@@ -4,6 +4,7 @@
   import DslHelp from "./DslHelp.svelte";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
+  import { Alert, Button, Checkbox, DataTable, Field, Input, Select, StateBlock, Textarea } from "./ui";
   import { encodeSearchHash } from "./searchparams";
   import { setReportPrefill, takeBuilderPrefill } from "./handoff";
   import {
@@ -336,212 +337,235 @@
   const groupOptions = $derived(keys?.groups ?? []);
   const metaKeyOptions = $derived(keys?.meta_keys.map((k) => k.key) ?? []);
   const cfKeyOptions = $derived(keys?.custom_fields.map((k) => k.name) ?? []);
+
+  // Preview rows carry no stable id (item_id can be absent), so DataTable keys
+  // them by position.
+  type PreviewRow = { i: number; row: Record<string, unknown> };
+  const previewRows = $derived<PreviewRow[]>((preview?.rows ?? []).map((row, i) => ({ i, row })));
 </script>
+
+<!-- Live-result cells (rendered twice by DataTable: table + card list, so no ids). -->
+{#snippet filenameCell(r: PreviewRow)}
+  <span title={String(r.row.rel_path ?? "")}>{cell(r.row, "filename")}</span>
+{/snippet}
+{#snippet openCell(r: PreviewRow)}
+  <Button
+    size="sm"
+    onclick={() => r.row.item_id && (detailId = String(r.row.item_id))}
+    disabled={!r.row.item_id}>Open</Button>
+{/snippet}
 
 <div class="mx-auto max-w-screen-xl">
   <div class="mb-4 flex items-center gap-3">
     <h2 class="text-lg font-semibold">Filter builder</h2>
-    <span class="text-sm text-slate-500">Build a query visually, test it live, then save or search.</span>
+    <span class="text-sm text-muted">Build a query visually, test it live, then save or search.</span>
     <div class="grow"></div>
-    <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={toggleRaw}>
+    <Button size="sm" onclick={toggleRaw}>
       {rawMode ? "Back to rows" : "Edit raw DSL"}
-    </button>
-    <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={reset}>Reset</button>
+    </Button>
+    <Button size="sm" onclick={reset}>Reset</Button>
   </div>
 
   {#if advancedBanner}
-    <p class="mb-3 rounded-lg bg-amber-100 px-3 py-2 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+    <Alert tone="warn" class="mb-3">
       This query contains advanced syntax the visual builder can't represent — editing raw. Your query is preserved.
-    </p>
+    </Alert>
   {/if}
 
   <!-- NL assist: plain English in, DSL out (server-validated) -->
   <form
-    class="mb-4 flex flex-wrap items-center gap-2"
+    class="mb-4"
     onsubmit={(e) => { e.preventDefault(); runAssist(); }}>
-    <input
-      class="min-w-64 grow rounded-lg border border-slate-300 bg-transparent px-3 py-1.5 text-sm dark:border-slate-700"
-      bind:value={nlText}
-      placeholder='Describe it: "videos over 2 GB modified last week, not tagged archived"' />
-    <button
-      type="submit"
-      class="rounded-lg border border-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent)] disabled:opacity-50"
-      disabled={nlBusy || !nlText.trim()}>
-      {nlBusy ? "Translating…" : "Translate"}
-    </button>
-    {#if nlSource}
-      <span class="text-xs text-slate-600 dark:text-slate-400" title="Which engine produced the filters — the deterministic pattern translator, or the configured local model.">
-        via {nlSource === "ollama" ? "local model" : "pattern rules"}
-      </span>
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="min-w-64 grow">
+        <Input
+          aria-label="Describe the filter in plain English"
+          bind:value={nlText}
+          placeholder='Describe it: "videos over 2 GB modified last week, not tagged archived"' />
+      </div>
+      <Button type="submit" disabled={nlBusy || !nlText.trim()}>
+        {nlBusy ? "Translating…" : "Translate"}
+      </Button>
+      {#if nlSource}
+        <span class="text-xs text-muted" title="Which engine produced the filters — the deterministic pattern translator, or the configured local model.">
+          via {nlSource === "ollama" ? "local model" : "pattern rules"}
+        </span>
+      {/if}
+    </div>
+    {#if nlError}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (nlError = "")}>{nlError}</Alert>
     {/if}
   </form>
-  {#if nlError}
-    <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">{nlError}</p>
-  {/if}
   {#each nlNotes as note (note)}
-    <p class="mb-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">{note}</p>
+    <Alert tone="warn" class="mb-3">{note}</Alert>
   {/each}
 
   <div class="grid gap-4 lg:grid-cols-2">
     <!-- LEFT: builder -->
     <div>
       {#if rawMode}
-        <label class="block text-sm">
-          <span class="mb-1 block text-slate-500">Raw filter DSL</span>
-          <textarea
-            class="h-40 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+        <Field label="Raw filter DSL">
+          <Textarea
+            class="font-mono"
+            rows={7}
             bind:value={rawQuery}
-            placeholder={"kind:video meta.height:>=1080 -tag:archived   (meta.*:value matches any metadata key)"}></textarea>
-        </label>
+            placeholder={"kind:video meta.height:>=1080 -tag:archived   (meta.*:value matches any metadata key)"} />
+        </Field>
       {:else}
         <div class="space-y-2">
           {#each conditions as c (c.id)}
             {@const st = validateCondition(c)}
             <div
-              class="flex flex-wrap items-center gap-2 rounded-lg border p-2 {st.state === 'invalid'
-                ? 'border-red-400 dark:border-red-700'
+              class="flex flex-wrap items-center gap-2 rounded-panel border p-2 {st.state === 'invalid'
+                ? 'border-danger'
                 : st.state === 'incomplete'
-                  ? 'border-amber-400 dark:border-amber-600/70'
-                  : 'border-slate-200 dark:border-slate-700'}">
+                  ? 'border-warn'
+                  : 'border-border'}">
               {#if NEGATABLE.has(c.field)}
-                <label class="inline-flex items-center gap-1 text-xs text-slate-500" title="Exclude matches">
-                  <input type="checkbox" checked={isNegated(c)} onchange={(e) => setNegated(c, e.currentTarget.checked)} />
-                  not
-                </label>
+                <span class="text-xs text-muted" title="Exclude matches">
+                  <Checkbox size="sm" label="not" checked={isNegated(c)} onchange={(e) => setNegated(c, e.currentTarget.checked)} />
+                </span>
               {/if}
-              <select
-                class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                bind:value={c.field}
-                onchange={() => onFieldChange(c)}>
-                {#each FIELDS as f (f.value)}
-                  <option value={f.value}>{f.label}</option>
-                {/each}
-              </select>
+              <span class="w-40">
+                <Select size="sm" aria-label="Field" bind:value={c.field} onchange={() => onFieldChange(c)}>
+                  {#each FIELDS as f (f.value)}
+                    <option value={f.value}>{f.label}</option>
+                  {/each}
+                </Select>
+              </span>
 
               {#if (c.field === "meta" || c.field === "cf")}
-                <input
-                  class="w-36 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
-                  list={c.field === "meta" ? "meta-keys" : "cf-keys"}
-                  placeholder={c.field === "meta" ? "key (e.g. height, or * for any)" : "field name"}
-                  title={c.field === "meta"
-                    ? "The extracted-metadata key. Dotted paths reach nested objects (exif.camera). The FINAL segment may be * to match ANY key: meta.*:1080p finds the value wherever it lives; meta.exif.*:canon searches every EXIF field."
-                    : "The registered custom field's name."}
-                  bind:value={c.key} />
+                <span class="w-36">
+                  <Input
+                    size="sm"
+                    class="font-mono"
+                    aria-label={c.field === "meta" ? "Metadata key" : "Custom field name"}
+                    list={c.field === "meta" ? "meta-keys" : "cf-keys"}
+                    placeholder={c.field === "meta" ? "key (e.g. height, or * for any)" : "field name"}
+                    title={c.field === "meta"
+                      ? "The extracted-metadata key. Dotted paths reach nested objects (exif.camera). The FINAL segment may be * to match ANY key: meta.*:1080p finds the value wherever it lives; meta.exif.*:canon searches every EXIF field."
+                      : "The registered custom field's name."}
+                    bind:value={c.key} />
+                </span>
               {/if}
 
               {#if COMPARATOR_FIELDS.has(c.field)}
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.op}>
-                  {#each opsFor(c.field) as op (op)}
-                    <option value={op}>{OP_LABEL[op]}</option>
-                  {/each}
-                </select>
+                <span class="w-28">
+                  <Select size="sm" aria-label="Operator" bind:value={c.op}>
+                    {#each opsFor(c.field) as op (op)}
+                      <option value={op}>{OP_LABEL[op]}</option>
+                    {/each}
+                  </Select>
+                </span>
               {/if}
 
               <!-- value inputs, typed per field -->
               {#if c.field === "kind"}
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.value}>
-                  <option value="">choose…</option>
-                  {#each kindOptions as k (k)}<option value={k}>{k}</option>{/each}
-                </select>
+                <span class="w-40">
+                  <Select size="sm" aria-label="Value" bind:value={c.value}>
+                    <option value="">choose…</option>
+                    {#each kindOptions as k (k)}<option value={k}>{k}</option>{/each}
+                  </Select>
+                </span>
               {:else if c.field === "group"}
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.value}>
-                  <option value="">choose…</option>
-                  {#each groupOptions as g (g)}<option value={g}>{g}</option>{/each}
-                </select>
+                <span class="w-40">
+                  <Select size="sm" aria-label="Value" bind:value={c.value}>
+                    <option value="">choose…</option>
+                    {#each groupOptions as g (g)}<option value={g}>{g}</option>{/each}
+                  </Select>
+                </span>
               {:else if c.field === "ext"}
-                <input
-                  class="w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  list="ext-facet" placeholder="pdf or mp4;mkv" bind:value={c.value} />
+                <span class="w-40">
+                  <Input size="sm" aria-label="Value" list="ext-facet" placeholder="pdf or mp4;mkv" bind:value={c.value} />
+                </span>
               {:else if c.field === "tag"}
-                <input
-                  class="w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  list={`tags-${c.id}`} placeholder="tag" value={c.value}
-                  oninput={(e) => onTagInput(c, e.currentTarget.value)} />
+                <span class="w-40">
+                  <Input
+                    size="sm"
+                    aria-label="Value"
+                    list={`tags-${c.id}`} placeholder="tag" value={c.value}
+                    oninput={(e) => onTagInput(c, e.currentTarget.value)} />
+                </span>
                 <datalist id={`tags-${c.id}`}>
                   {#each (tagSuggest[c.id] ?? []) as t (t)}<option value={t}></option>{/each}
                 </datalist>
               {:else if c.field === "size"}
-                <input type="number" min="0"
-                  class="w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.value} />
+                <span class="w-24">
+                  <Input size="sm" type="number" min="0" aria-label="Value" bind:value={c.value} />
+                </span>
                 {#if c.op === "range"}
-                  <span class="text-xs text-slate-500">to</span>
-                  <input type="number" min="0"
-                    class="w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                    bind:value={c.value2} />
+                  <span class="text-xs text-muted">to</span>
+                  <span class="w-24">
+                    <Input size="sm" type="number" min="0" aria-label="Upper value" bind:value={c.value2} />
+                  </span>
                 {/if}
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-1 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.unit}>
-                  {#each SIZE_UNITS as u (u)}<option value={u}>{u === "" ? "B" : u + "iB"}</option>{/each}
-                </select>
+                <span class="w-20">
+                  <Select size="sm" aria-label="Size unit" bind:value={c.unit}>
+                    {#each SIZE_UNITS as u (u)}<option value={u}>{u === "" ? "B" : u + "iB"}</option>{/each}
+                  </Select>
+                </span>
               {:else if c.field === "modified" || c.field === "created"}
-                <select
-                  class="rounded-lg border border-slate-300 bg-transparent px-1 py-1 text-sm dark:border-slate-700"
-                  bind:value={c.dateMode}>
-                  <option value="relative">relative</option>
-                  <option value="absolute">date</option>
-                </select>
+                <span class="w-28">
+                  <Select size="sm" aria-label="Date mode" bind:value={c.dateMode}>
+                    <option value="relative">relative</option>
+                    <option value="absolute">date</option>
+                  </Select>
+                </span>
                 {#if c.dateMode === "relative"}
-                  <input type="number" min="0"
-                    class="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                    bind:value={c.value} />
+                  <span class="w-20">
+                    <Input size="sm" type="number" min="0" aria-label="Value" bind:value={c.value} />
+                  </span>
                   {#if c.op === "range"}
-                    <span class="text-xs text-slate-500">to</span>
-                    <input type="number" min="0"
-                      class="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                      bind:value={c.value2} />
+                    <span class="text-xs text-muted">to</span>
+                    <span class="w-20">
+                      <Input size="sm" type="number" min="0" aria-label="Upper value" bind:value={c.value2} />
+                    </span>
                   {/if}
-                  <select
-                    class="rounded-lg border border-slate-300 bg-transparent px-1 py-1 text-sm dark:border-slate-700"
-                    bind:value={c.unit}>
-                    {#each DURATION_UNITS as u (u.v)}<option value={u.v}>{u.l} ago</option>{/each}
-                  </select>
+                  <span class="w-36">
+                    <Select size="sm" aria-label="Time unit" bind:value={c.unit}>
+                      {#each DURATION_UNITS as u (u.v)}<option value={u.v}>{u.l} ago</option>{/each}
+                    </Select>
+                  </span>
                 {:else}
-                  <input type="date"
-                    class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                    bind:value={c.value} />
+                  <span class="w-40">
+                    <Input size="sm" type="date" aria-label="Value" bind:value={c.value} />
+                  </span>
                   {#if c.op === "range"}
-                    <span class="text-xs text-slate-500">to</span>
-                    <input type="date"
-                      class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                      bind:value={c.value2} />
+                    <span class="text-xs text-muted">to</span>
+                    <span class="w-40">
+                      <Input size="sm" type="date" aria-label="Upper value" bind:value={c.value2} />
+                    </span>
                   {/if}
                 {/if}
               {:else if c.field === "meta" || c.field === "cf"}
-                <input
-                  class="w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  placeholder="value" bind:value={c.value} />
+                <span class="w-40">
+                  <Input size="sm" aria-label="Value" placeholder="value" bind:value={c.value} />
+                </span>
                 {#if c.op === "range"}
-                  <span class="text-xs text-slate-500">to</span>
-                  <input
-                    class="w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                    placeholder="value" bind:value={c.value2} />
+                  <span class="text-xs text-muted">to</span>
+                  <span class="w-40">
+                    <Input size="sm" aria-label="Upper value" placeholder="value" bind:value={c.value2} />
+                  </span>
                 {/if}
               {:else}
                 <!-- text / path / hash -->
-                <input
-                  class="w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                  placeholder={c.field === "path" ? "*/backups/*" : c.field === "hash" ? "hex digest" : "text"}
-                  bind:value={c.value} />
+                <span class="w-56">
+                  <Input
+                    size="sm"
+                    aria-label="Value"
+                    placeholder={c.field === "path" ? "*/backups/*" : c.field === "hash" ? "hex digest" : "text"}
+                    bind:value={c.value} />
+                </span>
               {/if}
 
               <div class="grow"></div>
-              <button
-                class="rounded border border-slate-300 px-2 py-0.5 text-xs text-red-600 dark:border-slate-700"
+              <Button
+                size="sm"
+                variant="ghost"
                 onclick={() => removeRow(c.id)}
-                aria-label="Remove condition">✕</button>
+                aria-label="Remove condition">✕</Button>
               {#if st.state !== "ok"}
-                <p
-                  class="w-full text-xs {st.state === 'invalid'
-                    ? 'text-red-600 dark:text-red-400'
-                    : 'text-amber-600 dark:text-amber-500'}">
+                <p class="w-full text-xs {st.state === 'invalid' ? 'text-danger' : 'text-warn'}">
                   {st.state === "invalid" ? "⚠ " : ""}{st.hint}{st.state === "invalid"
                     ? " — excluded until fixed"
                     : ""}
@@ -550,42 +574,42 @@
             </div>
           {/each}
           {#if conditions.length === 0}
-            <p class="text-sm text-slate-500">No conditions — matches all items.</p>
+            <StateBlock
+              state="empty"
+              compact
+              message="No conditions — matches all items. Add a condition to narrow it down." />
           {/if}
         </div>
 
-        <button
-          class="mt-3 rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-          onclick={addRow}>+ Add condition</button>
-        <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
+        <Button size="sm" class="mt-3" onclick={addRow}>+ Add condition</Button>
+        <p class="mt-1 text-xs text-muted">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
         <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="search" />
       {/if}
 
       <!-- compiled DSL preview -->
       <div class="mt-4">
         <div class="mb-1 flex items-center gap-2">
-          <span class="text-xs text-slate-500">Compiled filter DSL</span>
+          <span class="text-xs text-muted">Compiled filter DSL</span>
           <div class="grow"></div>
-          <button class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700" onclick={copyDsl}>
+          <Button size="sm" onclick={copyDsl}>
             {copied ? "Copied" : "Copy"}
-          </button>
+          </Button>
         </div>
-        <pre class="overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs dark:border-slate-800 dark:bg-slate-900">{dsl || (hasRows ? "(no complete conditions yet)" : "(all items)")}</pre>
+        <pre class="overflow-x-auto rounded-control border border-border bg-surface-2 px-3 py-2 font-mono text-xs">{dsl || (hasRows ? "(no complete conditions yet)" : "(all items)")}</pre>
       </div>
 
       <div class="mt-3 flex flex-wrap gap-2">
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={saveAsReport}>Save as custom report</button>
-        <button
-          class="rounded-lg border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-700"
-          onclick={openInSearch} disabled={rawMode} title={rawMode ? "Switch back to rows to map into search" : ""}>Open in search</button>
+        <Button variant="primary" onclick={saveAsReport}>Save as custom report</Button>
+        <Button
+          onclick={openInSearch} disabled={rawMode} title={rawMode ? "Switch back to rows to map into search" : ""}>Open in search</Button>
       </div>
       {#if unmappedWarn.length}
-        <div class="mt-2 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+        <Alert tone="warn" class="mt-2">
           Some conditions have no equivalent search filter and were dropped when opening search:
-          <ul class="mt-1 list-disc pl-5 font-mono">
+          <ul class="mt-1 list-disc pl-5 font-mono text-xs">
             {#each unmappedWarn as w (w)}<li>{w}</li>{/each}
           </ul>
-        </div>
+        </Alert>
       {/if}
     </div>
 
@@ -594,59 +618,44 @@
       <div class="mb-2 flex items-center gap-2">
         <span class="text-sm font-medium">Live results</span>
         {#if preview}
-          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          <span class="rounded-full bg-surface-3 px-2 py-0.5 text-xs text-muted">
             {preview.total}{preview.total_capped ? "+" : ""} match{preview.total === 1 && !preview.total_capped ? "" : "es"}
           </span>
         {/if}
-        {#if loading}<span class="text-xs text-slate-600 dark:text-slate-400">testing…</span>{/if}
+        {#if loading}<span class="text-xs text-muted">testing…</span>{/if}
       </div>
 
       {#if vErrors.length}
-        <ul class="space-y-1">
-          {#each vErrors as e, i (i)}
-            <li class="rounded bg-amber-100 px-2 py-1 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">{errText(e)}</li>
-          {/each}
-        </ul>
-      {:else if previewError}
-        <p class="rounded bg-red-100 px-2 py-1 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">{previewError}</p>
-      {:else if preview}
-        <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-          <table class="w-full text-sm">
-            <thead class="bg-slate-50 text-left dark:bg-slate-900">
-              <tr>
-                <th class="px-2 py-1.5 font-medium">filename</th>
-                <th class="px-2 py-1.5 font-medium">library</th>
-                <th class="px-2 py-1.5 font-medium">type</th>
-                <th class="px-2 py-1.5 font-medium">size</th>
-                <th class="px-2 py-1.5 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each preview.rows as row, i (i)}
-                <tr class="border-t border-slate-100 dark:border-slate-800">
-                  <td class="px-2 py-1 align-top" title={String(row.rel_path ?? "")}>{cell(row, "filename")}</td>
-                  <td class="px-2 py-1 align-top">{cell(row, "library")}</td>
-                  <td class="px-2 py-1 align-top">{cell(row, "file_category")}</td>
-                  <td class="px-2 py-1 align-top tabular-nums">{cell(row, "size")}</td>
-                  <td class="px-2 py-1 align-top text-right">
-                    <button
-                      class="rounded border border-slate-300 px-2 py-0.5 text-xs text-[var(--accent)] disabled:opacity-40 dark:border-slate-700"
-                      onclick={() => row.item_id && (detailId = String(row.item_id))}
-                      disabled={!row.item_id}>Open</button>
-                  </td>
-                </tr>
-              {/each}
-              {#if preview.rows.length === 0}
-                <tr><td class="px-2 py-3 text-slate-500" colspan="5">No matches.</td></tr>
-              {/if}
-            </tbody>
-          </table>
-        </div>
-        {#if preview.has_more}
-          <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">Showing the first {preview.count}. Save as a custom report to export the full result.</p>
+        <Alert tone="warn">
+          <ul class="space-y-1 text-xs">
+            {#each vErrors as e, i (i)}
+              <li>{errText(e)}</li>
+            {/each}
+          </ul>
+        </Alert>
+      {:else if previewError || preview}
+        <DataTable
+          caption="Live results"
+          captionHidden
+          columns={[
+            { key: "filename", label: "filename", cell: filenameCell },
+            { key: "library", label: "library" },
+            { key: "file_category", label: "type" },
+            { key: "size", label: "size" },
+            { key: "open", label: "Open", align: "right", cell: openCell },
+          ]}
+          rows={previewRows}
+          rowKey={(r) => r.i}
+          accessor={(r, k) => cell(r.row, k)}
+          {loading}
+          error={previewError || null}
+          onRetry={() => runPreview(dsl)}
+          emptyMessage="No matches. Loosen or remove a condition to widen the result." />
+        {#if preview?.has_more}
+          <p class="mt-2 text-xs text-muted">Showing the first {preview.count}. Save as a custom report to export the full result.</p>
         {/if}
       {:else}
-        <p class="text-sm text-slate-500">Add a condition to see matching items.</p>
+        <p class="text-sm text-muted">Add a condition to see matching items.</p>
       {/if}
     </div>
   </div>

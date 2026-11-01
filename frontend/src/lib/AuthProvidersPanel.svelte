@@ -6,6 +6,7 @@
     type FetchCertResult,
   } from "./api";
   import { numOrNull } from "./numInput";
+  import { Alert, Badge, Button, Checkbox, Field, Input, StateBlock, Textarea } from "./ui";
 
   // Admin > Authentication (2026-08-20): GUI configuration of AD/LDAP login, the
   // AD directory sync, and OIDC SSO — previously env-only (FILEARR_LDAP_* /
@@ -14,14 +15,14 @@
   // the server returns has_* flags, and an untouched password field sends the
   // SECRET_UNCHANGED sentinel so the stored value is kept.
 
-  type Field = {
+  type FieldDef = {
     key: string;
     label: string;
     type: "text" | "password" | "bool" | "number" | "longtext" | "json" | "pem";
     help?: string;
     secret?: boolean; // paired with a has_<key> flag from the server
   };
-  type Provider = { id: string; title: string; blurb: string; test?: string; fields: Field[] };
+  type Provider = { id: string; title: string; blurb: string; test?: string; fields: FieldDef[] };
 
   const PROVIDERS: Provider[] = [
     {
@@ -113,14 +114,18 @@
   let testResult = $state<Record<string, AuthTestResult | null>>({});
   let fetched = $state<FetchCertResult | null>(null);
   let fetchBusy = $state(false);
-  let error = $state("");
+  // Per-origin errors: a provider's config load (in place of its fields), its
+  // Save/Test (under those buttons), and the CA fetch (under its button).
+  let loadError = $state<Record<string, string>>({});
+  let actionError = $state<Record<string, string>>({});
+  let fetchError = $state("");
 
   async function fetchCert(p: Provider) {
-    error = ""; fetched = null; fetchBusy = true;
+    fetchError = ""; fetched = null; fetchBusy = true;
     try {
       fetched = await fetchLdapCert(buildBody(p));
     } catch (e) {
-      error = friendlyError(e);
+      fetchError = friendlyError(e);
     } finally {
       fetchBusy = false;
     }
@@ -134,6 +139,7 @@
   }
 
   async function load(p: Provider) {
+    loadError[p.id] = "";
     try {
       const data = await getAuthConfig(p.id);
       cfg[p.id] = data;
@@ -145,7 +151,7 @@
       }
       form[p.id] = f;
     } catch (e) {
-      error = friendlyError(e);
+      loadError[p.id] = friendlyError(e);
     }
   }
 
@@ -188,7 +194,7 @@
   }
 
   async function save(p: Provider) {
-    error = ""; msg[p.id] = ""; busy[p.id] = true;
+    actionError[p.id] = ""; msg[p.id] = ""; busy[p.id] = true;
     try {
       const body = buildBody(p);
       cfg[p.id] = await saveAuthConfig(p.id, body);
@@ -196,18 +202,18 @@
       await load(p);
       msg[p.id] = "Saved.";
     } catch (e) {
-      error = friendlyError(e);
+      actionError[p.id] = friendlyError(e);
     } finally {
       busy[p.id] = false;
     }
   }
 
   async function runTest(p: Provider) {
-    error = ""; msg[p.id] = ""; testResult[p.id] = null; busy[p.id] = true;
+    actionError[p.id] = ""; msg[p.id] = ""; testResult[p.id] = null; busy[p.id] = true;
     try {
       testResult[p.id] = await testAuthProvider(p.id, buildBody(p));
     } catch (e) {
-      error = friendlyError(e);
+      actionError[p.id] = friendlyError(e);
     } finally {
       busy[p.id] = false;
     }
@@ -216,130 +222,132 @@
   onMount(() => { /* lazy — panels load on expand */ });
 </script>
 
-<section class="mt-6 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+{#snippet sourceBadge(p: Provider, key: string)}
+  <Badge tone={source(p, key) === "gui" ? "accent" : "neutral"}>{source(p, key)}</Badge>
+{/snippet}
+
+<section class="mt-6 rounded-panel border border-border bg-surface-2 p-4">
   <h3 class="text-base font-semibold">Authentication</h3>
   <p class="mt-1 text-sm text-slate-500">
     Configure directory login and single sign-on from the console. A value set here
     overrides the matching <code>FILEARR_*</code> environment variable per field
     (the source is shown next to each). Secrets are stored encrypted and never shown.
   </p>
-  {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
 
   {#each PROVIDERS as p (p.id)}
-    <div class="mt-3 rounded-xl border border-slate-200 dark:border-slate-800">
+    <div class="mt-3 rounded-control border border-border">
+      <!-- A disclosure, not an action: stays a raw button with token classes. -->
       <button
+        type="button"
         class="flex w-full items-center justify-between px-4 py-3 text-left"
+        aria-expanded={!!open[p.id]}
         onclick={() => toggle(p)}>
         <span>
           <span class="font-medium">{p.title}</span>
-          <span class="ml-2 block text-xs text-slate-500 sm:inline">{p.blurb}</span>
+          <span class="ml-2 block text-xs text-muted sm:inline">{p.blurb}</span>
         </span>
-        <span class="text-slate-600 dark:text-slate-400">{open[p.id] ? "▲" : "▼"}</span>
+        <span class="text-muted" aria-hidden="true">{open[p.id] ? "▲" : "▼"}</span>
       </button>
 
-      {#if open[p.id] && form[p.id]}
-        <div class="border-t border-slate-200 px-4 py-3 dark:border-slate-800">
-          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {#each p.fields as fld (fld.key)}
-              <label class="block text-sm {fld.type === 'longtext' || fld.type === 'json' || fld.type === 'pem' ? 'md:col-span-2' : ''}">
-                <span class="flex items-center gap-2 text-slate-600 dark:text-slate-300">
-                  {fld.label}
-                  <span class="rounded px-1 text-[10px] {source(p, fld.key) === 'gui' ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'bg-slate-100 text-slate-500 dark:bg-slate-800'}">
-                    {source(p, fld.key)}
-                  </span>
-                </span>
-                {#if fld.type === "bool"}
-                  <input type="checkbox" class="mt-1 h-4 w-4"
-                    bind:checked={form[p.id][fld.key] as boolean} />
-                {:else if fld.type === "number"}
-                  <input type="number" class="mt-1 w-full rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800"
-                    bind:value={form[p.id][fld.key]} />
-                {:else if fld.type === "password"}
-                  <input type="password" autocomplete="new-password"
-                    class="mt-1 w-full rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800"
-                    placeholder={hasSecret(p, fld.key) ? "•••••• (stored — leave blank to keep)" : "not set"}
-                    bind:value={form[p.id][fld.key]} />
-                {:else if fld.type === "pem"}
-                  <textarea rows="4" placeholder="-----BEGIN CERTIFICATE-----"
-                    class="mt-1 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-800"
-                    bind:value={form[p.id][fld.key]}></textarea>
-                  <button type="button"
-                    class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-50 dark:border-slate-700"
-                    disabled={fetchBusy} onclick={() => fetchCert(p)}>
-                    {fetchBusy ? "fetching…" : "Fetch from server"}
-                  </button>
-                  {#if fetched}
-                    <div class="mt-2 rounded-lg border px-3 py-2 text-xs {fetched.ok ? 'border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40' : 'border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/40'}">
-                      {#if fetched.ok}
-                        <div class="font-medium text-amber-800 dark:text-amber-200">
-                          Verify this fingerprint out-of-band before trusting ({fetched.host}:{fetched.port})
-                        </div>
-                        {#each fetched.chain ?? [] as c, i}
-                          <div class="mt-1 border-t border-amber-200/50 pt-1">
-                            <div><span class="text-slate-500">{i === 0 ? "leaf" : c.is_self_signed ? "root CA" : "CA"}:</span> {c.subject}
-                              {#if c.via_aia}<span class="ml-1 rounded bg-amber-200/70 px-1 text-[10px] text-amber-900 dark:bg-amber-900/60 dark:text-amber-100" title="Not presented by the server — retrieved by following the certificate's Authority Information Access pointer">via AIA</span>{/if}</div>
-                            <div class="text-slate-500">issuer: {c.issuer}</div>
-                            <div class="font-mono break-all">SHA-256: {c.sha256}</div>
-                            <div class="text-slate-500">expires {new Date(c.not_after).toLocaleDateString()}</div>
-                          </div>
-                        {/each}
-                        <div class="mt-1 text-slate-600 dark:text-slate-300">{fetched.note}</div>
-                        <button type="button"
-                          class="mt-1 rounded bg-[var(--accent)] px-2 py-0.5 text-xs font-medium text-[var(--accent-fg)]"
-                          onclick={() => useFetchedCert(p)}>
-                          Use this CA (fills the box — review, then Save)
-                        </button>
+      {#if open[p.id]}
+        <div class="border-t border-border px-4 py-3">
+          {#if loadError[p.id]}
+            <StateBlock state="error" compact message={loadError[p.id]} onRetry={() => load(p)} />
+          {:else if !form[p.id]}
+            <StateBlock state="loading" compact />
+          {:else}
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {#each p.fields as fld (fld.key)}
+                <div class="flex items-start gap-2 {fld.type === 'longtext' || fld.type === 'json' || fld.type === 'pem' ? 'md:col-span-2' : ''}">
+                  {#if fld.type === "bool"}
+                    <Checkbox class="flex-1" label={fld.label} description={fld.help}
+                      bind:checked={form[p.id][fld.key] as boolean} />
+                  {:else}
+                    <Field class="min-w-0 flex-1" label={fld.label} hint={fld.help}>
+                      {#if fld.type === "number"}
+                        <Input type="number" bind:value={form[p.id][fld.key] as number | null} />
+                      {:else if fld.type === "password"}
+                        <Input type="password" autocomplete="new-password"
+                          placeholder={hasSecret(p, fld.key) ? "•••••• (stored — leave blank to keep)" : "not set"}
+                          bind:value={form[p.id][fld.key] as string} />
+                      {:else if fld.type === "pem"}
+                        <Textarea rows={4} placeholder="-----BEGIN CERTIFICATE-----" class="font-mono text-xs"
+                          bind:value={form[p.id][fld.key] as string} />
+                      {:else if fld.type === "longtext" || fld.type === "json"}
+                        <Textarea rows={fld.type === "json" ? 5 : 2} class="font-mono text-xs"
+                          bind:value={form[p.id][fld.key] as string} />
                       {:else}
-                        <span class="text-red-700 dark:text-red-300">✗ {fetched.error}</span>
+                        <Input type="text" bind:value={form[p.id][fld.key] as string} />
                       {/if}
-                    </div>
+                    </Field>
                   {/if}
-                {:else if fld.type === "longtext" || fld.type === "json"}
-                  <textarea rows={fld.type === "json" ? 5 : 2}
-                    class="mt-1 w-full rounded border border-slate-300 px-2 py-1 font-mono text-xs dark:border-slate-700 dark:bg-slate-800"
-                    bind:value={form[p.id][fld.key]}></textarea>
-                {:else}
-                  <input type="text"
-                    class="mt-1 w-full rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-800"
-                    bind:value={form[p.id][fld.key]} />
+                  {@render sourceBadge(p, fld.key)}
+                </div>
+                {#if fld.type === "pem"}
+                  <div class="md:col-span-2">
+                    <Button size="sm" disabled={fetchBusy} onclick={() => fetchCert(p)}>
+                      {fetchBusy ? "fetching…" : "Fetch from server"}
+                    </Button>
+                    {#if fetchError}
+                      <Alert tone="danger" class="mt-2" onDismiss={() => (fetchError = "")}>{fetchError}</Alert>
+                    {/if}
+                    {#if fetched}
+                      {#if fetched.ok}
+                        <Alert tone="warn" class="mt-2 text-xs"
+                          title={`Verify this fingerprint out-of-band before trusting (${fetched.host}:${fetched.port})`}>
+                          {#each fetched.chain ?? [] as c, i}
+                            <div class="mt-1 border-t border-border pt-1">
+                              <div><span class="text-muted">{i === 0 ? "leaf" : c.is_self_signed ? "root CA" : "CA"}:</span> {c.subject}
+                                {#if c.via_aia}<span title="Not presented by the server — retrieved by following the certificate's Authority Information Access pointer"><Badge tone="warn" class="ml-1">via AIA</Badge></span>{/if}</div>
+                              <div class="text-muted">issuer: {c.issuer}</div>
+                              <div class="font-mono break-all">SHA-256: {c.sha256}</div>
+                              <div class="text-muted">expires {new Date(c.not_after).toLocaleDateString()}</div>
+                            </div>
+                          {/each}
+                          <div class="mt-1 text-fg">{fetched.note}</div>
+                          <Button size="sm" variant="primary" class="mt-1" onclick={() => useFetchedCert(p)}>
+                            Use this CA (fills the box — review, then Save)
+                          </Button>
+                        </Alert>
+                      {:else}
+                        <Alert tone="danger" class="mt-2 text-xs" onDismiss={() => (fetched = null)}>✗ {fetched.error}</Alert>
+                      {/if}
+                    {/if}
+                  </div>
                 {/if}
-                {#if fld.help}<span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400">{fld.help}</span>{/if}
-              </label>
-            {/each}
-          </div>
-
-          <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
-              disabled={busy[p.id]} onclick={() => save(p)}>
-              {busy[p.id] ? "…" : "Save"}
-            </button>
-            {#if p.test}
-              <button
-                class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-50 dark:border-slate-700"
-                disabled={busy[p.id]} onclick={() => runTest(p)}>
-                {p.test}
-              </button>
-            {/if}
-            {#if msg[p.id]}<span class="text-sm text-green-600">{msg[p.id]}</span>{/if}
-          </div>
-
-          {#if testResult[p.id]}
-            {@const t = testResult[p.id]!}
-            <div class="mt-2 rounded-lg border px-3 py-2 text-sm {t.ok ? 'border-green-300 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-200' : 'border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200'}">
-              {#if t.ok}
-                {#if t.detail}<div>✓ {t.detail}</div>{/if}
-                {#if t.users != null}<div>Users: {t.users} · Groups: {t.groups}</div>{/if}
-                {#if t.issuer}<div>✓ Issuer: {t.issuer}</div><div class="text-xs opacity-80">token: {t.token_endpoint} · jwks: {t.jwks_uri}</div>{/if}
-                {#if t.endpoints}
-                  {#each t.endpoints as ep}
-                    <div>{ep.ok ? "✓" : "✗"} {ep.label}: {ep.ok ? `${ep.users} users, ${ep.groups} groups` : ep.error}</div>
-                  {/each}
-                {/if}
-              {:else}
-                ✗ {t.error}
-              {/if}
+              {/each}
             </div>
+
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <Button variant="primary" disabled={busy[p.id]} onclick={() => save(p)}>
+                {busy[p.id] ? "…" : "Save"}
+              </Button>
+              {#if p.test}
+                <Button disabled={busy[p.id]} onclick={() => runTest(p)}>{p.test}</Button>
+              {/if}
+              {#if msg[p.id]}<span class="text-sm text-ok" role="status">{msg[p.id]}</span>{/if}
+            </div>
+            {#if actionError[p.id]}
+              <Alert tone="danger" class="mt-2" onDismiss={() => (actionError[p.id] = "")}>{actionError[p.id]}</Alert>
+            {/if}
+
+            {#if testResult[p.id]}
+              {@const t = testResult[p.id]!}
+              <Alert tone={t.ok ? "ok" : "danger"} class="mt-2" onDismiss={() => (testResult[p.id] = null)}>
+                {#if t.ok}
+                  {#if t.detail}<div>✓ {t.detail}</div>{/if}
+                  {#if t.users != null}<div>Users: {t.users} · Groups: {t.groups}</div>{/if}
+                  {#if t.issuer}<div>✓ Issuer: {t.issuer}</div><div class="text-xs opacity-80">token: {t.token_endpoint} · jwks: {t.jwks_uri}</div>{/if}
+                  {#if t.endpoints}
+                    {#each t.endpoints as ep}
+                      <div>{ep.ok ? "✓" : "✗"} {ep.label}: {ep.ok ? `${ep.users} users, ${ep.groups} groups` : ep.error}</div>
+                    {/each}
+                  {/if}
+                {:else}
+                  ✗ {t.error}
+                {/if}
+              </Alert>
+            {/if}
           {/if}
         </div>
       {/if}

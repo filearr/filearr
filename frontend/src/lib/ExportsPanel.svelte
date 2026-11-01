@@ -7,13 +7,18 @@
     type ReportExport,
     errorMessage,
   } from "./api";
+  import { Alert, Badge, Button, DataTable, toneForStatus, type Tone } from "./ui";
 
   // P11-T5/T11 — background export jobs: a status list + download. Populated by
   // scheduled deliveries and by "Queue background export" from a report. Polls
   // while any export is still queued/running so a finished job flips to
   // downloadable without a manual refresh.
   let exports = $state<ReportExport[]>([]);
+  // Errors by origin: the list load (DataTable error on first load, an Alert
+  // above the kept rows on a later refresh) and a row's download.
   let error = $state("");
+  let loaded = $state(false);
+  let downloadError = $state<{ label: string; message: string } | null>(null);
   let loading = $state(false);
   let poller: Poller | undefined;
 
@@ -33,6 +38,7 @@
     try {
       exports = await listExports();
       error = "";
+      loaded = true;
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -41,11 +47,27 @@
   }
 
   async function download(ex: ReportExport) {
+    downloadError = null;
     try {
       await downloadExport(ex);
     } catch (e) {
-      error = errorMessage(e, { verb: "download this export" });
+      downloadError = {
+        label: reportLabel(ex),
+        message: errorMessage(e, { verb: "download this export" }),
+      };
     }
+  }
+
+  function reportLabel(ex: ReportExport): string {
+    return ex.canned_report_key ?? "custom report";
+  }
+
+  // "complete" is this endpoint's success word (the kit vocabulary has
+  // "completed"); everything else goes through the shared status map.
+  function statusTone(status: string): Tone {
+    // A queued export is waiting its turn, not a problem: neutral, not warn.
+    if (status === "queued") return "neutral";
+    return status === "complete" ? "ok" : toneForStatus(status);
   }
 
   onMount(() => {
@@ -59,83 +81,68 @@
   onDestroy(() => poller?.stop());
 </script>
 
+{#snippet reportCell(ex: ReportExport)}
+  {reportLabel(ex)}
+  {#if ex.triggered_by === "schedule"}
+    <span class="ml-1 text-xs text-muted">(scheduled)</span>
+  {/if}
+{/snippet}
+{#snippet formatCell(ex: ReportExport)}<span class="uppercase">{ex.format}</span>{/snippet}
+{#snippet statusCell(ex: ReportExport)}
+  <Badge tone={statusTone(ex.status)}>{ex.status}</Badge>
+  {#if ex.delivery_status}
+    <span class="ml-1 text-xs text-muted">· {ex.delivery_status}</span>
+  {/if}
+  {#if ex.status === "failed" && ex.error}
+    <!-- Was a hover-only ⓘ; the message is shown so touch and keyboard users get it too. -->
+    <span class="mt-0.5 block max-w-[24rem] break-words text-xs text-danger">{ex.error}</span>
+  {/if}
+{/snippet}
+{#snippet rowsCell(ex: ReportExport)}<span class="tabular-nums">{ex.row_count ?? "—"}</span>{/snippet}
+{#snippet sizeCell(ex: ReportExport)}<span class="tabular-nums">{fmtBytes(ex.file_size_bytes)}</span>{/snippet}
+{#snippet createdCell(ex: ReportExport)}
+  <span class="text-xs text-muted">{ex.created_at ? new Date(ex.created_at).toLocaleString() : ""}</span>
+{/snippet}
+{#snippet actionsCell(ex: ReportExport)}
+  <Button size="sm" onclick={() => download(ex)} disabled={!ex.downloadable}>
+    {ex.purged_at ? "Expired" : "Download"}
+  </Button>
+{/snippet}
+
 <section class="mt-8">
   <div class="mb-3 flex items-center gap-3">
     <h2 class="text-lg font-semibold">Exports</h2>
-    <button
-      class="rounded-lg border border-slate-300 px-2.5 py-1 text-xs disabled:opacity-50 dark:border-slate-700"
-      onclick={refresh}
-      disabled={loading}>Refresh</button>
+    <Button size="sm" onclick={refresh} disabled={loading}>Refresh</Button>
   </div>
 
-  {#if error}
-    <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-      {error}
-    </p>
+  {#if loaded && error}
+    <!-- A failed refresh keeps the rows already shown; the first load's
+         failure replaces the table instead (DataTable error + Retry). -->
+    <Alert tone="danger" class="mb-3" onDismiss={() => (error = "")}>{error}</Alert>
   {/if}
 
-  {#if exports.length === 0}
-    <p class="text-sm text-slate-500">
-      No background exports yet. Queue one from a report, or set up a schedule.
-    </p>
-  {:else}
-    <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-50 text-left dark:bg-slate-900">
-          <tr>
-            <th class="px-3 py-2 font-medium">Report</th>
-            <th class="px-3 py-2 font-medium">Format</th>
-            <th class="px-3 py-2 font-medium">Status</th>
-            <th class="px-3 py-2 font-medium">Rows</th>
-            <th class="px-3 py-2 font-medium">Size</th>
-            <th class="px-3 py-2 font-medium">Created</th>
-            <th class="px-3 py-2 font-medium"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each exports as ex (ex.id)}
-            <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="px-3 py-1.5">
-                {ex.canned_report_key ?? "custom report"}
-                {#if ex.triggered_by === "schedule"}
-                  <span class="ml-1 text-xs text-slate-500">(scheduled)</span>
-                {/if}
-              </td>
-              <td class="px-3 py-1.5 uppercase">{ex.format}</td>
-              <td class="px-3 py-1.5">
-                <span
-                  class="rounded px-1.5 py-0.5 text-xs
-                    {ex.status === 'complete'
-                    ? 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200'
-                    : ex.status === 'failed'
-                      ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200'
-                      : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'}">
-                  {ex.status}
-                </span>
-                {#if ex.status === "failed" && ex.error}
-                  <span class="ml-1 text-xs text-red-600" title={ex.error}>ⓘ</span>
-                {/if}
-                {#if ex.delivery_status}
-                  <span class="ml-1 text-xs text-slate-500">· {ex.delivery_status}</span>
-                {/if}
-              </td>
-              <td class="px-3 py-1.5 tabular-nums">{ex.row_count ?? "—"}</td>
-              <td class="px-3 py-1.5 tabular-nums">{fmtBytes(ex.file_size_bytes)}</td>
-              <td class="px-3 py-1.5 text-xs text-slate-500">
-                {ex.created_at ? new Date(ex.created_at).toLocaleString() : ""}
-              </td>
-              <td class="px-3 py-1 text-right">
-                <button
-                  class="rounded border border-slate-300 px-2 py-0.5 text-xs text-[var(--accent)] disabled:opacity-40 dark:border-slate-700"
-                  onclick={() => download(ex)}
-                  disabled={!ex.downloadable}>
-                  {ex.purged_at ? "Expired" : "Download"}
-                </button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
+  <DataTable
+    caption="Background exports"
+    captionHidden
+    columns={[
+      { key: "report", label: "Report", cell: reportCell },
+      { key: "format", label: "Format", cell: formatCell },
+      { key: "status", label: "Status", cell: statusCell },
+      { key: "row_count", label: "Rows", align: "right", cell: rowsCell },
+      { key: "file_size_bytes", label: "Size", align: "right", cell: sizeCell },
+      { key: "created_at", label: "Created", cell: createdCell },
+      { key: "actions", label: "Actions", align: "right", cell: actionsCell },
+    ]}
+    rows={exports}
+    rowKey={(ex) => ex.id}
+    loading={!loaded}
+    error={loaded ? null : error || null}
+    onRetry={refresh}
+    emptyMessage="No background exports yet. Queue one from a report, or set up a schedule."
+  />
+  {#if downloadError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (downloadError = null)}>
+      {downloadError.label}: {downloadError.message}
+    </Alert>
   {/if}
 </section>

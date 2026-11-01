@@ -17,6 +17,7 @@
   import { onMount } from "svelte";
   import { loadBasemap, type Basemap, type Shape } from "./basemap";
   import { numOrNull } from "../numInput";
+  import { Alert, Button, Checkbox, Field, Input } from "../ui";
   import {
     mapSettings,
     saveMapSettings,
@@ -500,68 +501,58 @@
   ];
 </script>
 
-<div class="mt-2 rounded-lg border border-slate-200 dark:border-slate-800">
+<div class="mt-2 rounded-panel border border-border">
   <!-- Toolbar. Wraps on narrow viewports; every control has a keyboard path. -->
-  <div class="flex flex-wrap items-center gap-2 border-b border-slate-200 p-2 text-xs dark:border-slate-800">
-    <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Drag behaviour">
+  <div class="flex flex-wrap items-center gap-2 border-b border-border p-2 text-xs">
+    <div class="flex items-center overflow-hidden rounded-full border border-border-strong" role="group" aria-label="Drag behaviour">
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'select' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+        class="px-3 py-1 {dragMode === 'select' ? 'bg-accent text-accent-fg' : ''}"
         aria-pressed={dragMode === "select"}
         title="Drag on the map to select an area (filters the search)"
         onclick={() => (dragMode = "select")}>Select area</button>
       <button
         type="button"
-        class="px-3 py-1 {dragMode === 'pan' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+        class="px-3 py-1 {dragMode === 'pan' ? 'bg-accent text-accent-fg' : ''}"
         aria-pressed={dragMode === "pan"}
         title="Drag on the map to pan (Shift+drag always pans)"
         onclick={() => (dragMode = "pan")}>Pan</button>
     </div>
-    <button
-      type="button"
-      class="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-700"
-      title="Zoom out (−)"
-      onclick={() => setZoom(zoom - 1)}>−</button>
-    <span class="tabular-nums text-slate-500">z{zoom}</span>
-    <button
-      type="button"
-      class="rounded-full border border-slate-300 px-2 py-1 dark:border-slate-700"
-      title="Zoom in (+)"
-      onclick={() => setZoom(zoom + 1)}>+</button>
-    <button
-      type="button"
-      class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
+    <Button size="sm" aria-label="Zoom out" title="Zoom out (−)" onclick={() => setZoom(zoom - 1)}>−</Button>
+    <span class="tabular-nums text-muted">z{zoom}</span>
+    <Button size="sm" aria-label="Zoom in" title="Zoom in (+)" onclick={() => setZoom(zoom + 1)}>+</Button>
+    <Button
+      size="sm"
       title="Frame every point in this result set"
-      onclick={() => { userMoved = false; fitTo(boundsOf(points)); }}>Fit results</button>
+      onclick={() => { userMoved = false; fitTo(boundsOf(points)); }}>Fit results</Button>
     {#if box}
-      <button
-        type="button"
-        class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
+      <Button
+        size="sm"
         title="Remove the area filter from this search"
-        onclick={() => onBoxChange(null)}>Clear area</button>
+        onclick={() => onBoxChange(null)}>Clear area</Button>
     {/if}
     <span class="grow"></span>
     <!-- The tile state is spelled out, never a bare unchecked box: "off" here is
          a privacy property, so it gets words. -->
-    <label class="flex items-center gap-1" title="Optional background tiles from a third-party server">
-      <input type="checkbox" checked={mapSettings.tiles} onchange={toggleTiles} />
-      Background tiles
-      <span class={mapSettings.tiles ? "text-amber-600 dark:text-amber-400" : "text-slate-500"}>
+    <span class="flex items-center gap-1" title="Optional background tiles from a third-party server">
+      <Checkbox size="sm" label="Background tiles" checked={mapSettings.tiles} onchange={toggleTiles} />
+      <span class={mapSettings.tiles ? "text-warn" : "text-muted"}>
         {mapSettings.tiles ? `on — requests ${host}` : "off — bundled outline only"}
       </span>
-    </label>
+    </span>
     {#if mapSettings.tiles}
       <!-- Only shown once tiles are on: an operator running their own tile
            server should not have to leave the page, and seeing the template
            makes it obvious where the requests go. -->
-      <input
-        class="w-72 rounded border border-slate-300 bg-transparent px-2 py-1 focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-               focus:border-[var(--accent)] dark:border-slate-700"
-        aria-label="Tile URL template"
-        title="XYZ tile URL template, with the z / x / y placeholders in braces"
-        bind:value={mapSettings.tileUrl}
-        onchange={saveMapSettings}
-      />
+      <span class="w-72">
+        <Input
+          size="sm"
+          aria-label="Tile URL template"
+          title="XYZ tile URL template, with the z / x / y placeholders in braces"
+          bind:value={mapSettings.tileUrl}
+          onchange={saveMapSettings}
+        />
+      </span>
     {/if}
   </div>
 
@@ -636,14 +627,13 @@
           y={boxRect.y}
           width={Math.max(0, boxRect.w)}
           height={Math.max(0, boxRect.h)}
-          class="fill-[var(--accent)]/10 stroke-[var(--accent)]"
+          class="fill-accent/10 stroke-accent"
           stroke-width="1.5"
           stroke-dasharray="4 3"
         />
       {/if}
 
       {#each clusters as c (c.key)}
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
         <g
           role="button"
           tabindex="0"
@@ -658,7 +648,7 @@
             cx={c.x}
             cy={c.y}
             r={radiusOf(c.count)}
-            class="fill-[var(--accent)]/70 stroke-white dark:stroke-slate-900"
+            class="fill-accent/70 stroke-surface"
             stroke-width="1.5"
           />
           {#if c.count > 1}
@@ -679,7 +669,7 @@
           y={dragRect.y}
           width={dragRect.w}
           height={dragRect.h}
-          class="fill-[var(--accent)]/15 stroke-[var(--accent)]"
+          class="fill-accent/15 stroke-accent"
           stroke-width="1"
         />
       {/if}
@@ -689,15 +679,15 @@
          page's existing ItemDetail, the same as clicking a result row. -->
     {#if openCluster}
       <div
-        class="absolute max-h-64 w-64 overflow-auto rounded-lg border border-slate-300 bg-white p-2 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900"
+        class="absolute max-h-64 w-64 overflow-auto rounded-panel border border-border-strong bg-surface-2 p-2 text-xs shadow-lg"
         style={`left: ${Math.min(Math.max(8, openCluster.x + 12), Math.max(8, width - 272))}px; top: ${Math.min(Math.max(8, openCluster.y + 12), Math.max(8, height - 200))}px;`}
       >
         <div class="mb-1 flex items-center gap-2">
           <span class="font-medium">{openCluster.count} items here</span>
-          <button
-            type="button"
-            class="ml-auto rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
-            onclick={() => openCluster && zoomIntoCluster(openCluster)}>Zoom in</button>
+          <Button
+            size="sm"
+            class="ml-auto"
+            onclick={() => openCluster && zoomIntoCluster(openCluster)}>Zoom in</Button>
           <button type="button" class="rounded px-1" aria-label="Close" onclick={() => (openCluster = null)}>×</button>
         </div>
         <ul>
@@ -705,14 +695,14 @@
             <li>
               <button
                 type="button"
-                class="w-full truncate rounded px-1 py-0.5 text-left hover:bg-slate-100 dark:hover:bg-slate-800"
+                class="w-full truncate rounded-control px-1 py-0.5 text-left hover:bg-surface-3"
                 title={p.label}
                 onclick={() => onOpenItem(p.id)}>{p.label}</button>
             </li>
           {/each}
         </ul>
         {#if openCluster.count > 50}
-          <p class="mt-1 text-slate-500">…and {openCluster.count - 50} more — zoom in to separate them.</p>
+          <p class="mt-1 text-muted">…and {openCluster.count - 50} more — zoom in to separate them.</p>
         {/if}
       </div>
     {/if}
@@ -731,7 +721,7 @@
           </p>
           <p class="mt-2">
             <a
-              class="underline decoration-dotted underline-offset-2 hover:text-[var(--accent)]"
+              class="underline decoration-dotted underline-offset-2 hover:text-accent-text"
               href={`${docsUrl}reference/api/#geo-search-radius-and-bounding-box`}
               target="_blank"
               rel="noreferrer">How the GPS gate works</a>
@@ -766,32 +756,32 @@
   </div>
 
   <!-- Numeric area form: the keyboard path to a selection, and where you paste
-       coordinates from somewhere else. -->
-  <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 p-2 text-xs dark:border-slate-800">
-    <span class="mr-1 font-medium text-slate-500">Area</span>
-    {#each BOX_FIELDS as f (f.k)}
-      <label class="flex flex-col gap-0.5 text-slate-500">
-        {f.label}
-        <input
-          class="w-24 rounded border border-slate-300 bg-transparent px-2 py-1 tabular-nums focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-                 focus:border-[var(--accent)] dark:border-slate-700"
-          type="text"
-          inputmode="decimal"
-          bind:value={draft[f.k]}
-          onkeydown={(e: KeyboardEvent) => { if (e.key === "Enter") applyDraft(); e.stopPropagation(); }}
-        />
-      </label>
-    {/each}
-    <button
-      type="button"
-      class="rounded-full bg-[var(--accent)] px-3 py-1 text-[var(--accent-fg)]"
-      onclick={applyDraft}>Apply area</button>
-    <button
-      type="button"
-      class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
-      title="Copy the current view (or the active area) into the fields"
-      onclick={fillDraftFromView}>Use current view</button>
-    {#if draftError}<span class="text-red-500">{draftError}</span>{/if}
+       coordinates from somewhere else. Drafts stay strings: blank or junk turns
+       into NaN only in applyDraft (P3), so boxError can name it. -->
+  <div class="border-t border-border p-2 text-xs">
+    <div class="flex flex-wrap items-end gap-2">
+      <span class="mr-1 pb-1.5 font-medium text-muted">Area</span>
+      {#each BOX_FIELDS as f (f.k)}
+        <Field label={f.label} class="w-24">
+          <Input
+            size="sm"
+            class="tabular-nums"
+            type="text"
+            inputmode="decimal"
+            bind:value={draft[f.k]}
+            onkeydown={(e: KeyboardEvent) => { if (e.key === "Enter") applyDraft(); e.stopPropagation(); }}
+          />
+        </Field>
+      {/each}
+      <Button variant="primary" size="sm" onclick={applyDraft}>Apply area</Button>
+      <Button
+        size="sm"
+        title="Copy the current view (or the active area) into the fields"
+        onclick={fillDraftFromView}>Use current view</Button>
+    </div>
+    {#if draftError}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (draftError = "")}>{draftError}</Alert>
+    {/if}
   </div>
 
   <!-- Caption: what is drawn, out of what. The cap is stated, never silent. -->

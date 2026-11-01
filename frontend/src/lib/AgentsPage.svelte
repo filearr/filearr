@@ -2,8 +2,26 @@
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { COPY_FAILED, copyText } from "./clipboard";
-  import { toast } from "./ui/toast.svelte";
+  import {
+    Alert,
+    Badge,
+    Button,
+    Checkbox,
+    DataTable,
+    Field,
+    Input,
+    Modal,
+    ScrollRegion,
+    Select,
+    StateBlock,
+    Textarea,
+    confirm,
+    toast,
+    toneForStatus,
+    type Tone,
+  } from "./ui";
   import { intOrNull } from "./numInput";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import ScheduleField from "./ScheduleField.svelte";
   import {
     CAPABILITY_TOOLS,
@@ -46,6 +64,8 @@
     rehashCell,
     toolPathCell,
     type AgentAbout,
+    type AgentAboutModule,
+    type AgentAboutTool,
   } from "./agentAbout";
   import {
     MAX_COLLECTORS,
@@ -129,7 +149,29 @@
   // belongs to the permanent Global group plus any number of others, they layer
   // per key in ascending priority (later wins), and every policy key is edited
   // inside the group dialog.
-  let error = $state("");
+  // Prefix for the few ids this page wires by hand (policy-field errors).
+  const uid = $props.id();
+  // Errors by origin. The page load: a StateBlock in place of the page on the
+  // first load, an Alert over the kept data on a later refresh. Every action
+  // error sits beside the control that raised it, keyed by its row where the
+  // control is per-row, until dismissed or retried.
+  let loadError = $state("");
+  let loaded = $state(false);
+  /** Fleet row actions (update … delete, and the re-hash band check), by agent id. */
+  let rowErr = $state<Record<string, string>>({});
+  /** Saving an agent's configuration-group membership, by agent id. */
+  let memberErr = $state<Record<string, string>>({});
+  /** Revoking / deleting an enrollment token, by token hash. */
+  let tokenErr = $state<Record<string, string>>({});
+  /** Promote / cancel on a live rollout, by rollout id. */
+  let rolloutErr = $state<Record<string, string>>({});
+  /** Deleting a configuration group, by group id. */
+  let groupErr = $state<Record<string, string>>({});
+  /** The priority arrows of a configuration group, by group id. */
+  let reorderErr = $state<Record<string, string>>({});
+  let mintErr = $state("");
+  let installerErr = $state("");
+  let relErr = $state("");
   let agents = $state<AgentOut[]>([]);
   let tokens = $state<EnrollmentTokenOut[]>([]);
   let groups = $state<ConfigGroupOut[]>([]);
@@ -163,7 +205,7 @@
   }
 
   async function refresh() {
-    error = "";
+    loadError = "";
     try {
       const [page, toks, grps] = await Promise.all([
         listAgents(AGENTS_PAGE, agentsOffset),
@@ -184,8 +226,9 @@
       tokens = toks;
       groups = grps;
       await Promise.all([refreshSummary(), refreshSweeps()]);
+      loaded = true;
     } catch (e) {
-      error = errorMessage(e);
+      loadError = errorMessage(e);
     }
   }
 
@@ -340,15 +383,12 @@
     if (a.status !== "active" || !a.last_seen_at) return false;
     return Date.now() - new Date(a.last_seen_at).getTime() <= ONLINE_WINDOW_MS;
   }
-  function statusClass(s: string): string {
-    if (s === "active") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
-    if (s === "revoked") return "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300";
-    return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
-  }
-  function tokenStatusClass(s: string): string {
-    if (s === "active") return "text-emerald-600";
-    if (s === "consumed") return "text-slate-600 dark:text-slate-400";
-    return "text-amber-600";
+  /** Enrollment-token status: active is usable, consumed is spent history, and
+   *  anything else (expired) is the one that needs attention. */
+  function tokenTone(s: string): Tone {
+    if (s === "active") return "ok";
+    if (s === "consumed") return "neutral";
+    return "warn";
   }
 
   // --- configuration groups: the ONE grouping --------------------------------
@@ -416,7 +456,7 @@
   async function submitRelRollout() {
     if (relTierError || !relVersion.trim()) return;
     relBusy = true;
-    error = "";
+    relErr = "";
     try {
       await createReleaseRollout(relVersion.trim(), {
         tiers: relTiers,
@@ -426,40 +466,48 @@
       relStartsAt = "";
       await reloadRollouts();
     } catch (e) {
-      error = `release rollout: ${errorMessage(e)}`;
+      relErr = `release rollout: ${errorMessage(e)}`;
     } finally {
       relBusy = false;
     }
   }
   async function promoteRelRollout(r: ReleaseRolloutOut) {
-    if (!confirm(`Promote the ${r.release_version} rollout to its next tier now? A tier only ever widens.`)) return;
+    const ok = await confirm({
+      title: `Promote the ${r.release_version} rollout?`,
+      message: `Promote the ${r.release_version} rollout to its next tier now? A tier only ever widens.`,
+      confirmLabel: "Promote now",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
+    rolloutErr[r.id] = "";
     try {
       await promoteReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `promote: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `promote: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
   }
   async function cancelRelRollout(r: ReleaseRolloutOut) {
-    if (
-      !confirm(
-        `Cancel the phased rollout of ${r.release_version}?\n\n` +
-          "Central STOPS OFFERING it to agents not yet covered. Nothing rolls back: an agent " +
-          "that already swapped its binary keeps running it (only the agent's own boot-counter " +
-          "rollback can un-install a binary). The version stays available — a per-agent update " +
-          "click still applies it.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Cancel the phased rollout of ${r.release_version}?`,
+      message:
+        "Central STOPS OFFERING it to agents not yet covered. Nothing rolls back: an agent " +
+        "that already swapped its binary keeps running it (only the agent's own boot-counter " +
+        "rollback can un-install a binary). The version stays available — a per-agent update " +
+        "click still applies it.",
+      confirmLabel: "Cancel rollout",
+      cancelLabel: "Keep rolling out",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
+    rolloutErr[r.id] = "";
     try {
       await cancelReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `cancel: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `cancel: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
@@ -493,19 +541,20 @@
     // Consequential and fleet-visible (it changes the document the machine
     // receives), so it confirms like the other agent-scoped actions.
     const names = ids.map((id) => groupsById.get(id)?.name ?? id);
-    if (
-      !confirm(
-        `Set agent "${a.name}" configuration groups to: ${
-          names.length ? names.join(", ") : "(Global only)"
-        }?\n\n` +
-          "Groups layer in priority order and the highest-priority group wins " +
-          "each key it sets. The new document lands on the agent's next poll " +
-          "(~1 min).",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Set agent "${a.name}" configuration groups?`,
+      message: `Set agent "${a.name}" configuration groups to: ${
+        names.length ? names.join(", ") : "(Global only)"
+      }?`,
+      details: [
+        "Groups layer in priority order and the highest-priority group wins each key it sets.",
+        "The new document lands on the agent's next poll (~1 min).",
+      ],
+      confirmLabel: "Save membership",
+    });
+    if (!ok) return;
     savingMembers[a.id] = true;
-    error = "";
+    memberErr[a.id] = "";
     try {
       const res = await setAgentConfigGroups(a.id, ids);
       a.config_group_ids = res.group_ids;
@@ -516,7 +565,7 @@
       delete effective[a.id];
       await Promise.all([reloadGroups(), refreshSummary()]);
     } catch (e) {
-      error = `configuration groups for ${a.name}: ${errorMessage(e)}`;
+      memberErr[a.id] = `configuration groups for ${a.name}: ${errorMessage(e)}`;
       delete memberDraft[a.id];
       await refresh(); // resync the checkboxes to server truth
     } finally {
@@ -531,11 +580,12 @@
   let updating: Record<string, boolean> = $state({});
   async function updateAgentNow(id: string, name: string) {
     updating[id] = true;
+    rowErr[id] = "";
     try {
       await triggerAgentUpdate(id);
       await refresh();
     } catch (e) {
-      error = `update ${name}: ${errorMessage(e)}`;
+      rowErr[id] = `update ${name}: ${errorMessage(e)}`;
       await refresh();
     } finally {
       updating[id] = false;
@@ -550,17 +600,21 @@
     const want = !a.health?.suspended;
     if (
       want &&
-      !confirm(
-        `Suspend agent "${a.name}"? It stops scanning and replicating until resumed (it keeps checking in for commands, so you can resume it from here).`,
-      )
+      !(await confirm({
+        title: `Suspend agent "${a.name}"?`,
+        message:
+          "It stops scanning and replicating until resumed (it keeps checking in for commands, so you can resume it from here).",
+        confirmLabel: "Suspend",
+      }))
     )
       return;
     suspending[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await suspendAgent(a.id, want);
       await refresh();
     } catch (e) {
-      error = `suspend ${a.name}: ${errorMessage(e)}`;
+      rowErr[a.id] = `suspend ${a.name}: ${errorMessage(e)}`;
     } finally {
       suspending[a.id] = false;
     }
@@ -569,11 +623,12 @@
   let maintaining: Record<string, boolean> = $state({});
   async function maintainAgent(a: AgentOut) {
     maintaining[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await runAgentMaintenance(a.id);
       await refresh();
     } catch (e) {
-      error = `maintenance ${a.name}: ${errorMessage(e)}`;
+      rowErr[a.id] = `maintenance ${a.name}: ${errorMessage(e)}`;
     } finally {
       maintaining[a.id] = false;
     }
@@ -614,11 +669,12 @@
 
   async function reconcileNow(a: AgentOut) {
     reconciling[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await reconcileAgent(a.id);
       await refresh();
     } catch (e) {
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `A reconcile is already queued or running on "${a.name}".`
           : errorMessage(e);
@@ -634,16 +690,17 @@
 
   async function inventoryNow(a: AgentOut) {
     inventorying[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await inventoryAgent(a.id);
       await refresh();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        error = `An inventory run is already queued or running on "${a.name}".`;
+        rowErr[a.id] = `An inventory run is already queued or running on "${a.name}".`;
       } else if (e instanceof ApiError && e.status === 422) {
-        error = `"${a.name}": ${errorMessage(e)} — see the agent's group settings, Inventory section.`;
+        rowErr[a.id] = `"${a.name}": ${errorMessage(e)} — see the agent's group settings, Inventory section.`;
       } else {
-        error = errorMessage(e);
+        rowErr[a.id] = errorMessage(e);
       }
     } finally {
       inventorying[a.id] = false;
@@ -652,22 +709,24 @@
 
   async function reextract(a: AgentOut) {
     // Fleet-visible and potentially hours long on a large index, so it confirms
-    // first — same idiom as suspend/revoke (a plain confirm() naming the agent
-    // and stating the cost).
-    if (
-      !confirm(
-        `Re-extract metadata on agent "${a.name}"? It sweeps every item in that agent's index and can run for hours on a large library. The sweep is resumable and re-emits metadata only — file contents never leave the agent.`,
-      )
-    )
-      return;
+    // first — same idiom as suspend/revoke (a confirm() naming the agent and
+    // stating the cost).
+    const ok = await confirm({
+      title: `Re-extract metadata on agent "${a.name}"?`,
+      message:
+        "It sweeps every item in that agent's index and can run for hours on a large library. The sweep is resumable and re-emits metadata only — file contents never leave the agent.",
+      confirmLabel: "Re-extract",
+    });
+    if (!ok) return;
     reextracting[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await reextractAgent(a.id);
       await refresh();
     } catch (e) {
       // 409 = the single-sweep guard (two sweeps would fight over one cursor).
       // Say that plainly instead of surfacing the raw endpoint detail.
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `re-extract ${a.name}: a sweep is already running on this agent`
           : `re-extract ${a.name}: ${errorMessage(e)}`;
@@ -695,8 +754,9 @@
     const min = b.min.trim() === "" ? 65537 : Number(b.min);
     const max = b.max.trim() === "" ? 131072 : Number(b.max);
     const items = b.items.trim() === "" ? undefined : Number(b.items);
+    rowErr[a.id] = "";
     if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || min > max) {
-      error = `re-hash ${a.name}: the size band must satisfy 0 < min ≤ max`;
+      rowErr[a.id] = `re-hash ${a.name}: the size band must satisfy 0 < min ≤ max`;
       return;
     }
     // The confirm has to state the REAL cost, because this action's cost is
@@ -706,17 +766,19 @@
     const inBand = a.health?.index_items
       ? `That index holds about ${a.health.index_items.toLocaleString()} items in total; typically a few percent fall in this band. `
       : "";
-    if (
-      !confirm(
-        `Re-hash files on agent "${a.name}"?\n\n` +
-          `It re-reads EVERY indexed file between ${min.toLocaleString()} and ${max.toLocaleString()} bytes — ` +
-          `the whole file, not a sample — to recompute its hashes. ${inBand}` +
-          `On the live fleet this was ~99,000 files and ran for hours; over a network mount, longer.\n\n` +
-          `It is safe to stop (suspend the agent) and resume: the cursor is durable. ` +
-          `Only files whose stored hash is actually wrong are re-sent, and file contents never leave the agent.`,
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Re-hash files on agent "${a.name}"?`,
+      message:
+        `It re-reads EVERY indexed file between ${min.toLocaleString()} and ${max.toLocaleString()} bytes — ` +
+        `the whole file, not a sample — to recompute its hashes. ${inBand}` +
+        `On the live fleet this was ~99,000 files and ran for hours; over a network mount, longer.`,
+      details: [
+        "It is safe to stop (suspend the agent) and resume: the cursor is durable.",
+        "Only files whose stored hash is actually wrong are re-sent, and file contents never leave the agent.",
+      ],
+      confirmLabel: "Re-hash",
+    });
+    if (!ok) return;
     rehashingNow[a.id] = true;
     try {
       await rehashSweepAgent(a.id, {
@@ -727,7 +789,7 @@
       await refresh();
     } catch (e) {
       // 409 = the single-sweep guard (two sweeps would fight over one cursor).
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `re-hash ${a.name}: a hash migration is already running on this agent`
           : `re-hash ${a.name}: ${errorMessage(e)}`;
@@ -777,12 +839,12 @@
     }
   }
 
-  const TOOL_CHIP_CLASS: Record<"ok" | "warn" | "muted", string> = {
-    ok: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  const TOOL_CHIP_TONE: Record<"ok" | "warn" | "muted", Tone> = {
+    ok: "ok",
     // Amber is reserved for `outdated`, and matches the "this agent will ignore"
     // chips below: both mean "working, but not doing what you think".
-    warn: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-    muted: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+    warn: "warn",
+    muted: "neutral",
   };
 
   async function loadEffective(id: string) {
@@ -798,13 +860,41 @@
     }
   }
 
+  // Below-table panels (agent details, a history version's JSON) open from a
+  // row button but render after the whole table, so opening one moves focus
+  // to its heading and closing it from the panel returns focus to the row's
+  // button. DataTable renders each cell twice (one copy hidden by CSS), so the
+  // button is found by a data attribute and the visible copy is picked.
+  const detailsId = (agentId: string) => `${uid}-details-${agentId}`;
+  const historyJsonId = (seq: number) => `${uid}-history-json-${seq}`;
+
   async function toggleDetail(a: AgentOut) {
     if (expanded === a.id) {
       expanded = null;
       return;
     }
     expanded = a.id;
+    void focusPanel(`${detailsId(a.id)}-heading`);
     await loadEffective(a.id);
+  }
+
+  function hideDetail(a: AgentOut) {
+    expanded = null;
+    void focusRowButton("data-details-for", a.id);
+  }
+
+  function toggleHistoryJson(h: ConfigVersionOut) {
+    if (historyOpenSeq === h.seq) {
+      historyOpenSeq = null;
+      return;
+    }
+    historyOpenSeq = h.seq;
+    void focusPanel(`${historyJsonId(h.seq)}-heading`);
+  }
+
+  function hideHistoryJson(h: ConfigVersionOut) {
+    historyOpenSeq = null;
+    void focusRowButton("data-json-for", String(h.seq));
   }
 
   // ---- per-agent About / dependency report (2026-08-11) --------------------
@@ -839,7 +929,11 @@
 
   async function toggleAbout(a: AgentOut) {
     aboutOpen[a.id] = !aboutOpen[a.id];
-    if (!aboutOpen[a.id] || about[a.id] || aboutLoading[a.id]) return;
+    if (aboutOpen[a.id]) await loadAbout(a);
+  }
+
+  async function loadAbout(a: AgentOut) {
+    if (about[a.id] || aboutLoading[a.id]) return;
     aboutLoading[a.id] = true;
     aboutError[a.id] = "";
     try {
@@ -864,10 +958,10 @@
    *  meaning "act on this", and `bad` appears only for the path rule violation
    *  that must never happen. */
   const ABOUT_TONE_CLASS: Record<"ok" | "bad" | "warn" | "muted", string> = {
-    ok: "text-slate-700 dark:text-slate-200",
-    bad: "text-red-600 dark:text-red-400",
-    warn: "text-amber-600 dark:text-amber-400",
-    muted: "text-slate-600 dark:text-slate-400",
+    ok: "text-fg",
+    bad: "text-danger",
+    warn: "text-warn",
+    muted: "text-muted",
   };
 
   function fmtPolicyValue(v: unknown): string {
@@ -898,18 +992,33 @@
   }
 
   async function dropAgent(id: string, name: string) {
-    if (!confirm(`Revoke agent "${name}"? It will be denied all replication/config access.`)) return;
+    const ok = await confirm({
+      title: `Revoke agent "${name}"?`,
+      message: "It will be denied all replication/config access.",
+      confirmLabel: "Revoke",
+      tone: "danger",
+    });
+    if (!ok) return;
+    rowErr[id] = "";
     try {
       await revokeAgent(id);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      rowErr[id] = errorMessage(e);
     }
   }
   // Hard delete: 409 while the agent still owns libraries/items — that message
   // surfaces verbatim (preserve the 409-owns-data messaging).
   async function purgeAgent(id: string, name: string) {
-    if (!confirm(`DELETE agent "${name}" permanently?`)) return;
+    const ok = await confirm({
+      title: `DELETE agent "${name}" permanently?`,
+      message: "This is a hard delete and cannot be undone. It only succeeds while the agent owns no libraries or items.",
+      confirmLabel: "Delete agent",
+      tone: "danger",
+      typedName: name,
+    });
+    if (!ok) return;
+    rowErr[id] = "";
     try {
       await deleteAgent(id);
       await refresh();
@@ -918,28 +1027,29 @@
       // The agent owns libraries/items: offer the one-action cascade instead
       // of sending the operator off to delete each library by hand first.
       if (e instanceof ApiError && e.status === 409 && detail.includes("replicated data")) {
-        if (
-          confirm(
-            `Agent "${name}" still owns replicated data:
-${detail}
-
-` +
-              "Delete the agent AND all of its libraries (including their " +
-              "items and scan history)? This cannot be undone.",
-          )
-        ) {
+        const cascade = await confirm({
+          title: `Agent "${name}" still owns replicated data`,
+          message: detail,
+          details: [
+            "Delete the agent AND all of its libraries (including their items and scan history)?",
+            "This cannot be undone.",
+          ],
+          confirmLabel: "Delete agent and libraries",
+          tone: "danger",
+        });
+        if (cascade) {
           try {
             await deleteAgent(id, true);
             await refresh();
             return;
           } catch (e2) {
-            error = errorMessage(e2);
+            rowErr[id] = errorMessage(e2);
             return;
           }
         }
         return;
       }
-      error = detail;
+      rowErr[id] = detail;
     }
   }
 
@@ -963,13 +1073,13 @@ ${detail}
   async function mint() {
     minting = true;
     mintedCopied = false;
-    error = "";
+    mintErr = "";
     try {
       const r = await mintEnrollmentToken(newGroupNames, newTtl || undefined);
       minted = { token: r.token, expires_at: r.expires_at };
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      mintErr = errorMessage(e);
     } finally {
       minting = false;
     }
@@ -978,12 +1088,22 @@ ${detail}
     if (minted) mintedCopied = await copyText(minted.token);
   }
   async function dropToken(hash: string, force = false) {
-    if (force && !confirm("Delete this consumed token row? Its consumed-by link is preserved in the audit log.")) return;
+    if (
+      force &&
+      !(await confirm({
+        title: "Delete this token row?",
+        message: "Delete this consumed token row? Its consumed-by link is preserved in the audit log.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    )
+      return;
+    tokenErr[hash] = "";
     try {
       await revokeEnrollmentToken(hash, force);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      tokenErr[hash] = errorMessage(e);
     }
   }
 
@@ -1008,7 +1128,7 @@ ${detail}
     issuing = true;
     sidecarCopied = false;
     hintCopied = null;
-    error = "";
+    installerErr = "";
     try {
       installer = await issueInstallerConfig({
         agent_name: insName.trim() || null,
@@ -1017,7 +1137,7 @@ ${detail}
       });
       await refresh(); // the mint created a new token row
     } catch (e) {
-      error = errorMessage(e);
+      installerErr = errorMessage(e);
     } finally {
       issuing = false;
     }
@@ -1111,6 +1231,37 @@ ${detail}
   let dialog = $state<GroupForm | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
+
+  // Discard check for the dialog (Modal `dirty`): the form as it was opened,
+  // and the inventory collectors it was opened with (the collector editor
+  // lives outside the form and loads after it opens).
+  let dialogBaseline = "";
+  let collectorBaseline = "";
+  // The phased-rollout draft (tiers + start time) lives in the footer, outside
+  // the form, so it has its own baseline.
+  let rolloutBaseline = "";
+  const collectorKey = (names: string[]): string => [...names].sort().join("\n");
+  const rolloutKey = (): string => JSON.stringify([tiers, rolloutStartsAt]);
+  function markDialogClean(storedCollectors: string[]) {
+    dialogBaseline = JSON.stringify(dialog);
+    collectorBaseline = collectorKey(storedCollectors);
+    rolloutBaseline = rolloutKey();
+  }
+  function dialogDirty(): boolean {
+    if (!dialog) return false;
+    if (JSON.stringify(dialog) !== dialogBaseline) return true;
+    if (rolloutKey() !== rolloutBaseline) return true;
+    return collectorKey(collectorsToSave(collectorEditor, dialog.collectorsText)) !== collectorBaseline;
+  }
+  const dialogTitle = $derived(
+    !dialog
+      ? ""
+      : dialog.id === null
+        ? "New configuration group"
+        : dialog.isSystem
+          ? "Edit the Global group"
+          : `Edit “${dialog.name}”`,
+  );
 
   // --- dialog section accordion ----------------------------------------------
   // The dialog now holds ~40 fields (settings + every policy key), so everything
@@ -1292,14 +1443,18 @@ ${detail}
 
   function openRollout() {
     rolloutOpen = true;
-    if (!tiers.length)
+    if (!tiers.length) {
       // A sane default an operator can accept as-is: a small first wave, a half
       // fleet an hour later, everyone an hour after that.
+      const untouched = rolloutKey() === rolloutBaseline;
       tiers = [
         { percent: 10, delay_minutes: 0 },
         { percent: 50, delay_minutes: 60 },
         { percent: 100, delay_minutes: 60 },
       ];
+      // Seeding the default is not an edit: only a change to it is dirty.
+      if (untouched) rolloutBaseline = rolloutKey();
+    }
   }
   function addTier() {
     if (tiers.length >= MAX_ROLLOUT_TIERS) return;
@@ -1334,17 +1489,18 @@ ${detail}
 
   async function restoreVersion(v: ConfigVersionOut) {
     if (!dialog?.id) return;
-    if (
-      !confirm(
-        `Restore version ${v.version} of "${dialog.name}"?\n\n` +
-          "It is copied forward as a NEW version and published IMMEDIATELY — " +
-          "reverting a bad configuration should not wait behind a rollout, so " +
-          "any live rollout for this group is cancelled and the agents it had " +
-          "already covered fall back with everyone else. Unsaved edits in this " +
-          "dialog are discarded.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Restore version ${v.version} of "${dialog.name}"?`,
+      message:
+        "It is copied forward as a NEW version and published IMMEDIATELY — " +
+        "reverting a bad configuration should not wait behind a rollout, so " +
+        "any live rollout for this group is cancelled and the agents it had " +
+        "already covered fall back with everyone else. Unsaved edits in this " +
+        "dialog are discarded.",
+      confirmLabel: "Restore and publish",
+    });
+    // The dialog may have been closed while the confirm was up.
+    if (!ok || !dialog?.id) return;
     dialogBusy = true;
     dialogError = "";
     try {
@@ -1484,6 +1640,7 @@ ${detail}
       authRequired: "",
       ...PERMS_DEFAULTS,
     };
+    markDialogClean([]);
     void loadCollectorCatalogue([]);
   }
 
@@ -1542,6 +1699,7 @@ ${detail}
       auditAlertOnChange: a?.alert_on_change ?? PERMS_DEFAULTS.auditAlertOnChange,
       auditWatchPathsText: (a?.watch_paths ?? []).join("\n"),
     };
+    markDialogClean(s.inventory?.collectors ?? []);
     // The STORED names drive the merge: any of them the catalogue does not know
     // comes back as a ticked "unrecognised" row, so an edit can never drop it.
     void loadCollectorCatalogue(s.inventory?.collectors ?? []);
@@ -1771,19 +1929,24 @@ ${detail}
 
   async function removeGroup(g: ConfigGroupOut) {
     const n = g.member_count;
-    if (!confirm(
-      `Delete configuration group "${g.name}"?` +
-        (n > 0
-          ? ` ${n} member agent(s) stop receiving its keys — each of those keys ` +
+    const ok = await confirm({
+      title: `Delete configuration group "${g.name}"?`,
+      message:
+        n > 0
+          ? `${n} member agent(s) stop receiving its keys — each of those keys ` +
             "falls back to the next-highest group that sets it, or to the " +
             "agent's built-in default."
-          : "")
-    )) return;
+          : undefined,
+      confirmLabel: "Delete group",
+      tone: "danger",
+    });
+    if (!ok) return;
+    groupErr[g.id] = "";
     try {
       await deleteConfigGroup(g.id);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      groupErr[g.id] = errorMessage(e);
     }
   }
 
@@ -1825,14 +1988,14 @@ ${detail}
     }
 
     reordering = true;
-    error = "";
+    reorderErr[g.id] = "";
     try {
       if (mine !== g.priority) await updateConfigGroup(g.id, { priority: mine });
       if (theirs !== other.priority)
         await updateConfigGroup(other.id, { priority: theirs });
       await reloadGroups();
     } catch (e) {
-      error = `reorder ${g.name}: ${errorMessage(e)}`;
+      reorderErr[g.id] = `reorder ${g.name}: ${errorMessage(e)}`;
       await reloadGroups(); // a half-applied swap must not linger on screen
     } finally {
       reordering = false;
@@ -1842,23 +2005,33 @@ ${detail}
   // --- live rollouts card ----------------------------------------------------
   let rolloutBusy = $state<Record<string, boolean>>({});
 
+  /** One table for both kinds of live rollout: configuration rollouts first,
+   *  then phased binary releases, each row tagged with its kind. */
+  type RolloutRow =
+    | { kind: "config"; key: string; r: RolloutOut }
+    | { kind: "release"; key: string; r: ReleaseRolloutOut };
+  const rolloutRows = $derived<RolloutRow[]>([
+    ...rollouts.map((r) => ({ kind: "config" as const, key: `config:${r.id}`, r })),
+    ...relRollouts.map((r) => ({ kind: "release" as const, key: `release:${r.id}`, r })),
+  ]);
+
   async function promoteRollout(r: RolloutOut) {
-    if (
-      !confirm(
-        `Promote "${r.group_name}" to the next tier now?\n\n` +
-          `Version ${r.target_version} immediately reaches the next tier's share ` +
-          "of the fleet instead of waiting out the configured delay. This cannot " +
-          "be un-promoted — a tier only ever widens.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Promote "${r.group_name}" to the next tier now?`,
+      message:
+        `Version ${r.target_version} immediately reaches the next tier's share ` +
+        "of the fleet instead of waiting out the configured delay. This cannot " +
+        "be un-promoted — a tier only ever widens.",
+      confirmLabel: "Promote now",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
-    error = "";
+    rolloutErr[r.id] = "";
     try {
       await promoteConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `promote ${r.group_name}: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `promote ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;
@@ -1866,23 +2039,24 @@ ${detail}
   }
 
   async function cancelRollout(r: RolloutOut) {
-    if (
-      !confirm(
-        `Cancel the rollout of version ${r.target_version} for "${r.group_name}"?\n\n` +
-          `The group stays on its current version, so the ${r.covered_percent}% of ` +
-          "agents already covered ROLL BACK to it on their next poll. The version " +
-          "itself is kept — start a new rollout, or publish it immediately, to " +
-          "deliver it later.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Cancel the rollout of version ${r.target_version} for "${r.group_name}"?`,
+      message:
+        `The group stays on its current version, so the ${r.covered_percent}% of ` +
+        "agents already covered ROLL BACK to it on their next poll. The version " +
+        "itself is kept — start a new rollout, or publish it immediately, to " +
+        "deliver it later.",
+      confirmLabel: "Cancel rollout",
+      cancelLabel: "Keep rolling out",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
-    error = "";
+    rolloutErr[r.id] = "";
     try {
       await cancelConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `cancel ${r.group_name}: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `cancel ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;
@@ -1895,88 +2069,511 @@ ${detail}
      than to let an operator conclude the fleet is misbehaving. Declared first
      because both the agent-detail panel and the group dialog render it. -->
 {#snippet notEnforced(why: string)}
+  <span title={why}><Badge tone="warn">not enforced yet</Badge></span>
+{/snippet}
+
+<!-- ---- registered-agents table cells ---------------------------------------
+     DataTable renders each cell twice (table ≥md, card list <md), so nothing
+     here carries an id, a bind:this or focus management. -->
+{#snippet agentNameCell(a: AgentOut)}
+  <span class="font-medium">{a.name}</span>
+{/snippet}
+
+{#snippet agentHostCell(a: AgentOut)}
+  <span class="font-mono text-xs text-muted">{a.hostname}</span>
+{/snippet}
+
+{#snippet agentPlatformCell(a: AgentOut)}
+  <span class="text-muted">{a.platform}</span>
+{/snippet}
+
+{#snippet agentStatusCell(a: AgentOut)}
+  <Badge tone={toneForStatus(a.status)}>{a.status}</Badge>
+{/snippet}
+
+{#snippet agentOnlineCell(a: AgentOut)}
+  {@const online = isOnline(a)}
+  <div class="flex flex-wrap items-center gap-1" title={healthTitle(a)}>
+    <!-- Offline only matters for an active agent; a pending or revoked one is
+         expected to be offline, and its Status badge already says why. -->
+    <Badge tone={online ? toneForStatus("online") : a.status === "active" ? toneForStatus("offline") : "neutral"}>{online ? "online" : "offline"}</Badge>
+    <span
+      class="text-xs tabular-nums text-muted"
+      title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">{relTime(a.last_seen_at)}</span>
+    {#if a.health?.suspended}
+      <span title="Operator-suspended: this agent is not scanning or replicating (self-reported at its last check-in). It still polls for commands — resume it with the actions on the right."><Badge tone="warn">suspended</Badge></span>
+    {/if}
+    {#if sweeping.has(a.id)}
+      <span title="A re-extract sweep is queued or running: the agent is re-running extraction over its existing index and re-emitting the metadata. It resumes across restarts, so this can stay up for hours on a large library."><Badge tone="accent">re-extracting</Badge></span>
+    {/if}
+    {#if rehashing.has(a.id)}
+      <span title="A hash migration is queued or running: the agent is re-reading every indexed file in the 64-128 KiB band to correct hashes computed before the 2026-07-18 fix. Expect sustained disk/network I/O on that machine; it resumes across restarts, so this can stay up for hours."><Badge tone="accent">re-hashing</Badge></span>
+    {/if}
+    {#if a.health?.central_maintenance}
+      <span title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends."><Badge tone="info">backing off</Badge></span>
+    {/if}
+    {#if a.health?.local_scan_paused}
+      <span title="An operator paused scanning from THIS AGENT's own web UI (allowed by the local_scan_control policy key). Replication is unaffected. Resume it there, or revoke the permission here — the central Suspend action is a separate, stronger hold that a local resume cannot lift."><Badge tone="warn">paused locally</Badge></span>
+    {/if}
+    {#if a.health?.local_overrides}
+      <span title={healthTitle(a)}><Badge tone="accent">local settings</Badge></span>
+    {/if}
+    {#if shareMapRejects(a) > 0}
+      <span title="This agent skipped one or more malformed share-map entries, so those scan roots report no network location. A bad entry is never fatal (share hints are best-effort), which is why it needs saying here. Fix FILEARR_AGENT_SHARE_MAP where the agent is deployed, or the mapping in the agent's own roots editor."><Badge tone="warn">share map errors</Badge></span>
+    {/if}
+    {#if a.last_auth_mode === "mtls"}
+      <span title="Central verified this agent's last authenticated request via the mTLS proxy path (client-certificate SAN identity) — observed server-side, not self-reported."><Badge tone="ok">mTLS</Badge></span>
+    {:else if a.last_auth_mode === "bearer"}
+      <span title="This agent's last authenticated request used the interim bearer (fingerprint) path — it has not been switched to the mTLS endpoint yet. See the mode-flip runbook (docs: TLS)."><Badge>bearer</Badge></span>
+    {/if}
+  </div>
+{/snippet}
+
+<!-- NAMES, not a picker: an agent can be in many groups, so the cell reports
+     and the details panel edits. Global is left out deliberately — it is on
+     every row, so printing it on every row is noise; the effective-config
+     viewer names it where the provenance actually matters. -->
+{#snippet agentGroupsCell(a: AgentOut)}
+  <div class="flex flex-wrap gap-1">
+    {#each groupsOf(a) as g (g.id)}
+      <span title={`Priority ${g.priority} — a higher priority applies later and wins the keys it sets. Current version ${g.current_version}.`}><Badge>{g.name}</Badge></span>
+    {:else}
+      <span class="text-2xs text-muted" title="This agent is only in the implicit Global group, so it receives the fleet-wide baseline and nothing else.">Global only</span>
+    {/each}
+  </div>
+{/snippet}
+
+{#snippet agentVersionCell(a: AgentOut)}
+  <div class="flex flex-wrap items-center gap-1 text-muted">
+    <span class="font-mono text-xs">{a.agent_version ?? "—"}</span>
+    {#if a.update_pending}
+      <span title={`Updating to ${a.update_target ?? "the current central version"} at its next check-in`}><Badge tone="info">update queued</Badge></span>
+    {:else if a.update_available && a.capabilities?.container}
+      <span title={`A newer agent build exists (${a.update_target}). This agent runs in a container, which updates by pulling the new agent image on its host — central never swaps binaries inside a container.`}><Badge tone="warn">newer image available</Badge></span>
+    {:else if a.update_available && a.update_hold}
+      <span title={`${a.update_target} is available but this agent's policy holds it: ${a.update_hold}. The update action still applies it immediately (the click is the authorization).`}><Badge>update held</Badge></span>
+    {:else if a.update_available}
+      <span title={`Central offers ${a.update_target}`}><Badge tone="warn">update available</Badge></span>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet agentActionsCell(a: AgentOut)}
+  <div class="flex flex-wrap justify-end gap-1">
+    <Button
+      size="sm"
+      variant="ghost"
+      aria-expanded={expanded === a.id}
+      aria-controls={expanded === a.id ? detailsId(a.id) : undefined}
+      data-details-for={a.id}
+      title="Show what this agent can actually do (advertised capabilities + host tools) and which of its effective policy settings it will ignore."
+      onclick={() => toggleDetail(a)}>{expanded === a.id ? "hide" : "details"}</Button>
+    {#if a.status !== "revoked"}
+      {#if a.update_available && !a.update_pending && !a.capabilities?.container}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={updating[a.id]}
+          title={`Queue an update to ${a.update_target} — applied at the agent's next check-in (~1 min)`}
+          onclick={() => updateAgentNow(a.id, a.name)}>update</Button>
+      {/if}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={suspending[a.id]}
+        title={a.health?.suspended
+          ? "Queue a resume — the agent restarts scanning + replication at its next check-in (~1 min)"
+          : "Queue a suspend — the agent stops scanning + replicating at its next check-in (~1 min); it keeps checking in so it can be resumed"}
+        onclick={() => toggleSuspend(a)}>{a.health?.suspended ? "resume" : "suspend"}</Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={maintaining[a.id]}
+        title="Queue a local maintenance pass: compact the agent's index (VACUUM), prune already-replicated outbox rows, sweep stale temp files. Runs at its next check-in; the result appears in the command history."
+        onclick={() => maintainAgent(a)}>maintain</Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={reconciling[a.id]}
+        title="Queue an immediate full-manifest consistency sweep: the agent checks each root's complete index against central and re-syncs any drift (deletions missed while offline included). Normally automatic — the agent also catches up at startup when its last sweep is overdue — this is the run-it-now handle. Sets the 'Last reconcile' watermark that gates recycle-bin purge of this agent's items."
+        onclick={() => reconcileNow(a)}>{reconciling[a.id] ? "queuing…" : "reconcile"}</Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={inventorying[a.id]}
+        title="Queue one host inventory run now — the same command the group schedule fires: this agent's effective group collectors (stat / owner / perms / permissions …) over the group's paths or preset. Permission snapshots, the drift report and the item-detail Permissions section all come from this. Runs at the agent's next check-in (~1 min); the result appears in the command history."
+        onclick={() => inventoryNow(a)}>{inventorying[a.id] ? "queuing…" : "inventory"}</Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={reextracting[a.id] || sweeping.has(a.id)}
+        title="Re-run extraction across this agent's EXISTING index and re-emit the metadata — the catch-up for items scanned before extraction (or before ffprobe/exiftool/poppler/tesseract) was available on that host. Only extracted metadata is re-sent; file contents never leave the agent. Resumable, and a repeat run at an unchanged extraction configuration does nothing."
+        onclick={() => reextract(a)}>{sweeping.has(a.id) ? "sweeping…" : "re-extract"}</Button>
+      <!-- QH-T6, next to re-extract because they are the same SHAPE of action
+           (an hours-long resumable sweep of the agent's existing index) even
+           though they repair different things. The band/max_items knobs live
+           in the expanded detail panel: the default IS the answer for almost
+           everyone, and putting three number boxes in a table cell would imply
+           otherwise. -->
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={rehashingNow[a.id] || rehashing.has(a.id)}
+        title="Re-read every indexed file between 64 KiB and 128 KiB on this agent and correct its hashes. Files in that band were under-hashed before 2026-07-18 (only the first 64 KiB was read), which produced false duplicate detections; the agent's ordinary scan will never revisit them, because their size and modification time have not changed. Re-reads whole files for hours — only the rows whose hash is actually wrong are re-sent, and file contents never leave the agent. Open 'details' to change the size band."
+        onclick={() => rehashSweep(a)}>{rehashing.has(a.id) ? "re-hashing…" : "re-hash"}</Button>
+      <Button size="sm" variant="danger" onclick={() => dropAgent(a.id, a.name)}>revoke</Button>
+    {/if}
+    <Button
+      size="sm"
+      variant="danger"
+      title="Hard delete — only while the agent owns no libraries/items"
+      onclick={() => purgeAgent(a.id, a.name)}>delete</Button>
+  </div>
+  {#if rowErr[a.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (rowErr[a.id] = "")}>{rowErr[a.id]}</Alert>
+  {/if}
+{/snippet}
+
+<!-- ---- enrollment-token table cells ---------------------------------------- -->
+{#snippet tokenHashCell(t: EnrollmentTokenOut)}
+  <span class="font-mono text-xs">{t.token_hash.slice(0, 12)}…</span>
+{/snippet}
+
+{#snippet tokenGroupsCell(t: EnrollmentTokenOut)}
+  <span title="Groups the enrolling agent joins on top of Global.">
+    {t.config_group_names.length ? t.config_group_names.join(", ") : "Global only"}
+  </span>
+{/snippet}
+
+{#snippet tokenStatusCell(t: EnrollmentTokenOut)}
+  <Badge tone={tokenTone(t.status)}>{t.status}</Badge>
+{/snippet}
+
+{#snippet tokenExpiresCell(t: EnrollmentTokenOut)}
+  <span class="text-muted">{fmt(t.expires_at)}</span>
+{/snippet}
+
+{#snippet tokenActionsCell(t: EnrollmentTokenOut)}
+  <div class="flex flex-wrap justify-end gap-1">
+    {#if t.status === "active"}
+      <Button size="sm" variant="danger" onclick={() => dropToken(t.token_hash)}>revoke</Button>
+    {:else}
+      <Button size="sm" variant="danger" onclick={() => dropToken(t.token_hash, true)}>delete</Button>
+    {/if}
+  </div>
+  {#if tokenErr[t.token_hash]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (tokenErr[t.token_hash] = "")}>{tokenErr[t.token_hash]}</Alert>
+  {/if}
+{/snippet}
+
+<!-- ---- rollouts-in-flight table cells --------------------------------------- -->
+{#snippet rolloutGroupCell(row: RolloutRow)}
+  {#if row.kind === "config"}
+    <span class="font-medium">{row.r.group_name}</span>
+  {:else}
+    <span title="A phased BINARY rollout: while it is live, central offers this version only to agents inside the active tier's bucket range. Cancel = stop offering (nothing rolls back)."><Badge tone="accent">release</Badge></span>
+  {/if}
+{/snippet}
+
+{#snippet rolloutTargetCell(row: RolloutRow)}
+  {#if row.kind === "config"}
+    <span
+      class="tabular-nums text-muted"
+      title="The group version this rollout is delivering. The group's current_version is unchanged until the last tier completes, so uncovered agents keep receiving the old one.">v{row.r.target_version}</span>
+  {:else}
+    <span class="font-mono text-xs text-muted">{row.r.release_version}</span>
+  {/if}
+{/snippet}
+
+{#snippet rolloutProgressCell(row: RolloutRow)}
+  <span class="text-muted">{describeRollout(row.r)}</span>
+{/snippet}
+
+{#snippet rolloutCoveredCell(row: RolloutRow)}
   <span
-    class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-    title={why}>not enforced yet</span>
+    class="tabular-nums text-muted"
+    title={row.kind === "config"
+      ? "Share of the fleet whose agent-id hash bucket is inside the active tier. Membership in the bucket is stable, so an agent never flaps in and out between polls."
+      : undefined}>{row.r.covered_percent}%</span>
+{/snippet}
+
+{#snippet rolloutNextCell(row: RolloutRow)}
+  <span
+    class="text-muted"
+    title={row.kind !== "config"
+      ? undefined
+      : row.r.next_promotion_at
+        ? "When the engine widens to the next tier on its own. Promote now to skip the remaining wait."
+        : "No further tier is scheduled — this rollout finishes at its current tier."}>
+    {#if row.r.next_promotion_at}
+      {untilTime(row.r.next_promotion_at)} · {fmt(row.r.next_promotion_at)}
+    {:else if row.r.status === "scheduled"}
+      {#if row.kind === "config"}
+        starts {fmt(row.r.starts_at)}
+      {:else}
+        starts {row.r.starts_at ? fmt(row.r.starts_at) : "next tick"}
+      {/if}
+    {:else}
+      —
+    {/if}
+  </span>
+{/snippet}
+
+{#snippet rolloutActionsCell(row: RolloutRow)}
+  <div class="flex flex-wrap justify-end gap-1">
+    {#if row.kind === "config"}
+      {@const r = row.r}
+      {#if r.status === "running"}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={rolloutBusy[r.id]}
+          title="Advance to the next tier immediately instead of waiting out its delay."
+          onclick={() => promoteRollout(r)}>promote now</Button>
+      {/if}
+      <Button
+        size="sm"
+        variant="danger"
+        disabled={rolloutBusy[r.id]}
+        title="Stop the rollout. The group stays on its current version, so agents already covered roll BACK to it on their next poll."
+        onclick={() => cancelRollout(r)}>cancel</Button>
+    {:else}
+      {@const r = row.r}
+      {#if r.status === "running"}
+        <Button size="sm" variant="ghost" disabled={rolloutBusy[r.id]} onclick={() => promoteRelRollout(r)}>promote now</Button>
+      {/if}
+      <Button
+        size="sm"
+        variant="danger"
+        disabled={rolloutBusy[r.id]}
+        title="Stop OFFERING this version to agents not yet covered. Nothing rolls back — a binary already swapped in stays."
+        onclick={() => cancelRelRollout(r)}>cancel</Button>
+    {/if}
+  </div>
+  {#if rolloutErr[row.r.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (rolloutErr[row.r.id] = "")}>{rolloutErr[row.r.id]}</Alert>
+  {/if}
+{/snippet}
+
+<!-- ---- configuration-groups table cells ------------------------------------- -->
+{#snippet groupNameCell(g: ConfigGroupOut)}
+  <span class="inline-flex flex-wrap items-center gap-1 font-medium">
+    {g.name}
+    {#if g.is_system}
+      <span title="The permanent Global group: every agent is a member, its name and priority are fixed, and it cannot be deleted. Its document is the fleet-wide baseline."><Badge>system</Badge></span>
+    {/if}
+  </span>
+{/snippet}
+
+{#snippet groupPriorityCell(g: ConfigGroupOut)}
+  <span class="inline-flex items-center gap-1 whitespace-nowrap tabular-nums text-muted">
+    {g.priority}
+    {#if !g.is_system}
+      <!-- Two-PATCH swap rather than a drag handle: no DnD dependency, and the
+           priorities stay numbers an operator can also type into the dialog. -->
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label="Apply {g.name} earlier"
+        disabled={reordering || reorderable[0]?.id === g.id}
+        title="Apply this group EARLIER (lower priority), so groups below it can override it."
+        onclick={() => reorderGroup(g, -1)}><span aria-hidden="true">↑</span></Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label="Apply {g.name} later"
+        disabled={reordering || reorderable[reorderable.length - 1]?.id === g.id}
+        title="Apply this group LATER (higher priority), so it overrides the groups above it."
+        onclick={() => reorderGroup(g, 1)}><span aria-hidden="true">↓</span></Button>
+    {/if}
+  </span>
+  {#if reorderErr[g.id]}
+    <Alert tone="danger" class="mt-1" onDismiss={() => (reorderErr[g.id] = "")}>{reorderErr[g.id]}</Alert>
+  {/if}
+{/snippet}
+
+{#snippet groupMembersCell(g: ConfigGroupOut)}
+  <span
+    class="tabular-nums text-muted"
+    title={g.is_system ? "Every enrolled agent — membership in Global is implicit." : "Agents explicitly added to this group."}>{g.member_count}</span>
+{/snippet}
+
+{#snippet groupVersionCell(g: ConfigGroupOut)}
+  <span class="tabular-nums text-muted">v{g.current_version}</span>
+{/snippet}
+
+{#snippet groupRolloutCell(g: ConfigGroupOut)}
+  {#if g.active_rollout}
+    <span title={`Version ${g.active_rollout.target_version} is being delivered in ${g.active_rollout.tiers.length} tier(s). Manage it in the rollouts card above.`}>
+      <Badge tone="info">→ v{g.active_rollout.target_version} · {describeRollout(g.active_rollout)}</Badge>
+    </span>
+  {:else}
+    <span class="text-muted">—</span>
+  {/if}
+{/snippet}
+
+{#snippet groupDescriptionCell(g: ConfigGroupOut)}
+  <span class="block max-w-[18rem] truncate text-muted" title={g.description ?? ""}>{g.description ?? "—"}</span>
+{/snippet}
+
+{#snippet groupActionsCell(g: ConfigGroupOut)}
+  <div class="flex flex-wrap justify-end gap-1">
+    <Button size="sm" onclick={() => openEdit(g)}>edit</Button>
+    {#if !g.is_system}
+      <Button size="sm" variant="danger" onclick={() => removeGroup(g)}>delete</Button>
+    {/if}
+  </div>
+  {#if groupErr[g.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (groupErr[g.id] = "")}>{groupErr[g.id]}</Alert>
+  {/if}
+{/snippet}
+
+<!-- ---- version-history table cells (group dialog) --------------------------- -->
+{#snippet historyVersionCell(h: ConfigVersionOut)}
+  <span class="inline-flex items-center gap-1 tabular-nums">
+    v{h.version}
+    {#if h.version === dialog?.currentVersion}<Badge tone="ok">current</Badge>{/if}
+  </span>
+{/snippet}
+
+{#snippet historySeqCell(h: ConfigVersionOut)}
+  <span class="tabular-nums text-muted">{h.seq}</span>
+{/snippet}
+
+{#snippet historyActorCell(h: ConfigVersionOut)}
+  <span class="text-muted">{h.actor ?? "—"}</span>
+{/snippet}
+
+{#snippet historyNoteCell(h: ConfigVersionOut)}
+  <span class="block max-w-[14rem] truncate text-muted" title={h.note ?? ""}>{h.note ?? "—"}</span>
+{/snippet}
+
+{#snippet historyWrittenCell(h: ConfigVersionOut)}
+  <span class="text-muted">{fmt(h.created_at)}</span>
+{/snippet}
+
+{#snippet historyActionsCell(h: ConfigVersionOut)}
+  <div class="flex flex-wrap justify-end gap-1">
+    <Button
+      size="sm"
+      variant="ghost"
+      aria-expanded={historyOpenSeq === h.seq}
+      aria-controls={historyOpenSeq === h.seq ? historyJsonId(h.seq) : undefined}
+      data-json-for={h.seq}
+      onclick={() => toggleHistoryJson(h)}>
+      {historyOpenSeq === h.seq ? "hide" : "view JSON"}
+    </Button>
+    {#if h.version !== dialog?.currentVersion}
+      <Button
+        size="sm"
+        disabled={dialogBusy}
+        title="Copy this snapshot forward as a new version and publish it immediately."
+        onclick={() => restoreVersion(h)}>restore this version</Button>
+    {/if}
+  </div>
 {/snippet}
 
 <div class="mt-4">
   <div class="flex items-center gap-3">
     <h2 class="text-lg font-semibold">Agents</h2>
-    <span class="text-xs text-slate-500">distributed fleet</span>
+    <span class="text-xs text-muted">distributed fleet</span>
     <div class="grow"></div>
-    <button
-      class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300"
-      onclick={refresh}>Refresh</button>
+    <Button size="sm" onclick={refresh}>Refresh</Button>
   </div>
 
-  {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
+  {#if !loaded && loadError}
+    <!-- The first load failed: nothing on this page is trustworthy yet. -->
+    <StateBlock state="error" message={loadError} onRetry={refresh} />
+  {:else}
+  {#if loadError}
+    <!-- A later refresh failed: the data below is the last good copy. -->
+    <Alert tone="danger" class="mt-3" onDismiss={() => (loadError = "")}>{loadError}</Alert>
+  {/if}
 
   <!-- Status header: fleet count tiles (auto-refresh ~15s) -->
   <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-    <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-      <div class="flex items-center gap-2 text-xs text-slate-500">
-        <span class="h-2 w-2 rounded-full bg-emerald-500"></span>Connected
+    <div class="rounded-panel border border-border p-3">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <span class="h-2 w-2 rounded-full bg-ok"></span>Connected
       </div>
-      <div class="mt-1 text-3xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
-        {summary?.connected ?? "—"}
-      </div>
+      <div class="mt-1 text-3xl font-bold tabular-nums text-ok">{summary?.connected ?? "—"}</div>
     </div>
-    <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-      <div class="flex items-center gap-2 text-xs text-slate-500">
-        <span class="h-2 w-2 rounded-full bg-slate-400"></span>Disconnected
+    <div class="rounded-panel border border-border p-3">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <span class="h-2 w-2 rounded-full bg-muted"></span>Disconnected
       </div>
-      <div class="mt-1 text-3xl font-bold tabular-nums text-slate-600 dark:text-slate-300">
-        {summary?.disconnected ?? "—"}
-      </div>
+      <div class="mt-1 text-3xl font-bold tabular-nums text-muted">{summary?.disconnected ?? "—"}</div>
     </div>
-    <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-      <div class="flex items-center gap-2 text-xs text-slate-500">
-        <span class="h-2 w-2 rounded-full bg-amber-500"></span>Pending
+    <div class="rounded-panel border border-border p-3">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <span class="h-2 w-2 rounded-full bg-warn"></span>Pending
       </div>
-      <div class="mt-1 text-3xl font-bold tabular-nums text-amber-600 dark:text-amber-400">
-        {summary?.pending ?? "—"}
-      </div>
+      <div class="mt-1 text-3xl font-bold tabular-nums text-warn">{summary?.pending ?? "—"}</div>
     </div>
-    <div class="rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-      <div class="flex items-center gap-2 text-xs text-slate-500">
-        <span class="h-2 w-2 rounded-full bg-red-500"></span>Revoked
+    <div class="rounded-panel border border-border p-3">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <span class="h-2 w-2 rounded-full bg-danger"></span>Revoked
       </div>
-      <div class="mt-1 text-3xl font-bold tabular-nums text-red-600 dark:text-red-400">
-        {summary?.revoked ?? "—"}
-      </div>
+      <div class="mt-1 text-3xl font-bold tabular-nums text-danger">{summary?.revoked ?? "—"}</div>
     </div>
   </div>
   {#if summary}
-    <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">{summary.total} agent(s) total.</p>
+    <p class="mt-1 text-xs text-muted">{summary.total} agent(s) total.</p>
   {/if}
 
-  <!-- Per-agent detail row: what this agent can DO (its advertised capability +
-       host-tool matrix) versus what its effective policy asks of it, and — the
-       point of the whole surface — the settings it will therefore ignore. -->
+  <!-- Per-agent detail panel: what this agent can DO (its advertised capability
+       + host-tool matrix) versus what its effective policy asks of it, and —
+       the point of the whole surface — the settings it will therefore ignore.
+       Rendered below the agents table, keyed by the expanded row. -->
   {#snippet agentDetail(a: AgentOut)}
     {@const caps = capsOf(a)}
-    <div class="flex flex-col gap-3 rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-800">
+    {#snippet toolNameCell(t: AgentAboutTool)}
+      {#if t.url}
+        <a class="text-accent-text underline" href={t.url} target="_blank" rel="noreferrer noopener">{t.name}</a>
+      {:else}
+        <span>{t.name}</span>
+      {/if}
+      <div class="text-muted">{orUnknown(t.purpose, "purpose not published")}</div>
+    {/snippet}
+    {#snippet toolVersionCell(t: AgentAboutTool)}
+      {@const cell = agentToolCell(t)}
+      <span class={ABOUT_TONE_CLASS[cell.tone]} title={cell.hint}>{cell.text}</span>
+    {/snippet}
+    {#snippet toolPathCellView(t: AgentAboutTool)}
+      {@const path = toolPathCell(t)}
+      <span class="break-all font-mono {ABOUT_TONE_CLASS[path.tone]}" title={path.hint}>{path.text}</span>
+    {/snippet}
+    {#snippet toolStatusCell(t: AgentAboutTool)}
+      <!-- The chip comes from ./hostTools, the SAME helper the capability row
+           uses: one verdict vocabulary, one set of tooltips, no third opinion
+           invented here. -->
+      {@const chip = toolChip(t.name, caps, a.tool_verdicts, toolMinimums)}
+      <span title={chip.title}><Badge tone={TOOL_CHIP_TONE[chip.tone]}>{t.verdict}{t.verdict === "outdated" ? " ⚠" : ""}</Badge></span>
+    {/snippet}
+    {#snippet modulePathCell(m: AgentAboutModule)}
+      <a class="break-all font-mono text-accent-text underline" href={m.url} target="_blank" rel="noreferrer noopener">{m.path}</a>
+    {/snippet}
+    {#snippet moduleVersionCell(m: AgentAboutModule)}
+      <span class="font-mono text-muted">{orUnknown(m.version, "version unknown")}</span>
+    {/snippet}
+
+    <div class="flex flex-col gap-3 rounded-control border border-border p-3 text-xs">
       <!-- Capability advertisement -->
       <div class="flex flex-wrap items-center gap-2">
-        <span class="font-medium text-slate-500">Capabilities</span>
+        <span class="font-medium text-muted">Capabilities</span>
         {#if caps === null}
-          <span class="text-slate-600 dark:text-slate-400">
+          <span class="text-muted">
             Not reported yet — an agent advertises its capabilities on its command
             poll (about a minute after it starts).
           </span>
         {:else}
           {#if caps.extract === true}
-            <span
-              class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-              title="This agent runs the content-extraction pass locally and ships the result with its replication events. Central never opens a file on an agent host.">
-              extraction{caps.extract_schema ? ` · schema ${caps.extract_schema}` : ""}
+            <span title="This agent runs the content-extraction pass locally and ships the result with its replication events. Central never opens a file on an agent host.">
+              <Badge tone="ok">extraction{caps.extract_schema ? ` · schema ${caps.extract_schema}` : ""}</Badge>
             </span>
           {:else}
-            <span
-              class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-              title="This agent advertises no extraction pass — either an older build, or extraction is unavailable on the host. Its items carry identity only (path/size/mtime/hashes).">
-              no extraction
+            <span title="This agent advertises no extraction pass — either an older build, or extraction is unavailable on the host. Its items carry identity only (path/size/mtime/hashes).">
+              <Badge>no extraction</Badge>
             </span>
           {/if}
           {#each CAPABILITY_TOOLS as tool (tool)}
@@ -1989,104 +2586,106 @@ ${detail}
                  and `unknown` is styled like neither good nor bad news because
                  an ffmpeg git build is usually the newest one in the fleet. -->
             {@const chip = toolChip(tool, caps, a.tool_verdicts, toolMinimums)}
-            <span
-              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {TOOL_CHIP_CLASS[chip.tone]}"
-              title={chip.title}>
-              <!-- The version stays INLINE rather than tooltip-only: it is the
-                   fact an operator compares across rows. -->
-              {chip.label}{chip.verdict === "outdated" ? " ⚠" : ""}
+            <!-- The version stays INLINE rather than tooltip-only: it is the
+                 fact an operator compares across rows. -->
+            <span title={chip.title}>
+              <Badge tone={TOOL_CHIP_TONE[chip.tone]}>{chip.label}{chip.verdict === "outdated" ? " ⚠" : ""}</Badge>
             </span>
           {/each}
           {#if caps.formats?.length}
-            <span class="text-slate-600 dark:text-slate-400">formats:</span>
+            <span class="text-muted">formats:</span>
             {#each caps.formats as f (f)}
-              <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{f}</span>
+              <Badge>{f}</Badge>
             {/each}
           {/if}
         {/if}
+      </div>
+
+      <!-- Health snapshot: the same lines the Online column's tooltip carries,
+           shown in full here so they are readable without hovering. -->
+      <div class="border-t border-border pt-2">
+        <span class="font-medium text-muted">Health</span>
+        <ul class="mt-1 flex flex-col gap-0.5 text-muted">
+          {#each healthTitle(a).split("\n") as line, i (i)}
+            <li>{line}</li>
+          {/each}
+        </ul>
       </div>
 
       <!-- Configuration-group membership. A FULL-REPLACE editor: tick the
            groups this agent should be in and save once. Global is shown ticked
            and disabled because membership in it is implicit — there are no join
            rows for it and the endpoint 400s if its id is submitted. -->
-      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+      <div class="border-t border-border pt-2">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="font-medium text-slate-500">Configuration groups</span>
-          <span class="text-slate-600 dark:text-slate-400">
+          <span class="font-medium text-muted">Configuration groups</span>
+          <span class="text-muted">
             applied in priority order, lowest first — the last group to set a key wins it
           </span>
         </div>
         <div class="mt-1.5 flex flex-wrap gap-2">
           {#each groups as g (g.id)}
-            <label
-              class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
+            <Checkbox
+              size="sm"
+              class="rounded-control border border-border px-2 py-1"
+              label={g.name}
+              description={g.is_system ? `p${g.priority} · always` : `p${g.priority}`}
               title={g.is_system
                 ? "The permanent Global group. Every agent is a member and it always applies first, so it is the fleet-wide baseline every other group overrides. It cannot be left."
-                : `Priority ${g.priority} — a higher priority applies later and wins any key it sets. ${g.member_count} member agent(s).`}>
-              <input
-                type="checkbox"
-                checked={g.is_system || memberIds(a).includes(g.id)}
-                disabled={g.is_system || savingMembers[a.id] || a.status === "revoked"}
-                onchange={(e) => toggleMembership(a, g.id, e.currentTarget.checked)} />
-              <span>{g.name}</span>
-              <span class="tabular-nums text-slate-600 dark:text-slate-400">p{g.priority}</span>
-              {#if g.is_system}
-                <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">always</span>
-              {/if}
-            </label>
+                : `Priority ${g.priority} — a higher priority applies later and wins any key it sets. ${g.member_count} member agent(s).`}
+              checked={g.is_system || memberIds(a).includes(g.id)}
+              disabled={g.is_system || savingMembers[a.id] || a.status === "revoked"}
+              onchange={(e) => toggleMembership(a, g.id, e.currentTarget.checked)} />
           {/each}
         </div>
         {#if membersDirty(a)}
           <div class="mt-1.5 flex items-center gap-2">
-            <button
-              class="rounded-lg bg-[var(--accent)] px-2 py-1 text-[11px] text-[var(--accent-fg)] disabled:opacity-50"
-              disabled={savingMembers[a.id]}
-              onclick={() => saveMembership(a)}>
+            <Button size="sm" variant="primary" disabled={savingMembers[a.id]} onclick={() => saveMembership(a)}>
               {savingMembers[a.id] ? "Saving…" : "Save membership"}
-            </button>
-            <button
-              class="text-[11px] text-slate-500"
-              onclick={() => delete memberDraft[a.id]}>discard</button>
+            </Button>
+            <Button size="sm" variant="ghost" onclick={() => delete memberDraft[a.id]}>discard</Button>
           </div>
+        {/if}
+        {#if memberErr[a.id]}
+          <Alert tone="danger" class="mt-1.5" onDismiss={() => (memberErr[a.id] = "")}>{memberErr[a.id]}</Alert>
         {/if}
       </div>
 
       <!-- Effective extraction policy + the ignored-settings verdict -->
-      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
-        <span class="font-medium text-slate-500">Effective content-extraction settings</span>
+      <div class="border-t border-border pt-2">
+        <span class="font-medium text-muted">Effective content-extraction settings</span>
         {#if effLoading[a.id]}
-          <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
+          <StateBlock state="loading" compact message="Loading the effective configuration…" />
         {:else if effError[a.id]}
-          <p class="mt-1 text-red-600">Could not load the effective configuration: {effError[a.id]}</p>
+          <StateBlock
+            state="error"
+            compact
+            message="Could not load the effective configuration: {effError[a.id]}"
+            onRetry={() => loadEffective(a.id)} />
         {:else if effective[a.id]}
           {@const eff = effective[a.id]}
           {@const merged = policyOf(eff)}
           {@const ignored = ignoredPolicySettings(merged, caps)}
           <div class="mt-1 flex flex-wrap gap-x-5 gap-y-1">
             {#each EXTRACTION_FIELDS as f (f.key)}
-              <span class="text-slate-500">
-                <code class="font-mono text-[11px]">{f.key}</code>
-                <b class="text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[f.key])}</b>
-                <span class="text-slate-600 dark:text-slate-400">
-                  ({provenanceFor(eff.provenance, eff.groups, "policy", f.key)})
-                </span>
+              <span class="text-muted">
+                <code class="font-mono text-2xs">{f.key}</code>
+                <b class="text-fg">{fmtPolicyValue(merged[f.key])}</b>
+                <span>({provenanceFor(eff.provenance, eff.groups, "policy", f.key)})</span>
               </span>
             {/each}
           </div>
           {#if ignored.length}
             <div class="mt-2 flex flex-wrap items-center gap-2">
-              <span class="text-slate-500">This agent will ignore:</span>
+              <span class="text-muted">This agent will ignore:</span>
               {#each ignored as ig (ig.key)}
-                <span
-                  class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                  title={`${ig.key} is set in this agent's effective configuration, but ${ig.reason}. The agent logs the ignored setting once and carries on.`}>
-                  {ig.key} — {ig.reason}
+                <span title={`${ig.key} is set in this agent's effective configuration, but ${ig.reason}. The agent logs the ignored setting once and carries on.`}>
+                  <Badge tone="warn">{ig.key} — {ig.reason}</Badge>
                 </span>
               {/each}
             </div>
           {:else if caps !== null}
-            <p class="mt-2 text-emerald-600 dark:text-emerald-400">
+            <p class="mt-2 text-ok">
               Nothing in this agent's effective configuration is beyond what it advertises.
             </p>
           {/if}
@@ -2094,33 +2693,34 @@ ${detail}
       </div>
 
       <!-- The FULL effective configuration: every merged key with the group and
-           version that supplied it. Opt-in inside an already-expanded row —
+           version that supplied it. Opt-in inside an already-expanded panel —
            ~40 keys with badges is a wall, and the extraction summary above
            answers the common question on its own. -->
       {#if effective[a.id]}
         {@const eff = effective[a.id]}
-        <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+        <div class="border-t border-border pt-2">
           <div class="flex flex-wrap items-center gap-2">
-            <button
-              class="font-medium text-[var(--accent)]"
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={!!effFull[a.id]}
               title="Every key of the document this agent receives on its next poll, after all of its groups have been merged — with the group and version each value came from."
               onclick={() => (effFull[a.id] = !effFull[a.id])}>
-              {effFull[a.id] ? "▾" : "▸"} Effective configuration
-            </button>
-            <span class="text-slate-600 dark:text-slate-400" title="The delivered generation: max(version seq) across the group snapshots that composed this document. The agent echoes it back on its next poll.">
-              generation <b class="tabular-nums text-slate-600 dark:text-slate-300">{eff.generation}</b>
+              <span aria-hidden="true">{effFull[a.id] ? "▾" : "▸"}</span> Effective configuration
+            </Button>
+            <span class="text-muted" title="The delivered generation: max(version seq) across the group snapshots that composed this document. The agent echoes it back on its next poll.">
+              generation <b class="tabular-nums text-fg">{eff.generation}</b>
             </span>
             {#if eff.confirmed_generation !== eff.generation}
-              <span
-                class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                title={`This agent last confirmed generation ${eff.confirmed_generation ?? "none"}. A poll (~1 min) or an offline agent explains a brief lag; a persistent one means it is not reaching central.`}>
-                agent has not confirmed latest (at {eff.confirmed_generation ?? "none"})
+              <span title={`This agent last confirmed generation ${eff.confirmed_generation ?? "none"}. A poll (~1 min) or an offline agent explains a brief lag; a persistent one means it is not reaching central.`}>
+                <Badge tone="warn">agent has not confirmed latest (at {eff.confirmed_generation ?? "none"})</Badge>
               </span>
             {:else}
-              <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-                title="The agent has echoed back this exact generation, so what is shown below is what it is running.">confirmed</span>
+              <span title="The agent has echoed back this exact generation, so what is shown below is what it is running.">
+                <Badge tone="ok">confirmed</Badge>
+              </span>
             {/if}
-            <span class="font-mono text-slate-600 dark:text-slate-400" title="First 12 hex of the sha256 over the canonical document — the same hash that rides the delivery ETag.">{eff.hash}</span>
+            <span class="font-mono text-muted" title="First 12 hex of the sha256 over the canonical document — the same hash that rides the delivery ETag.">{eff.hash}</span>
           </div>
 
           {#if effFull[a.id]}
@@ -2133,13 +2733,11 @@ ${detail}
             <!-- Contributing layers, in merge order. Naming them (and their
                  versions) is what makes a surprising value traceable. -->
             <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
-              <span class="text-slate-500">Layers:</span>
+              <span class="text-muted">Layers:</span>
               {#each eff.groups as g, i (g.id)}
-                {#if i > 0}<span class="text-slate-600 dark:text-slate-400">→</span>{/if}
-                <span
-                  class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                  title={`Priority ${g.priority}, version ${g.version_used}${g.via_rollout ? " — delivered by a phased rollout this agent's bucket is covered by, so other members of the same group may still be on the previous version" : ""}.`}>
-                  {g.name} v{g.version_used}{g.via_rollout ? " · rollout" : ""}
+                {#if i > 0}<span class="text-muted" aria-hidden="true">→</span>{/if}
+                <span title={`Priority ${g.priority}, version ${g.version_used}${g.via_rollout ? " — delivered by a phased rollout this agent's bucket is covered by, so other members of the same group may still be on the previous version" : ""}.`}>
+                  <Badge>{g.name} v{g.version_used}{g.via_rollout ? " · rollout" : ""}</Badge>
                 </span>
               {/each}
             </div>
@@ -2147,16 +2745,14 @@ ${detail}
             {#each POLICY_SECTIONS as section (section.id)}
               {@const fields = POLICY_FIELDS.filter((f) => f.section === section.id)}
               <div class="mt-2">
-                <span class="font-medium text-slate-500">{section.label}</span>
+                <span class="font-medium text-muted">{section.label}</span>
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each fields as f (f.key)}
                     <div class="flex flex-wrap items-baseline gap-1.5">
-                      <code class="font-mono text-[11px] text-slate-500">{f.key}</code>
-                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[f.key])}</b>
-                      <span
-                        class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                        title="The group version that supplied this value. 'built-in default' means no group sets the key, so the agent's own default applies.">
-                        {provenanceFor(eff.provenance, eff.groups, "policy", f.key)}
+                      <code class="font-mono text-2xs text-muted">{f.key}</code>
+                      <b class="break-all text-fg">{fmtPolicyValue(merged[f.key])}</b>
+                      <span title="The group version that supplied this value. 'built-in default' means no group sets the key, so the agent's own default applies.">
+                        <Badge>{provenanceFor(eff.provenance, eff.groups, "policy", f.key)}</Badge>
                       </span>
                       {#if ignoredKeys.has(f.key)}
                         {@render notEnforced(`This agent cannot honour ${f.key} — see the ignored-settings chips above.`)}
@@ -2169,16 +2765,14 @@ ${detail}
 
             {#if extraPolicyKeys(eff).length}
               <div class="mt-2">
-                <span class="font-medium text-slate-500">Other delivered keys</span>
-                <span class="text-slate-600 dark:text-slate-400"> — set by a group but not modelled by this console</span>
+                <span class="font-medium text-muted">Other delivered keys</span>
+                <span class="text-muted"> — set by a group but not modelled by this console</span>
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each extraPolicyKeys(eff) as key (key)}
                     <div class="flex flex-wrap items-baseline gap-1.5">
-                      <code class="font-mono text-[11px] text-slate-500">{key}</code>
-                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(merged[key])}</b>
-                      <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                        {provenanceFor(eff.provenance, eff.groups, "policy", key)}
-                      </span>
+                      <code class="font-mono text-2xs text-muted">{key}</code>
+                      <b class="break-all text-fg">{fmtPolicyValue(merged[key])}</b>
+                      <Badge>{provenanceFor(eff.provenance, eff.groups, "policy", key)}</Badge>
                     </div>
                   {/each}
                 </div>
@@ -2187,19 +2781,17 @@ ${detail}
 
             <!-- The settings half, delivered under the document's `group` key. -->
             <div class="mt-2">
-              <span class="font-medium text-slate-500">Group settings</span>
-              <span class="text-slate-600 dark:text-slate-400"> — delivered under <code class="font-mono">group</code></span>
+              <span class="font-medium text-muted">Group settings</span>
+              <span class="text-muted"> — delivered under <code class="font-mono">group</code></span>
               {#if Object.keys(settingsOf(eff)).length === 0}
-                <p class="mt-1 text-slate-600 dark:text-slate-400">No group supplies any settings — the agent uses its own configuration.</p>
+                <p class="mt-1 text-muted">No group supplies any settings — the agent uses its own configuration.</p>
               {:else}
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each Object.entries(settingsOf(eff)) as [key, value] (key)}
                     <div class="flex flex-wrap items-baseline gap-1.5">
-                      <code class="font-mono text-[11px] text-slate-500">{key}</code>
-                      <b class="break-all text-slate-700 dark:text-slate-200">{fmtPolicyValue(value)}</b>
-                      <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                        {provenanceFor(eff.provenance, eff.groups, "settings", key)}
-                      </span>
+                      <code class="font-mono text-2xs text-muted">{key}</code>
+                      <b class="break-all text-fg">{fmtPolicyValue(value)}</b>
+                      <Badge>{provenanceFor(eff.provenance, eff.groups, "settings", key)}</Badge>
                     </div>
                   {/each}
                 </div>
@@ -2214,51 +2806,55 @@ ${detail}
            the opt-in wide backfill, sitting next to the row action they modify.
            Left blank they are absent from the request and the defect band
            applies, which is what the overwhelming majority of runs want. -->
-      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
-        <div class="flex flex-wrap items-center gap-2">
+      <div class="border-t border-border pt-2">
+        <div class="flex flex-wrap items-end gap-3">
           <span
-            class="font-medium text-slate-500"
+            class="font-medium text-muted"
             title="Bounds for this agent's 're-hash' action. The default is the defect band — files between 65,537 and 131,072 bytes, the only sizes the pre-2026-07-18 hasher got wrong. A file of 65,536 bytes or less was already hashed in full and is correct; above 131,072 bytes the hash was sampled then and is sampled now, so neither is worth re-reading.">
             Re-hash band
           </span>
-          <label class="text-slate-500">
-            min
-            <input
-              type="number" min="1" max="131072" placeholder="65537"
-              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+          <Field label="min" class="w-28">
+            <Input
+              size="sm"
+              type="number"
+              min="1"
+              max="131072"
+              placeholder="65537"
               bind:value={
                 () => bandOf(a.id).min,
                 (v) => (rehashBand[a.id] = { ...bandOf(a.id), min: String(v ?? "") })
               } />
-          </label>
-          <label class="text-slate-500">
-            max
-            <input
-              type="number" min="1" max="131072" placeholder="131072"
-              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+          </Field>
+          <Field label="max" class="w-28">
+            <Input
+              size="sm"
+              type="number"
+              min="1"
+              max="131072"
+              placeholder="131072"
               bind:value={
                 () => bandOf(a.id).max,
                 (v) => (rehashBand[a.id] = { ...bandOf(a.id), max: String(v ?? "") })
               } />
-          </label>
-          <label
-            class="text-slate-500"
-            title="Stop after this many candidate files and leave the cursor there; the next run resumes from it. Leave blank to sweep the whole band in one command.">
-            max files
-            <input
-              type="number" min="1" placeholder="all"
-              class="ml-1 w-24 rounded border border-slate-300 px-1 py-0.5 text-[11px] dark:border-slate-700 dark:bg-slate-900"
+          </Field>
+          <Field label="max files" class="w-28">
+            <Input
+              size="sm"
+              type="number"
+              min="1"
+              placeholder="all"
+              title="Stop after this many candidate files and leave the cursor there; the next run resumes from it. Leave blank to sweep the whole band in one command."
               bind:value={
                 () => bandOf(a.id).items,
                 (v) => (rehashBand[a.id] = { ...bandOf(a.id), items: String(v ?? "") })
               } />
-          </label>
-          <span class="text-[11px] text-slate-600 dark:text-slate-400">
-            Widening the floor to 1 runs the separate small-file content-hash
-            backfill instead — roughly ten times the reads, for exact identity on
-            files that were never mis-hashed. Not the default for that reason.
-          </span>
+          </Field>
         </div>
+        <p class="mt-1 text-2xs text-muted">
+          Widening the floor to 1 runs the separate small-file content-hash
+          backfill instead — roughly ten times the reads, for exact identity on
+          files that were never mis-hashed. Not the default for that reason.
+        </p>
       </div>
 
       <!-- About / versions: what this agent IS, as opposed to what it can do.
@@ -2266,30 +2862,37 @@ ${detail}
            is long, and it answers a deliberate investigation ("which exiftool
            is actually on that box, and how old is it") rather than the
            at-a-glance question the chips at the top already answer. -->
-      <div class="border-t border-slate-100 pt-2 dark:border-slate-800/60">
+      <div class="border-t border-border pt-2">
         <div class="flex flex-wrap items-center gap-2">
-          <button
-            class="font-medium text-[var(--accent)]"
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-expanded={!!aboutOpen[a.id]}
             title="This agent's build stack, its Go module dependencies, and its host tools with version, resolved path and how each measures up to the recommended minimum. All self-reported on its command poll — central never queries an agent."
             onclick={() => toggleAbout(a)}>
-            {aboutOpen[a.id] ? "▾" : "▸"} About / versions
-          </button>
+            <span aria-hidden="true">{aboutOpen[a.id] ? "▾" : "▸"}</span> About / versions
+          </Button>
           {#if about[a.id]}
-            <button
-              class="text-[11px] text-slate-500"
+            <Button
+              size="sm"
+              variant="ghost"
               title="Copy the whole report as a Markdown table — paste it straight into a bug report."
-              onclick={() => copyAbout(a)}>Copy as Markdown</button>
+              onclick={() => copyAbout(a)}>Copy as Markdown</Button>
             {#if aboutCopied === a.id}
-              <span class="text-[11px] text-[var(--accent)]">copied</span>
+              <span class="text-2xs text-accent-text" role="status">copied</span>
             {/if}
           {/if}
         </div>
 
         {#if aboutOpen[a.id]}
           {#if aboutLoading[a.id]}
-            <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
+            <StateBlock state="loading" compact message="Loading this agent's About report…" />
           {:else if aboutError[a.id]}
-            <p class="mt-1 text-red-600">Could not load this agent's About report: {aboutError[a.id]}</p>
+            <StateBlock
+              state="error"
+              compact
+              message="Could not load this agent's About report: {aboutError[a.id]}"
+              onRetry={() => loadAbout(a)} />
           {:else if about[a.id]}
             {@const rep = about[a.id]}
             {@const mods = modulesSummary(rep)}
@@ -2297,7 +2900,7 @@ ${detail}
               <!-- Not an error and not zeros: an enrolled agent that has not
                    polled yet genuinely has nothing to report, and saying so is
                    a different statement from "everything is absent". -->
-              <p class="mt-1 text-slate-600 dark:text-slate-400">
+              <p class="mt-1 text-muted">
                 This agent has never sent a capability advertisement — it has not polled
                 yet (a fresh enrollment), or it runs a build older than the capability
                 channel. Nothing below is missing; there is nothing yet to report.
@@ -2308,8 +2911,8 @@ ${detail}
             <div class="mt-2 grid gap-x-6 gap-y-1 md:grid-cols-2">
               {#each buildRows(rep) as row (row.label)}
                 <div class="flex flex-wrap items-baseline gap-1.5" title={row.hint}>
-                  <span class="text-slate-500">{row.label}</span>
-                  <b class="break-all font-mono text-[11px] text-slate-700 dark:text-slate-200">{row.value}</b>
+                  <span class="text-muted">{row.label}</span>
+                  <b class="break-all font-mono text-2xs text-fg">{row.value}</b>
                 </div>
               {/each}
             </div>
@@ -2323,13 +2926,14 @@ ${detail}
             {@const rehash = rehashCell(rep)}
             <div class="mt-3 flex flex-wrap items-baseline gap-1.5">
               <span
-                class="text-slate-500"
+                class="text-muted"
                 title="The 2026-07-18 fix corrected a defect where a file between 64 KiB and 128 KiB had only its first 64 KiB hashed, so different files with matching headers looked like duplicates. Stored hashes were NOT corrected by that fix: this agent's scan re-hashes a file only when its size or modification time changes, so a stable file in that band keeps its wrong hash until this migration runs.">
                 Hash migration
               </span>
-              <b class="{ABOUT_TONE_CLASS[rehash.tone]}" title={rehash.hint}>{rehash.text}</b>
+              <b class={ABOUT_TONE_CLASS[rehash.tone]} title={rehash.hint}>{rehash.text}</b>
               {#if rep.rehash?.fp}
-                <span class="font-mono text-[11px] text-slate-600 dark:text-slate-400"
+                <span
+                  class="font-mono text-2xs text-muted"
                   title="The scheme and size band this cursor belongs to. A repeat sweep at the same fingerprint short-circuits; changing the band, or a future change to the hashing itself, invalidates it and re-sweeps.">{rep.rehash.fp}</span>
               {/if}
             </div>
@@ -2337,56 +2941,24 @@ ${detail}
             <!-- Host tools: version · location · verdict. The three things the
                  boolean matrix above cannot say. -->
             <div class="mt-3">
-              <span class="font-medium text-slate-500">Host tools on this agent</span>
-              <span class="text-slate-600 dark:text-slate-400">
+              <span class="font-medium text-muted">Host tools on this agent</span>
+              <span class="text-muted">
                 — the resolved path is which copy the agent will actually run; the agent
                 only ever resolves tools from machine-wide, admin-writable locations
               </span>
-              {#if rep.host_tools.length === 0}
-                <p class="mt-1 text-slate-600 dark:text-slate-400">Not reported.</p>
-              {:else}
-                <div class="mt-1 overflow-x-auto">
-                  <table class="w-full min-w-[46rem] text-[11px]">
-                    <thead class="text-left text-slate-500">
-                      <tr class="border-b border-slate-200 dark:border-slate-800">
-                        <th class="py-1 pr-3 font-medium">Tool</th>
-                        <th class="py-1 pr-3 font-medium">Version</th>
-                        <th class="py-1 pr-3 font-medium">Location</th>
-                        <th class="py-1 font-medium">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800/60">
-                      {#each rep.host_tools as t (t.name)}
-                        <!-- The chip comes from ./hostTools, the SAME helper the
-                             row above uses: one verdict vocabulary, one set of
-                             tooltips, no third opinion invented here. -->
-                        {@const chip = toolChip(t.name, caps, a.tool_verdicts, toolMinimums)}
-                        {@const cell = agentToolCell(t)}
-                        {@const path = toolPathCell(t)}
-                        <tr class="align-top">
-                          <td class="py-1 pr-3">
-                            {#if t.url}
-                              <a class="text-[var(--accent)]" href={t.url} target="_blank" rel="noreferrer noopener">{t.name}</a>
-                            {:else}
-                              <span>{t.name}</span>
-                            {/if}
-                            <div class="text-slate-600 dark:text-slate-400">{orUnknown(t.purpose, "purpose not published")}</div>
-                          </td>
-                          <td class="py-1 pr-3 {ABOUT_TONE_CLASS[cell.tone]}" title={cell.hint}>{cell.text}</td>
-                          <td class="py-1 pr-3 font-mono break-all {ABOUT_TONE_CLASS[path.tone]}" title={path.hint}>{path.text}</td>
-                          <td class="py-1">
-                            <span
-                              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {TOOL_CHIP_CLASS[chip.tone]}"
-                              title={chip.title}>
-                              {t.verdict}{t.verdict === "outdated" ? " ⚠" : ""}
-                            </span>
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </div>
-              {/if}
+              <DataTable
+                class="mt-1"
+                caption="Host tools on {a.name}"
+                captionHidden
+                columns={[
+                  { key: "name", label: "Tool", cell: toolNameCell },
+                  { key: "version", label: "Version", cell: toolVersionCell },
+                  { key: "path", label: "Location", cell: toolPathCellView },
+                  { key: "verdict", label: "Status", cell: toolStatusCell },
+                ]}
+                rows={rep.host_tools}
+                rowKey={(t) => t.name}
+                emptyMessage="Not reported. The agent sends its host tools with its capability advertisement on its next poll." />
             </div>
 
             <!-- Go modules: collapsed by default (it is ~120 rows), and when the
@@ -2394,38 +2966,29 @@ ${detail}
                  than rendering an empty table that reads as "no dependencies". -->
             <div class="mt-3">
               <div class="flex flex-wrap items-center gap-2">
-                <button
-                  class="font-medium text-[var(--accent)] disabled:opacity-50"
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-expanded={!!modulesOpen[a.id]}
                   disabled={!rep.modules?.length}
                   title="Every Go module linked into this agent binary. A Go binary is statically linked, so this list IS what is running — not a manifest of what was requested."
                   onclick={() => (modulesOpen[a.id] = !modulesOpen[a.id])}>
-                  {modulesOpen[a.id] ? "▾" : "▸"} Go modules
-                </button>
-                <span class="{ABOUT_TONE_CLASS[mods.tone]}" title={mods.hint}>{mods.text}</span>
+                  <span aria-hidden="true">{modulesOpen[a.id] ? "▾" : "▸"}</span> Go modules
+                </Button>
+                <span class={ABOUT_TONE_CLASS[mods.tone]} title={mods.hint}>{mods.text}</span>
               </div>
               {#if modulesOpen[a.id] && rep.modules?.length}
-                <div class="mt-1 max-h-80 overflow-y-auto">
-                  <div class="overflow-x-auto"><table class="w-full text-[11px]">
-                    <thead class="text-left text-slate-500">
-                      <tr class="border-b border-slate-200 dark:border-slate-800">
-                        <th class="py-1 pr-3 font-medium">Module</th>
-                        <th class="py-1 font-medium">Version</th>
-                      </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100 dark:divide-slate-800/60">
-                      {#each rep.modules as m (m.path)}
-                        <tr>
-                          <td class="py-1 pr-3 font-mono break-all">
-                            <a class="text-[var(--accent)]" href={m.url} target="_blank" rel="noreferrer noopener">{m.path}</a>
-                          </td>
-                          <td class="py-1 font-mono text-slate-600 dark:text-slate-300">
-                            {orUnknown(m.version, "version unknown")}
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table></div>
-                </div>
+                <ScrollRegion label="Go modules of {a.name}" class="mt-1 max-h-80">
+                  <DataTable
+                    caption="Go modules of {a.name}"
+                    captionHidden
+                    columns={[
+                      { key: "path", label: "Module", cell: modulePathCell },
+                      { key: "version", label: "Version", cell: moduleVersionCell },
+                    ]}
+                    rows={rep.modules}
+                    rowKey={(m) => m.path} />
+                </ScrollRegion>
               {/if}
             </div>
           {/if}
@@ -2440,7 +3003,7 @@ ${detail}
        in one response. Defined as a snippet here, rendered at the end. -->
   {#snippet registeredAgents()}
     <h3 class="mt-8 font-medium">Registered agents</h3>
-    <p class="mt-1 text-xs text-slate-500">
+    <p class="mt-1 text-xs text-muted">
       Every agent is in the permanent <b>Global</b> group plus any configuration
       groups you add it to. They layer in priority order — the lowest priority
       applies first and the last group to set a key wins it — so a value shown in
@@ -2448,214 +3011,63 @@ ${detail}
       <b>details</b> to change its membership and to read its merged, per-key
       effective configuration. Changes land on the agent's next poll.
     </p>
-    {#if agentsTotal === 0}
-      <p class="py-2 text-slate-600 dark:text-slate-400">No agents registered.</p>
-    {:else}
-      <div class="mt-1 overflow-x-auto">
-        <table class="w-full min-w-[64rem] text-sm">
-          <thead class="text-left text-slate-500">
-            <tr class="border-b border-slate-200 dark:border-slate-800">
-              <th class="py-2 pr-3 font-medium">Name</th>
-              <th class="py-2 pr-3 font-medium">Hostname</th>
-              <th class="py-2 pr-3 font-medium">Platform</th>
-              <th class="py-2 pr-3 font-medium">Status</th>
-              <th class="py-2 pr-3 font-medium">Online</th>
-              <th
-                class="py-2 pr-3 font-medium"
-                title="The configuration groups this agent belongs to, in merge order (lowest priority first). Global is implicit on every agent and is not listed. Edit membership in the row's details panel — an agent can be in any number of groups and they layer per key.">
-                Config groups
-              </th>
-              <th class="py-2 pr-3 font-medium">Version</th>
-              <th class="py-2 text-right font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-          {#each agents as a (a.id)}
-            <tr class="align-middle">
-              <td class="py-2 pr-3 font-medium">{a.name}</td>
-              <td class="py-2 pr-3 font-mono text-xs text-slate-500">{a.hostname}</td>
-              <td class="py-2 pr-3 text-slate-500">{a.platform}</td>
-              <td class="py-2 pr-3">
-                <span class="rounded-full px-2 py-0.5 text-xs font-medium {statusClass(a.status)}">{a.status}</span>
-              </td>
-              <td class="py-2 pr-3">
-                {#if isOnline(a)}
-                  <span class="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400" title={healthTitle(a)}>
-                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>online
-                    <span class="tabular-nums text-slate-600 dark:text-slate-400" title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">· {relTime(a.last_seen_at)}</span>
-                  </span>
-                {:else}
-                  <span class="inline-flex items-center gap-1 text-xs text-slate-500" title={healthTitle(a)}>
-                    <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>{relTime(a.last_seen_at)}
-                  </span>
-                {/if}
-                {#if a.health?.suspended}
-                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                    title="Operator-suspended: this agent is not scanning or replicating (self-reported at its last check-in). It still polls for commands — resume it with the actions on the right.">suspended</span>
-                {/if}
-                {#if sweeping.has(a.id)}
-                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
-                    title="A re-extract sweep is queued or running: the agent is re-running extraction over its existing index and re-emitting the metadata. It resumes across restarts, so this can stay up for hours on a large library.">re-extracting</span>
-                {/if}
-                {#if rehashing.has(a.id)}
-                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
-                    title="A hash migration is queued or running: the agent is re-reading every indexed file in the 64-128 KiB band to correct hashes computed before the 2026-07-18 fix. Expect sustained disk/network I/O on that machine; it resumes across restarts, so this can stay up for hours.">re-hashing</span>
-                {/if}
-                {#if a.health?.central_maintenance}
-                  <span class="ml-1 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                    title="This agent observed central's maintenance mode and paused its replication push; local scanning continues and its backlog drains when maintenance ends.">backing off</span>
-                {/if}
-                {#if a.health?.local_scan_paused}
-                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                    title="An operator paused scanning from THIS AGENT's own web UI (allowed by the local_scan_control policy key). Replication is unaffected. Resume it there, or revoke the permission here — the central Suspend action is a separate, stronger hold that a local resume cannot lift.">paused locally</span>
-                {/if}
-                {#if a.health?.local_overrides}
-                  <span class="ml-1 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
-                    title={healthTitle(a)}>local settings</span>
-                {/if}
-                {#if shareMapRejects(a) > 0}
-                  <span class="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                    title="This agent skipped one or more malformed share-map entries, so those scan roots report no network location. A bad entry is never fatal (share hints are best-effort), which is why it needs saying here. Fix FILEARR_AGENT_SHARE_MAP where the agent is deployed, or the mapping in the agent's own roots editor.">share map errors</span>
-                {/if}
-                {#if a.last_auth_mode === "mtls"}
-                  <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                    title="Central verified this agent's last authenticated request via the mTLS proxy path (client-certificate SAN identity) — observed server-side, not self-reported.">mTLS</span>
-                {:else if a.last_auth_mode === "bearer"}
-                  <span class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                    title="This agent's last authenticated request used the interim bearer (fingerprint) path — it has not been switched to the mTLS endpoint yet. See the mode-flip runbook (docs: TLS).">bearer</span>
-                {/if}
-              </td>
-              <!-- NAMES, not a picker: an agent can be in many groups, so the
-                   cell reports and the details panel edits. Global is left out
-                   deliberately — it is on every row, so printing it on every row
-                   is noise; the effective-config viewer names it where the
-                   provenance actually matters. -->
-              <td class="py-2 pr-3">
-                {#each groupsOf(a) as g (g.id)}
-                  <span
-                    class="mr-1 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                    title={`Priority ${g.priority} — a higher priority applies later and wins the keys it sets. Current version ${g.current_version}.`}>
-                    {g.name}
-                  </span>
-                {:else}
-                  <span class="text-[11px] text-slate-600 dark:text-slate-400" title="This agent is only in the implicit Global group, so it receives the fleet-wide baseline and nothing else.">Global only</span>
-                {/each}
-              </td>
-              <td class="py-2 pr-3 text-slate-500">
-                <span class="font-mono text-xs">{a.agent_version ?? "—"}</span>
-                {#if a.update_pending}
-                  <span
-                    class="ml-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                    title={`Updating to ${a.update_target ?? "the current central version"} at its next check-in`}
-                    >update queued</span>
-                {:else if a.update_available && a.capabilities?.container}
-                  <span
-                    class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                    title={`A newer agent build exists (${a.update_target}). This agent runs in a container, which updates by pulling the new agent image on its host — central never swaps binaries inside a container.`}
-                    >newer image available</span>
-                {:else if a.update_available && a.update_hold}
-                  <span
-                    class="ml-1 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                    title={`${a.update_target} is available but this agent's policy holds it: ${a.update_hold}. The update action still applies it immediately (the click is the authorization).`}>update held</span>
-                {:else if a.update_available}
-                  <span
-                    class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                    title={`Central offers ${a.update_target}`}>update available</span>
-                {/if}
-              </td>
-              <td class="py-2 text-right whitespace-nowrap">
-                <button
-                  class="text-slate-600 dark:text-slate-300"
-                  title="Show what this agent can actually do (advertised capabilities + host tools) and which of its effective policy settings it will ignore."
-                  onclick={() => toggleDetail(a)}>{expanded === a.id ? "hide" : "details"}</button>
-                {#if a.status !== "revoked"}
-                  {#if a.update_available && !a.update_pending && !a.capabilities?.container}
-                    <button
-                      class="ml-3 text-sky-600 disabled:opacity-50 dark:text-sky-400"
-                      disabled={updating[a.id]}
-                      title={`Queue an update to ${a.update_target} — applied at the agent's next check-in (~1 min)`}
-                      onclick={() => updateAgentNow(a.id, a.name)}>update</button>
-                  {/if}
-                  <button
-                    class="ml-3 text-amber-600 disabled:opacity-50 dark:text-amber-400"
-                    disabled={suspending[a.id]}
-                    title={a.health?.suspended
-                      ? "Queue a resume — the agent restarts scanning + replication at its next check-in (~1 min)"
-                      : "Queue a suspend — the agent stops scanning + replicating at its next check-in (~1 min); it keeps checking in so it can be resumed"}
-                    onclick={() => toggleSuspend(a)}>{a.health?.suspended ? "resume" : "suspend"}</button>
-                  <button
-                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
-                    disabled={maintaining[a.id]}
-                    title="Queue a local maintenance pass: compact the agent's index (VACUUM), prune already-replicated outbox rows, sweep stale temp files. Runs at its next check-in; the result appears in the command history."
-                    onclick={() => maintainAgent(a)}>maintain</button>
-                  <button
-                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
-                    disabled={reconciling[a.id]}
-                    title="Queue an immediate full-manifest consistency sweep: the agent checks each root's complete index against central and re-syncs any drift (deletions missed while offline included). Normally automatic — the agent also catches up at startup when its last sweep is overdue — this is the run-it-now handle. Sets the 'Last reconcile' watermark that gates recycle-bin purge of this agent's items."
-                    onclick={() => reconcileNow(a)}>{reconciling[a.id] ? "queuing…" : "reconcile"}</button>
-                  <button
-                    class="ml-3 text-slate-600 disabled:opacity-50 dark:text-slate-300"
-                    disabled={inventorying[a.id]}
-                    title="Queue one host inventory run now — the same command the group schedule fires: this agent's effective group collectors (stat / owner / perms / permissions …) over the group's paths or preset. Permission snapshots, the drift report and the item-detail Permissions section all come from this. Runs at the agent's next check-in (~1 min); the result appears in the command history."
-                    onclick={() => inventoryNow(a)}>{inventorying[a.id] ? "queuing…" : "inventory"}</button>
-                  <button
-                    class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
-                    disabled={reextracting[a.id] || sweeping.has(a.id)}
-                    title="Re-run extraction across this agent's EXISTING index and re-emit the metadata — the catch-up for items scanned before extraction (or before ffprobe/exiftool/poppler/tesseract) was available on that host. Only extracted metadata is re-sent; file contents never leave the agent. Resumable, and a repeat run at an unchanged extraction configuration does nothing."
-                    onclick={() => reextract(a)}>{sweeping.has(a.id) ? "sweeping…" : "re-extract"}</button>
-                  <!-- QH-T6, next to re-extract because they are the same SHAPE
-                       of action (an hours-long resumable sweep of the agent's
-                       existing index) even though they repair different things.
-                       The band/max_items knobs live in the expanded detail row:
-                       the default IS the answer for almost everyone, and putting
-                       three number boxes in a table cell would imply otherwise. -->
-                  <button
-                    class="ml-3 text-violet-600 disabled:opacity-50 dark:text-violet-400"
-                    disabled={rehashingNow[a.id] || rehashing.has(a.id)}
-                    title="Re-read every indexed file between 64 KiB and 128 KiB on this agent and correct its hashes. Files in that band were under-hashed before 2026-07-18 (only the first 64 KiB was read), which produced false duplicate detections; the agent's ordinary scan will never revisit them, because their size and modification time have not changed. Re-reads whole files for hours — only the rows whose hash is actually wrong are re-sent, and file contents never leave the agent. Open 'details' to change the size band."
-                    onclick={() => rehashSweep(a)}>{rehashing.has(a.id) ? "re-hashing…" : "re-hash"}</button>
-                  <button class="ml-3 text-red-600" onclick={() => dropAgent(a.id, a.name)}>revoke</button>
-                {/if}
-                <button
-                  class="ml-3 text-red-600"
-                  title="Hard delete — only while the agent owns no libraries/items"
-                  onclick={() => purgeAgent(a.id, a.name)}>delete</button>
-              </td>
-            </tr>
-            {#if expanded === a.id}
-              <tr class="bg-slate-50/60 dark:bg-slate-900/40">
-                <td colspan="8" class="px-1 py-2">{@render agentDetail(a)}</td>
-              </tr>
-            {/if}
-          {/each}
-          </tbody>
-        </table>
-      </div>
-      <div class="mt-2 flex items-center gap-3 text-xs text-slate-500">
+    <DataTable
+      class="mt-2"
+      caption="Registered agents"
+      captionHidden
+      columns={[
+        { key: "name", label: "Name", cell: agentNameCell },
+        { key: "hostname", label: "Hostname", cell: agentHostCell },
+        { key: "platform", label: "Platform", cell: agentPlatformCell },
+        { key: "status", label: "Status", cell: agentStatusCell },
+        { key: "online", label: "Online", cell: agentOnlineCell },
+        { key: "groups", label: "Config groups", cell: agentGroupsCell },
+        { key: "agent_version", label: "Version", cell: agentVersionCell },
+        { key: "actions", label: "Actions", align: "right", cell: agentActionsCell },
+      ]}
+      rows={agents}
+      rowKey={(a) => a.id}
+      loading={!loaded}
+      emptyMessage="No agents registered. Enrol an agent to see it here." />
+    {#if agentsTotal > 0}
+      <!-- The Config groups column's legend (it used to be a header tooltip). -->
+      <p class="mt-2 text-xs text-muted">
+        <b>Config groups</b> lists the configuration groups each agent belongs to,
+        in merge order (lowest priority first). Global is implicit on every agent
+        and is not listed. Edit membership in the row's details panel — an agent
+        can be in any number of groups and they layer per key.
+      </p>
+      <div class="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
         <span>
           {agentsOffset + 1}–{Math.min(agentsOffset + AGENTS_PAGE, agentsTotal)} of {agentsTotal}
         </span>
-        <button
-          class="rounded border border-slate-300 px-2 py-0.5 disabled:opacity-40 dark:border-slate-700"
-          onclick={() => agentsPage(-1)}
-          disabled={agentsOffset === 0}>Prev</button>
-        <button
-          class="rounded border border-slate-300 px-2 py-0.5 disabled:opacity-40 dark:border-slate-700"
-          onclick={() => agentsPage(1)}
-          disabled={agentsOffset + AGENTS_PAGE >= agentsTotal}>Next</button>
+        <Button size="sm" onclick={() => agentsPage(-1)} disabled={agentsOffset === 0}>Prev</Button>
+        <Button size="sm" onclick={() => agentsPage(1)} disabled={agentsOffset + AGENTS_PAGE >= agentsTotal}>Next</Button>
       </div>
     {/if}
+    {#each agents as a (a.id)}
+      {#if expanded === a.id}
+        <section id={detailsId(a.id)} aria-labelledby="{detailsId(a.id)}-heading" class="mt-3">
+          <div class="mb-2 flex items-center gap-2">
+            <h4 id="{detailsId(a.id)}-heading" tabindex="-1" class="text-sm font-semibold">Details — {a.name}</h4>
+            <span class="grow"></span>
+            <Button size="sm" variant="ghost" onclick={() => hideDetail(a)}>Hide</Button>
+          </div>
+          {@render agentDetail(a)}
+        </section>
+      {/if}
+    {/each}
   {/snippet}
 
   <!-- Enrollment & installer card -->
-  <div class="mt-8 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+  <div class="mt-8 rounded-panel border border-border p-4">
     <h3 class="font-medium">Enrollment &amp; installer</h3>
-    <p class="mt-1 text-xs text-slate-500">
+    <p class="mt-1 text-xs text-muted">
       Mint a single-use, short-lived enrollment token — or generate a full installer
       sidecar (<code class="font-mono">filearr-agent.json</code>) the console agent
       consumes directly. Tokens are shown once and never stored in the clear.
     </p>
-    <p class="mt-2 text-xs text-slate-500"
+    <p class="mt-2 text-xs text-muted"
       title="One script for the whole Windows agent lifecycle, pre-configured with this central's URL: on a machine without the agent it provisions (mints its own token via the API, installs the service, sets scan roots); on a machine with the agent it updates the binary and applies config changes (-ScanRoot, -MtlsUrl). Requires an elevated PowerShell; pass -ApiKey <admin key> when authentication is enabled.">
       <b>Windows one-script lifecycle:</b>
       <code class="font-mono break-all select-all">irm {location.origin}/api/v1/agent-dist/manage-windows-agent.ps1 -OutFile manage-windows-agent.ps1</code>
@@ -2663,324 +3075,235 @@ ${detail}
     </p>
 
     <!-- Simple token mint -->
-    <div class="mt-3 flex flex-wrap items-end gap-2">
-      <div class="text-xs text-slate-500"
+    <div class="mt-3 flex flex-wrap items-end gap-3">
+      <fieldset
         title="The configuration groups the enrolling agent joins, by NAME (a token is minted before the agent exists, so there is nothing to assign ids to yet). Global is joined automatically — selecting nothing is a complete answer, not an unconfigured one. A name that no longer exists at enrollment time is skipped rather than failing the enrollment.">
-        configuration groups (joined at enrollment)
-        <div class="mt-1 flex flex-wrap gap-2">
+        <legend class="text-xs font-medium text-fg">configuration groups (joined at enrollment)</legend>
+        <div class="mt-1 flex flex-wrap gap-2 text-xs">
           {#each groups.filter((g) => !g.is_system) as g (g.id)}
-            <label class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
-              title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}>
-              <input type="checkbox"
-                checked={newGroupNames.includes(g.name)}
-                onchange={(e) => toggleMintGroup(g.name, e.currentTarget.checked)} />
-              {g.name}
-            </label>
+            <Checkbox
+              size="sm"
+              class="rounded-control border border-border px-2 py-1"
+              label={g.name}
+              title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}
+              checked={newGroupNames.includes(g.name)}
+              onchange={(e) => toggleMintGroup(g.name, e.currentTarget.checked)} />
           {:else}
-            <span class="text-slate-600 dark:text-slate-400">No groups beyond Global — the agent enrolls into the fleet-wide baseline.</span>
+            <span class="text-muted">No groups beyond Global — the agent enrolls into the fleet-wide baseline.</span>
           {/each}
         </div>
-      </div>
-      <label class="text-xs text-slate-500"
-        title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes).">
-        TTL (min, blank = default)
-        <input class="mt-1 block w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+      </fieldset>
+      <Field label="TTL (min, blank = default)" class="w-40">
+        <Input
+          type="number"
+          min="1"
+          placeholder="60"
           title="How long the minted token stays usable, in minutes. The token is single-use as well as short-lived: central consumes it on a successful enrollment. Range 1–1440. Blank uses the server default (60 minutes)."
-          type="number" min="1" placeholder="60" bind:value={newTtl} />
-      </label>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-        disabled={minting} onclick={mint}>Mint token</button>
+          bind:value={newTtl} />
+      </Field>
+      <Button variant="primary" disabled={minting} onclick={mint}>Mint token</Button>
     </div>
+    {#if mintErr}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (mintErr = "")}>{mintErr}</Alert>
+    {/if}
 
     {#if minted}
-      <div class="mt-2 rounded-lg border border-amber-400 bg-amber-50 p-2 text-sm dark:bg-amber-950/30">
-        <p class="font-medium">Copy this token now — it will not be shown again.</p>
+      <Alert tone="warn" class="mt-2" title="Copy this token now — it will not be shown again.">
         <div class="mt-1 flex items-center gap-2">
           <code class="grow break-all font-mono text-xs">{minted.token}</code>
-          <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700" onclick={copyMinted}>
-            {mintedCopied ? "Copied" : "Copy"}
-          </button>
+          <Button size="sm" onclick={copyMinted}>{mintedCopied ? "Copied" : "Copy"}</Button>
         </div>
-        <p class="mt-1 text-xs text-slate-500">Expires {fmt(minted.expires_at)}</p>
-      </div>
+        <p class="mt-1 text-xs">Expires {fmt(minted.expires_at)}</p>
+      </Alert>
     {/if}
 
     <!-- Installer sidecar generator -->
-    <div class="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+    <div class="mt-5 border-t border-border pt-4">
       <h4 class="text-sm font-medium">Generate installer sidecar</h4>
-      <div class="mt-2 flex flex-wrap items-end gap-2">
-        <label class="text-xs text-slate-500"
-          title="Writes agent_name into the sidecar — the friendly name this agent shows under in the fleet table. Left blank, the agent uses the device's own hostname.">
-          agent name (optional)
-          <input class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+      <div class="mt-2 flex flex-wrap items-end gap-3">
+        <Field label="agent name (optional)" class="w-56">
+          <Input
             title="Writes agent_name into the sidecar — the friendly name this agent shows under in the fleet table. Left blank, the agent uses the device's own hostname."
-            placeholder="(auto from hostname)" bind:value={insName} />
-        </label>
-        <div class="text-xs text-slate-500"
+            placeholder="(auto from hostname)"
+            bind:value={insName} />
+        </Field>
+        <fieldset
           title="Writes config_group_names into the sidecar, so the agent joins these configuration groups at enrollment instead of needing an assignment afterwards. Global is implicit. The sidecar also keeps the legacy single-group config_group key (the first name) so an older agent binary still reads one of them.">
-          configuration groups
-          <div class="mt-1 flex flex-wrap gap-2">
+          <legend class="text-xs font-medium text-fg">configuration groups</legend>
+          <div class="mt-1 flex flex-wrap gap-2 text-xs">
             {#each groups.filter((g) => !g.is_system) as g (g.id)}
-              <label class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2 py-1 dark:border-slate-800"
-                title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}>
-                <input type="checkbox"
-                  checked={insGroupIds.includes(g.id)}
-                  onchange={(e) => toggleInsGroup(g.id, e.currentTarget.checked)} />
-                {g.name}
-              </label>
+              <Checkbox
+                size="sm"
+                class="rounded-control border border-border px-2 py-1"
+                label={g.name}
+                title={`Priority ${g.priority}. ${g.member_count} member agent(s) today.`}
+                checked={insGroupIds.includes(g.id)}
+                onchange={(e) => toggleInsGroup(g.id, e.currentTarget.checked)} />
             {:else}
-              <span class="text-slate-600 dark:text-slate-400">Global only</span>
+              <span class="text-muted">Global only</span>
             {/each}
           </div>
-        </div>
-        <label class="text-xs text-slate-500"
-          title="Writes log_level into the sidecar. This is the ONE log-level setting a shipped agent actually reads (the per-group Log level below is stored but not yet enforced). The host can still override it with FILEARR_AGENT_LOG_LEVEL or -log-level; the sidecar is the lowest-precedence source. Takes effect at agent start. (default) leaves the key out, so the agent uses info.">
-          log level
-          <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+        </fieldset>
+        <Field label="log level" class="w-40">
+          <Select
             title="Writes log_level into the sidecar. This is the ONE log-level setting a shipped agent actually reads (the per-group Log level below is stored but not yet enforced). The host can still override it with FILEARR_AGENT_LOG_LEVEL or -log-level; the sidecar is the lowest-precedence source. Takes effect at agent start. (default) leaves the key out, so the agent uses info."
             bind:value={insLogLevel}>
             <option value="">(default)</option>
             {#each AGENT_LOG_LEVELS as lvl}
               <option value={lvl}>{lvl}</option>
             {/each}
-          </select>
-        </label>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-          disabled={issuing} onclick={issueInstaller}>Generate</button>
+          </Select>
+        </Field>
+        <Button variant="primary" disabled={issuing} onclick={issueInstaller}>Generate</Button>
       </div>
+      {#if installerErr}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (installerErr = "")}>{installerErr}</Alert>
+      {/if}
 
       {#if installer}
-        <div class="mt-3 rounded-lg border border-amber-400 bg-amber-50 p-3 text-sm dark:bg-amber-950/30">
+        <Alert tone="warn" class="mt-3">
           <div class="flex flex-wrap items-center gap-2">
             <p class="font-medium">Sidecar (<code class="font-mono">filearr-agent.json</code>) — contains a show-once token.</p>
             <span class="grow"></span>
-            <span class="text-xs text-slate-500">Token expires {fmt(installer.expires_at)}</span>
+            <span class="text-xs">Token expires {fmt(installer.expires_at)}</span>
           </div>
-          <pre class="mt-2 max-h-64 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-xs text-slate-100">{sidecarJson}</pre>
+          <pre class="mt-2 max-h-64 overflow-auto rounded-control bg-surface p-2 font-mono text-xs text-fg">{sidecarJson}</pre>
           <div class="mt-2 flex flex-wrap gap-2">
-            <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700" onclick={copySidecar}>
-              {sidecarCopied ? "Copied" : "Copy JSON"}
-            </button>
-            <button class="rounded bg-[var(--accent)] px-2 py-1 text-xs text-[var(--accent-fg)]" onclick={downloadSidecar}>
-              Download filearr-agent.json
-            </button>
+            <Button size="sm" onclick={copySidecar}>{sidecarCopied ? "Copied" : "Copy JSON"}</Button>
+            <Button size="sm" variant="primary" onclick={downloadSidecar}>Download filearr-agent.json</Button>
           </div>
 
           <div class="mt-3">
-            <p class="text-xs font-medium text-slate-600 dark:text-slate-300">Install one-liners</p>
+            <p class="text-xs font-medium">Install one-liners</p>
             {#each [["windows", "Windows"], ["linux", "Linux"], ["macos", "macOS"]] as [os, label]}
               <div class="mt-1.5">
                 <div class="flex items-center gap-2">
-                  <span class="w-16 text-xs text-slate-500">{label}</span>
-                  <button class="rounded border border-slate-300 px-2 py-0.5 text-[11px] dark:border-slate-700"
-                    onclick={() => copyHint(os as "windows" | "linux" | "macos")}>
+                  <span class="w-16 text-xs">{label}</span>
+                  <Button size="sm" aria-label="Copy the {label} one-liner" onclick={() => copyHint(os as "windows" | "linux" | "macos")}>
                     {hintCopied === os ? "Copied" : "Copy"}
-                  </button>
+                  </Button>
                 </div>
-                <pre class="mt-1 overflow-auto rounded bg-slate-100 p-2 font-mono text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-200">{installer.install_hint[os as "windows" | "linux" | "macos"]}</pre>
+                <pre class="mt-1 overflow-auto rounded-control bg-surface p-2 font-mono text-2xs text-fg">{installer.install_hint[os as "windows" | "linux" | "macos"]}</pre>
               </div>
             {/each}
-            <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
+            <p class="mt-1 text-2xs">
               Replace <code class="font-mono">{"{agent_id}"}</code> / <code class="font-mono">{"{version}"}</code>
               from the fleet console after enrollment (the artifact path is agent-authenticated).
             </p>
           </div>
-        </div>
+        </Alert>
       {/if}
     </div>
 
     <!-- Enrollment tokens -->
     <h4 class="mt-5 text-sm font-medium">Enrollment tokens</h4>
-    {#if tokens.length === 0}
-      <p class="py-2 text-slate-600 dark:text-slate-400">No tokens.</p>
-    {:else}
-      <div class="overflow-x-auto">
-        <table class="mt-1 w-full text-sm">
-          <thead class="text-left text-slate-500">
-            <tr><th class="py-1 pr-3">hash</th><th class="pr-3">config groups</th><th class="pr-3">status</th><th class="pr-3">expires</th><th></th></tr>
-          </thead>
-          <tbody>
-            {#each tokens as t (t.token_hash)}
-              <tr class="border-t border-slate-200 dark:border-slate-800">
-                <td class="py-1 pr-3 font-mono text-xs">{t.token_hash.slice(0, 12)}…</td>
-                <td class="pr-3" title="Groups the enrolling agent joins on top of Global.">
-                  {t.config_group_names.length ? t.config_group_names.join(", ") : "Global only"}
-                </td>
-                <td class="pr-3 {tokenStatusClass(t.status)}">{t.status}</td>
-                <td class="pr-3 text-slate-500">{fmt(t.expires_at)}</td>
-                <td class="text-right">
-                  {#if t.status === "active"}
-                    <button class="text-red-600" onclick={() => dropToken(t.token_hash)}>revoke</button>
-                  {:else}
-                    <button class="text-red-600" onclick={() => dropToken(t.token_hash, true)}>delete</button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
+    <DataTable
+      class="mt-1"
+      caption="Enrollment tokens"
+      captionHidden
+      columns={[
+        { key: "token_hash", label: "hash", cell: tokenHashCell },
+        { key: "config_group_names", label: "config groups", cell: tokenGroupsCell },
+        { key: "status", label: "status", cell: tokenStatusCell },
+        { key: "expires_at", label: "expires", cell: tokenExpiresCell },
+        { key: "actions", label: "Actions", align: "right", cell: tokenActionsCell },
+      ]}
+      rows={tokens}
+      rowKey={(t) => t.token_hash}
+      loading={!loaded}
+      emptyMessage="No enrollment tokens. Mint one above to enrol an agent." />
   </div>
 
   <!-- Live rollouts. Only rendered when something is in flight: an empty card
        would be permanent furniture for a feature most fleets use rarely, and
        "no rollouts" is already the visible state of the groups table. -->
   <div class="mt-8 flex flex-wrap items-center gap-3">
-    <button class="rounded border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+    <Button
       title="Phase a NEW agent binary through the fleet in tiers (e.g. 10% now, 50% in an hour, everyone an hour later) instead of every agent taking it on its next poll. Uses the same stable agent-id buckets as configuration rollouts. auto_update, the update window and update_not_before still gate first; the per-agent update action still bypasses everything."
-      onclick={openRelForm}>Phased release rollout…</button>
+      onclick={openRelForm}>Phased release rollout…</Button>
     {#if offerableVersions.length}
-      <span class="text-xs text-slate-500">central is currently offering: {offerableVersions.join(", ")}</span>
+      <span class="text-xs text-muted">central is currently offering: {offerableVersions.join(", ")}</span>
     {:else}
-      <span class="text-xs text-slate-500">no agent is behind central's version right now</span>
+      <span class="text-xs text-muted">no agent is behind central's version right now</span>
     {/if}
   </div>
   {#if relFormOpen}
-    <div class="mt-3 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+    <div class="mt-3 rounded-panel border border-border p-4">
       <div class="flex flex-wrap items-end gap-3">
-        <label class="text-xs text-slate-500">
-          version
-          <input class="mt-1 block w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
-            list="offerable-versions" bind:value={relVersion}
-            title="A version central can offer: its baked agent version (shown above) or an uploaded signed release. Anything else is refused." />
-          <datalist id="offerable-versions">
-            {#each offerableVersions as v (v)}<option value={v}></option>{/each}
-          </datalist>
-        </label>
-        <label class="text-xs text-slate-500"
-          title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC.">
-          start at (optional)
-          <input type="datetime-local" class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+        <Field label="version" class="w-56">
+          <Input
+            class="font-mono"
+            list="offerable-versions"
+            title="A version central can offer: its baked agent version (shown above) or an uploaded signed release. Anything else is refused."
+            bind:value={relVersion} />
+        </Field>
+        <datalist id="offerable-versions">
+          {#each offerableVersions as v (v)}<option value={v}></option>{/each}
+        </datalist>
+        <Field label="start at (optional)" class="w-56">
+          <Input
+            type="datetime-local"
+            title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC."
             bind:value={relStartsAt} />
-        </label>
+        </Field>
       </div>
       {#each relTiers as t, i (i)}
         <div class="mt-2 flex flex-wrap items-end gap-2">
-          <span class="text-xs text-slate-500">Tier {i + 1}</span>
-          <label class="text-xs text-slate-500">
-            percent
-            <input type="number" min="1" max="100"
-              class="mt-1 block w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-              bind:value={t.percent} />
-          </label>
-          <label class="text-xs text-slate-500">
-            delay (minutes)
-            <input type="number" min="0"
-              class="mt-1 block w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-              bind:value={t.delay_minutes} />
-          </label>
-          <button class="text-xs text-red-600" onclick={() => (relTiers = relTiers.filter((_, j) => j !== i))}>remove</button>
-          <span class="text-[11px] text-slate-600 dark:text-slate-400">≈ {tierEtaMinutes(relTiers, i)} min after start</span>
+          <span class="pb-1.5 text-xs text-muted">Tier {i + 1}</span>
+          <Field label="percent" class="w-24">
+            <Input type="number" min="1" max="100" bind:value={t.percent} />
+          </Field>
+          <Field label="delay (minutes)" class="w-28">
+            <Input type="number" min="0" bind:value={t.delay_minutes} />
+          </Field>
+          <Button size="sm" variant="ghost" aria-label="Remove tier {i + 1}" onclick={() => (relTiers = relTiers.filter((_, j) => j !== i))}>remove</Button>
+          <span class="pb-1.5 text-2xs text-muted">≈ {tierEtaMinutes(relTiers, i)} min after start</span>
         </div>
       {/each}
       <div class="mt-3 flex flex-wrap items-center gap-3">
-        <button class="rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-40 dark:border-slate-700"
+        <Button
+          size="sm"
           disabled={relTiers.length >= MAX_ROLLOUT_TIERS}
-          onclick={() => { const last = relTiers[relTiers.length - 1]; relTiers = [...relTiers, { percent: Math.min(100, (last?.percent ?? 0) + 25), delay_minutes: 60 }]; }}>+ add tier</button>
-        {#if relTierError}<span class="text-xs text-red-600">{relTierError}</span>{/if}
+          onclick={() => { const last = relTiers[relTiers.length - 1]; relTiers = [...relTiers, { percent: Math.min(100, (last?.percent ?? 0) + 25), delay_minutes: 60 }]; }}>+ add tier</Button>
         <div class="grow"></div>
-        <button class="text-sm text-slate-500" onclick={() => (relFormOpen = false)}>Cancel</button>
-        <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+        <Button variant="ghost" onclick={() => (relFormOpen = false)}>Cancel</Button>
+        <Button
+          variant="primary"
           disabled={relBusy || !!relTierError || !relVersion.trim()}
-          onclick={submitRelRollout}>Start rollout</button>
+          onclick={submitRelRollout}>Start rollout</Button>
       </div>
+      {#if relTierError}
+        <!-- Live validation of the tier list; it clears as the tiers are fixed. -->
+        <Alert tone="danger" class="mt-2">{relTierError}</Alert>
+      {/if}
+      {#if relErr}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (relErr = "")}>{relErr}</Alert>
+      {/if}
     </div>
   {/if}
 
-  {#if rollouts.length || relRollouts.length}
-    <div class="mt-4 rounded-xl border border-sky-300 p-4 dark:border-sky-800">
-      <div class="flex items-center gap-3">
+  {#if rolloutRows.length}
+    <div class="mt-4 rounded-panel border border-border p-4">
+      <div class="flex flex-wrap items-center gap-3">
         <h3 class="font-medium">Rollouts in flight</h3>
-        <span class="text-xs text-slate-500">
+        <span class="text-xs text-muted">
           promotion is evaluated on central's minute tick; coverage is by stable agent-id bucket
         </span>
       </div>
-      <div class="mt-2 overflow-x-auto">
-        <table class="w-full min-w-[48rem] text-sm">
-          <thead class="text-left text-slate-500">
-            <tr class="border-b border-slate-200 dark:border-slate-800">
-              <th class="py-2 pr-3 font-medium">Group</th>
-              <th class="py-2 pr-3 font-medium">Target</th>
-              <th class="py-2 pr-3 font-medium">Progress</th>
-              <th class="py-2 pr-3 font-medium">Covered</th>
-              <th class="py-2 pr-3 font-medium">Next promotion</th>
-              <th class="py-2 text-right font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-            {#each rollouts as r (r.id)}
-              <tr>
-                <td class="py-2 pr-3 font-medium">{r.group_name}</td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500"
-                  title="The group version this rollout is delivering. The group's current_version is unchanged until the last tier completes, so uncovered agents keep receiving the old one.">
-                  v{r.target_version}
-                </td>
-                <td class="py-2 pr-3 text-slate-500">{describeRollout(r)}</td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500"
-                  title="Share of the fleet whose agent-id hash bucket is inside the active tier. Membership in the bucket is stable, so an agent never flaps in and out between polls.">
-                  {r.covered_percent}%
-                </td>
-                <td class="py-2 pr-3 text-slate-500"
-                  title={r.next_promotion_at
-                    ? "When the engine widens to the next tier on its own. Promote now to skip the remaining wait."
-                    : "No further tier is scheduled — this rollout finishes at its current tier."}>
-                  {#if r.next_promotion_at}
-                    {untilTime(r.next_promotion_at)} · {fmt(r.next_promotion_at)}
-                  {:else if r.status === "scheduled"}
-                    starts {fmt(r.starts_at)}
-                  {:else}
-                    —
-                  {/if}
-                </td>
-                <td class="py-2 text-right whitespace-nowrap">
-                  {#if r.status === "running"}
-                    <button class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
-                      disabled={rolloutBusy[r.id]}
-                      title="Advance to the next tier immediately instead of waiting out its delay."
-                      onclick={() => promoteRollout(r)}>promote now</button>
-                  {/if}
-                  <button class="ml-3 text-red-600 disabled:opacity-50"
-                    disabled={rolloutBusy[r.id]}
-                    title="Stop the rollout. The group stays on its current version, so agents already covered roll BACK to it on their next poll."
-                    onclick={() => cancelRollout(r)}>cancel</button>
-                </td>
-              </tr>
-            {/each}
-            {#each relRollouts as r (r.id)}
-              <tr>
-                <td class="py-2 pr-3 font-medium">
-                  <span class="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300"
-                    title="A phased BINARY rollout: while it is live, central offers this version only to agents inside the active tier's bucket range. Cancel = stop offering (nothing rolls back).">release</span>
-                </td>
-                <td class="py-2 pr-3 font-mono text-xs text-slate-500">{r.release_version}</td>
-                <td class="py-2 pr-3 text-slate-500">{describeRollout(r)}</td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500">{r.covered_percent}%</td>
-                <td class="py-2 pr-3 text-slate-500">
-                  {#if r.next_promotion_at}
-                    {untilTime(r.next_promotion_at)} · {fmt(r.next_promotion_at)}
-                  {:else if r.status === "scheduled"}
-                    starts {r.starts_at ? fmt(r.starts_at) : "next tick"}
-                  {:else}
-                    —
-                  {/if}
-                </td>
-                <td class="py-2 text-right whitespace-nowrap">
-                  {#if r.status === "running"}
-                    <button class="text-sky-600 disabled:opacity-50 dark:text-sky-400"
-                      disabled={rolloutBusy[r.id]}
-                      onclick={() => promoteRelRollout(r)}>promote now</button>
-                  {/if}
-                  <button class="ml-3 text-red-600 disabled:opacity-50"
-                    disabled={rolloutBusy[r.id]}
-                    title="Stop OFFERING this version to agents not yet covered. Nothing rolls back — a binary already swapped in stays."
-                    onclick={() => cancelRelRollout(r)}>cancel</button>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        class="mt-2"
+        caption="Rollouts in flight"
+        captionHidden
+        columns={[
+          { key: "group", label: "Group", cell: rolloutGroupCell },
+          { key: "target", label: "Target", cell: rolloutTargetCell },
+          { key: "progress", label: "Progress", cell: rolloutProgressCell },
+          { key: "covered", label: "Covered", cell: rolloutCoveredCell },
+          { key: "next", label: "Next promotion", cell: rolloutNextCell },
+          { key: "actions", label: "Actions", align: "right", cell: rolloutActionsCell },
+        ]}
+        rows={rolloutRows}
+        rowKey={(row) => row.key} />
     </div>
   {/if}
 
@@ -2988,11 +3311,11 @@ ${detail}
   <div class="mt-8">
     <div class="flex items-center gap-3">
       <h3 class="font-medium">Configuration groups</h3>
-      <span class="text-xs text-slate-500">layered per key, lowest priority first</span>
+      <span class="text-xs text-muted">layered per key, lowest priority first</span>
       <div class="grow"></div>
-      <button class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]" onclick={openCreate}>New group</button>
+      <Button variant="primary" onclick={openCreate}>New group</Button>
     </div>
-    <p class="mt-1 text-xs text-slate-500">
+    <p class="mt-1 text-xs text-muted">
       Rows are listed in <b>merge order</b>: each group applies over the ones
       above it and wins only the keys it actually sets. <b>Global</b> is
       permanent, contains every agent and always applies first, so it is the
@@ -3001,295 +3324,227 @@ ${detail}
       as a phased rollout.
     </p>
 
-    {#if groups.length === 0}
-      <p class="py-2 text-slate-600 dark:text-slate-400">No configuration groups yet.</p>
-    {:else}
-      <div class="mt-2 overflow-x-auto">
-        <table class="w-full min-w-[48rem] text-sm">
-          <thead class="text-left text-slate-500">
-            <tr class="border-b border-slate-200 dark:border-slate-800">
-              <th class="py-2 pr-3 font-medium">Name</th>
-              <th class="py-2 pr-3 font-medium"
-                title="Merge rank. Lower applies FIRST, so a higher number wins any key both groups set. Ties are legal and break deterministically by name.">Priority</th>
-              <th class="py-2 pr-3 font-medium">Members</th>
-              <th class="py-2 pr-3 font-medium"
-                title="The version uncovered agents receive. A phased rollout delivers a NEWER version to part of the fleet without changing this number until it completes.">Version</th>
-              <th class="py-2 pr-3 font-medium">Rollout</th>
-              <th class="py-2 pr-3 font-medium">Description</th>
-              <th class="py-2 text-right font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-            {#each groups as g (g.id)}
-              <tr>
-                <td class="py-2 pr-3 font-medium whitespace-nowrap">
-                  {g.name}
-                  {#if g.is_system}
-                    <span class="ml-1 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                      title="The permanent Global group: every agent is a member, its name and priority are fixed, and it cannot be deleted. Its document is the fleet-wide baseline.">system</span>
-                  {/if}
-                </td>
-                <td class="py-2 pr-3 whitespace-nowrap tabular-nums text-slate-500">
-                  {g.priority}
-                  {#if !g.is_system}
-                    <!-- Two-PATCH swap rather than a drag handle: no DnD
-                         dependency, and the priorities stay numbers an operator
-                         can also type into the dialog. -->
-                    <button class="ml-2 disabled:opacity-30"
-                      disabled={reordering || reorderable[0]?.id === g.id}
-                      title="Apply this group EARLIER (lower priority), so groups below it can override it."
-                      onclick={() => reorderGroup(g, -1)}>↑</button>
-                    <button class="ml-1 disabled:opacity-30"
-                      disabled={reordering || reorderable[reorderable.length - 1]?.id === g.id}
-                      title="Apply this group LATER (higher priority), so it overrides the groups above it."
-                      onclick={() => reorderGroup(g, 1)}>↓</button>
-                  {/if}
-                </td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500"
-                  title={g.is_system ? "Every enrolled agent — membership in Global is implicit." : "Agents explicitly added to this group."}>
-                  {g.member_count}
-                </td>
-                <td class="py-2 pr-3 tabular-nums text-slate-500">v{g.current_version}</td>
-                <td class="py-2 pr-3">
-                  {#if g.active_rollout}
-                    <span class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                      title={`Version ${g.active_rollout.target_version} is being delivered in ${g.active_rollout.tiers.length} tier(s). Manage it in the rollouts card above.`}>
-                      → v{g.active_rollout.target_version} · {describeRollout(g.active_rollout)}
-                    </span>
-                  {:else}
-                    <span class="text-slate-600 dark:text-slate-400">—</span>
-                  {/if}
-                </td>
-                <td class="max-w-[18rem] truncate py-2 pr-3 text-slate-500" title={g.description ?? ""}>{g.description ?? "—"}</td>
-                <td class="py-2 text-right whitespace-nowrap">
-                  <button class="text-[var(--accent)]" onclick={() => openEdit(g)}>edit</button>
-                  {#if !g.is_system}
-                    <button class="ml-3 text-red-600" onclick={() => removeGroup(g)}>delete</button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
+    <DataTable
+      class="mt-2"
+      caption="Configuration groups"
+      captionHidden
+      columns={[
+        { key: "name", label: "Name", cell: groupNameCell },
+        { key: "priority", label: "Priority", cell: groupPriorityCell },
+        { key: "member_count", label: "Members", cell: groupMembersCell },
+        { key: "current_version", label: "Version", cell: groupVersionCell },
+        { key: "rollout", label: "Rollout", cell: groupRolloutCell },
+        { key: "description", label: "Description", cell: groupDescriptionCell },
+        { key: "actions", label: "Actions", align: "right", cell: groupActionsCell },
+      ]}
+      rows={groups}
+      rowKey={(g) => g.id}
+      loading={!loaded}
+      emptyMessage="No configuration groups yet. Create one with New group." />
+    <!-- Legends for the Priority and Version columns (formerly header tooltips). -->
+    <dl class="mt-2 grid gap-1 text-xs text-muted sm:grid-cols-[auto_1fr] sm:gap-x-3">
+      <dt class="font-medium text-fg">Priority</dt>
+      <dd>Merge rank. Lower applies FIRST, so a higher number wins any key both groups set. Ties are legal and break deterministically by name.</dd>
+      <dt class="font-medium text-fg">Version</dt>
+      <dd>The version uncovered agents receive. A phased rollout delivers a NEWER version to part of the fleet without changing this number until it completes.</dd>
+    </dl>
   </div>
 
   {@render registeredAgents()}
+  {/if}
 </div>
 
 <!-- A collapsible dialog section. Everything except General starts closed: the
      dialog now carries the whole group document (~40 fields across settings and
-     policy) and an operator almost always came to change exactly one thing. -->
+     policy) and an operator almost always came to change exactly one thing.
+     A bespoke disclosure header (not a Button): full-width, two-line. -->
 {#snippet sectionHead(id: string, label: string, blurb: string)}
   <button
-    class="flex w-full items-baseline gap-2 rounded-lg border border-slate-200 px-3 py-2 text-left dark:border-slate-800"
+    type="button"
+    class="flex w-full items-baseline gap-2 rounded-control border border-border px-3 py-2 text-left hover:bg-surface-3"
+    aria-expanded={!!openSections[id]}
     onclick={() => toggleSection(id)}>
-    <span class="text-slate-600 dark:text-slate-400">{openSections[id] ? "▾" : "▸"}</span>
+    <span class="text-muted" aria-hidden="true">{openSections[id] ? "▾" : "▸"}</span>
     <span class="text-sm font-medium">{label}</span>
-    <span class="text-xs text-slate-500">{blurb}</span>
+    <span class="text-xs text-muted">{blurb}</span>
   </button>
 {/snippet}
 
-<!-- Config-group create/edit dialog -->
-{#if dialog}
-  <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-    <div class="my-8 w-full max-w-3xl rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-      <div class="flex flex-wrap items-center gap-3">
-        <h3 class="text-lg font-semibold">
-          {dialog.id === null
-            ? "New configuration group"
-            : dialog.isSystem
-              ? "Edit the Global group"
-              : `Edit “${dialog.name}”`}
-        </h3>
-        {#if dialog.id !== null}
-          <span class="text-xs text-slate-500"
-            title="The version uncovered members receive today. Every publish writes a NEW version — nothing is ever rewritten in place.">
-            v{dialog.currentVersion} · {dialog.memberCount} member{dialog.memberCount === 1 ? "" : "s"}
-          </span>
-          <button class="text-xs text-[var(--accent)]"
-            title="Past versions of this group's document, newest first — with a one-click restore that republishes an old snapshot as a new version."
-            onclick={openHistory}>history</button>
-        {/if}
-        <div class="grow"></div>
-        <button class="text-slate-500" onclick={() => (dialog = null)}>✕</button>
-      </div>
-
+<!-- Config-group create/edit dialog. State-driven: `dialog` holds the form.
+     A successful save sets it to null, which closes without asking; every user
+     dismissal (Escape, backdrop, ×, Cancel → close()) asks "Discard changes?"
+     first while the form differs from what was opened. -->
+<Modal open={!!dialog} onClose={() => (dialog = null)} dirty={dialogDirty} size="xl" title={dialogTitle}>
+  {#snippet children()}
+    {#if dialog}{@render groupDialogBody(dialog)}{/if}
+  {/snippet}
+  {#snippet footer({ close })}
+    {#if dialog}
       {#if dialogError}
-        <p class="mt-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{dialogError}</p>
+        <!-- Save, publish and restore errors: in the footer beside the buttons
+             that raised them, which stay in view while the body scrolls. -->
+        <Alert tone="danger" class="w-full" onDismiss={() => (dialogError = "")}>{dialogError}</Alert>
+      {/if}
+      {#if !historyView}{@render groupDialogFooter(dialog, close)}{/if}
+    {/if}
+  {/snippet}
+</Modal>
+
+{#snippet groupDialogBody(d: GroupForm)}
+  {#if d.id !== null}
+    <div class="mb-3 flex flex-wrap items-center gap-2">
+      <span
+        class="text-xs text-muted"
+        title="The version uncovered members receive today. Every publish writes a NEW version — nothing is ever rewritten in place.">
+        v{d.currentVersion} · {d.memberCount} member{d.memberCount === 1 ? "" : "s"}
+      </span>
+      {#if !historyView}
+        <Button
+          size="sm"
+          variant="ghost"
+          title="Past versions of this group's document, newest first — with a one-click restore that republishes an old snapshot as a new version."
+          onclick={openHistory}>history</Button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if historyView}
+    <!-- In-dialog history view. Deliberately a VIEW rather than a second
+         modal: restoring re-seeds the form behind it, so stacking two
+         dialogs would hide the thing that just changed. -->
+    <div>
+      <Button size="sm" variant="ghost" onclick={() => (historyView = false)}>← back to editing</Button>
+      <DataTable
+          class="mt-2"
+          caption="Version history of {d.name}"
+          captionHidden
+          columns={[
+            { key: "version", label: "Version", cell: historyVersionCell },
+            { key: "seq", label: "Generation", cell: historySeqCell },
+            { key: "actor", label: "Actor", cell: historyActorCell },
+            { key: "note", label: "Note", cell: historyNoteCell },
+            { key: "created_at", label: "Written", cell: historyWrittenCell },
+            { key: "actions", label: "Actions", align: "right", cell: historyActionsCell },
+          ]}
+          rows={historyRows}
+          rowKey={(h) => h.seq}
+          loading={historyLoading}
+          error={historyError ? `Could not load the history: ${historyError}` : null}
+          onRetry={openHistory}
+          emptyMessage="No versions recorded for this group. Save a change to start its history." />
+      {#if historyRows.length}
+        <p class="mt-2 text-xs text-muted">
+          <b>Generation</b> is the fleet-wide generation counter a snapshot advanced —
+          the number an agent echoes back as its applied generation.
+        </p>
+      {/if}
+      {#each historyRows as h (h.seq)}
+        {#if historyOpenSeq === h.seq}
+          <section id={historyJsonId(h.seq)} aria-labelledby="{historyJsonId(h.seq)}-heading" class="mt-2">
+            <div class="flex items-center gap-2">
+              <h4 id="{historyJsonId(h.seq)}-heading" tabindex="-1" class="text-xs font-semibold">Version {h.version} — settings and policy</h4>
+              <span class="grow"></span>
+              <Button size="sm" variant="ghost" onclick={() => hideHistoryJson(h)}>Hide</Button>
+            </div>
+            <pre class="mt-1 max-h-72 overflow-auto rounded-control bg-surface-3 p-2 font-mono text-2xs text-fg">{JSON.stringify(
+                { settings: h.settings, policy: h.policy },
+                null,
+                2,
+              )}</pre>
+          </section>
+        {/if}
+      {/each}
+    </div>
+  {:else}
+    <div class="flex flex-col gap-3">
+      <!-- General: the only section open on entry. -->
+      {@render sectionHead("general", "General", "Name, description and merge priority.")}
+      {#if openSections.general}
+        <div class="flex flex-col gap-3 rounded-control border border-border p-3">
+          {#if d.isSystem}
+            <Alert tone="info" live={false} class="text-xs">
+              This is the permanent <b>Global</b> group. Every agent is a member, it
+              always applies first, and its name and priority are fixed — every
+              other group layers on top of what you set here. Its document is the
+              only sensible place for a fleet-wide default.
+            </Alert>
+          {/if}
+          <Field label="Name">
+            <Input
+              title="How this group is identified everywhere in this console and in enrollment tokens. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned."
+              disabled={d.isSystem}
+              bind:value={d.name} />
+          </Field>
+          <Field label="Description">
+            <Input
+              title="Free-text note for other operators, up to 1024 characters. Never sent to the agent."
+              bind:value={d.description} />
+          </Field>
+          <Field label="Priority" hint="Lower applies first; a higher number wins the keys it sets." class="w-64">
+            <Input
+              type="number"
+              min="0"
+              max="1000000"
+              title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0."
+              disabled={d.isSystem}
+              bind:value={d.priority} />
+          </Field>
+        </div>
       {/if}
 
-      {#if historyView}
-        <!-- In-dialog history view. Deliberately a VIEW rather than a second
-             modal: restoring re-seeds the form behind it, so stacking two
-             dialogs would hide the thing that just changed. -->
-        <div class="mt-3">
-          <button class="text-xs text-[var(--accent)]" onclick={() => (historyView = false)}>← back to editing</button>
-          {#if historyLoading}
-            <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Loading version history…</p>
-          {:else if historyError}
-            <p class="mt-2 text-sm text-red-600">Could not load the history: {historyError}</p>
-          {:else if historyRows.length === 0}
-            <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">No versions recorded for this group.</p>
-          {:else}
-            <div class="overflow-x-auto"><table class="mt-2 w-full text-xs">
-              <thead class="text-left text-slate-500">
-                <tr>
-                  <th class="py-1 pr-3 font-medium">Version</th>
-                  <th class="py-1 pr-3 font-medium"
-                    title="The fleet-wide generation counter this snapshot advanced. It is the number an agent echoes back as its applied generation.">Generation</th>
-                  <th class="py-1 pr-3 font-medium">Actor</th>
-                  <th class="py-1 pr-3 font-medium">Note</th>
-                  <th class="py-1 pr-3 font-medium">Written</th>
-                  <th class="py-1 font-medium"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each historyRows as h (h.seq)}
-                  <tr class="border-t border-slate-100 dark:border-slate-800/60">
-                    <td class="py-1 pr-3 tabular-nums">
-                      v{h.version}
-                      {#if h.version === dialog.currentVersion}
-                        <span class="ml-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">current</span>
-                      {/if}
-                    </td>
-                    <td class="py-1 pr-3 tabular-nums text-slate-500">{h.seq}</td>
-                    <td class="py-1 pr-3 text-slate-500">{h.actor ?? "—"}</td>
-                    <td class="max-w-[14rem] truncate py-1 pr-3 text-slate-500" title={h.note ?? ""}>{h.note ?? "—"}</td>
-                    <td class="py-1 pr-3 text-slate-500">{fmt(h.created_at)}</td>
-                    <td class="py-1 text-right whitespace-nowrap">
-                      <button class="text-[var(--accent)]"
-                        onclick={() => (historyOpenSeq = historyOpenSeq === h.seq ? null : h.seq)}>
-                        {historyOpenSeq === h.seq ? "hide" : "view JSON"}
-                      </button>
-                      {#if h.version !== dialog.currentVersion}
-                        <button class="ml-3 text-amber-600 disabled:opacity-50 dark:text-amber-400"
-                          disabled={dialogBusy}
-                          title="Copy this snapshot forward as a new version and publish it immediately."
-                          onclick={() => restoreVersion(h)}>restore this version</button>
-                      {/if}
-                    </td>
-                  </tr>
-                  {#if historyOpenSeq === h.seq}
-                    <tr>
-                      <td colspan="6" class="pb-2">
-                        <pre class="max-h-72 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-[11px] text-slate-100">{JSON.stringify(
-                            { settings: h.settings, policy: h.policy },
-                            null,
-                            2,
-                          )}</pre>
-                      </td>
-                    </tr>
-                  {/if}
-                {/each}
-              </tbody>
-            </table></div>
-          {/if}
-        </div>
-      {:else}
-      <div class="mt-3 flex flex-col gap-3">
-        <!-- General: the only section open on entry. -->
-        {@render sectionHead("general", "General", "Name, description and merge priority.")}
-        {#if openSections.general}
-        <div class="flex flex-col gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-        {#if dialog.isSystem}
-          <p class="rounded-lg border border-slate-300 bg-slate-50 p-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-            This is the permanent <b>Global</b> group. Every agent is a member, it
-            always applies first, and its name and priority are fixed — every
-            other group layers on top of what you set here. Its document is the
-            only sensible place for a fleet-wide default.
-          </p>
-        {/if}
-        <label class="text-xs text-slate-500"
-          title="How this group is identified everywhere in this console and in enrollment tokens. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned.">Name
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-700"
-            title="How this group is identified everywhere in this console and in enrollment tokens. Unique across the fleet — a duplicate is rejected — and 1–128 characters. Renaming keeps every member assigned."
-            disabled={dialog.isSystem}
-            bind:value={dialog.name} />
-        </label>
-        <label class="text-xs text-slate-500"
-          title="Free-text note for other operators, up to 1024 characters. Never sent to the agent.">Description
-          <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-            title="Free-text note for other operators, up to 1024 characters. Never sent to the agent."
-            bind:value={dialog.description} />
-        </label>
-        <label class="text-xs text-slate-500"
-          title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0.">Priority
-          <input type="number" min="0" max="1000000"
-            class="mt-1 block w-40 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-700"
-            title="Merge rank, 0–1000000. Groups apply in ASCENDING priority and the last one to set a key wins it, so a HIGHER number means this group overrides the others. Ties are legal and break deterministically by name. Global is pinned at 0."
-            disabled={dialog.isSystem}
-            bind:value={dialog.priority} />
-          <span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400">
-            Lower applies first; a higher number wins the keys it sets.
-          </span>
-        </label>
-        </div>
-        {/if}
+      <!-- 2026-08-23: three schedules exist in this document and operators
+           could not tell them apart (user report). One glance-table up top
+           says what each one does, who runs it and on whose clock. -->
+      <Alert tone="info" live={false} class="text-xs" title="Where schedules live in this group">
+        <ul class="mt-1 list-disc space-y-0.5 pl-4">
+          <li><span class="font-medium">Media scans</span> (the agent scanning its own roots) —
+            <span class="font-medium">Scheduling (media scans)</span> section below, policy key <code class="font-mono">scan_cron</code> / <code class="font-mono">scan_interval_seconds</code>.
+            Runs on the agent, on the agent's local clock.</li>
+          <li><span class="font-medium">Host inventory &amp; permission snapshots</span> —
+            <span class="font-medium">Inventory &amp; permission snapshots</span> section, <code class="font-mono">inventory.schedule_cron</code>.
+            Central enqueues the run on each occurrence (time zone of your choice), the agent executes it; the per-agent <em>inventory</em> action fires the same run now.</li>
+          <li><span class="font-medium">Legacy group scan schedule</span> (<code class="font-mono">scan_schedule_cron</code>) — only shown in the Delivery section when a group still has one; the Scheduling section's <code class="font-mono">scan_cron</code> outranks it.</li>
+          <li>Scans of libraries mounted on central itself are scheduled on the Libraries page, not here.</li>
+        </ul>
+      </Alert>
 
-        <!-- 2026-08-23: three schedules exist in this document and operators
-             could not tell them apart (user report). One glance-table up top
-             says what each one does, who runs it and on whose clock. -->
-        <div class="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
-          <p class="font-medium">Where schedules live in this group</p>
-          <ul class="mt-1 list-disc space-y-0.5 pl-4">
-            <li><span class="font-medium">Media scans</span> (the agent scanning its own roots) —
-              <span class="font-medium">Scheduling (media scans)</span> section below, policy key <code class="font-mono">scan_cron</code> / <code class="font-mono">scan_interval_seconds</code>.
-              Runs on the agent, on the agent's local clock.</li>
-            <li><span class="font-medium">Host inventory &amp; permission snapshots</span> —
-              <span class="font-medium">Inventory &amp; permission snapshots</span> section, <code class="font-mono">inventory.schedule_cron</code>.
-              Central enqueues the run on each occurrence (time zone of your choice), the agent executes it; the per-agent <em>inventory</em> action fires the same run now.</li>
-            <li><span class="font-medium">Legacy group scan schedule</span> (<code class="font-mono">scan_schedule_cron</code>) — only shown in the Delivery section when a group still has one; the Scheduling section's <code class="font-mono">scan_cron</code> outranks it.</li>
-            <li>Scans of libraries mounted on central itself are scheduled on the Libraries page, not here.</li>
-          </ul>
-        </div>
-
-        {@render sectionHead(
-          "delivery",
-          SETTINGS_SECTIONS[0].label,
-          SETTINGS_SECTIONS[0].blurb,
-        )}
-        {#if openSections.delivery}
-        <div class="flex flex-wrap gap-4 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <label class="text-xs text-slate-500">
-            <span class="inline-flex items-center gap-1.5">Log level
-              <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-                title="Agents ≥ 1.5.3 live-retune their log threshold from this on the next policy poll; older builds keep their local flag/env/sidecar level.">agent ≥ 1.5.3</span></span>
-            <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+      {@render sectionHead("delivery", SETTINGS_SECTIONS[0].label, SETTINGS_SECTIONS[0].blurb)}
+      {#if openSections.delivery}
+        <div class="flex flex-wrap gap-4 rounded-control border border-border p-3">
+          <Field
+            label="Log level"
+            hint="agent ≥ 1.5.3 — live-retunes its log threshold from this on the next policy poll; older builds keep their local flag/env/sidecar level."
+            class="w-64">
+            <Select
               title="Log verbosity for this group's members. Agents ≥ 1.5.3 apply it on the next policy poll (it wins over the local default while set); (unset) omits the key and the local flag/env/sidecar resolution stands."
-              bind:value={dialog.logLevel}>
+              bind:value={d.logLevel}>
               <option value="">(unset)</option>
               {#each AGENT_LOG_LEVELS as lvl}
                 <option value={lvl}>{lvl}</option>
               {/each}
-            </select>
-          </label>
-          {#if dialog.cron}
+            </Select>
+          </Field>
+          {#if d.cron}
             <!-- settings.scan_schedule_cron predates the policy scan_cron key
                  and does the same job one precedence rung lower. It is kept
                  editable for groups that still carry one (so it can be moved
                  or switched Off), never offered to groups that don't. -->
-            <div class="min-w-64 max-w-xl flex-1 text-xs text-slate-500"
+            <div class="min-w-64 max-w-xl flex-1 text-xs text-muted"
               title="Legacy group scan schedule (settings key scan_schedule_cron). Same job as the Scheduling section's scan_cron policy key — the agent scans itself at these times, on its own local clock — but scan_cron outranks it when both are set. Prefer authoring the schedule in the Scheduling section and switching this Off.">
-              <span class="mb-1 block">Legacy group scan schedule
-                <span class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">superseded by Scheduling → scan_cron</span></span>
-              <ScheduleField value={dialog.cron || null} offsetMinutes={0}
+              <span class="mb-1 flex flex-wrap items-center gap-1.5">Legacy group scan schedule
+                <Badge tone="warn">superseded by Scheduling → scan_cron</Badge></span>
+              <ScheduleField value={d.cron || null} offsetMinutes={0}
                 tzLabel="each agent's local time" dstNote={false}
                 onChange={(c) => { if (dialog) dialog.cron = c ?? ""; }} />
             </div>
           {/if}
         </div>
-        {/if}
+      {/if}
 
-        {@render sectionHead(
-          "surface",
-          SETTINGS_SECTIONS[1].label,
-          SETTINGS_SECTIONS[1].blurb,
-        )}
-        {#if openSections.surface}
-        <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-          <p class="text-xs text-slate-600 dark:text-slate-400">
+      {@render sectionHead("surface", SETTINGS_SECTIONS[1].label, SETTINGS_SECTIONS[1].blurb)}
+      {#if openSections.surface}
+        <div class="rounded-control border border-border p-3">
+          <p class="text-xs text-muted">
             Inherit = this group says nothing, so a lower-priority group or the
             agent's built-in default supplies the value. These three exist in
             BOTH halves of the document: a non-null value here is lifted over the
@@ -3297,59 +3552,48 @@ ${detail}
             for this group's layer only.
           </p>
           <div class="mt-2 flex flex-wrap gap-4">
-            <label class="text-xs text-slate-500"
-              title="Read-only browser search served by the agent itself, on loopback 127.0.0.1:8686 by default. Off by default for an agent central has never reached. Fails closed when the agent's cached policy goes stale past its offline-grace window. This gates what is SERVED; the listener address is a host setting (FILEARR_AGENT_WEBUI_ADDR / _WEBUI_ALLOW_REMOTE).">
-              Web UI
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+            <Field label="Web UI" class="w-48">
+              <Select
                 title="Read-only browser search served by the agent itself, on loopback 127.0.0.1:8686 by default. Off by default for an agent central has never reached. Fails closed when the agent's cached policy goes stale past its offline-grace window. This gates what is SERVED; the listener address is a host setting (FILEARR_AGENT_WEBUI_ADDR / _WEBUI_ALLOW_REMOTE)."
-                bind:value={dialog.webUI}>
+                bind:value={d.webUI}>
                 <option value="">Inherit</option>
                 <option value="on">On</option>
                 <option value="off">Off</option>
-              </select>
-            </label>
-            <label class="text-xs text-slate-500"
-              title="Whether the local web UI demands the agent's bootstrap token before serving anything. Required is the default for an agent central has never reached. Never affects the CLI, which authenticates by peer credentials instead.">
-              Web UI auth token
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              </Select>
+            </Field>
+            <Field label="Web UI auth token" class="w-48">
+              <Select
                 title="Whether the local web UI demands the agent's bootstrap token before serving anything. Required is the default for an agent central has never reached. Never affects the CLI, which authenticates by peer credentials instead."
-                bind:value={dialog.authRequired}>
+                bind:value={d.authRequired}>
                 <option value="">Inherit</option>
                 <option value="on">Required</option>
                 <option value="off">Not required</option>
-              </select>
-            </label>
-            <label class="text-xs text-slate-500"
-              title="The on-device `filearr query` socket — offline local search from the agent host's own shell. On by default. Unlike the web UI it keeps answering through a long disconnection; an explicit Off persists through offline periods too, because the policy is cached on the agent.">
-              Local query API / CLI
-              <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
+              </Select>
+            </Field>
+            <Field label="Local query API / CLI" class="w-48">
+              <Select
                 title="The on-device `filearr query` socket — offline local search from the agent host's own shell. On by default. Unlike the web UI it keeps answering through a long disconnection; an explicit Off persists through offline periods too, because the policy is cached on the agent."
-                bind:value={dialog.localAccess}>
+                bind:value={d.localAccess}>
                 <option value="">Inherit</option>
                 <option value="on">On</option>
                 <option value="off">Off</option>
-              </select>
-            </label>
+              </Select>
+            </Field>
           </div>
         </div>
-        {/if}
+      {/if}
 
-        {@render sectionHead(
-          "inventory",
-          SETTINGS_SECTIONS[2].label,
-          SETTINGS_SECTIONS[2].blurb,
-        )}
-        {#if openSections.inventory}
-        <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      {@render sectionHead("inventory", SETTINGS_SECTIONS[2].label, SETTINGS_SECTIONS[2].blurb)}
+      {#if openSections.inventory}
+        <div class="rounded-control border border-border p-3">
           <div class="flex flex-wrap items-center gap-2">
-            <label class="inline-flex items-center gap-2 text-sm"
-              title="Master switch for scheduled host inventory collection on this group's members. With a schedule below, central enqueues the inventory command (the collectors ticked here over the paths/preset below) on each cron occurrence — the same run the per-agent Inventory button fires.">
-              <input type="checkbox" bind:checked={dialog.inventoryEnabled}
-                title="Master switch for scheduled host inventory collection on this group's members." />
-              Inventory collection enabled
-            </label>
-            <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-              title="With a schedule set, central enqueues inventory commands for this group's members on each occurrence — collectors, results, permission snapshots and the drift alert all ride the existing pipeline.">scheduled by central</span>
+            <Checkbox
+              label="Inventory collection enabled"
+              title="Master switch for scheduled host inventory collection on this group's members. With a schedule below, central enqueues the inventory command (the collectors ticked here over the paths/preset below) on each cron occurrence — the same run the per-agent Inventory button fires."
+              bind:checked={d.inventoryEnabled} />
+            <span title="With a schedule set, central enqueues inventory commands for this group's members on each occurrence — collectors, results, permission snapshots and the drift alert all ride the existing pipeline.">
+              <Badge tone="ok">scheduled by central</Badge>
+            </span>
           </div>
           <!-- Collectors. The master switch above gates whether ANY of this runs,
                so the block dims (the page-family idiom — cf. AlertsPage's
@@ -3358,50 +3602,47 @@ ${detail}
                authored inert and switched on later ("unticking keeps it authored
                but inert" on scan selections), and locking the list behind the
                master switch would force a fleet-visible toggle just to edit it. -->
-          <div class="mt-3" class:opacity-50={!dialog.inventoryEnabled}>
+          <div class="mt-3" class:opacity-50={!d.inventoryEnabled}>
             <div class="flex flex-wrap items-baseline gap-2">
-              <span class="text-xs font-medium text-slate-500"
+              <span class="text-xs font-medium text-muted"
                 title="Which inventory collectors this group's members should run. The list below is a CATALOGUE, not a whitelist: it is the union of the collectors this Filearr release can describe and every collector name your enrolled agents advertise. Central deliberately does not hard-code the vocabulary, so a newer agent build's collector still works — use 'add another' for a name nothing here knows yet. Max 64.">Collectors</span>
-              {#if !dialog.inventoryEnabled}
-                <span class="text-[11px] text-slate-600 dark:text-slate-400"
+              {#if !d.inventoryEnabled}
+                <span class="text-2xs text-muted"
                   title="Inventory collection is switched off for this group, so nothing below runs. The selection is still saved — author it now and tick the master switch when you want it live.">inventory collection is off — this selection is saved but inert</span>
               {/if}
             </div>
 
             {#if collectorEditor.mode === "loading"}
-              <p class="mt-1 text-xs text-slate-600 dark:text-slate-400"
-                title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">Loading the collector catalogue…</p>
+              <div title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">
+                <StateBlock state="loading" compact message="Loading the collector catalogue…" />
+              </div>
             {:else if collectorEditor.mode === "list"}
               <div class="mt-1 flex flex-col gap-1.5">
                 {#each collectorEditor.choices as c (c.name)}
                   {@const st = collectorStanding(c)}
-                  <label class="flex items-start gap-2 rounded-lg border border-slate-200 p-2 dark:border-slate-800"
-                    title={st.note}>
-                    <input type="checkbox" class="mt-1" checked={c.checked}
-                      title={st.note}
+                  <!-- Raw <label> + checkbox, not Checkbox: the label carries
+                       markup (the collector's id, a standing chip, platforms). -->
+                  <label class="flex items-start gap-2 rounded-control border border-border p-2" title={st.note}>
+                    <input type="checkbox" class="mt-1 size-4 shrink-0 accent-accent" checked={c.checked}
                       onchange={(e) => setCollector(c.name, e.currentTarget.checked)} />
                     <span class="min-w-0">
                       <span class="flex flex-wrap items-center gap-1.5">
-                        <span class="text-sm">{c.label}</span>
-                        <code class="font-mono text-[11px] text-slate-500">{c.name}</code>
+                        <span class="text-sm text-fg">{c.label}</span>
+                        <code class="font-mono text-2xs text-muted">{c.name}</code>
                         {#if st.kind === "active"}
-                          <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                            title={st.note}>{c.advertisedBy} agent{c.advertisedBy === 1 ? "" : "s"}</span>
+                          <Badge>{c.advertisedBy} agent{c.advertisedBy === 1 ? "" : "s"}</Badge>
                         {:else if st.kind === "unmatched"}
                           <!-- Amber, not disabled: "nothing in your fleet reports
                                this" is a warning, never a prohibition — the host
                                that supports it may enroll tomorrow. -->
-                          <span class="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                            title={st.note}>{st.chip}</span>
+                          <Badge tone="warn">{st.chip}</Badge>
                         {:else}
-                          <span class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                            title={st.note}>{st.chip}</span>
+                          <Badge tone="info">{st.chip}</Badge>
                         {/if}
                       </span>
-                      <span class="mt-0.5 block text-xs text-slate-500">{c.description}</span>
+                      <span class="mt-0.5 block text-xs text-muted">{c.description}</span>
                       {#if c.described}
-                        <span class="mt-0.5 block text-[11px] text-slate-600 dark:text-slate-400"
-                          title={st.note}>{c.platforms.length ? c.platforms.join(" · ") : "platform not recorded"} — cost: {c.cost}</span>
+                        <span class="mt-0.5 block text-2xs text-muted">{c.platforms.length ? c.platforms.join(" · ") : "platform not recorded"} — cost: {c.cost}</span>
                       {/if}
                     </span>
                   </label>
@@ -3409,7 +3650,7 @@ ${detail}
               </div>
 
               {#if preservedUnknownCollectors(collectorEditor).length}
-                <p class="mt-1.5 text-[11px] text-sky-700 dark:text-sky-300"
+                <p class="mt-1.5 text-2xs text-info"
                   title="These names are stored on this group but are neither described by this Filearr release nor advertised by any enrolled agent. They are kept exactly as stored and re-sent on save — dropping them would silently discard configuration. Untick one to actually remove it.">
                   Kept from this group's saved settings, unrecognised here:
                   <code class="font-mono">{preservedUnknownCollectors(collectorEditor).join(", ")}</code>
@@ -3419,38 +3660,39 @@ ${detail}
               <!-- Escape hatch: the checkbox list must not be a cage. Naming a
                    collector for an agent build that has not rolled out yet is a
                    legitimate thing to want, and central stores free strings. -->
-              <div class="mt-2 flex flex-wrap items-center gap-2">
-                <input
-                  class="w-56 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
-                  title="Add a collector name that is neither in this release's catalogue nor advertised by any enrolled agent — for example when pre-configuring a group for an agent build you have not rolled out yet. Stored verbatim; an agent that does not implement it simply ignores it. Max 128 characters."
-                  placeholder="other-collector" bind:value={collectorAdd}
-                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCollector(); } }} />
-                <button class="rounded border border-slate-300 px-2 py-1 text-xs dark:border-slate-700"
+              <div class="mt-2 flex flex-wrap items-end gap-2">
+                <Field label="Add another collector" error={collectorAddError || undefined} class="w-56">
+                  <Input
+                    size="sm"
+                    class="font-mono"
+                    title="Add a collector name that is neither in this release's catalogue nor advertised by any enrolled agent — for example when pre-configuring a group for an agent build you have not rolled out yet. Stored verbatim; an agent that does not implement it simply ignores it. Max 128 characters."
+                    placeholder="other-collector"
+                    bind:value={collectorAdd}
+                    onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCollector(); } }} />
+                </Field>
+                <Button
+                  size="sm"
                   title="Add the typed name to the list as a ticked, unrecognised collector. Central never validates the vocabulary, so this always works; the name only does something on an agent build that implements it."
-                  onclick={addCollector}>+ add another</button>
+                  onclick={addCollector}>+ add another</Button>
               </div>
-              {#if collectorAddError}
-                <p class="mt-1 text-xs text-red-600 dark:text-red-400">{collectorAddError}</p>
-              {/if}
             {:else}
               <!-- Catalogue fetch failed. Falling back to the free-text field is
                    the honest degradation: an empty checkbox list would read as
                    "no collectors exist" and invite saving an emptied group. -->
-              <p class="mt-1 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                title="GET /agents/inventory-collectors failed, so the console cannot show the checkbox list. Your stored collectors are unchanged and still editable as text below — nothing has been dropped. Reopen the dialog to retry.">
+              <Alert tone="warn" class="mt-1 text-xs">
                 Could not load the collector list ({collectorEditor.reason}) — editing
                 as text instead. Known names: <code class="font-mono">stat</code>,
                 <code class="font-mono">owner</code>, <code class="font-mono">perms</code>,
                 <code class="font-mono">placeholder</code>, plus anything a newer agent
-                build implements. Nothing has been dropped.
-              </p>
-              <label class="mt-1 block text-xs text-slate-500"
-                title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs.">
-                Collectors (comma or newline separated)
-                <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-                  title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names."
-                  placeholder="stat, owner, perms" bind:value={dialog.collectorsText} />
-              </label>
+                build implements. Nothing has been dropped. Your stored collectors are
+                unchanged and still editable as text below; reopen the dialog to retry.
+              </Alert>
+              <Field label="Collectors (comma or newline separated)" class="mt-1">
+                <Input
+                  title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs."
+                  placeholder="stat, owner, perms"
+                  bind:value={d.collectorsText} />
+              </Field>
             {/if}
 
             <!-- 2026-08-23: scheduled collection. ALWAYS rendered — it used to
@@ -3459,576 +3701,617 @@ ${detail}
                  the friendly builder; the cron is stored VERBATIM in the clock
                  picked below and central evaluates it there (DST-aware for
                  named zones). -->
-            <div class="mt-3 rounded-lg border border-slate-200 p-2.5 dark:border-slate-800">
+            <div class="mt-3 rounded-control border border-border p-2.5">
               <div class="flex flex-wrap items-baseline gap-2">
-                <span class="text-xs font-medium text-slate-500"
+                <span class="text-xs font-medium text-muted"
                   title="When a schedule is set, central enqueues an inventory command for every member agent on each occurrence — the same run the per-agent Inventory button fires, so collectors, results and permission snapshots all ride the existing pipeline. An unfinished scheduled run suppresses the next occurrence.">Scheduled collection</span>
-                <span class="text-[11px] text-slate-600 dark:text-slate-400"
+                <span class="text-2xs text-muted"
                   title="Without a schedule nothing collects on its own — inventory runs only when you press an agent's Inventory button.">Off = manual runs only (the per-agent Inventory button)</span>
               </div>
               <div class="mt-2">
-                <ScheduleField value={dialog.invScheduleCron || null} offsetMinutes={0}
-                  tzLabel={invTzLabel(dialog.invScheduleTz)} dstNote={false}
+                <ScheduleField value={d.invScheduleCron || null} offsetMinutes={0}
+                  tzLabel={invTzLabel(d.invScheduleTz)} dstNote={false}
                   onChange={(c) => { if (dialog) dialog.invScheduleCron = c ?? ""; }} />
               </div>
               <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                <label class="block text-xs text-slate-500"
-                  title="Which clock the schedule's times mean. UTC is the stored-document default. A named timezone is evaluated DST-aware by central, so an 04:00 schedule stays 04:00 wall-clock year-round. Each agent's local time uses the UTC offset agents self-report on every poll — one group can then run every host at its own 04:00.">
-                  Time zone
-                  <select class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-2 text-sm dark:border-slate-700 dark:bg-slate-800"
-                    title="Which clock the schedule's times mean. UTC is the stored-document default. A named timezone is evaluated DST-aware by central. Each agent's local time uses the UTC offset agents self-report on every poll."
-                    bind:value={dialog.invScheduleTz}>
+                <Field label="Time zone">
+                  <Select
+                    title="Which clock the schedule's times mean. UTC is the stored-document default. A named timezone is evaluated DST-aware by central, so an 04:00 schedule stays 04:00 wall-clock year-round. Each agent's local time uses the UTC offset agents self-report on every poll — one group can then run every host at its own 04:00."
+                    bind:value={d.invScheduleTz}>
                     <option value="">UTC (server default)</option>
                     {#if browserZone && browserZone !== "agent"}
                       <option value={browserZone}>Console time — {browserZone}</option>
                     {/if}
                     <option value="agent">Each agent's local time</option>
-                    {#if dialog.invScheduleTz && dialog.invScheduleTz !== "agent" && dialog.invScheduleTz !== browserZone}
+                    {#if d.invScheduleTz && d.invScheduleTz !== "agent" && d.invScheduleTz !== browserZone}
                       <!-- a stored zone authored from another console keeps its
                            exact value selectable instead of being coerced -->
-                      <option value={dialog.invScheduleTz}>{dialog.invScheduleTz}</option>
+                      <option value={d.invScheduleTz}>{d.invScheduleTz}</option>
                     {/if}
-                  </select>
-                </label>
-                <label class="block text-xs text-slate-500"
-                  title="Optional path-selection preset the scheduled run walks (e.g. user-documents). Combined with the explicit paths.">
-                  Preset (optional)
-                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-                    placeholder="user-documents" bind:value={dialog.invPreset} />
-                </label>
+                  </Select>
+                </Field>
+                <Field label="Preset (optional)">
+                  <Input
+                    title="Optional path-selection preset the scheduled run walks (e.g. user-documents). Combined with the explicit paths."
+                    placeholder="user-documents"
+                    bind:value={d.invPreset} />
+                </Field>
               </div>
-              {#if dialog.invScheduleTz === "agent"}
-                <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400"
+              {#if d.invScheduleTz === "agent"}
+                <p class="mt-1 text-2xs text-muted"
                   title="Agents advertise their current UTC offset on every command poll, so a DST change reaches central within one poll interval. A build that predates the advertisement is scheduled on UTC until it upgrades.">
                   Uses the UTC offset each agent reports; an agent that has not reported one yet runs on UTC.
                 </p>
               {/if}
               <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                <label class="inline-flex items-start gap-2 text-xs text-slate-500"
-                  title="Also walk what the agent scans: its library roots (as central knows them) plus the explicit paths of this group's enabled scan selections. Combined with any paths listed below. With no paths and no preset the run walks the scan roots anyway — ticking this makes that explicit and lets you add extra paths on top.">
-                  <input type="checkbox" class="mt-0.5" bind:checked={dialog.invInheritScanPaths} />
-                  <span>Inherit the scan paths<span class="block text-[11px] text-slate-600 dark:text-slate-400">agent's library roots + this group's scan selections</span></span>
-                </label>
-                <label class="block text-xs text-slate-500"
-                  title="Maximum entries one run collects before the agent stops walking (the summary then says entries_capped). The agent default is 100,000 — a drive with more files than that is silently truncated unless this is raised. 1,000 – 5,000,000.">
-                  Max entries per run
-                  <input type="number" min="1000" max="5000000" step="1000"
-                    class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
-                    placeholder="100000 (agent default)" bind:value={dialog.invMaxEntries} />
-                </label>
+                <Checkbox
+                  size="sm"
+                  label="Inherit the scan paths"
+                  description="agent's library roots + this group's scan selections"
+                  title="Also walk what the agent scans: its library roots (as central knows them) plus the explicit paths of this group's enabled scan selections. Combined with any paths listed below. With no paths and no preset the run walks the scan roots anyway — ticking this makes that explicit and lets you add extra paths on top."
+                  bind:checked={d.invInheritScanPaths} />
+                <Field label="Max entries per run">
+                  <Input
+                    type="number"
+                    min="1000"
+                    max="5000000"
+                    step="1000"
+                    title="Maximum entries one run collects before the agent stops walking (the summary then says entries_capped). The agent default is 100,000 — a drive with more files than that is silently truncated unless this is raised. 1,000 – 5,000,000."
+                    placeholder="100000 (agent default)"
+                    bind:value={d.invMaxEntries} />
+                </Field>
               </div>
-              <label class="mt-2 block text-xs text-slate-500"
-                title="Extra path specs the run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). Blank with no preset and the box above unticked still walks the agent's scan roots.">
-                Paths (one per line; blank = the agent's scan roots)
-                <textarea class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
-                  rows="2" placeholder={"D:\\\nhome_glob:*"} bind:value={dialog.invPathsText}></textarea>
-              </label>
+              <Field label="Paths (one per line; blank = the agent's scan roots)" class="mt-2">
+                <Textarea
+                  class="font-mono"
+                  rows={2}
+                  title="Extra path specs the run walks, one per line (the agent's grammar: absolute paths like D:\ or /srv/share, or home_glob:* forms). Blank with no preset and the box above unticked still walks the agent's scan roots."
+                  placeholder={"D:\\\nhome_glob:*"}
+                  bind:value={d.invPathsText} />
+              </Field>
             </div>
           </div>
 
           <!-- W7 permissions collector (advanced, collapsed by default) -->
-          <button
-            class="mt-3 text-xs text-[var(--accent)]"
+          <Button
+            size="sm"
+            variant="ghost"
+            class="mt-3"
+            aria-expanded={advancedOpen}
             onclick={() => (advancedOpen = !advancedOpen)}>
-            {advancedOpen ? "▾" : "▸"} Advanced: permissions collector
-            {dialog.permsConfigured ? "(configured)" : "(not configured)"}
-          </button>
+            <span aria-hidden="true">{advancedOpen ? "▾" : "▸"}</span> Advanced: permissions collector
+            {d.permsConfigured ? "(configured)" : "(not configured)"}
+          </Button>
           {#if advancedOpen}
-            <div class="mt-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-              <p class="text-xs text-slate-500">
+            <div class="mt-2 rounded-control border border-border p-3">
+              <p class="text-xs text-muted">
                 Detailed knobs for the <code class="font-mono">permissions</code>
                 collector. Only takes effect when <code class="font-mono">permissions</code>
                 is <em>also</em> named in Collectors above — an admin must both name
                 the collector and configure it. It has no checkbox of its own unless
                 an agent advertises it; use <em>+ add another</em> to name it.
               </p>
-              <label class="mt-2 inline-flex items-center gap-2 text-sm"
-                title="Whether a permissions object is written into this group's settings at all. Unticked omits the whole block, which keeps 'never configured' distinguishable from 'configured, everything off'.">
-                <input type="checkbox" bind:checked={dialog.permsConfigured} />
-                Include a permissions block in this group's settings
-              </label>
-              {#if dialog.permsConfigured}
-                <div class="mt-2 flex flex-col gap-1.5 text-sm">
-                  <label class="inline-flex items-center gap-2"
-                    title="Runs the permissions collector. Off by default — the block can be authored and staged before it is switched on.">
-                    <input type="checkbox" bind:checked={dialog.permsEnabled} /> Enabled
-                  </label>
-                  <label class="inline-flex items-center gap-2"
-                    title="Look each principal's display name up on the agent host. Best-effort: an unresolvable SID/uid is reported as-is rather than failing the collection. Costs a directory lookup per distinct principal.">
-                    <input type="checkbox" bind:checked={dialog.permsResolveNames} />
-                    Resolve principal names
-                    <span class="text-xs text-slate-500">(best-effort SID/uid → display name)</span>
-                  </label>
-                  <label class="inline-flex items-center gap-2"
-                    title="Report ACEs a path inherited from its parents as well as those set directly on it. Off keeps the report to explicit grants, which is what makes a first run readable; on produces a much larger report.">
-                    <input type="checkbox" bind:checked={dialog.permsIncludeInherited} />
-                    Include inherited ACEs
-                    <span class="text-xs text-slate-500">(off = explicit grants only)</span>
-                  </label>
-                  <label class="inline-flex items-center gap-2"
-                    title="Drop the baseline principals that appear on almost every path, so what is left is the grant someone actually made. On by default. Turn it off only when you are auditing the baseline itself.">
-                    <input type="checkbox" bind:checked={dialog.permsExcludeWellKnown} />
-                    Exclude well-known principals
-                    <span class="text-xs text-slate-500">(SYSTEM, Administrators, root, Everyone, CREATOR OWNER)</span>
-                  </label>
-                  <label class="inline-flex items-center gap-2"
-                    title="Also read the SMB share's own ACL, not just the filesystem's. Windows hosts only — a Linux or macOS agent has nothing to report here and skips it.">
-                    <input type="checkbox" bind:checked={dialog.permsCollectShareAcls} />
-                    Collect share-level ACLs
-                    <span class="text-xs text-slate-500">(Windows only)</span>
-                  </label>
-                  <label class="inline-flex items-center gap-2"
-                    title="Resolve each principal's net effective access rather than listing raw ACEs. Reserved for v2: central accepts and stores the flag, and the agent no-ops on it until the feature ships.">
-                    <input type="checkbox" bind:checked={dialog.permsIncludeEffective} />
-                    Include effective access
-                    <span class="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                      title="Reserved for v2 of the permissions brief. Central accepts and stores it; the agent no-ops on it until the feature ships.">reserved v2</span>
-                  </label>
+              <Checkbox
+                class="mt-2"
+                label="Include a permissions block in this group's settings"
+                title="Whether a permissions object is written into this group's settings at all. Unticked omits the whole block, which keeps 'never configured' distinguishable from 'configured, everything off'."
+                bind:checked={d.permsConfigured} />
+              {#if d.permsConfigured}
+                <div class="mt-2 flex flex-col gap-1.5">
+                  <Checkbox
+                    label="Enabled"
+                    title="Runs the permissions collector. Off by default — the block can be authored and staged before it is switched on."
+                    bind:checked={d.permsEnabled} />
+                  <Checkbox
+                    label="Resolve principal names"
+                    description="best-effort SID/uid → display name"
+                    title="Look each principal's display name up on the agent host. Best-effort: an unresolvable SID/uid is reported as-is rather than failing the collection. Costs a directory lookup per distinct principal."
+                    bind:checked={d.permsResolveNames} />
+                  <Checkbox
+                    label="Include inherited ACEs"
+                    description="off = explicit grants only"
+                    title="Report ACEs a path inherited from its parents as well as those set directly on it. Off keeps the report to explicit grants, which is what makes a first run readable; on produces a much larger report."
+                    bind:checked={d.permsIncludeInherited} />
+                  <Checkbox
+                    label="Exclude well-known principals"
+                    description="SYSTEM, Administrators, root, Everyone, CREATOR OWNER"
+                    title="Drop the baseline principals that appear on almost every path, so what is left is the grant someone actually made. On by default. Turn it off only when you are auditing the baseline itself."
+                    bind:checked={d.permsExcludeWellKnown} />
+                  <Checkbox
+                    label="Collect share-level ACLs"
+                    description="Windows only"
+                    title="Also read the SMB share's own ACL, not just the filesystem's. Windows hosts only — a Linux or macOS agent has nothing to report here and skips it."
+                    bind:checked={d.permsCollectShareAcls} />
+                  <Checkbox
+                    label="Include effective access"
+                    description="reserved v2 — central accepts and stores it; the agent no-ops on it until the feature ships"
+                    title="Resolve each principal's net effective access rather than listing raw ACEs. Reserved for v2: central accepts and stores the flag, and the agent no-ops on it until the feature ships."
+                    bind:checked={d.permsIncludeEffective} />
                 </div>
-                <label class="mt-2 block text-xs text-slate-500"
-                  title="Extra principals to drop from the report on top of the well-known list — typically backup and monitoring service accounts that hold access everywhere and drown out real findings. Canonical ids (a SID, or DOMAIN\user), max 64 entries of 128 characters.">
-                  Exclude principals (comma or newline separated canonical ids; max 64)
-                  <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-                    title="Extra principals to drop from the report on top of the well-known list — typically backup and monitoring service accounts that hold access everywhere. Canonical ids (a SID, or DOMAIN\user), max 64 entries of 128 characters."
-                    placeholder="S-1-5-18, DOMAIN\\svc_backup" bind:value={dialog.permsExcludePrincipalsText} />
-                </label>
+                <Field label="Exclude principals (comma or newline separated canonical ids; max 64)" class="mt-2">
+                  <Input
+                    size="sm"
+                    class="font-mono"
+                    title="Extra principals to drop from the report on top of the well-known list — typically backup and monitoring service accounts that hold access everywhere and drown out real findings. Canonical ids (a SID, or DOMAIN\user), max 64 entries of 128 characters."
+                    placeholder="S-1-5-18, DOMAIN\\svc_backup"
+                    bind:value={d.permsExcludePrincipalsText} />
+                </Field>
 
-                <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-                  <label class="inline-flex items-center gap-2 text-sm"
-                    title="Whether an audit object is written into the permissions block at all. Unticked omits it entirely.">
-                    <input type="checkbox" bind:checked={dialog.auditConfigured} />
-                    Include a change-audit block
-                  </label>
-                  <p class="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
-                    Snapshot-diff + alert routing for watched paths. Stored ahead of
-                    the collector; nothing consumes it yet.
-                  </p>
-                  {#if dialog.auditConfigured}
-                    <div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
-                      <label class="inline-flex items-center gap-2"
-                        title="Take a permissions snapshot of the watch paths on each collection and diff it against the previous one. Off by default.">
-                        <input type="checkbox" bind:checked={dialog.auditEnabled} /> Enabled
-                      </label>
-                      <label class="inline-flex items-center gap-2"
-                        title="Raise an alert when a diff is non-empty. Off means the snapshots are still taken and kept, just silently — useful while you learn what a normal week of churn looks like.">
-                        <input type="checkbox" bind:checked={dialog.auditAlertOnChange} /> Alert on change
-                      </label>
-                      <label class="text-xs text-slate-500"
-                        title="How many past snapshots to keep per watch path before the oldest is discarded. Bounds the disk this costs on the agent; more snapshots means a longer diff history to look back through. Default 10.">
-                        Retain snapshots (1–{MAX_RETAIN_SNAPSHOTS})
-                        <input type="number" min="1" max={MAX_RETAIN_SNAPSHOTS}
-                          class="ml-1 w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                          title="How many past snapshots to keep per watch path before the oldest is discarded. Bounds the disk this costs on the agent. Default 10."
-                          bind:value={dialog.auditRetain} />
-                      </label>
+                <div class="mt-3 rounded-control border border-border p-3">
+                  <Checkbox
+                    label="Include a change-audit block"
+                    description="Snapshot-diff + alert routing for watched paths. Stored ahead of the collector; nothing consumes it yet."
+                    title="Whether an audit object is written into the permissions block at all. Unticked omits it entirely."
+                    bind:checked={d.auditConfigured} />
+                  {#if d.auditConfigured}
+                    <div class="mt-2 flex flex-wrap items-end gap-4">
+                      <Checkbox
+                        label="Enabled"
+                        title="Take a permissions snapshot of the watch paths on each collection and diff it against the previous one. Off by default."
+                        bind:checked={d.auditEnabled} />
+                      <Checkbox
+                        label="Alert on change"
+                        title="Raise an alert when a diff is non-empty. Off means the snapshots are still taken and kept, just silently — useful while you learn what a normal week of churn looks like."
+                        bind:checked={d.auditAlertOnChange} />
+                      <Field label="Retain snapshots (1–{MAX_RETAIN_SNAPSHOTS})" class="w-48">
+                        <Input
+                          type="number"
+                          min="1"
+                          max={MAX_RETAIN_SNAPSHOTS}
+                          title="How many past snapshots to keep per watch path before the oldest is discarded. Bounds the disk this costs on the agent; more snapshots means a longer diff history to look back through. Default 10."
+                          bind:value={d.auditRetain} />
+                      </Field>
                     </div>
-                    <label class="mt-2 block text-xs text-slate-500"
-                      title="Which paths get snapshotted, one per line. Path specs — environment tokens (%USERPROFILE%, $HOME, ~) and globs are expanded ON THE AGENT, so a spec may resolve differently on each host and central cannot preview the result. Central only syntax-checks them. Max 200.">
-                      Watch paths (one per line; max 200 — path specs, syntax-checked only)
-                      <textarea rows="2"
-                        class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-                        title="Which paths get snapshotted, one per line. Path specs — environment tokens (%USERPROFILE%, $HOME, ~) and globs are expanded ON THE AGENT, so a spec may resolve differently on each host. Central only syntax-checks them. Max 200."
-                        bind:value={dialog.auditWatchPathsText}></textarea>
-                    </label>
+                    <Field label="Watch paths (one per line; max 200 — path specs, syntax-checked only)" class="mt-2">
+                      <Textarea
+                        size="sm"
+                        class="font-mono"
+                        rows={2}
+                        title="Which paths get snapshotted, one per line. Path specs — environment tokens (%USERPROFILE%, $HOME, ~) and globs are expanded ON THE AGENT, so a spec may resolve differently on each host and central cannot preview the result. Central only syntax-checks them. Max 200."
+                        bind:value={d.auditWatchPathsText} />
+                    </Field>
                   {/if}
                 </div>
               {/if}
             </div>
           {/if}
         </div>
+      {/if}
 
-        {/if}
-
-        {@render sectionHead(
-          "selections",
-          SETTINGS_SECTIONS[3].label,
-          SETTINGS_SECTIONS[3].blurb,
-        )}
-        {#if openSections.selections}
-        <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+      {@render sectionHead("selections", SETTINGS_SECTIONS[3].label, SETTINGS_SECTIONS[3].blurb)}
+      {#if openSections.selections}
+        <div class="rounded-control border border-border p-3">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">Scan selections</span>
-            <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-              title="Agents on this group derive their scan roots from these selections: every policy poll rewrites the agent's scan.json root list (its local roots editor is locked while a group manages roots). A bare Windows drive such as D: means the drive root. Agent build 2026-08-18 or newer.">drives scan roots</span>
+            <span title="Agents on this group derive their scan roots from these selections: every policy poll rewrites the agent's scan.json root list (its local roots editor is locked while a group manages roots). A bare Windows drive such as D: means the drive root. Agent build 2026-08-18 or newer.">
+              <Badge tone="ok">drives scan roots</Badge>
+            </span>
             <div class="grow"></div>
-            <button class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700"
-              onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</button>
+            <Button size="sm" onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</Button>
           </div>
-          {#if dialog.selections.length === 0}
-            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">No selections — the agent falls back to its defaults.</p>
+          {#if d.selections.length === 0}
+            <StateBlock state="empty" compact message="No selections — the agent falls back to its defaults. Add one to choose its scan roots." />
           {/if}
-          {#each dialog.selections as sel, i (i)}
-            <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-              <div class="flex flex-wrap items-center gap-3">
-                <label class="text-xs text-slate-500"
-                  title="A predefined, per-OS folder set the AGENT resolves to real locations — Windows known folders (OneDrive-redirect aware), Linux XDG user-dirs, macOS user folders — with system files, thumbnails and caches excluded. Presets are why one selection works across a mixed fleet. (none) means this selection is defined purely by the path specs below.">Preset
-                  <select class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
-                    title="A predefined, per-OS folder set the AGENT resolves to real locations — Windows known folders (OneDrive-redirect aware), Linux XDG user-dirs, macOS user folders — with system files, thumbnails and caches excluded. (none) means this selection is defined purely by the path specs below."
+          {#each d.selections as sel, i (i)}
+            <div class="mt-3 rounded-control border border-border p-3">
+              <div class="flex flex-wrap items-end gap-3">
+                <Field label="Preset" class="w-56">
+                  <Select
+                    size="sm"
+                    title="A predefined, per-OS folder set the AGENT resolves to real locations — Windows known folders (OneDrive-redirect aware), Linux XDG user-dirs, macOS user folders — with system files, thumbnails and caches excluded. Presets are why one selection works across a mixed fleet. (none) means this selection is defined purely by the path specs below."
                     bind:value={sel.preset}>
                     <option value="">(none)</option>
                     {#each SCAN_PRESET_NAMES as p}
                       <option value={p}>{p}</option>
                     {/each}
-                  </select>
-                </label>
-                <label class="inline-flex items-center gap-2 text-sm"
-                  title="Whether this selection counts. Unticking keeps it authored but inert, so a scaffold can be staged and switched on later instead of being deleted and retyped.">
-                  <input type="checkbox" bind:checked={sel.enabled} /> enabled
-                </label>
+                  </Select>
+                </Field>
+                <Checkbox
+                  label="enabled"
+                  title="Whether this selection counts. Unticking keeps it authored but inert, so a scaffold can be staged and switched on later instead of being deleted and retyped."
+                  bind:checked={sel.enabled} />
                 <div class="grow"></div>
-                <button class="text-xs text-red-600" onclick={() => dialog && (dialog.selections = dialog.selections.filter((_, j) => j !== i))}>remove</button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Remove selection {i + 1}"
+                  onclick={() => dialog && (dialog.selections = dialog.selections.filter((_, j) => j !== i))}>remove</Button>
               </div>
-              <label class="mt-2 block text-xs text-slate-500"
-                title="Extra locations for this selection, one per line. Environment tokens (%USERPROFILE%, $HOME, ~) and multi-user globs (/home/*/documents) are expanded ON THE AGENT, never centrally — so one spec covers every member of a mixed fleet, and central cannot show you what it will resolve to. Max 200 specs, 4096 characters each.">Path specs (one per line — env tokens / globs allowed)
-                <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-                  title="Extra locations for this selection, one per line. Environment tokens (%USERPROFILE%, $HOME, ~) and multi-user globs (/home/*/documents) are expanded ON THE AGENT, never centrally. Max 200 specs, 4096 characters each."
-                  placeholder={"%USERPROFILE%/Documents\n/home/*/documents"} bind:value={sel.pathsText}></textarea>
-              </label>
-              <div class="mt-2 flex flex-wrap gap-3">
-                <label class="grow text-xs text-slate-500"
-                  title="Only paths matching one of these expressions are kept, one per line. Empty means no include filter at all — everything the specs resolved that the excludes do not drop. Central compiles them with Python's re as a typo gate only; the agent's RE2 engine is the authority, so an exotic construct can pass here and behave differently there. Max 200.">Include regex (one per line)
-                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-                    title="Only paths matching one of these expressions are kept, one per line. Empty means no include filter at all. Central compiles them with Python's re as a typo gate only; the agent's RE2 engine is the authority. Max 200."
-                    bind:value={sel.includeText}></textarea>
-                </label>
-                <label class="grow text-xs text-slate-500"
-                  title="Paths matching any of these are dropped, one per line, applied after the includes. Same typo-gate caveat: central syntax-checks with Python's re, the agent evaluates with RE2. Max 200.">Exclude regex (one per line)
-                  <textarea rows="2" class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
+              <Field label="Path specs (one per line — env tokens / globs allowed)" class="mt-2">
+                <Textarea
+                  size="sm"
+                  class="font-mono"
+                  rows={2}
+                  title="Extra locations for this selection, one per line. Environment tokens (%USERPROFILE%, $HOME, ~) and multi-user globs (/home/*/documents) are expanded ON THE AGENT, never centrally — so one spec covers every member of a mixed fleet, and central cannot show you what it will resolve to. Max 200 specs, 4096 characters each."
+                  placeholder={"%USERPROFILE%/Documents\n/home/*/documents"}
+                  bind:value={sel.pathsText} />
+              </Field>
+              <div class="mt-2 grid gap-3 sm:grid-cols-2">
+                <Field label="Include regex (one per line)">
+                  <Textarea
+                    size="sm"
+                    class="font-mono"
+                    rows={2}
+                    title="Only paths matching one of these expressions are kept, one per line. Empty means no include filter at all — everything the specs resolved that the excludes do not drop. Central compiles them with Python's re as a typo gate only; the agent's RE2 engine is the authority, so an exotic construct can pass here and behave differently there. Max 200."
+                    bind:value={sel.includeText} />
+                </Field>
+                <Field label="Exclude regex (one per line)">
+                  <Textarea
+                    size="sm"
+                    class="font-mono"
+                    rows={2}
                     title="Paths matching any of these are dropped, one per line, applied after the includes. Same typo-gate caveat: central syntax-checks with Python's re, the agent evaluates with RE2. Max 200."
-                    bind:value={sel.excludeText}></textarea>
-                </label>
+                    bind:value={sel.excludeText} />
+                </Field>
               </div>
             </div>
           {/each}
         </div>
-        {/if}
+      {/if}
 
-        <!-- The POLICY half of the group document. Same catalogue the old
-             standalone policy editor rendered (./agentPolicyDoc), now scoped to
-             ONE group: every field is tri-state, and "Inherit (not set)" means
-             this group contributes nothing for that key, so a lower-priority
-             group — or the agent's built-in default — supplies it. -->
-        {#each POLICY_SECTIONS as section (section.id)}
-          {@render sectionHead(`policy:${section.id}`, section.label, section.blurb)}
-          {#if openSections[`policy:${section.id}`]}
-            <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-              {#each sectionFields(section.id) as f (f.key)}
-                <div class="mt-3 grid gap-2 border-t border-slate-100 pt-3 first:mt-0 first:border-t-0 first:pt-0 md:grid-cols-[18rem_1fr] dark:border-slate-800/60">
-                  <div>
-                    <div class="flex flex-wrap items-center gap-1.5">
-                      <span class="text-sm" title={fieldTitle(f)}>{f.label}</span>
-                      {#if f.enforcedBy === "central"}
-                        <span
-                          class="rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-                          title="Enforced by CENTRAL, not the agent: central applies this when the agent asks, so it takes effect for every agent build — including old ones.">
-                          central-enforced
-                        </span>
-                      {/if}
-                    </div>
-                    <code class="text-[11px] text-slate-600 dark:text-slate-400" title={fieldTitle(f)}>{f.key}</code>
-                    <p class="mt-0.5 text-xs text-slate-500" title={fieldTitle(f)}>{f.hint}</p>
+      <!-- The POLICY half of the group document. Same catalogue the old
+           standalone policy editor rendered (./agentPolicyDoc), now scoped to
+           ONE group: every field is tri-state, and "Inherit (not set)" means
+           this group contributes nothing for that key, so a lower-priority
+           group — or the agent's built-in default — supplies it. The label,
+           key and hint sit in the left column, so the controls are named with
+           aria-label and point at their validation message. -->
+      {#each POLICY_SECTIONS as section (section.id)}
+        {@render sectionHead(`policy:${section.id}`, section.label, section.blurb)}
+        {#if openSections[`policy:${section.id}`]}
+          <div class="rounded-control border border-border p-3">
+            {#each sectionFields(section.id) as f (f.key)}
+              {@const errId = `${uid}-policy-${f.key}-error`}
+              {@const fieldErr = policyErrors[f.key]}
+              {@const described = fieldErr ? errId : undefined}
+              <div class="mt-3 grid gap-2 border-t border-border pt-3 first:mt-0 first:border-t-0 first:pt-0 md:grid-cols-[18rem_1fr]">
+                <div>
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="text-sm" title={fieldTitle(f)}>{f.label}</span>
+                    {#if f.enforcedBy === "central"}
+                      <span title="Enforced by CENTRAL, not the agent: central applies this when the agent asks, so it takes effect for every agent build — including old ones.">
+                        <Badge tone="info">central-enforced</Badge>
+                      </span>
+                    {/if}
                   </div>
+                  <code class="text-2xs text-muted" title={fieldTitle(f)}>{f.key}</code>
+                  <p class="mt-0.5 text-xs text-muted" title={fieldTitle(f)}>{f.hint}</p>
+                </div>
 
-                  <div>
-                    {#if f.kind === "bool"}
-                      <select
-                        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                <div>
+                  {#if f.kind === "bool"}
+                    <div class="w-48">
+                      <Select
+                        size="sm"
+                        aria-label={f.label}
+                        aria-describedby={described}
+                        invalid={!!fieldErr}
                         title={fieldTitle(f)}
                         value={boolMode(f.key)}
                         onchange={(e) => setBoolMode(f.key, e.currentTarget.value)}>
                         <option value="">Inherit (not set)</option>
                         <option value="true">On</option>
                         <option value="false">Off</option>
-                      </select>
-                    {:else}
-                      <label
-                        class="inline-flex items-center gap-2 text-xs text-slate-500"
-                        title="Write this key into THIS group's policy section. Unticked leaves it absent, which is not the same as off — the key is then supplied by a lower-priority group, or falls back to {f.fallback}.">
-                        <input
-                          type="checkbox"
-                          checked={dialog.policyForm[f.key]?.set ?? false}
-                          onchange={(e) => setExplicit(f.key, e.currentTarget.checked)} />
-                        set in this group
-                      </label>
-                      {#if dialog.policyForm[f.key]?.set}
-                        {#if f.kind === "int" && f.key === "scan_interval_seconds"}
-                          <div class="mt-1 flex flex-wrap items-center gap-2">
-                            <select
-                              class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
+                      </Select>
+                    </div>
+                  {:else}
+                    <Checkbox
+                      size="sm"
+                      label="set in this group"
+                      description={f.label}
+                      title="Write this key into THIS group's policy section. Unticked leaves it absent, which is not the same as off — the key is then supplied by a lower-priority group, or falls back to {f.fallback}."
+                      checked={d.policyForm[f.key]?.set ?? false}
+                      onchange={(e) => setExplicit(f.key, e.currentTarget.checked)} />
+                    {#if d.policyForm[f.key]?.set}
+                      {#if f.kind === "int" && f.key === "scan_interval_seconds"}
+                        <div class="mt-1 flex flex-wrap items-center gap-2">
+                          <div class="w-48">
+                            <Select
+                              size="sm"
+                              aria-label="{f.label} — common intervals"
                               title="Common intervals; pick custom to type the seconds."
-                              value={intervalPresetValue(dialog.policyForm[f.key].value)}
+                              value={intervalPresetValue(d.policyForm[f.key].value)}
                               onchange={(e) => { if (e.currentTarget.value !== "custom") setPolicyValue(f.key, e.currentTarget.value); }}>
                               {#each INTERVAL_PRESETS as p (p.s)}
                                 <option value={String(p.s)}>{p.label}</option>
                               {/each}
                               <option value="custom">custom…</option>
-                            </select>
-                            <input
-                              type="number" min={f.min} max={f.max}
+                            </Select>
+                          </div>
+                          <div class="w-32">
+                            <Input
+                              size="sm"
+                              type="number"
+                              min={f.min}
+                              max={f.max}
+                              aria-label="{f.label} (seconds)"
+                              aria-describedby={described}
+                              invalid={!!fieldErr}
                               title={fieldTitle(f)}
-                              class="w-32 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                              value={dialog.policyForm[f.key].value}
+                              value={d.policyForm[f.key].value}
                               oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
-                            <span class="text-xs text-slate-600 dark:text-slate-400">seconds</span>
                           </div>
-                        {:else if f.kind === "int"}
-                          <input
-                            type="number" min={f.min} max={f.max}
+                          <span class="text-xs text-muted">seconds</span>
+                        </div>
+                      {:else if f.kind === "int"}
+                        <div class="mt-1 w-48">
+                          <Input
+                            size="sm"
+                            type="number"
+                            min={f.min}
+                            max={f.max}
+                            aria-label={f.label}
+                            aria-describedby={described}
+                            invalid={!!fieldErr}
                             title={fieldTitle(f)}
-                            class="mt-1 block w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-                            value={dialog.policyForm[f.key].value}
+                            value={d.policyForm[f.key].value}
                             oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
-                        {:else if f.kind === "cron"}
-                          <div class="mt-1 max-w-xl">
-                            <ScheduleField value={dialog.policyForm[f.key].value || null} offsetMinutes={0}
-                              tzLabel="the agent's local time" dstNote={false}
-                              onChange={(c) => setPolicyValue(f.key, c ?? "")} />
-                            <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">Times are the agent's own local clock. Off leaves the key set-but-empty (a save error) — untick “set in this group” to inherit instead.</p>
-                          </div>
-                        {:else if f.kind === "text"}
-                          <input
-                            class="mt-1 block w-80 rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-sm dark:border-slate-700"
+                        </div>
+                      {:else if f.kind === "cron"}
+                        <div class="mt-1 max-w-xl">
+                          <ScheduleField value={d.policyForm[f.key].value || null} offsetMinutes={0}
+                            tzLabel="the agent's local time" dstNote={false}
+                            onChange={(c) => setPolicyValue(f.key, c ?? "")} />
+                          <p class="mt-1 text-2xs text-muted">Times are the agent's own local clock. Off leaves the key set-but-empty (a save error) — untick “set in this group” to inherit instead.</p>
+                        </div>
+                      {:else if f.kind === "text"}
+                        <div class="mt-1 w-80 max-w-full">
+                          <Input
+                            size="sm"
+                            class="font-mono"
+                            aria-label={f.label}
+                            aria-describedby={described}
+                            invalid={!!fieldErr}
                             title={fieldTitle(f)}
                             placeholder={f.placeholder ?? ""}
-                            value={dialog.policyForm[f.key].value}
+                            value={d.policyForm[f.key].value}
                             oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
-                        {:else if f.kind === "presets"}
-                          <div class="mt-1 flex flex-wrap gap-1">
-                            {#each presetNames as p (p)}
-                              {@const chosen = dialog.policyForm[f.key].value
-                                .split(/[\n,]/)
-                                .map((x) => x.trim())
-                                .includes(p)}
-                              <button type="button"
-                                class="rounded-full border px-2 py-0.5 text-[11px] {chosen
-                                  ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-                                  : 'border-slate-300 dark:border-slate-700'}"
-                                onclick={() => {
-                                  const cur = dialog!.policyForm[f.key].value
-                                    .split(/[\n,]/)
-                                    .map((x) => x.trim())
-                                    .filter(Boolean);
-                                  setPolicyValue(
-                                    f.key,
-                                    (chosen ? cur.filter((x) => x !== p) : [...cur, p]).join(", "),
-                                  );
-                                }}>{p}</button>
-                            {/each}
-                          </div>
-                          <input
-                            class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
-                            title={fieldTitle(f)}
-                            placeholder="comma-separated preset names"
-                            value={dialog.policyForm[f.key].value}
-                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
-                        {:else}
-                          <textarea rows="3"
-                            class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
-                            title={fieldTitle(f)}
-                            placeholder="one per line"
-                            value={dialog.policyForm[f.key].value}
-                            oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)}></textarea>
-                        {/if}
+                        </div>
+                      {:else if f.kind === "presets"}
+                        <!-- Toggle chips (aria-pressed): a bespoke segment-style
+                             control, kept raw with token classes. -->
+                        <div class="mt-1 flex flex-wrap gap-1">
+                          {#each presetNames as p (p)}
+                            {@const chosen = d.policyForm[f.key].value
+                              .split(/[\n,]/)
+                              .map((x) => x.trim())
+                              .includes(p)}
+                            <button type="button"
+                              aria-pressed={chosen}
+                              class="rounded-full border px-2 py-0.5 text-2xs {chosen
+                                ? 'border-transparent bg-accent text-accent-fg'
+                                : 'border-border-strong text-fg hover:bg-surface-3'}"
+                              onclick={() => {
+                                const cur = d.policyForm[f.key].value
+                                  .split(/[\n,]/)
+                                  .map((x) => x.trim())
+                                  .filter(Boolean);
+                                setPolicyValue(
+                                  f.key,
+                                  (chosen ? cur.filter((x) => x !== p) : [...cur, p]).join(", "),
+                                );
+                              }}>{p}</button>
+                          {/each}
+                        </div>
+                        <Input
+                          size="sm"
+                          class="mt-1 font-mono"
+                          aria-label={f.label}
+                          aria-describedby={described}
+                          invalid={!!fieldErr}
+                          title={fieldTitle(f)}
+                          placeholder="comma-separated preset names"
+                          value={d.policyForm[f.key].value}
+                          oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
+                      {:else}
+                        <Textarea
+                          size="sm"
+                          class="mt-1 font-mono"
+                          rows={3}
+                          aria-label={f.label}
+                          aria-describedby={described}
+                          invalid={!!fieldErr}
+                          title={fieldTitle(f)}
+                          placeholder="one per line"
+                          value={d.policyForm[f.key].value}
+                          oninput={(e) => setPolicyValue(f.key, e.currentTarget.value)} />
                       {/if}
                     {/if}
-                    {#if policyErrors[f.key]}
-                      <p class="mt-1 text-xs text-red-600">{policyErrors[f.key]}</p>
-                    {/if}
-                    {#if !dialog.policyForm[f.key]?.set}
-                      <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
-                        Not set here → a lower-priority group supplies it, or {f.fallback}.
-                      </p>
-                    {/if}
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        {/each}
-
-        <!-- Advanced: the keys the form does not render. Both halves matter —
-             the fixed keys explain why they have no field, and the raw view is
-             the only way to author a forward-compat key an unshipped agent
-             build reads. -->
-        {@render sectionHead(
-          "advanced",
-          "Advanced: fixed and forward-compat policy keys",
-          "Raw JSON for keys this console does not model.",
-        )}
-        {#if openSections.advanced}
-          <div class="rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-800">
-            <span class="text-sm font-medium">Fixed keys</span>
-            <ul class="mt-1 space-y-1 text-slate-500">
-              {#each Object.entries(RESERVED_POLICY_KEYS) as [key, why] (key)}
-                <li>
-                  <code class="font-mono text-slate-600 dark:text-slate-300">{key}</code> — {why}
-                  {#if key in dialog.storedPolicy}
-                    <span class="text-slate-600 dark:text-slate-400">(present in this group; preserved as-is)</span>
                   {/if}
-                </li>
-              {/each}
-            </ul>
-
-            {#if unknownKeys.length || unparsedKeys.length}
-              <div class="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900/40">
-                {#if unknownKeys.length}
-                  <p>
-                    <b>{unknownKeys.length} key(s) this console does not model</b>
-                    are in this group and are preserved untouched on save (the
-                    policy schema allows forward-compat keys so a newer agent can
-                    read them): <code class="font-mono">{unknownKeys.join(", ")}</code>.
-                  </p>
-                {/if}
-                {#if unparsedKeys.length}
-                  <p class="mt-1 text-amber-700 dark:text-amber-400">
-                    <b>Unexpected value shape</b> for
-                    <code class="font-mono">{unparsedKeys.join(", ")}</code> — the
-                    fields above show these as “Inherit” but the stored value is
-                    kept as-is. Fix them in the raw JSON below.
-                  </p>
-                {/if}
+                  {#if fieldErr}
+                    <p id={errId} class="mt-1 text-2xs text-danger">{fieldErr}</p>
+                  {/if}
+                  {#if !d.policyForm[f.key]?.set}
+                    <p class="mt-1 text-2xs text-muted">
+                      Not set here → a lower-priority group supplies it, or {f.fallback}.
+                    </p>
+                  {/if}
+                </div>
               </div>
-            {/if}
-
-            <button class="mt-3 rounded-lg border border-slate-300 px-3 py-1 dark:border-slate-700"
-              onclick={openRaw}>{rawOpen ? "Hide" : "Show"} raw policy JSON</button>
-            {#if rawOpen}
-              <p class="mt-2 text-slate-500">
-                The exact <code class="font-mono">policy</code> section that will be
-                sent. Apply loads it back into the fields above; nothing is stored
-                until you publish. The <code class="font-mono">settings</code>
-                section is authored by the fields above only — it is typed and
-                rejects unknown keys.
-              </p>
-              <textarea rows="10"
-                class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
-                title="This group's whole policy section, including keys this console does not render (those round-trip untouched). Editing here is how you set a key the form has no field for."
-                bind:value={rawText}></textarea>
-              {#if rawError}<p class="mt-1 text-red-600">{rawError}</p>{/if}
-              <button class="mt-1 rounded-lg border border-slate-300 px-3 py-1 dark:border-slate-700"
-                onclick={applyRaw}>Apply JSON to the fields</button>
-            {/if}
+            {/each}
           </div>
         {/if}
-      </div>
+      {/each}
+
+      <!-- Advanced: the keys the form does not render. Both halves matter —
+           the fixed keys explain why they have no field, and the raw view is
+           the only way to author a forward-compat key an unshipped agent
+           build reads. -->
+      {@render sectionHead(
+        "advanced",
+        "Advanced: fixed and forward-compat policy keys",
+        "Raw JSON for keys this console does not model.",
+      )}
+      {#if openSections.advanced}
+        <div class="rounded-control border border-border p-3 text-xs">
+          <span class="text-sm font-medium">Fixed keys</span>
+          <ul class="mt-1 space-y-1 text-muted">
+            {#each Object.entries(RESERVED_POLICY_KEYS) as [key, why] (key)}
+              <li>
+                <code class="font-mono text-fg">{key}</code> — {why}
+                {#if key in d.storedPolicy}
+                  <span>(present in this group; preserved as-is)</span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+
+          {#if unknownKeys.length || unparsedKeys.length}
+            <Alert tone="warn" live={false} class="mt-3 text-xs">
+              {#if unknownKeys.length}
+                <p>
+                  <b>{unknownKeys.length} key(s) this console does not model</b>
+                  are in this group and are preserved untouched on save (the
+                  policy schema allows forward-compat keys so a newer agent can
+                  read them): <code class="font-mono">{unknownKeys.join(", ")}</code>.
+                </p>
+              {/if}
+              {#if unparsedKeys.length}
+                <p class="mt-1">
+                  <b>Unexpected value shape</b> for
+                  <code class="font-mono">{unparsedKeys.join(", ")}</code> — the
+                  fields above show these as “Inherit” but the stored value is
+                  kept as-is. Fix them in the raw JSON below.
+                </p>
+              {/if}
+            </Alert>
+          {/if}
+
+          <Button size="sm" class="mt-3" aria-expanded={rawOpen} onclick={openRaw}>{rawOpen ? "Hide" : "Show"} raw policy JSON</Button>
+          {#if rawOpen}
+            <p class="mt-2 text-muted">
+              The exact <code class="font-mono">policy</code> section that will be
+              sent. Apply loads it back into the fields above; nothing is stored
+              until you publish. The <code class="font-mono">settings</code>
+              section is authored by the fields above only — it is typed and
+              rejects unknown keys.
+            </p>
+            <Field label="Raw policy JSON" error={rawError || undefined} class="mt-1">
+              <Textarea
+                size="sm"
+                class="font-mono"
+                rows={10}
+                title="This group's whole policy section, including keys this console does not render (those round-trip untouched). Editing here is how you set a key the form has no field for."
+                bind:value={rawText} />
+            </Field>
+            <Button size="sm" class="mt-1" onclick={applyRaw}>Apply JSON to the fields</Button>
+          {/if}
+        </div>
+      {/if}
 
       <!-- Publish. Two buttons because they are two different acts, not one act
            with a checkbox: "apply now" makes the new version current for every
            member on its next poll; a phased rollout leaves current_version alone
            and widens coverage by tier, so cancelling it ROLLS BACK the agents
-           already covered. -->
-      <div class="mt-4 border-t border-slate-200 pt-3 dark:border-slate-800">
+           already covered. The buttons sit in the dialog footer. -->
+      <div class="border-t border-border pt-3">
         {#if shadowedKeys.length}
           <!-- Layering preview, computed client-side because the draft is not
                saved yet. Amber rather than red: being overridden is a normal,
                intended state — it is only a surprise when nobody said so. -->
-          <p class="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-            title="These keys are set by a group with a HIGHER priority, which applies after this one. For any agent that is in both groups, that group's value wins. Agents in this group but not that one still get the value you set here.">
-            <b>Overridden for agents that are also in a higher-priority group:</b>
-            {#each shadowedKeys as s, i (s.key)}{i > 0 ? ", " : " "}<code class="font-mono">{s.key}</code> (by {s.by}){/each}
-          </p>
+          <Alert tone="warn" live={false} class="mb-3 text-xs">
+            <span title="These keys are set by a group with a HIGHER priority, which applies after this one. For any agent that is in both groups, that group's value wins. Agents in this group but not that one still get the value you set here.">
+              <b>Overridden for agents that are also in a higher-priority group:</b>
+              {#each shadowedKeys as s, i (s.key)}{i > 0 ? ", " : " "}<code class="font-mono">{s.key}</code> (by {s.by}){/each}
+            </span>
+          </Alert>
         {/if}
-        {#if dialog.id !== null}
-          <label class="text-xs text-slate-500"
-            title="Stored on the published snapshot and shown in the version history. The only place the reason for a change survives.">
-            Change note (optional)
-            <input class="mt-1 block w-full rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+        {#if d.id !== null}
+          <Field label="Change note (optional)">
+            <Input
+              title="Stored on the published snapshot and shown in the version history. The only place the reason for a change survives."
               placeholder="why this change"
-              bind:value={dialog.note} />
-          </label>
+              bind:value={d.note} />
+          </Field>
         {/if}
 
         {#if rolloutOpen}
-          <div class="mt-3 rounded-lg border border-sky-300 p-3 dark:border-sky-800">
+          <div class="mt-3 rounded-control border border-border p-3">
             <div class="flex flex-wrap items-center gap-2">
               <span class="text-sm font-medium">Phased rollout</span>
-              <span class="text-xs text-slate-500">
+              <span class="text-xs text-muted">
                 up to {MAX_ROLLOUT_TIERS} tiers · percent of the fleet, and how long
                 to wait after the previous tier
               </span>
               <div class="grow"></div>
-              <button class="text-xs text-slate-500" onclick={() => (rolloutOpen = false)}>cancel rollout</button>
+              <Button size="sm" variant="ghost" onclick={() => (rolloutOpen = false)}>cancel rollout</Button>
             </div>
-            <p class="mt-1 text-xs text-slate-600 dark:text-slate-400">
+            <p class="mt-1 text-xs text-muted">
               Coverage is picked by a stable hash of each agent's id, so an agent
               never flaps in and out between polls. Members outside the active
-              tier keep receiving version {dialog.currentVersion} until the last
+              tier keep receiving version {d.currentVersion} until the last
               tier completes.
             </p>
             {#each tiers as t, i (i)}
               <div class="mt-2 flex flex-wrap items-end gap-2">
-                <span class="text-xs text-slate-500">Tier {i + 1}</span>
-                <label class="text-xs text-slate-500">
-                  percent
-                  <input type="number" min="1" max="100"
-                    class="mt-1 block w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                <span class="pb-1.5 text-xs text-muted">Tier {i + 1}</span>
+                <Field label="percent" class="w-24">
+                  <Input
+                    type="number"
+                    min="1"
+                    max="100"
                     title="Share of the fleet receiving the new version once this tier activates. Strictly ascending across tiers; the last tier must be 100."
                     bind:value={t.percent} />
-                </label>
-                <label class="text-xs text-slate-500">
-                  delay (minutes)
-                  <input type="number" min="0"
-                    class="mt-1 block w-28 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                </Field>
+                <Field label="delay (minutes)" class="w-28">
+                  <Input
+                    type="number"
+                    min="0"
                     title="How long to wait after the PREVIOUS tier activated before this one does. For tier 1 the wait counts from the rollout's start."
                     bind:value={t.delay_minutes} />
-                </label>
-                <button class="text-xs text-red-600"
-                  onclick={() => (tiers = tiers.filter((_, j) => j !== i))}>remove</button>
+                </Field>
+                <Button size="sm" variant="ghost" aria-label="Remove tier {i + 1}" onclick={() => (tiers = tiers.filter((_, j) => j !== i))}>remove</Button>
                 <!-- The running sum, because each row's number is a delay after
                      the PREVIOUS tier and operators reliably read it as "minutes
                      from the start". -->
-                <span class="text-[11px] text-slate-600 dark:text-slate-400"
+                <span class="pb-1.5 text-2xs text-muted"
                   title="Cumulative wait from the rollout's start until this tier activates — the sum of every delay up to and including this row.">
                   ≈ {tierEtaMinutes(tiers, i)} min after start
                 </span>
               </div>
             {/each}
             <div class="mt-2 flex flex-wrap items-end gap-3">
-              <button class="rounded border border-slate-300 px-2 py-0.5 text-xs disabled:opacity-40 dark:border-slate-700"
-                disabled={tiers.length >= MAX_ROLLOUT_TIERS}
-                onclick={addTier}>+ add tier</button>
-              <label class="text-xs text-slate-500"
-                title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC.">
-                start at (optional)
-                <input type="datetime-local"
-                  class="mt-1 block rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+              <Button size="sm" disabled={tiers.length >= MAX_ROLLOUT_TIERS} onclick={addTier}>+ add tier</Button>
+              <Field label="start at (optional)" class="w-56">
+                <Input
+                  type="datetime-local"
+                  title="When the first tier activates. Blank starts at central's next minute tick. Interpreted in this browser's timezone and sent as UTC."
                   bind:value={rolloutStartsAt} />
-              </label>
+              </Field>
             </div>
             {#if tierError}
-              <p class="mt-2 text-xs text-red-600">{tierError}</p>
+              <!-- Live validation of the tier list; it clears as the tiers are fixed. -->
+              <Alert tone="danger" class="mt-2">{tierError}</Alert>
             {/if}
           </div>
         {/if}
-
-        <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
-          <span class="mr-auto text-xs text-slate-600 dark:text-slate-400">
-            {policyKeyCount} policy key(s) will be written for this group.
-          </span>
-          <button class="rounded-lg border border-slate-300 px-3 py-1.5 text-sm dark:border-slate-700"
-            onclick={() => (dialog = null)}>Cancel</button>
-          {#if dialog.id !== null && !rolloutOpen}
-            <button class="rounded-lg border border-sky-400 px-3 py-1.5 text-sm text-sky-700 dark:border-sky-700 dark:text-sky-300"
-              title="Publish the new version behind a tiered schedule instead of delivering it to every member at once."
-              onclick={openRollout}>Save &amp; phased rollout…</button>
-          {/if}
-          {#if rolloutOpen}
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-              disabled={dialogBusy || tierError !== null}
-              onclick={() => saveGroup("rollout")}>
-              {dialogBusy ? "Publishing…" : "Publish with rollout"}
-            </button>
-          {:else}
-            <button class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-              disabled={dialogBusy}
-              title="Publish a new version immediately — every member receives it on its next poll (~1 min)."
-              onclick={() => saveGroup("now")}>
-              {dialogBusy ? "Saving…" : dialog.id === null ? "Create" : "Save & apply now"}
-            </button>
-          {/if}
-        </div>
       </div>
-      {/if}
     </div>
-  </div>
-{/if}
+  {/if}
+{/snippet}
+
+<!-- The dialog's footer row: the key count, Cancel and the publish buttons. -->
+{#snippet groupDialogFooter(d: GroupForm, close: () => void)}
+  <span class="mr-auto text-xs text-muted">
+    {policyKeyCount} policy key(s) will be written for this group.
+  </span>
+  <Button onclick={close}>Cancel</Button>
+  {#if d.id !== null && !rolloutOpen}
+    <Button
+      title="Publish the new version behind a tiered schedule instead of delivering it to every member at once."
+      onclick={openRollout}>Save &amp; phased rollout…</Button>
+  {/if}
+  {#if rolloutOpen}
+    <Button variant="primary" disabled={dialogBusy || tierError !== null} onclick={() => saveGroup("rollout")}>
+      {dialogBusy ? "Publishing…" : "Publish with rollout"}
+    </Button>
+  {:else}
+    <Button
+      variant="primary"
+      disabled={dialogBusy}
+      title="Publish a new version immediately — every member receives it on its next poll (~1 min)."
+      onclick={() => saveGroup("now")}>
+      {dialogBusy ? "Saving…" : d.id === null ? "Create" : "Save & apply now"}
+    </Button>
+  {/if}
+{/snippet}

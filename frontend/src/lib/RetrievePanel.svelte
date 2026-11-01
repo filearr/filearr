@@ -18,6 +18,7 @@
     mintTransferEventsToken,
     type TransferEvent,
   } from "./api";
+  import { Alert, Button } from "./ui";
 
   let { itemId, filename }: { itemId: string; filename: string } = $props();
 
@@ -205,6 +206,7 @@
   async function download() {
     if (!transferId || downloading) return;
     downloading = true;
+    message = ""; // a retry clears the previous attempt's error
     try {
       await downloadTransfer(transferId, filename);
       phase = "downloaded";
@@ -231,52 +233,58 @@
 
 <div class="flex flex-col gap-2">
   <div class="flex flex-wrap items-center gap-2">
-    <span class="text-sm font-medium text-slate-600 dark:text-slate-300">Retrieve file</span>
+    <span class="text-sm font-medium text-muted">Retrieve file</span>
     <span class="grow"></span>
     {#if !active}
-      <button
-        type="button"
-        class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+      <!-- One primary action at a time: once a download is ready it is the
+           primary, and Retrieve again steps back to secondary. -->
+      <Button
+        variant={canDownload ? "secondary" : "primary"}
+        size="sm"
         onclick={retrieve}
         title="Pull this file from the hosting agent to the server, then download it"
-      >{phase === "idle" ? "Retrieve" : "Retrieve again"}</button>
+      >{phase === "idle" ? "Retrieve" : "Retrieve again"}</Button>
     {:else}
-      <button
-        type="button"
-        class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-        onclick={cancel}>Cancel</button>
+      <Button size="sm" onclick={cancel}>Cancel</Button>
     {/if}
     {#if canDownload}
-      <button
-        type="button"
-        class="rounded-lg bg-emerald-600 px-3 py-1 text-sm text-white disabled:opacity-50"
+      <Button
+        variant="primary"
+        size="sm"
         disabled={downloading}
-        onclick={download}>{downloading ? "Downloading…" : "Download"}</button>
+        onclick={download}>{downloading ? "Downloading…" : "Download"}</Button>
     {/if}
   </div>
 
   {#if active}
     <div class="flex flex-col gap-1">
-      <div class="flex items-center justify-between text-xs text-slate-500">
+      <div class="flex items-center justify-between text-xs text-muted">
         <span>{PHASE_LABEL[phase]}</span>
         {#if phase === "uploading" && total}
           <span>{pct}%</span>
         {/if}
       </div>
-      <div class="h-2 w-full overflow-hidden rounded bg-slate-200 dark:bg-slate-800">
+      <div class="h-2 w-full overflow-hidden rounded-control bg-surface-3">
         {#if phase === "uploading" && total}
-          <div class="h-full bg-[var(--accent)] transition-all" style="width: {pct}%"></div>
+          <div class="h-full bg-accent transition-all" style="width: {pct}%"></div>
         {:else}
           <!-- Indeterminate stripe for waiting / preparing / verifying (no % yet). -->
-          <div class="h-full w-1/3 animate-pulse bg-[var(--accent)]"></div>
+          <div class="h-full w-1/3 animate-pulse bg-accent"></div>
         {/if}
       </div>
     </div>
   {:else if canDownload}
-    <p class="text-xs text-emerald-600 dark:text-emerald-400" role="status">
+    <p class="text-xs text-ok" role="status">
       {PHASE_LABEL[phase]}{#if phase === "downloaded"} — you can download it again until it expires.{/if}
     </p>
-  {:else if failedPhase}
-    <p class="text-xs text-amber-600 dark:text-amber-400" role="status">{message}</p>
+    <!-- A failed Download keeps the staged file (phase stays ready), so the
+         error sits under the Download button until dismissed or retried. -->
+    {#if message}
+      <Alert tone="danger" onDismiss={() => (message = "")}>{message}</Alert>
+    {/if}
+  {:else if failedPhase && message}
+    <!-- Why the retrieve ended, under the Retrieve again button. An integrity
+         failure is an error; offline / expired / cancelled are warnings. -->
+    <Alert tone={phase === "failed" ? "danger" : "warn"} onDismiss={() => (message = "")}>{message}</Alert>
   {/if}
 </div>

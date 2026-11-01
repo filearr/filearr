@@ -21,6 +21,7 @@
     Tabs,
     Textarea,
     confirm,
+    promptText,
     toast,
     toneForStatus,
     type SortState,
@@ -111,11 +112,15 @@
     modalOpen = true;
   }
 
-  // Modal with a dirty check: Escape and outside clicks are off, and every
-  // remaining way out (Close, Cancel) asks before discarding edits.
-  // $state, so `dirty` re-derives when Save moves the baseline.
+  // Modal with the built-in dirty check: every user dismissal (Escape, outside
+  // click, ×, Cancel via close()) asks before discarding edits; Save sets
+  // `open = false` and is not asked. $state, so `dirty` re-derives when Save
+  // moves the baseline.
   const savedEdit = $state({ name: "Movies", path: "/mnt/media/movies" });
   let editOpen = $state(false);
+  // Off: dismissible={false} — Escape and outside clicks do nothing; × and
+  // Cancel still close (through the dirty check).
+  let editDismissible = $state(true);
   let editName = $state(savedEdit.name);
   let editPath = $state(savedEdit.path);
   const dirty = $derived(editName !== savedEdit.name || editPath !== savedEdit.path);
@@ -126,17 +131,6 @@
   }
   // Focus target for initialFocus, via the Input's bindable element ref.
   let editPathInput = $state<HTMLInputElement | null>(null);
-  async function confirmDiscard(): Promise<boolean> {
-    return (
-      !dirty ||
-      (await confirm({
-        title: "Discard changes?",
-        message: "Your edits to Movies will be lost.",
-        tone: "danger",
-        confirmLabel: "Discard",
-      }))
-    );
-  }
   function saveEdit() {
     savedEdit.name = editName;
     savedEdit.path = editPath;
@@ -144,11 +138,11 @@
     // A "caller" close is never vetoed, so the save is final here.
     toast("Library saved", { tone: "ok" });
   }
-  // onBeforeClose waves a "caller" close through (Save, or Cancel after this
-  // check); the × button ("close-button") asks.
-  async function cancelEdit() {
-    if (await confirmDiscard()) editOpen = false;
-  }
+
+  // Nested modals: a click inside the inner one is not an outside click on
+  // the outer one.
+  let outerOpen = $state(false);
+  let innerOpen = $state(false);
 
   async function askDefault() {
     const ok = await confirm({
@@ -179,6 +173,16 @@
       tone: "danger",
     });
     toast(ok ? "Confirmed" : "Cancelled", { tone: ok ? "ok" : "info" });
+  }
+
+  async function askName() {
+    const name = await promptText({
+      title: "Name this search",
+      label: "Name",
+      validate: (v) => (v.length > 40 ? "Keep it under 40 characters." : undefined),
+    });
+    if (name === null) toast("Cancelled", { tone: "info" });
+    else toast(`Saved as “${name}”`, { tone: "ok" });
   }
 
   // Tabs
@@ -426,16 +430,20 @@
 
     <h3 class="mt-4 mb-2 text-sm font-medium">Unsaved changes</h3>
     <p class="mb-3 text-sm text-muted">
-      <code>dismissible=&#123;false&#125;</code>: Escape and outside clicks do nothing. Edit a field, then Cancel or
-      Close to get the discard prompt. Focus starts on the second input.
+      <code>dirty=&#123;() =&gt; dirty&#125;</code>: edit a field, then press Escape, click outside, Close or Cancel to
+      get the discard prompt; Save closes without asking. Focus starts on the second input. Switch off
+      <code>dismissible</code> and Escape and outside clicks do nothing at all.
     </p>
-    <Button variant="secondary" onclick={openEdit}>Edit with unsaved changes</Button>
+    <div class="flex flex-wrap items-center gap-4">
+      <Button variant="secondary" onclick={openEdit}>Edit with unsaved changes</Button>
+      <Switch label="Dismissible (Escape, outside click)" bind:checked={editDismissible} />
+    </div>
     <Modal
       bind:open={editOpen}
       title="Edit library"
-      description="Escape and outside clicks are disabled while editing."
-      dismissible={false}
-      onBeforeClose={(r) => r === "caller" || confirmDiscard()}
+      description="Leaving with unsaved edits asks first."
+      dirty={() => dirty}
+      dismissible={editDismissible}
       initialFocus={() => editPathInput}
     >
       <div class="flex flex-col gap-3">
@@ -445,9 +453,29 @@
         </Field>
       </div>
       <p class="mt-3 text-2xs text-muted">{dirty ? "Unsaved changes" : "No changes"}</p>
-      {#snippet footer()}
-        <Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
+      {#snippet footer({ close })}
+        <Button variant="secondary" onclick={close}>Cancel</Button>
         <Button onclick={saveEdit}>Save</Button>
+      {/snippet}
+    </Modal>
+
+    <h3 class="mt-4 mb-2 text-sm font-medium">Nested</h3>
+    <p class="mb-3 text-sm text-muted">
+      Open the inner dialog and click inside it: the outer one stays open. A click on the backdrop closes the inner one.
+    </p>
+    <Button variant="secondary" onclick={() => (outerOpen = true)}>Open outer</Button>
+    <Modal bind:open={outerOpen} title="Choose a folder">
+      <p class="text-sm text-muted">The picker opens in a second dialog on top of this one.</p>
+      <Button class="mt-3" variant="secondary" onclick={() => (innerOpen = true)}>Browse…</Button>
+      {#snippet footer({ close })}
+        <Button variant="secondary" onclick={close}>Close</Button>
+      {/snippet}
+    </Modal>
+    <Modal bind:open={innerOpen} size="sm" title="Browse">
+      <Field label="Folder"><Input value="/mnt/media" /></Field>
+      {#snippet footer({ close })}
+        <Button variant="secondary" onclick={close}>Cancel</Button>
+        <Button onclick={() => (innerOpen = false)}>Select</Button>
       {/snippet}
     </Modal>
   </section>
@@ -460,6 +488,13 @@
       <Button variant="danger" onclick={askDanger}>Delete library…</Button>
       <Button variant="danger" onclick={askDetails}>Remove library (with details)…</Button>
     </div>
+
+    <h3 class="mt-4 mb-2 text-sm font-medium">Prompt</h3>
+    <p class="mb-3 text-sm text-muted">
+      <code>promptText()</code> replaces <code>window.prompt</code>: Enter submits, an empty or over-long name shows its
+      error under the field, Escape cancels.
+    </p>
+    <Button variant="secondary" onclick={askName}>Prompt…</Button>
   </section>
 
   <section class="rounded-panel border border-border bg-surface-2 p-4" aria-labelledby="kit-toasts">

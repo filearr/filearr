@@ -2,7 +2,7 @@
 // one place so the three wrappers cannot drift. DOM-free so the Node test
 // runner can load it directly (tests/control.node.test.ts).
 
-export type ControlSize = "sm" | "md";
+export type ControlSize = "sm" | "md" | "lg";
 
 // Full literal class strings (never assembled from fragments) so Tailwind's
 // source scanner can see every utility and generate it. No focus ring here:
@@ -11,6 +11,8 @@ export type ControlSize = "sm" | "md";
 const BASE = "w-full rounded-control border bg-surface text-fg placeholder:text-muted disabled:opacity-50";
 
 const SIZES: Record<ControlSize, string> = {
+  // lg: a page's primary input (the Search hero box), 44 px tall.
+  lg: "min-h-11 px-4 text-base",
   md: "px-3 py-1.5 text-sm",
   sm: "px-2 py-1 text-xs",
 };

@@ -21,6 +21,8 @@
   import Thumb from "./Thumb.svelte";
   import DslHelp from "./DslHelp.svelte";
   import BulkEditBar from "./BulkEditBar.svelte";
+  import { Alert, Button, Checkbox, Input, Select, StateBlock, confirm, promptText } from "./ui";
+  import { toast } from "./ui/toast.svelte";
   import {
     batchPatchItems,
     getItem,
@@ -206,7 +208,15 @@
   // whole catalog is "a result". Flips true on the first query (typed, chip,
   // deep link, or saved search) and stays true for the session.
   let searched = $state(false);
-  let savedError = $state("");
+  // Saved-search action errors, keyed by origin: "save" for the Save button,
+  // else the saved search's id (its Rename/Delete row).
+  let savedErrors = $state<Record<string, string>>({});
+  function setSavedError(key: string, msg: string) {
+    const next = { ...savedErrors };
+    if (msg) next[key] = msg;
+    else delete next[key];
+    savedErrors = next;
+  }
   // Range params carried through from an applied/deep-linked search until the user
   // next touches a slider (the sliders are facetStats-derived, not directly
   // restorable — see applyParams).
@@ -225,8 +235,6 @@
   // virtualization, so we track an index + drive aria-activedescendant instead.
   let selectedIndex = $state(0);
   let selected = $state<string | null>(null); // open ItemDetail id
-  let toast = $state<string | null>(null);
-  let toastTimer: ReturnType<typeof setTimeout>;
 
   // library_id -> Library, for native_prefix-resolved copy-path (invariant 3).
   let libs = $state<Map<string, Library>>(new Map());
@@ -258,7 +266,7 @@
   );
 
   let vlist = $state<VListHandle | undefined>();
-  let searchInput = $state<HTMLInputElement | undefined>();
+  let searchInput = $state<HTMLInputElement | null>(null);
   let debounce: ReturnType<typeof setTimeout>;
   let controller: AbortController | null = null;
 
@@ -268,6 +276,13 @@
   const num = (h: Hit, k: string): number | null =>
     typeof h[k] === "number" ? (h[k] as number) : null;
   const hitId = (h: Hit): string => str(h, "id");
+  // A row checkbox's accessible name (its label is visually hidden).
+  const selectText = (h: Hit): string =>
+    `Select ${str(h, "title") || str(h, "filename") || hitId(h)}`;
+  // Shared look of the toggle chips (category, library, group, extension,
+  // Saved/Filters): on = accent fill, off = a plain outline.
+  const CHIP_ON = "border-transparent bg-accent text-accent-fg";
+  const CHIP_OFF = "border-border-strong";
 
   // P3-T5 snippet rendering. The backend returns ``snippet`` (cropped document
   // body) with matches wrapped in <em>…</em>. We NEVER {@html} it (untrusted
@@ -446,7 +461,7 @@
       const patches = buildPatches(targets, ops);
       const ids = Object.keys(patches);
       if (!ids.length && !unresolved.length) {
-        flash("Nothing to change — every selected item already matches.");
+        toast("Nothing to change — every selected item already matches.");
         return;
       }
       // Chunked at exactly the server's cap: a request over 500 keys is rejected
@@ -466,10 +481,11 @@
       bulkFailuresOpen = sum.failures.length > 0;
       applyLocally(sum.ok, patches);
       if (!sum.failures.length) clearSelection();
-      flash(
+      toast(
         sum.failures.length
           ? `${sum.ok.length} updated, ${sum.failures.length} failed — search index updates shortly.`
           : `${sum.ok.length} updated — search index updates shortly.`,
+        { tone: sum.failures.length ? "warn" : "ok" },
       );
     } catch (e) {
       // A request-level failure (auth, 413, network). Per-ITEM failures never
@@ -646,15 +662,29 @@
     }
   }
 
+  // promptText validate: a name another saved search already has (case-
+  // insensitive). `exceptId` lets a rename keep (or re-case) its own name.
+  function duplicateName(name: string, exceptId?: string): string | undefined {
+    const n = name.trim().toLowerCase();
+    return saved.some((s) => s.id !== exceptId && s.name.toLowerCase() === n)
+      ? "A saved search with that name already exists."
+      : undefined;
+  }
+
   async function saveCurrent() {
-    const name = window.prompt("Name this search:");
-    if (!name?.trim()) return;
-    savedError = "";
+    const name = await promptText({
+      title: "Name this search",
+      label: "Name",
+      confirmLabel: "Save",
+      validate: (v) => duplicateName(v),
+    });
+    if (!name) return;
+    setSavedError("save", "");
     try {
-      await createSavedSearch({ name: name.trim(), params: savedParams() });
+      await createSavedSearch({ name, params: savedParams() });
       await loadSaved();
     } catch (e) {
-      savedError = errorMessage(e);
+      setSavedError("save", errorMessage(e));
     }
   }
 
@@ -663,25 +693,37 @@
   }
 
   async function renameSaved(ss: SavedSearch) {
-    const name = window.prompt("Rename search:", ss.name);
-    if (!name?.trim() || name.trim() === ss.name) return;
-    savedError = "";
+    const name = await promptText({
+      title: "Rename search",
+      label: "Name",
+      initial: ss.name,
+      confirmLabel: "Rename",
+      validate: (v) => duplicateName(v, ss.id),
+    });
+    if (!name || name === ss.name) return;
+    setSavedError(ss.id, "");
     try {
-      await updateSavedSearch(ss.id, { name: name.trim() });
+      await updateSavedSearch(ss.id, { name });
       await loadSaved();
     } catch (e) {
-      savedError = errorMessage(e);
+      setSavedError(ss.id, errorMessage(e));
     }
   }
 
   async function removeSaved(ss: SavedSearch) {
-    if (!window.confirm(`Delete saved search "${ss.name}"?`)) return;
-    savedError = "";
+    const ok = await confirm({
+      title: "Delete saved search?",
+      message: `"${ss.name}" will be removed from your saved searches.`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setSavedError(ss.id, "");
     try {
       await deleteSavedSearch(ss.id);
       await loadSaved();
     } catch (e) {
-      savedError = errorMessage(e);
+      setSavedError(ss.id, errorMessage(e));
     }
   }
 
@@ -1128,14 +1170,8 @@
   async function copyPath(h: Hit | undefined) {
     if (!h) return;
     const p = resolvePath(h);
-    if (await copyText(p)) flash(`Copied ${p}`);
-    else flash(COPY_FAILED);
-  }
-
-  function flash(msg: string) {
-    toast = msg;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = null), 2500);
+    if (await copyText(p)) toast(`Copied ${p}`, { tone: "ok" });
+    else toast(COPY_FAILED, { tone: "warn" });
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -1177,6 +1213,16 @@
     }
   }
 
+  // A clicked row takes DOM focus (rows are tabindex=-1, so focus returns to
+  // it when the detail modal closes). The first key pressed on the row itself
+  // hands focus back to the grid container, which owns the roving cursor
+  // (aria-activedescendant); the key then bubbles on to onKeydown unchanged.
+  // Keys on a control inside the row (its checkbox) are left to that control.
+  function focusGrid(e: KeyboardEvent) {
+    if (e.target !== e.currentTarget) return;
+    (e.currentTarget as HTMLElement).closest<HTMLElement>("#search-results")?.focus({ preventScroll: true });
+  }
+
   function onScroll() {
     if (!vlist || !nextCursor || loading) return;
     const end = vlist.getScrollOffset() + vlist.getViewportSize();
@@ -1203,7 +1249,7 @@
     return new Date(epoch * 1000).toISOString().slice(0, 10);
   }
   const activeDescendant = $derived(
-    hits.length && hits[selectedIndex] ? `opt-${hitId(hits[selectedIndex])}` : undefined,
+    hits.length && hits[selectedIndex] ? `row-${hitId(hits[selectedIndex])}` : undefined,
   );
 
   // ---- lifecycle ----------------------------------------------------------
@@ -1273,7 +1319,6 @@
     tagController?.abort();
     clearTimeout(debounce);
     clearTimeout(tagDebounce);
-    clearTimeout(toastTimer);
     window.removeEventListener("hashchange", onHashChange);
   });
 </script>
@@ -1281,10 +1326,10 @@
 <svelte:window onkeydown={onKeydown} />
 
 <div>
-  <input
-    bind:this={searchInput}
-    class="w-full rounded-xl border border-slate-300 bg-transparent px-4 py-3 text-lg focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-           focus:border-[var(--accent)] dark:border-slate-700"
+  <Input
+    bind:ref={searchInput}
+    size="lg"
+    aria-label="Search your library"
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
     oninput={onInput}
@@ -1294,17 +1339,13 @@
        primary type filter row; the granular file_group row sits below it. -->
   <div class="mt-3 flex flex-wrap items-center gap-2">
     <button
-      class="rounded-full border px-3 py-1 text-sm {selectedCategories.length === 0
-        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-        : 'border-slate-300 dark:border-slate-700'}"
+      class="rounded-full border px-3 py-1 text-sm {selectedCategories.length === 0 ? CHIP_ON : CHIP_OFF}"
       onclick={() => { selectedCategories = []; reset(); }}>all</button>
     {#each categoryOptions as c (c.key)}
       {@const count = facets.file_category?.[c.key]}
       {@const on = selectedCategories.includes(c.key)}
       <button
-        class="rounded-full border px-3 py-1 text-sm {on
-          ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-          : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+        class="rounded-full border px-3 py-1 text-sm {on ? CHIP_ON : CHIP_OFF} {count === 0 && !on
           ? 'opacity-40'
           : ''}"
         title={c.description || c.label}
@@ -1316,49 +1357,49 @@
     <span class="grow"></span>
     <!-- P3-T8 semantic blend slider — only rendered when the feature is enabled. -->
     {#if semanticEnabled}
-      <label class="flex items-center gap-1 text-sm text-slate-500" title="Blend keyword and meaning-based (semantic) matching">
+      <span class="flex items-center gap-1 text-sm text-muted" title="Blend keyword and meaning-based (semantic) matching">
         Semantic
-        <input
-          type="range"
-          min="0"
-          max="1"
-          step="0.1"
-          bind:value={semantic}
-          onchange={reset}
-          class="w-24 accent-[var(--accent)]"
-          aria-label="Semantic blend ratio" />
+        <span class="w-24">
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            class="w-full accent-accent"
+            bind:value={semantic}
+            onchange={reset}
+            aria-label="Semantic blend ratio" />
+        </span>
         <span class="w-8 tabular-nums">{semantic.toFixed(1)}</span>
-      </label>
+      </span>
     {/if}
     <!-- Sort (P3-T7 deep-linkable). -->
-    <label class="flex items-center gap-1 text-sm text-slate-500">
+    <span class="flex items-center gap-1 text-sm text-muted">
       Sort
-      <select
-        class="rounded-full border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-        bind:value={sortMode}
-        onchange={reset}
-        aria-label="Sort results">
-        {#each SORTS as s (s.value)}<option value={s.value}>{s.label}</option>{/each}
-      </select>
-    </label>
+      <span class="w-32">
+        <Select size="sm" bind:value={sortMode} onchange={reset} aria-label="Sort results">
+          {#each SORTS as s (s.value)}<option value={s.value}>{s.label}</option>{/each}
+        </Select>
+      </span>
+    </span>
     <!-- P12 slice 2: list / grid layout toggle. -->
-    <div class="flex items-center overflow-hidden rounded-full border border-slate-300 dark:border-slate-700" role="group" aria-label="Result layout">
+    <div class="flex items-center overflow-hidden rounded-full border border-border-strong" role="group" aria-label="Result layout">
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'list' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+        class="px-3 py-1 text-sm {view === 'list' ? 'bg-accent text-accent-fg' : ''}"
         aria-pressed={view === 'list'}
         title="List view"
         onclick={() => setView('list')}>List</button>
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+        class="px-3 py-1 text-sm {view === 'grid' ? 'bg-accent text-accent-fg' : ''}"
         aria-pressed={view === 'grid'}
         title="Grid view"
         onclick={() => setView('grid')}>Grid</button>
       <!-- R8-UI: the map is a third view of the SAME query, not a separate page. -->
       <button
         type="button"
-        class="px-3 py-1 text-sm {view === 'map' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+        class="px-3 py-1 text-sm {view === 'map' ? 'bg-accent text-accent-fg' : ''}"
         aria-pressed={view === 'map'}
         title="Map view — plot the results that carry GPS coordinates, and drag an area to filter by it"
         onclick={() => setView('map')}>Map</button>
@@ -1367,16 +1408,12 @@
          (accent fill, matching the chip convention) — the chevron alone was
          not a legible state indicator. Open/closed persists per browser. -->
     <button
-      class="rounded-full border px-3 py-1 text-sm {savedOpen
-        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-        : 'border-slate-300 dark:border-slate-700'}"
+      class="rounded-full border px-3 py-1 text-sm {savedOpen ? CHIP_ON : CHIP_OFF}"
       aria-expanded={savedOpen}
       title={savedOpen ? "Hide the saved-searches panel" : "Show saved searches"}
       onclick={toggleSavedOpen}>Saved {savedOpen ? "▲" : "▾"}</button>
     <button
-      class="rounded-full border px-3 py-1 text-sm {filtersOpen
-        ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-        : 'border-slate-300 dark:border-slate-700'}"
+      class="rounded-full border px-3 py-1 text-sm {filtersOpen ? CHIP_ON : CHIP_OFF}"
       aria-expanded={filtersOpen}
       title={filtersOpen ? "Hide the filters panel" : "Show filters (group, extension, tags, ranges)"}
       onclick={toggleFiltersOpen}>Filters {filtersOpen ? "▲" : "▾"}</button>
@@ -1387,32 +1424,34 @@
 
   <!-- Saved searches panel (P3-T7): save current, apply/rename/delete. -->
   {#if savedOpen}
-    <div class="mt-2 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
-      <div class="flex items-center gap-2">
-        <button
-          class="rounded-full bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
-          onclick={saveCurrent}>Save current search</button>
-        {#if savedError}<span class="text-xs text-red-500">{savedError}</span>{/if}
-      </div>
+    <div class="mt-2 rounded-panel border border-border p-3">
+      <Button variant="primary" size="sm" onclick={saveCurrent}>Save current search</Button>
+      {#if savedErrors.save}
+        <Alert tone="danger" class="mt-2" onDismiss={() => setSavedError("save", "")}>{savedErrors.save}</Alert>
+      {/if}
       {#if saved.length}
         <ul class="mt-3 flex flex-col gap-1">
           {#each saved as ss (ss.id)}
-            <li class="flex items-center gap-2 text-sm">
-              <button
-                class="min-w-0 flex-1 truncate rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-800"
-                title={`Apply "${ss.name}"`}
-                onclick={() => applySaved(ss)}>{ss.name}</button>
-              <button
-                class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700"
-                onclick={() => renameSaved(ss)}>Rename</button>
-              <button
-                class="rounded border border-slate-300 px-2 py-0.5 text-xs text-red-500 dark:border-slate-700"
-                onclick={() => removeSaved(ss)}>Delete</button>
+            <li class="flex flex-col gap-1 text-sm">
+              <div class="flex items-center gap-2">
+                <button
+                  class="min-w-0 flex-1 truncate rounded-control px-2 py-1 text-left hover:bg-surface-3"
+                  title={`Apply "${ss.name}"`}
+                  onclick={() => applySaved(ss)}>{ss.name}</button>
+                <Button size="sm" onclick={() => renameSaved(ss)}>Rename</Button>
+                <Button size="sm" variant="danger" onclick={() => removeSaved(ss)}>Delete</Button>
+              </div>
+              {#if savedErrors[ss.id]}
+                <Alert tone="danger" onDismiss={() => setSavedError(ss.id, "")}>{savedErrors[ss.id]}</Alert>
+              {/if}
             </li>
           {/each}
         </ul>
       {:else}
-        <p class="mt-2 text-xs text-slate-500">No saved searches yet.</p>
+        <StateBlock
+          state="empty"
+          compact
+          message="No saved searches yet. Run a search, then press Save current search to keep it." />
       {/if}
     </div>
   {/if}
@@ -1421,11 +1460,11 @@
   {#if activeFilters.length}
     <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
       {#each activeFilters as chip (chip.key)}
-        <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-[var(--accent)]">
+        <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-accent-text">
           {chip.label}
           <button
             type="button"
-            class="rounded-full px-1 leading-none hover:bg-[var(--accent)]/25"
+            class="rounded-full px-1 leading-none hover:bg-accent/25"
             aria-label={`Remove filter ${chip.label}`}
             onclick={chip.clear}>×</button>
         </span>
@@ -1434,23 +1473,21 @@
   {/if}
 
   {#if filtersOpen}
-    <div class="mt-3 rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+    <div class="mt-3 rounded-panel border border-border p-3">
       <!-- Library / machine filter (MULTI-select, OR). Central libraries first,
            then one group per agent with a whole-machine toggle; counts come
            from the library_id facet when the backend surfaces it. Hidden on a
            single-library catalog (nothing to choose). -->
       {#if libs.size > 1}
         <div class="mb-3 flex flex-wrap items-start gap-2">
-          <span class="mt-1 w-10 text-xs font-medium text-slate-500">Library</span>
+          <span class="mt-1 w-10 text-xs font-medium text-muted">Library</span>
           <div class="flex flex-wrap items-center gap-2">
             {#each libraryGroups as grp (grp.agent ?? "central")}
               {#if grp.agent}
                 {@const ids = grp.libs.map((l) => l.id)}
                 {@const allOn = ids.every((id) => selectedLibraries.includes(id))}
                 <button
-                  class="rounded-full border border-dashed px-2 py-0.5 text-xs {allOn
-                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-                    : 'border-slate-400 dark:border-slate-600'}"
+                  class="rounded-full border border-dashed px-2 py-0.5 text-xs {allOn ? CHIP_ON : CHIP_OFF}"
                   title="every library on this machine"
                   aria-pressed={allOn}
                   onclick={() => toggleAgentLibraries(ids)}>
@@ -1461,9 +1498,7 @@
                 {@const count = facets.library_id?.[l.id]}
                 {@const on = selectedLibraries.includes(l.id)}
                 <button
-                  class="rounded-full border px-3 py-1 text-sm {on
-                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-                    : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+                  class="rounded-full border px-3 py-1 text-sm {on ? CHIP_ON : CHIP_OFF} {count === 0 && !on
                     ? 'opacity-40'
                     : ''}"
                   title={l.root_path}
@@ -1483,14 +1518,12 @@
            appear when facet stats aren't available. -->
       {#if fileGroupOptions.length}
         <div class="mb-3 flex flex-wrap items-center gap-2">
-          <span class="w-10 text-xs font-medium text-slate-500">Group</span>
+          <span class="w-10 text-xs font-medium text-muted">Group</span>
           {#each fileGroupOptions as g (g.key)}
             {@const count = facets.file_group?.[g.key]}
             {@const on = selectedGroups.includes(g.key)}
             <button
-              class="rounded-full border px-3 py-1 text-sm {on
-                ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-                : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+              class="rounded-full border px-3 py-1 text-sm {on ? CHIP_ON : CHIP_OFF} {count === 0 && !on
                 ? 'opacity-40'
                 : ''}"
               title={g.description || g.label}
@@ -1502,18 +1535,14 @@
         </div>
       {/if}
       <!-- Extension type-ahead-lite: bounds come from the live ext facet. -->
-      <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+      <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
         <span class="w-10 font-medium">Type</span>
-        <input
-          class="w-32 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-                 focus:border-[var(--accent)] dark:border-slate-700"
-          placeholder="ext…"
-          bind:value={extQuery} />
+        <span class="w-32">
+          <Input size="sm" aria-label="Filter extensions" placeholder="ext…" bind:value={extQuery} />
+        </span>
         {#each topExtensions as [ext, count] (ext)}
           <button
-            class="rounded-full border px-2 py-0.5 {extension === ext
-              ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-              : 'border-slate-300 dark:border-slate-700'}"
+            class="rounded-full border px-2 py-0.5 {extension === ext ? CHIP_ON : CHIP_OFF}"
             onclick={() => toggleExtension(ext)}>
             {ext}<span class="ml-1 opacity-70">{count}</span>
           </button>
@@ -1522,32 +1551,30 @@
       </div>
 
       <!-- Sidecar toggle (T3 sidecars hidden by default). -->
-      <div class="mt-3 flex flex-wrap items-center gap-4">
-        <label class="flex items-center gap-2 text-xs text-slate-500">
-          <input type="checkbox" bind:checked={includeSidecars} onchange={reset} />
-          Show sidecar files (.nfo / artwork / JRiver)
-        </label>
-        <label class="flex items-center gap-1 text-xs text-slate-500"
+      <div class="mt-3 flex flex-wrap items-center gap-4 text-xs text-muted">
+        <Checkbox size="sm" label="Show sidecar files (.nfo / artwork / JRiver)" bind:checked={includeSidecars} onchange={reset} />
+        <span class="flex items-center gap-1"
           title="Which parts of an item the search text matches. 'File content only' searches the extracted body/OCR text and archive member names — a filename or path match alone no longer returns the file. 'Names only' is the inverse (no body text). Filters and facets are unaffected.">
           Match in
-          <select class="rounded border border-slate-300 bg-transparent px-1 py-0.5 dark:border-slate-700 dark:bg-slate-800"
-            bind:value={searchIn} onchange={reset}>
-            <option value="all">everything</option>
-            <option value="content">file content only</option>
-            <option value="names">names only</option>
-          </select>
-        </label>
+          <span class="w-40">
+            <Select size="sm" aria-label="Match in" bind:value={searchIn} onchange={reset}>
+              <option value="all">everything</option>
+              <option value="content">file content only</option>
+              <option value="names">names only</option>
+            </Select>
+          </span>
+        </span>
       </div>
 
       <!-- Permission filter (2026-08-23): who can read (agent-collected ACLs,
            perm_principals facet type-ahead) + world-readable. Items without a
            collected ACL never match a principal; the world select is tri-state. -->
-      <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-slate-500">
+      <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-muted">
         <span class="mt-1 w-10 font-medium" title="File permissions read by agents on the machine that owns the files (enable an agent's 'permissions' inventory collector). Only items with a collected ACL can match.">Access</span>
-        <div class="relative">
-          <input
-            class="w-56 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-                   focus:border-[var(--accent)] dark:border-slate-700"
+        <div class="relative w-56">
+          <Input
+            size="sm"
+            aria-label="Readable by principal"
             placeholder="readable by principal… (name or SID)"
             role="combobox"
             aria-expanded={principalOpen}
@@ -1559,13 +1586,13 @@
             onfocus={() => { if (!principalSuggestions.length) fetchPrincipalSuggestions(); else principalOpen = true; }} />
           {#if principalOpen && principalSuggestions.length}
             <ul id="principal-suggestions" role="listbox"
-              class="absolute z-20 mt-1 max-h-56 w-72 overflow-auto rounded border border-slate-300 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
+              class="absolute z-20 mt-1 max-h-56 w-72 overflow-auto rounded-control border border-border-strong bg-surface-2 shadow-lg">
               {#each principalSuggestions as sug, i (sug.value)}
                 <li role="option" aria-selected={i === principalActiveIndex}>
                   <button type="button"
                     class="flex w-full items-center justify-between gap-2 px-2 py-1 text-left {i === principalActiveIndex
-                      ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
-                      : 'hover:bg-slate-100 dark:hover:bg-slate-800'}"
+                      ? 'bg-accent/15 text-accent-text'
+                      : 'hover:bg-surface-3'}"
                     onmousedown={(e) => { e.preventDefault(); addPrincipal(sug.value); }}>
                     <span class="truncate">{sug.value}</span>
                     <span class="shrink-0 opacity-60">{sug.count}</span>
@@ -1576,38 +1603,38 @@
           {/if}
         </div>
         {#each selectedPrincipals as pr (pr)}
-          <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-[var(--accent)]">
+          <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-accent-text">
             {pr}
-            <button type="button" class="rounded-full px-1 leading-none hover:bg-[var(--accent)]/25"
+            <button type="button" class="rounded-full px-1 leading-none hover:bg-accent/25"
               aria-label={`Remove principal ${pr}`} onclick={() => removePrincipal(pr)}>×</button>
           </span>
         {/each}
-        <label class="flex items-center gap-1"
+        <span class="flex items-center gap-1"
           title="Who can READ, as it actually takes effect: through the SMB share when the agent collected share ACLs (access = share AND file permissions), else the file's own ACL. Anonymous = no credential needed (Everyone / POSIX other); authenticated = any signed-in account (Authenticated Users) but not anonymous; restricted = named principals only.">
           Readable by
-          <select class="rounded border border-slate-300 bg-transparent px-1 py-0.5 dark:border-slate-700 dark:bg-slate-800"
-            bind:value={exposure} onchange={reset}>
-            <option value="">any</option>
-            <option value="anonymous">anyone, no sign-in{#if facets.perm_exposure?.anonymous != null} ({facets.perm_exposure.anonymous}){/if}</option>
-            <option value="authenticated">any signed-in account{#if facets.perm_exposure?.authenticated != null} ({facets.perm_exposure.authenticated}){/if}</option>
-            <option value="restricted">named principals only{#if facets.perm_exposure?.restricted != null} ({facets.perm_exposure.restricted}){/if}</option>
-          </select>
-        </label>
-        <label class="flex items-center gap-1"
+          <span class="w-48">
+            <Select size="sm" aria-label="Readable by" bind:value={exposure} onchange={reset}>
+              <option value="">any</option>
+              <option value="anonymous">anyone, no sign-in{#if facets.perm_exposure?.anonymous != null} ({facets.perm_exposure.anonymous}){/if}</option>
+              <option value="authenticated">any signed-in account{#if facets.perm_exposure?.authenticated != null} ({facets.perm_exposure.authenticated}){/if}</option>
+              <option value="restricted">named principals only{#if facets.perm_exposure?.restricted != null} ({facets.perm_exposure.restricted}){/if}</option>
+            </Select>
+          </span>
+        </span>
+        <span class="mt-1"
           title="Files whose SMB share ACL and own file ACL disagree on who can read — e.g. the share grants Everyone Read but the files behind it don't (anonymous is denied), or the reverse. The share-vs-file-system reconciliation list.">
-          <input type="checkbox" bind:checked={shareMismatch} onchange={reset} />
-          share ≠ file permissions
-        </label>
+          <Checkbox size="sm" label="share ≠ file permissions" bind:checked={shareMismatch} onchange={reset} />
+        </span>
       </div>
 
       <!-- P3-T12 tag type-ahead: typo-tolerant, count-ordered facet search over
            the tags array. Selecting a suggestion (click / Enter) adds an AND tag. -->
-      <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-slate-500">
+      <div class="mt-3 flex flex-wrap items-start gap-2 text-xs text-muted">
         <span class="mt-1 w-10 font-medium">Tags</span>
-        <div class="relative">
-          <input
-            class="w-48 rounded border border-slate-300 bg-transparent px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-hidden
-                   focus:border-[var(--accent)] dark:border-slate-700"
+        <div class="relative w-48">
+          <Input
+            size="sm"
+            aria-label="Add tag filter"
             placeholder="add tag…"
             role="combobox"
             aria-expanded={tagOpen}
@@ -1621,14 +1648,14 @@
             <ul
               id="tag-suggestions"
               role="listbox"
-              class="absolute z-20 mt-1 max-h-56 w-48 overflow-auto rounded border border-slate-300 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
+              class="absolute z-20 mt-1 max-h-56 w-48 overflow-auto rounded-control border border-border-strong bg-surface-2 shadow-lg">
               {#each tagSuggestions as sug, i (sug.value)}
                 <li role="option" aria-selected={i === tagActiveIndex}>
                   <button
                     type="button"
                     class="flex w-full items-center justify-between gap-2 px-2 py-1 text-left {i === tagActiveIndex
-                      ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
-                      : 'hover:bg-slate-100 dark:hover:bg-slate-800'}"
+                      ? 'bg-accent/15 text-accent-text'
+                      : 'hover:bg-surface-3'}"
                     onmousedown={(e) => { e.preventDefault(); addTag(sug.value); }}>
                     <span class="truncate">{sug.value}</span>
                     <span class="shrink-0 opacity-60">{sug.count}</span>
@@ -1639,9 +1666,9 @@
           {/if}
         </div>
         {#each selectedTags as t (t)}
-          <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/15 px-2 py-1 text-[var(--accent)]">
+          <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-accent-text">
             {t}
-            <button type="button" class="rounded-full px-1 leading-none hover:bg-[var(--accent)]/25"
+            <button type="button" class="rounded-full px-1 leading-none hover:bg-accent/25"
               aria-label={`Remove tag ${t}`} onclick={() => removeTag(t)}>×</button>
           </span>
         {/each}
@@ -1649,43 +1676,51 @@
 
       <!-- facetStats range sliders (P3-T4): bounds are data-derived, never hardcoded. -->
       {#if sizeBounds && sizeBounds.max > sizeBounds.min}
-        <div class="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <div class="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Size</span>
-          <input
-            type="range" class="w-40" min={sizeBounds.min} max={sizeBounds.max} step="1"
-            bind:value={sizeLo}
-            oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; }}
-            onchange={onRangeChange} aria-label="Minimum file size" />
-          <input
-            type="range" class="w-40" min={sizeBounds.min} max={sizeBounds.max} step="1"
-            bind:value={sizeHi}
-            oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; }}
-            onchange={onRangeChange} aria-label="Maximum file size" />
+          <span class="w-40">
+            <input
+              type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
+              bind:value={sizeLo}
+              oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; }}
+              onchange={onRangeChange} aria-label="Minimum file size" />
+          </span>
+          <span class="w-40">
+            <input
+              type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
+              bind:value={sizeHi}
+              oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; }}
+              onchange={onRangeChange} aria-label="Maximum file size" />
+          </span>
           <span class="tabular-nums">{fmtBytes(sizeLo)} – {fmtBytes(sizeHi)}</span>
         </div>
       {:else}
-        <div class="mt-3 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
+        <div class="mt-3 flex items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Size</span>
           <span>range unavailable (no matching results)</span>
         </div>
       {/if}
       {#if mtimeBounds && mtimeBounds.max > mtimeBounds.min}
-        <div class="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <div class="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Date</span>
-          <input
-            type="range" class="w-40" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
-            bind:value={mtimeLo}
-            oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; }}
-            onchange={onRangeChange} aria-label="Earliest modified date" />
-          <input
-            type="range" class="w-40" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
-            bind:value={mtimeHi}
-            oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; }}
-            onchange={onRangeChange} aria-label="Latest modified date" />
+          <span class="w-40">
+            <input
+              type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
+              bind:value={mtimeLo}
+              oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; }}
+              onchange={onRangeChange} aria-label="Earliest modified date" />
+          </span>
+          <span class="w-40">
+            <input
+              type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
+              bind:value={mtimeHi}
+              oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; }}
+              onchange={onRangeChange} aria-label="Latest modified date" />
+          </span>
           <span class="tabular-nums">{fmtDate(mtimeLo)} – {fmtDate(mtimeHi)}</span>
         </div>
       {:else}
-        <div class="mt-2 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-400">
+        <div class="mt-2 flex items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Date</span>
           <span>range unavailable (no matching results)</span>
         </div>
@@ -1699,9 +1734,9 @@
          explanation is worth seeing immediately. The panel owns only its
          viewport; the area it reports comes straight back into this page's param
          state. -->
-    {#if error}<p class="mt-6 text-red-500">{error}</p>{/if}
+    {#if error}<StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />{/if}
     {#await loadMapPanel()}
-      <p class="py-8 text-sm text-slate-500">Loading…</p>
+      <StateBlock state="loading" />
     {:then m}
       <m.default
         points={mapPoints}
@@ -1715,52 +1750,45 @@
         onOpenItem={(id) => (selected = id)}
       />
     {:catch}
-      <div class="py-8 text-sm text-slate-500">
+      <div role="alert" class="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted">
         <p>The map failed to load — Filearr may have been updated since this tab was opened.</p>
-        <button class="mt-2 rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-          onclick={() => location.reload()}>Reload</button>
+        <Button size="sm" onclick={() => location.reload()}>Reload</Button>
       </div>
     {/await}
   {:else if !searched}
     <!-- Roadmap §20 empty start: nothing has been queried yet — an honest blank
          slate instead of a match-all dump of the whole catalog. -->
-    <div class="mt-16 text-center text-slate-500">
+    <div class="mt-16 text-center text-muted">
       <p class="text-lg">Search your library</p>
       <p class="mt-2 text-sm">
         Type above, pick a category chip, or open
-        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-[var(--accent)]"
+        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-accent-text"
           onclick={() => { if (!savedOpen) toggleSavedOpen(); }}>Saved</button>
         /
-        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-[var(--accent)]"
+        <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-accent-text"
           onclick={() => { if (!filtersOpen) toggleFiltersOpen(); }}>Filters</button>
         — results appear once a search starts.
       </p>
     </div>
   {:else if error}
-    <p class="mt-6 text-red-500">{error}</p>
+    <StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />
   {:else}
     {#if hashMode}
-      <p class="mt-4 text-sm text-[var(--accent)]">Exact hash match ({total} found)</p>
+      <p class="mt-4 text-sm text-accent-text">Exact hash match ({total} found)</p>
     {:else}
-      <p class="mt-4 text-sm text-slate-500">{total} results</p>
+      <p class="mt-4 text-sm text-muted">{total} results</p>
     {/if}
 
     <!-- IN-T4 selection controls. Deliberately "all LOADED", never "all
          matching": the batch API takes explicit ids, and a button that silently
          meant "every one of 1.09M results" would be a trap. -->
     {#if hits.length}
-      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <button
-          type="button"
-          class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
-          onclick={selectAllLoaded}>Select all loaded ({hits.length})</button>
+      <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
+        <Button size="sm" onclick={selectAllLoaded}>Select all loaded ({hits.length})</Button>
         {#if selectedIds.size}
-          <button
-            type="button"
-            class="rounded-full border border-slate-300 px-3 py-1 dark:border-slate-700"
-            onclick={clearSelection}>Clear selection</button>
+          <Button size="sm" onclick={clearSelection}>Clear selection</Button>
         {:else}
-          <span class="opacity-70">
+          <span>
             Tick a row (or press Space) to select; shift-click extends a range.
           </span>
         {/if}
@@ -1776,10 +1804,9 @@
         onClear={clearSelection} />
     {/if}
 
+    <!-- A request-level failure of the bar's Apply, right below the bar. -->
     {#if bulkError}
-      <p class="mt-2 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-        {bulkError}
-      </p>
+      <Alert tone="danger" class="mt-2" onDismiss={() => (bulkError = "")}>{bulkError}</Alert>
     {/if}
 
     <!-- Per-item outcomes. RBAC path grants can deny an arbitrary subset of a
@@ -1787,44 +1814,39 @@
          reasons come back per item and are shown verbatim rather than folded
          into a single "some items failed". -->
     {#if bulkSummary}
-      <div class="mt-2 rounded-lg border border-slate-200 px-3 py-2 text-xs dark:border-slate-800">
+      <div class="mt-2 rounded-panel border border-border px-3 py-2 text-xs">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="font-medium text-slate-600 dark:text-slate-300">
+          <span class="font-medium text-muted">
             {bulkSummary.ok.length} updated
             {#if bulkSummary.failures.length}
-              · <span class="text-red-500">{bulkSummary.failures.length} failed</span>
+              · <span class="text-danger">{bulkSummary.failures.length} failed</span>
             {/if}
           </span>
           {#if bulkSummary.failures.length}
-            <button
-              type="button"
-              class="rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+            <Button
+              size="sm"
               aria-expanded={bulkFailuresOpen}
               onclick={() => (bulkFailuresOpen = !bulkFailuresOpen)}
-              >{bulkFailuresOpen ? "Hide" : "Show"} failures</button>
-            <button
-              type="button"
-              class="rounded border border-slate-300 px-2 py-0.5 dark:border-slate-700"
+              >{bulkFailuresOpen ? "Hide" : "Show"} failures</Button>
+            <Button
+              size="sm"
               title="Keep only the items that failed selected, so you can retry the same change"
               onclick={() => selectFailedOnly(bulkSummary?.failures ?? [])}
-              >Select only the failed</button>
+              >Select only the failed</Button>
           {/if}
           <span class="grow"></span>
-          <button
-            type="button"
-            class="rounded px-2 py-0.5 hover:bg-slate-100 dark:hover:bg-slate-800"
-            onclick={() => (bulkSummary = null)}>Dismiss</button>
+          <Button size="sm" variant="ghost" onclick={() => (bulkSummary = null)}>Dismiss</Button>
         </div>
         {#if bulkFailuresOpen && bulkSummary.failures.length}
           <ul class="mt-2 max-h-48 overflow-auto">
             {#each bulkSummary.failures as f (f.id)}
-              <li class="flex items-start gap-2 border-t border-slate-100 py-1 dark:border-slate-800">
+              <li class="flex items-start gap-2 border-t border-border py-1">
                 <button
                   type="button"
-                  class="shrink-0 font-mono text-[10px] text-[var(--accent)] underline decoration-dotted"
+                  class="shrink-0 font-mono text-2xs text-accent-text underline decoration-dotted"
                   title="Open this item"
                   onclick={() => (selected = f.id)}>{f.id.slice(0, 8)}</button>
-                <span class="min-w-0 flex-1 break-words text-red-600 dark:text-red-400">{f.reason}</span>
+                <span class="min-w-0 flex-1 break-words text-danger">{f.reason}</span>
               </li>
             {/each}
           </ul>
@@ -1832,16 +1854,30 @@
       </div>
     {/if}
 
-    {#if view === "grid"}
+    <!-- ARIA grid (ruling 6): the container holds the one tab stop and the
+         roving cursor (aria-activedescendant → the cursor row); each row is
+         `aria-selected` when it is in the bulk selection, and every child sits
+         in a gridcell. Keys are handled on window (onKeydown + searchKeys.ts):
+         arrows move the cursor, Enter opens, Space toggles the selection,
+         Cmd/Ctrl+Enter copies the path. The controls inside rows are
+         tabindex=-1 (pointer only; the keys above cover them), so Tab leaves
+         the grid instead of walking every row. -->
+    {#if !loading && hits.length === 0}
+      <StateBlock
+        state="empty"
+        class="mt-2"
+        message="No matches. Try fewer words, remove a filter chip, or set Match in to everything." />
+    {:else if view === "grid"}
       <!-- P12 slice 2: responsive thumbnail GRID. Non-virtualized (a CSS grid of
            the already-loaded, paginated hits) with lazy <img>s (loading="lazy")
            so only on-screen thumbs fetch; infinite-scroll reuses loadMore via the
            container's scroll handler, so a huge result set still streams in. -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <div
-        class="mt-2 grid max-h-[65vh] gap-3 overflow-auto rounded-lg border border-slate-200 p-3 dark:border-slate-800
+        class="mt-2 grid max-h-[65vh] gap-3 overflow-auto rounded-panel border border-border p-3
                grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
-        role="listbox"
+        role="grid"
+        aria-multiselectable="true"
+        aria-busy={loading}
         tabindex={0}
         id="search-results"
         aria-label="Search results (grid)"
@@ -1849,137 +1885,153 @@
         onscroll={onGridScroll}
       >
         {#each hits as hit, index (hitId(hit))}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div
-            id={`opt-${hitId(hit)}`}
-            role="option"
+            id={`row-${hitId(hit)}`}
+            role="row"
             tabindex={-1}
-            aria-selected={index === selectedIndex}
-            class="group relative flex cursor-pointer flex-col overflow-hidden rounded-lg border text-left {index === selectedIndex
-              ? 'border-[var(--accent)] ring-1 ring-[var(--accent)]'
-              : 'border-slate-200 hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700'}"
+            aria-selected={selectedIds.has(hitId(hit))}
+            class="group relative flex cursor-pointer flex-col overflow-hidden rounded-panel border text-left {index === selectedIndex
+              ? 'border-accent ring-1 ring-accent'
+              : 'border-border hover:border-border-strong'}"
             onclick={() => { selectedIndex = index; openItem(hit); }}
+            onkeydown={focusGrid}
           >
             <!-- IN-T4 tile checkbox. Hidden until hover while nothing is
                  selected (the grid is a picture wall — permanent chrome on every
                  tile would compete with the thumbnails), then permanently
                  visible once a selection exists so the user can see what is in
                  it while scrolling. -->
-            <span
-              class="absolute left-1.5 top-1.5 z-10 rounded bg-white/85 p-0.5 shadow-sm transition-opacity dark:bg-slate-900/85
+            <div
+              role="gridcell"
+              class="absolute left-1.5 top-1.5 z-10 rounded-control bg-surface/85 p-0.5 shadow-sm transition-opacity
                 {selectedIds.size ? '' : 'opacity-0 focus-within:opacity-100 group-hover:opacity-100'}">
-              <input
-                type="checkbox"
-                class="block accent-[var(--accent)]"
-                aria-label={`Select ${str(hit, "title") || str(hit, "filename") || hitId(hit)}`}
+              <Checkbox
+                size="sm"
+                class="[&>span]:sr-only"
+                label={selectText(hit)}
+                tabindex={-1}
                 checked={selectedIds.has(hitId(hit))}
                 onmousedown={(e) => { if (e.shiftKey) e.preventDefault(); }}
                 onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
-            </span>
-            <Thumb id={hitId(hit)} size="aspect-square w-full h-auto" rounded="rounded-none" />
-            <div class="flex min-w-0 flex-col gap-1 p-2">
-              <span class="truncate text-sm font-medium" title={str(hit, "title") || str(hit, "filename")}
-                >{str(hit, "title") || str(hit, "filename")}</span>
-              <span class="flex items-center gap-1">
-                <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800"
-                  >{str(hit, "file_category")}</span>
-                {#if num(hit, "year")}<span class="text-xs text-slate-500">({num(hit, "year")})</span>{/if}
-                {#if copyCountMap[hitId(hit)] > 1}
-                  <span class="ml-auto shrink-0 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
-                    title="Has duplicate copies">{copyCountMap[hitId(hit)]}×</span>
-                {/if}
-              </span>
+            </div>
+            <div role="gridcell" class="flex min-w-0 flex-col">
+              <Thumb id={hitId(hit)} size="aspect-square w-full h-auto" rounded="rounded-none" />
+              <div class="flex min-w-0 flex-col gap-1 p-2">
+                <span class="truncate text-sm font-medium" title={str(hit, "title") || str(hit, "filename")}
+                  >{str(hit, "title") || str(hit, "filename")}</span>
+                <span class="flex items-center gap-1">
+                  <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs"
+                    >{str(hit, "file_category")}</span>
+                  {#if num(hit, "year")}<span class="text-xs text-muted">({num(hit, "year")})</span>{/if}
+                  {#if copyCountMap[hitId(hit)] > 1}
+                    <span class="ml-auto shrink-0 rounded-full bg-warn-bg px-1.5 py-0.5 text-2xs font-medium text-warn"
+                      title="Has duplicate copies">{copyCountMap[hitId(hit)]}×</span>
+                  {/if}
+                </span>
+              </div>
             </div>
           </div>
         {/each}
       </div>
     {:else}
-    <!-- Virtualized listbox. aria-activedescendant points at the logically
-         selected row; real DOM focus stays on the container (rows unmount). -->
+    <!-- Virtualized grid. aria-activedescendant points at the cursor row; real
+         DOM focus stays on the container (rows unmount). -->
     <VList
       bind:this={vlist}
       data={hits}
       getKey={(h) => hitId(h)}
       itemSize={44}
       onscroll={onScroll}
-      role="listbox"
+      role="grid"
+      aria-multiselectable="true"
+      aria-busy={loading}
       tabindex={0}
       id="search-results"
       aria-label="Search results"
       aria-activedescendant={activeDescendant}
-      class="mt-2 rounded-lg border border-slate-200 dark:border-slate-800"
+      class="mt-2 rounded-panel border border-border"
       style="height: 65vh;"
     >
       {#snippet children(hit: Hit, index: number)}
-        <!-- Rows are click-only by design: keyboard nav (arrows/Enter/Cmd+Enter)
-             is handled at the listbox container via the roving aria-activedescendant
-             pattern, so per-row key handlers would be dead code. -->
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- Rows are click-only by design: keyboard nav (arrows/Enter/Space/
+             Cmd+Enter) is handled at the grid container via the roving
+             aria-activedescendant pattern. -->
         <!-- FIX-4: full-width rows. Filename/title gets flex priority (flex-1,
              min-w-0) and the path column shrinks FIRST (capped basis, truncates).
              Both carry a title tooltip so a truncated value is still readable. -->
         <div
-          id={`opt-${hitId(hit)}`}
-          role="option"
+          id={`row-${hitId(hit)}`}
+          role="row"
           tabindex={-1}
-          aria-selected={index === selectedIndex}
+          aria-selected={selectedIds.has(hitId(hit))}
           class="group flex min-h-11 w-full items-center gap-3 px-3 py-1 text-left {index === selectedIndex
-            ? 'bg-[var(--accent)]/10 ring-1 ring-inset ring-[var(--accent)]'
-            : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'}"
+            ? 'bg-accent/10 ring-1 ring-inset ring-accent'
+            : 'hover:bg-surface-3'}"
           onclick={() => { selectedIndex = index; openItem(hit); }}
+          onkeydown={focusGrid}
         >
           <!-- IN-T4 row checkbox. Same show/hide rule as the grid: on hover, or
                always once a selection exists. stopPropagation keeps ticking a box
                from also opening the detail modal; the mousedown guard stops
                shift-click from smearing a text selection across rows. -->
-          <input
-            type="checkbox"
-            class="shrink-0 accent-[var(--accent)] transition-opacity
-              {selectedIds.size ? '' : 'opacity-0 focus:opacity-100 group-hover:opacity-100'}"
-            aria-label={`Select ${str(hit, "title") || str(hit, "filename") || hitId(hit)}`}
-            checked={selectedIds.has(hitId(hit))}
-            onmousedown={(e) => { if (e.shiftKey) e.preventDefault(); }}
-            onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
-          <Thumb id={hitId(hit)} size="h-9 w-9" />
-          <span class="shrink-0 rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800"
-            >{str(hit, "file_category")}</span>
-          <span class="flex min-w-0 flex-1 flex-col">
-            <span class="flex items-center gap-2">
-              <span class="truncate font-medium" title={str(hit, "title") || str(hit, "filename")}
-                >{str(hit, "title") || str(hit, "filename")}</span>
-              {#if num(hit, "year")}<span class="shrink-0 text-sm text-slate-500">({num(hit, "year")})</span>{/if}
-              {#if copyCountMap[hitId(hit)] > 1}
-                <!-- P3-T10 duplicate badge: opens the detail (Copies section). -->
-                <button
-                  type="button"
-                  class="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300"
-                  title="This file has duplicate copies — click to view them"
-                  onclick={(e) => { e.stopPropagation(); selectedIndex = index; openItem(hit); }}
-                >{copyCountMap[hitId(hit)]} copies</button>
+          <div
+            role="gridcell"
+            class="flex shrink-0 items-center transition-opacity
+              {selectedIds.size ? '' : 'opacity-0 focus-within:opacity-100 group-hover:opacity-100'}">
+            <Checkbox
+              size="sm"
+              class="[&>span]:sr-only"
+              label={selectText(hit)}
+              tabindex={-1}
+              checked={selectedIds.has(hitId(hit))}
+              onmousedown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+              onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
+          </div>
+          <div role="gridcell" class="flex min-w-0 flex-1 items-center gap-3">
+            <Thumb id={hitId(hit)} size="h-9 w-9" />
+            <span class="shrink-0 rounded-control bg-surface-3 px-2 py-0.5 text-xs"
+              >{str(hit, "file_category")}</span>
+            <span class="flex min-w-0 flex-1 flex-col">
+              <span class="flex items-center gap-2">
+                <span class="truncate font-medium" title={str(hit, "title") || str(hit, "filename")}
+                  >{str(hit, "title") || str(hit, "filename")}</span>
+                {#if num(hit, "year")}<span class="shrink-0 text-sm text-muted">({num(hit, "year")})</span>{/if}
+                {#if copyCountMap[hitId(hit)] > 1}
+                  <!-- P3-T10 duplicate badge: opens the detail (Copies section). -->
+                  <button
+                    type="button"
+                    tabindex={-1}
+                    class="shrink-0 rounded-full bg-warn-bg px-2 py-0.5 text-xs font-medium text-warn"
+                    title="This file has duplicate copies — click to view them"
+                    onclick={(e) => { e.stopPropagation(); selectedIndex = index; openItem(hit); }}
+                  >{copyCountMap[hitId(hit)]} copies</button>
+                {/if}
+              </span>
+              {#if str(hit, "snippet")}
+                <span class="truncate text-xs text-muted">
+                  {#each parseSnippet(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                </span>
               {/if}
             </span>
-            {#if str(hit, "snippet")}
-              <span class="truncate text-xs text-slate-500">
-                {#each parseSnippet(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-[var(--accent)]/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
-              </span>
-            {/if}
-          </span>
-          <span
-            class="hidden min-w-0 shrink basis-1/3 truncate text-right text-xs text-slate-500 sm:inline"
-            title={str(hit, "path")}>{str(hit, "path")}</span>
-          <button
-            type="button"
-            title="Copy path (Cmd/Ctrl+Enter)"
-            class="shrink-0 rounded border border-slate-300 px-2 py-0.5 text-xs opacity-0 group-hover:opacity-100 dark:border-slate-700"
-            onclick={(e) => { e.stopPropagation(); selectedIndex = index; copyPath(hit); }}
-          >Copy path</button>
+          </div>
+          <div role="gridcell" class="hidden min-w-0 shrink basis-1/3 text-right sm:block">
+            <span class="block truncate text-xs text-muted" title={str(hit, "path")}>{str(hit, "path")}</span>
+          </div>
+          <div role="gridcell" class="shrink-0 opacity-0 group-hover:opacity-100">
+            <Button
+              size="sm"
+              tabindex={-1}
+              title="Copy path (Cmd/Ctrl+Enter)"
+              onclick={(e) => { e.stopPropagation(); selectedIndex = index; copyPath(hit); }}
+            >Copy path</Button>
+          </div>
         </div>
       {/snippet}
     </VList>
     {/if}
 
     {#if loading}
-      <p class="mt-2 text-center text-xs text-slate-600 dark:text-slate-400">Loading…</p>
+      <StateBlock state="loading" compact />
     {/if}
   {/if}
 
@@ -1991,18 +2043,12 @@
     {#await loadItemDetail() then m}
       <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
     {:catch}
-      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-        Item details failed to load — Filearr may have been updated.
-        <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
-          onclick={() => location.reload()}>Reload</button>
+      <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
+        <Alert tone="danger">
+          Item details failed to load — Filearr may have been updated.
+          <Button size="sm" class="ml-2" onclick={() => location.reload()}>Reload</Button>
+        </Alert>
       </div>
     {/await}
-  {/if}
-
-  {#if toast}
-    <div
-      class="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white shadow-lg dark:bg-slate-100 dark:text-slate-900"
-      role="status"
-    >{toast}</div>
   {/if}
 </div>

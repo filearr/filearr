@@ -14,13 +14,13 @@ test("toneForStatus maps failure words to danger, case-insensitively", () => {
 });
 
 test("toneForStatus maps caution words to warn", () => {
-  for (const s of ["warning", "WARN", "Degraded", "stale", "pending", "Queued", "held"]) {
+  for (const s of ["warning", "WARN", "Degraded", "stale", "pending", "Queued", "held", "stopped", "Stopping", "cancelled", "CANCELED"]) {
     assert.equal(toneForStatus(s), "warn", s);
   }
 });
 
 test("toneForStatus maps success words to ok", () => {
-  for (const s of ["ok", "OK", "Success", "succeeded", "completed", "done", "Healthy", "online", "active", "enabled", "Verified"]) {
+  for (const s of ["ok", "OK", "Success", "succeeded", "completed", "done", "Healthy", "online", "active", "enabled", "Verified", "Finished"]) {
     assert.equal(toneForStatus(s), "ok", s);
   }
 });

@@ -8,6 +8,7 @@
   import { onDestroy } from "svelte";
   import { browseFs, type FsBrowse, errorMessage } from "./api";
   import { latest } from "./latest";
+  import { Alert, Button, Modal, StateBlock } from "./ui";
 
   let {
     initial = "",
@@ -15,6 +16,10 @@
     onClose,
   }: { initial?: string; onPick: (path: string) => void; onClose: () => void } = $props();
 
+  // Mount-style: the parent mounts this while it wants the picker and
+  // unmounts it from onClose / onPick. `open` lets "Use this folder" close
+  // the Modal as a caller close before handing the path over.
+  let open = $state(true);
   let view = $state<FsBrowse | null>(null);
   let error = $state("");
   let loading = $state(false);
@@ -54,108 +59,91 @@
     return out;
   }
 
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onClose();
-  }
-
   $effect(() => {
     void go(initial);
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
-
-<div class="fixed inset-0 z-[60] overflow-y-auto">
-  <button
-    type="button"
-    class="absolute inset-0 h-full w-full cursor-default bg-black/50"
-    aria-label="Close folder picker"
-    onclick={onClose}
-  ></button>
-
-  <div
-    class="relative z-10 mx-auto mt-24 mb-8 w-full max-w-lg rounded-2xl bg-white p-5 shadow-xl dark:bg-slate-900"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Choose a folder"
-  >
-    <div class="flex items-center gap-2 border-b border-slate-200 pb-3 dark:border-slate-800">
-      <h3 class="text-sm font-semibold">Choose a folder</h3>
-      <span class="grow"></span>
-      <button
-        class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-        onclick={onClose}>Close</button>
-    </div>
-
-    <!-- Breadcrumb: roots shortcut + each ancestor segment. -->
-    <div class="mt-3 flex flex-wrap items-center gap-1 text-xs text-slate-500">
-      <button class="rounded px-1 hover:text-[var(--accent)] hover:underline" onclick={() => go("")}>
-        roots
-      </button>
-      {#if view?.path}
-        {#each crumbs(view.path) as c (c.path)}
-          <span>/</span>
-          <button class="rounded px-1 hover:text-[var(--accent)] hover:underline" onclick={() => go(c.path)}>
-            {c.label}
-          </button>
-        {/each}
-      {/if}
-    </div>
-
-    {#if error}
-      <p class="mt-3 text-xs text-red-500">{error}</p>
+<Modal bind:open title="Choose a folder" size="md" {onClose}>
+  <!-- Breadcrumb: roots shortcut + each ancestor segment. -->
+  <nav aria-label="Folder path" class="flex flex-wrap items-center gap-1 text-xs text-muted">
+    <button type="button" class="rounded-control px-1 hover:text-accent-text hover:underline" onclick={() => go("")}>
+      roots
+    </button>
+    {#if view?.path}
+      {#each crumbs(view.path) as c (c.path)}
+        <span aria-hidden="true">/</span>
+        <button type="button" class="rounded-control px-1 hover:text-accent-text hover:underline" onclick={() => go(c.path)}>
+          {c.label}
+        </button>
+      {/each}
     {/if}
+  </nav>
 
-    <div class="mt-3 max-h-72 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-800">
-      {#if loading && !view}
-        <p class="p-3 text-sm text-slate-500">Loading…</p>
-      {:else if view}
-        <ul class="divide-y divide-slate-100 text-sm dark:divide-slate-800">
-          {#if view.parent !== null}
+  {#if error}
+    <Alert tone="danger" class="mt-3" onDismiss={() => (error = "")}>{error}</Alert>
+  {/if}
+
+  <div class="mt-3 max-h-72 overflow-y-auto rounded-control border border-border" aria-busy={loading}>
+    {#if loading && !view}
+      <StateBlock state="loading" compact />
+    {:else if view}
+      <ul class="divide-y divide-border text-sm">
+        {#if view.parent !== null}
+          <li>
+            <button
+              type="button"
+              class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface-3"
+              onclick={() => go(view!.parent ?? "")}>
+              <span class="text-muted" aria-hidden="true">↑</span> ..
+            </button>
+          </li>
+        {/if}
+        {#if !view.path && view.roots.length}
+          {#each view.roots as r (r)}
             <li>
               <button
-                class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
-                onclick={() => go(view!.parent ?? "")}>
-                <span class="text-slate-600 dark:text-slate-400">↑</span> ..
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface-3"
+                onclick={() => go(r)}>
+                <span class="text-muted" aria-hidden="true">▸</span>
+                <span class="font-mono">{r}</span>
               </button>
             </li>
-          {/if}
-          {#if !view.path && view.roots.length}
-            {#each view.roots as r (r)}
-              <li>
-                <button
-                  class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
-                  onclick={() => go(r)}>
-                  <span class="text-slate-600 dark:text-slate-400">▸</span>
-                  <span class="font-mono">{r}</span>
-                </button>
-              </li>
-            {/each}
-          {:else if view.dirs.length}
-            {#each view.dirs as d (d.path)}
-              <li>
-                <button
-                  class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
-                  onclick={() => go(d.path)}>
-                  <span class="text-slate-600 dark:text-slate-400">▸</span> {d.name}
-                </button>
-              </li>
-            {/each}
-          {:else}
-            <li class="px-3 py-2 text-slate-500">No sub-folders here.</li>
-          {/if}
-        </ul>
-      {/if}
-    </div>
-
-    <div class="mt-4 flex items-center gap-2">
-      <span class="grow truncate font-mono text-xs text-slate-500">{view?.path || "(no folder selected)"}</span>
-      <button
-        class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-        disabled={!view?.path}
-        onclick={() => view?.path && onPick(view.path)}>
-        Use this folder
-      </button>
-    </div>
+          {/each}
+        {:else if view.dirs.length}
+          {#each view.dirs as d (d.path)}
+            <li>
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-surface-3"
+                onclick={() => go(d.path)}>
+                <span class="text-muted" aria-hidden="true">▸</span> {d.name}
+              </button>
+            </li>
+          {/each}
+        {:else}
+          <li><StateBlock state="empty" compact message="No sub-folders here — use this folder or go up a level." /></li>
+        {/if}
+      </ul>
+    {/if}
   </div>
-</div>
+
+  {#snippet footer({ close })}
+    <span class="min-w-0 grow self-center truncate font-mono text-xs text-muted" title={view?.path || undefined}>
+      {view?.path || "(no folder selected)"}
+    </span>
+    <Button onclick={close}>Cancel</Button>
+    <Button
+      variant="primary"
+      disabled={!view?.path}
+      onclick={() => {
+        if (!view?.path) return;
+        const path = view.path;
+        open = false;
+        onPick(path);
+      }}>
+      Use this folder
+    </Button>
+  {/snippet}
+</Modal>

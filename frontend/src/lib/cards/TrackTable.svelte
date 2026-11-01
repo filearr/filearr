@@ -21,9 +21,10 @@
     <div class="mb-1 text-xs font-semibold text-slate-500">{title} ({rows.length})</div>
     <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
       <table class="w-full text-left text-xs">
+        <caption class="sr-only">{title}</caption>
         <thead class="bg-slate-50 text-slate-500 dark:bg-slate-800/50">
           <tr>
-            {#each columns as c (c)}<th class="px-2 py-1 font-medium">{c}</th>{/each}
+            {#each columns as c (c)}<th scope="col" class="px-2 py-1 font-medium">{c}</th>{/each}
           </tr>
         </thead>
         <tbody>
