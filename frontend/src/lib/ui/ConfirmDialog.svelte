@@ -1,13 +1,21 @@
 <!--
   Confirmation on bits-ui AlertDialog: no outside-click dismiss, Escape and
-  Cancel both mean "no". Most callers want the promise helper instead:
+  Cancel both mean "no". Most callers want the promise helpers instead:
     if (!(await confirm({ title: "Delete agent?", tone: "danger", typedName: agent.name }))) return;
+    const name = await promptText({ title: "Rename", label: "Name", initial: item.name });
+    if (name === null) return;
+
+  With `prompt` set it is a text prompt (a second mode of the typedName
+  field): Enter or Confirm runs checkPromptValue and shows its error under the
+  field instead of closing; on success onConfirm gets the trimmed value.
 -->
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
   import { AlertDialog } from "bits-ui";
   import Button from "./Button.svelte";
+  import Field from "./Field.svelte";
   import Input from "./Input.svelte";
+  import { checkPromptValue, type PromptRules } from "./promptRules.ts";
 
   let {
     open = $bindable(false),
@@ -18,6 +26,7 @@
     cancelLabel = "Cancel",
     tone = "default",
     typedName,
+    prompt,
     onConfirm,
     onCancel,
     children,
@@ -32,7 +41,10 @@
     tone?: "default" | "danger";
     /** When set, the user must type this exactly before Confirm enables. */
     typedName?: string;
-    onConfirm: () => void;
+    /** When set, asks for a line of text; onConfirm receives the trimmed value. */
+    prompt?: PromptRules & { label: string; initial?: string; placeholder?: string };
+    /** Gets the trimmed value in prompt mode, nothing otherwise. */
+    onConfirm: (value?: string) => void;
     /** Called on Cancel or Escape. */
     onCancel?: () => void;
     /** Rich message; takes the place of `message`. */
@@ -41,22 +53,39 @@
 
   const fieldId = $props.id();
   let typed = $state("");
+  let promptError = $state<string | undefined>();
   let cancelEl = $state<HTMLElement | null>(null);
+  let inputEl = $state<HTMLInputElement | null>(null);
 
   // Case-sensitive on purpose: the name is the thing being destroyed. Both
   // sides are trimmed, so a stray space from copy-paste still matches.
   const canConfirm = $derived(typedName === undefined || typed.trim() === typedName.trim());
 
-  // A reopened dialog starts with an empty field, never a stale match.
+  // A reopened dialog starts from a clean field: no stale typed-name match,
+  // a prompt back at its initial value with no error.
   $effect(() => {
-    if (open) untrack(() => (typed = ""));
+    if (open)
+      untrack(() => {
+        typed = prompt?.initial ?? "";
+        promptError = undefined;
+      });
   });
 
   function handleConfirm() {
     if (!canConfirm) return;
+    let value: string | undefined;
+    if (prompt) {
+      const checked = checkPromptValue(typed, prompt);
+      if (checked.error !== undefined) {
+        promptError = checked.error;
+        inputEl?.focus();
+        return;
+      }
+      value = checked.value;
+    }
     // Closing from here does not fire onOpenChange, so onCancel stays silent.
     open = false;
-    onConfirm();
+    onConfirm(value);
   }
 </script>
 
@@ -67,14 +96,15 @@
     <!-- Same z-index and backdrop as Modal. -->
     <AlertDialog.Overlay class="fixed inset-0 z-50 bg-black/50" />
     <!-- Cancel is the safe default, so it takes the initial focus rather than
-         the content box. Deferred a frame because the button's ref is attached
-         after the focus scope mounts. The panel scrolls, not the wrapper, for
-         the same reason as in Modal (the wrapper is pointer-events: none). -->
+         the content box; a prompt focuses its field instead. Deferred a frame
+         because the refs are attached after the focus scope mounts. The panel
+         scrolls, not the wrapper, for the same reason as in Modal (the wrapper
+         is pointer-events: none). -->
     <AlertDialog.Content
       class="relative max-h-[calc(100dvh-4rem)] w-full max-w-md overflow-y-auto rounded-panel bg-surface-2 p-5 shadow-xl"
       onOpenAutoFocus={(e) => {
         e.preventDefault();
-        requestAnimationFrame(() => cancelEl?.focus());
+        requestAnimationFrame(() => (prompt ? inputEl : cancelEl)?.focus());
       }}
     >
       {#snippet child({ props })}
@@ -97,7 +127,26 @@
                 {/if}
               </AlertDialog.Description>
             {/if}
-            {#if typedName !== undefined}
+            {#if prompt}
+              <!-- A form so Enter in the field submits, like the typedName one. -->
+              <form
+                class="mt-4"
+                onsubmit={(e) => {
+                  e.preventDefault();
+                  handleConfirm();
+                }}
+              >
+                <Field label={prompt.label} error={promptError}>
+                  <Input
+                    bind:value={typed}
+                    bind:ref={inputEl}
+                    placeholder={prompt.placeholder}
+                    autocomplete="off"
+                    oninput={() => (promptError = undefined)}
+                  />
+                </Field>
+              </form>
+            {:else if typedName !== undefined}
               <!-- Not Field: its label is a plain string and this one needs the
                    name in bold. Same label styling and id wiring by hand. -->
               <!-- A form so Enter in the field confirms once the name matches. -->

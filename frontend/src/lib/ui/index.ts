@@ -27,7 +27,7 @@ export { default as Toast } from "./Toast.svelte";
 export { default as Tabs } from "./Tabs.svelte";
 export { default as Popover } from "./Popover.svelte";
 export { default as DataTable } from "./DataTable.svelte";
-export { confirm } from "./confirm.svelte.ts";
+export { confirm, promptText, type ConfirmOptions, type PromptOptions } from "./confirm.svelte.ts";
 export { toast } from "./toast.svelte.ts";
 export { controlClass, type ControlSize } from "./control.ts";
 export { FIELD_CTX, controlAttrs, type FieldCtx } from "./fieldContext.ts";

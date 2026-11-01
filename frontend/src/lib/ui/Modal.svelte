@@ -2,28 +2,41 @@
   Dialog shell on bits-ui Dialog, which owns the focus trap, Escape, outside
   click, scroll lock, focus return and aria-labelledby/-describedby.
 
-    <Modal bind:open title="Edit library" onClose={reset}>
+    <Modal bind:open title="Edit library" dirty={() => dirty} onClose={reset}>
       …body…
-      {#snippet footer()}<Button onclick={save}>Save</Button>{/snippet}
+      {#snippet footer({ close })}
+        <Button variant="secondary" onclick={close}>Cancel</Button>
+        <Button onclick={save}>Save</Button>
+      {/snippet}
     </Modal>
 
-  Dirty-check every way out. The check gets the reason, so a save that closes
-  with `open = false` ("caller") is not asked about the edits it just saved:
-    <Modal bind:open title="Edit" onBeforeClose={(r) => r === "caller" || !dirty || confirm({ title: "Discard changes?" })}>
-  A Cancel button that sets `open = false` is then a "caller" close too, so it
-  runs the discard check itself before closing.
-  Use `bind:open` together with `onBeforeClose`: after a veto the dialog
-  writes `open = true` back, which a one-way `open` cannot receive, so the
-  parent would still hold `false` and could not close it again.
+  `dirty` is the default dirty check: while it returns true, every user
+  dismissal (Escape, outside click, ×, and `close()`) first asks "Discard
+  changes?". `close` is handed to `children` and `footer` (zero-arg snippets
+  still work); Cancel buttons call it so they run the check, while a Save that
+  sets `open = false` ("caller") skips it, so it is not asked about the edits
+  it just saved.
+
+  `onBeforeClose` is for anything more, and replaces `dirty` when both are
+  set. It gets the reason, including "caller":
+    <Modal bind:open title="Edit" onBeforeClose={(r) => r === "caller" || canLeave(r)}>
+  Use `bind:open` together with `dirty`/`onBeforeClose`: after a veto the
+  dialog writes `open = true` back, which a one-way `open` cannot receive, so
+  the parent would still hold `false` and could not close it again.
+
+  A click inside another dialog stacked over this one (a nested Modal, the
+  confirm() dialog) is not an outside click on this one.
 -->
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
   import { Dialog } from "bits-ui";
+  import { confirm } from "./confirm.svelte.ts";
 
   type Size = "sm" | "md" | "lg" | "xl";
-  /** Why a close was requested: Escape, an outside click, the × button, or the
-   *  parent setting `open = false`. */
-  type CloseReason = "escape" | "outside" | "close-button" | "caller";
+  /** Why a close was requested: Escape, an outside click, the × button,
+   *  `close()` from a snippet (a Cancel button), or the parent setting
+   *  `open = false`. */
+  type CloseReason = "escape" | "outside" | "close-button" | "cancel" | "caller";
 
   let {
     open = $bindable(false),
@@ -32,6 +45,7 @@
     size = "md",
     onClose,
     dismissible = true,
+    dirty,
     onBeforeClose,
     initialFocus,
     class: className = "",
@@ -42,10 +56,14 @@
     title: string;
     description?: string;
     size?: Size;
-    /** Called when the user dismisses the dialog (Escape, outside click, Close). */
+    /** Called when the user dismisses the dialog (Escape, outside click, ×, close()). */
     onClose?: () => void;
-    /** False: Escape and outside clicks do nothing; Close and `open = false` still close. */
+    /** False: Escape and outside clicks do nothing; ×, close() and `open = false` still close. */
     dismissible?: boolean;
+    /** True while there are unsaved edits: every user dismissal asks "Discard
+     *  changes?" first; `open = false` from the caller does not. Ignored when
+     *  onBeforeClose is set. Pair it with `bind:open`. */
+    dirty?: () => boolean;
     /** Asked before every close, including `open = false` from the caller
      *  (reason "caller"); returning false keeps the dialog open. A throw counts
      *  as false. Pair it with `bind:open`. */
@@ -53,8 +71,8 @@
     /** The element to focus on open instead of the body's first control. */
     initialFocus?: () => HTMLElement | null | undefined;
     class?: string;
-    children: Snippet;
-    footer?: Snippet;
+    children: Snippet<[{ close: () => void }]>;
+    footer?: Snippet<[{ close: () => void }]>;
   } = $props();
 
   const widths: Record<Size, string> = {
@@ -73,19 +91,31 @@
   let deciding = false;
   let panel = $state<HTMLElement | null>(null);
 
+  // The built-in check behind `dirty`; a caller close (a Save) is never asked.
+  async function discardCheck(reason: CloseReason): Promise<boolean> {
+    if (reason === "caller" || !dirty?.()) return true;
+    return confirm({
+      title: "Discard changes?",
+      message: "Your edits will be lost.",
+      confirmLabel: "Discard",
+      tone: "danger",
+    });
+  }
+
   /** "caller": the parent set `open = false`. That path skips onClose, which
    *  is for user dismissals only. */
   async function requestClose(reason: CloseReason) {
     if (deciding) return;
     const fromCaller = reason === "caller";
-    if (onBeforeClose) {
+    const check = onBeforeClose ?? (dirty ? discardCheck : undefined);
+    if (check) {
       deciding = true;
       let ok = false;
       try {
-        ok = await onBeforeClose(reason);
+        ok = await check(reason);
       } catch (e) {
         // A failing check must not discard what it was guarding.
-        if (import.meta.env.DEV) console.error("Modal: onBeforeClose threw; keeping the dialog open.", e);
+        if (import.meta.env.DEV) console.error("Modal: the close check threw; keeping the dialog open.", e);
       } finally {
         deciding = false;
       }
@@ -113,6 +143,9 @@
       else if (!want && inner) void requestClose("caller");
     });
   });
+
+  // Handed to the snippets; Cancel buttons call it.
+  const snippetArgs = { close: () => void requestClose("cancel") };
 
   const focusable =
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -149,7 +182,14 @@
       onInteractOutside={(e) => {
         e.preventDefault();
         // A click on a toast over the modal (e.g. its Undo) is not a dismissal.
-        if ((e.target as Element | null)?.closest?.("[data-toast-region]")) return;
+        const target = e.target as Element | null;
+        if (target?.closest?.("[data-toast-region]")) return;
+        // Nor is a click inside another dialog stacked over this one. bits-ui
+        // already ignores one in its own layer stack (a nested Modal, the
+        // confirm() dialog); this also covers a hand-rolled role="dialog"
+        // (FolderPicker), which it sees as outside this panel.
+        const dialog = target?.closest?.('[role="dialog"],[role="alertdialog"]');
+        if (dialog && dialog !== panel && !panel?.contains(dialog)) return;
         void requestClose("outside");
       }}
       onEscapeKeydown={(e) => {
@@ -184,9 +224,9 @@
             <!-- Bleeds into the panel padding (-mx-5 px-5, py-1) so the global
                  focus outline of a control at the body's edge is not clipped
                  by the scroll container. -->
-            <div class="-mx-5 mt-3 min-h-0 overflow-y-auto px-5 py-1">{@render children()}</div>
+            <div class="-mx-5 mt-3 min-h-0 overflow-y-auto px-5 py-1">{@render children(snippetArgs)}</div>
             {#if footer}
-              <div class="mt-4 flex shrink-0 flex-wrap justify-end gap-2">{@render footer()}</div>
+              <div class="mt-4 flex shrink-0 flex-wrap justify-end gap-2">{@render footer(snippetArgs)}</div>
             {/if}
             <!-- Last in DOM order so the initial focus lands on the body's first
                  control rather than on Close. -->
