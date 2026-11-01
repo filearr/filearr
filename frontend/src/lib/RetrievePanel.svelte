@@ -11,9 +11,11 @@
   // EXISTING transfer (its id parsed from the error) rather than erroring.
   import {
     cancelTransfer,
-    downloadTransfer,
+    errorMessage,
     friendlyError,
     initiateTransfer,
+    probeDownload,
+    transferDownloadUrl,
     transferEventsUrl,
     mintTransferEventsToken,
     type TransferEvent,
@@ -42,7 +44,19 @@
   let total = $state<number | null>(null);
   let message = $state("");
   let downloading = $state(false);
+  // A29: a failed Download (probe 409/401/403/network) — one shared slot under
+  // the action row, shown whatever the phase.
+  let downloadError = $state("");
   let es: EventSource | null = null;
+  // A29: the 2 s reconnect timer, cleared on close / item change / unmount so
+  // a pending retry never reopens a stream on a destroyed panel.
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // A29: Cancel pressed while initiate is still in flight (no id yet); honoured
+  // as soon as initiateTransfer resolves.
+  let cancelRequested = false;
+  // Bumped by the reset effect's cleanup (item change / unmount): an initiate
+  // that resolves for an older generation is dropped.
+  let generation = 0;
 
   const pct = $derived(
     total && total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0,
@@ -78,6 +92,8 @@
   };
 
   function closeStream() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
     es?.close();
     es = null;
   }
@@ -130,6 +146,7 @@
     if (opening) return;
     opening = true;
     closeStream();
+    const gen = generation;
     // EventSource can't set headers, so mint a single-use scoped stream token
     // (?stream_token=) per connect — the real API key never rides the URL. A
     // failed mint tries tokenless (works with auth off; 401s into the error
@@ -141,6 +158,8 @@
       /* tokenless attempt below */
     }
     opening = false;
+    // Unmounted / item changed during the mint: open nothing.
+    if (gen !== generation) return;
     es = new EventSource(transferEventsUrl(id, token));
     let terminated = false;
     const onFrame = (ev: MessageEvent) => {
@@ -168,7 +187,8 @@
         closeStream();
       } else {
         closeStream();
-        setTimeout(() => {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
           if (transferId === id && !opening) openStream(id);
         }, 2000);
       }
@@ -179,20 +199,36 @@
     if (active) return;
     phase = "starting";
     message = "";
+    downloadError = "";
     bytes = 0;
     total = null;
+    cancelRequested = false;
+    const gen = generation;
     try {
       const r = await initiateTransfer(itemId);
+      // The item changed (or the panel unmounted) while initiating: the reset
+      // effect owns the state now.
+      if (gen !== generation) return;
       transferId = r.transfer_id;
+      if (cancelRequested) {
+        cancelRequested = false;
+        await cancel();
+        return;
+      }
       openStream(r.transfer_id);
     } catch (e) {
+      if (gen !== generation) return;
       phase = "failed";
       message = friendlyError(e, "retrieve");
     }
   }
 
   async function cancel() {
-    if (!transferId) return;
+    if (!transferId) {
+      // Initiate still in flight: cancel the transfer the moment it has an id.
+      if (phase === "starting") cancelRequested = true;
+      return;
+    }
     try {
       await cancelTransfer(transferId);
     } catch {
@@ -205,13 +241,24 @@
 
   async function download() {
     if (!transferId || downloading) return;
+    const id = transferId;
     downloading = true;
-    message = ""; // a retry clears the previous attempt's error
+    downloadError = ""; // a retry clears the previous attempt's error
     try {
-      await downloadTransfer(transferId, filename);
+      await probeDownload(id);
+      if (id !== transferId) return;
+      // The browser streams the file to disk from this navigation (cookie
+      // auth, Content-Disposition attachment): no blob, nothing in memory.
+      const a = document.createElement("a");
+      a.href = transferDownloadUrl(id);
+      a.download = filename || `transfer-${id}`;
+      a.hidden = true;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
       phase = "downloaded";
     } catch (e) {
-      message = friendlyError(e, "download");
+      if (id === transferId) downloadError = errorMessage(e, { verb: "download" });
     } finally {
       downloading = false;
     }
@@ -225,9 +272,14 @@
     bytes = 0;
     total = null;
     message = "";
+    downloadError = "";
     downloading = false;
+    cancelRequested = false;
     closeStream();
-    return () => closeStream();
+    return () => {
+      generation += 1;
+      closeStream();
+    };
   });
 </script>
 
@@ -256,6 +308,10 @@
     {/if}
   </div>
 
+  {#if downloadError}
+    <Alert tone="danger" onDismiss={() => (downloadError = "")}>{downloadError}</Alert>
+  {/if}
+
   {#if active}
     <div class="flex flex-col gap-1">
       <div class="flex items-center justify-between text-xs text-muted">
@@ -277,11 +333,6 @@
     <p class="text-xs text-ok" role="status">
       {PHASE_LABEL[phase]}{#if phase === "downloaded"} — you can download it again until it expires.{/if}
     </p>
-    <!-- A failed Download keeps the staged file (phase stays ready), so the
-         error sits under the Download button until dismissed or retried. -->
-    {#if message}
-      <Alert tone="danger" onDismiss={() => (message = "")}>{message}</Alert>
-    {/if}
   {:else if failedPhase && message}
     <!-- Why the retrieve ended, under the Retrieve again button. An integrity
          failure is an error; offline / expired / cancelled are warnings. -->

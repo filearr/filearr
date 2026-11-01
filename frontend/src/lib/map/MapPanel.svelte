@@ -17,6 +17,7 @@
   import { onMount } from "svelte";
   import { loadBasemap, type Basemap, type Shape } from "./basemap";
   import { numOrNull } from "../numInput";
+  import { shouldStartDrag } from "../mapInteraction";
   import { Alert, Button, Checkbox, Field, Input } from "../ui";
   import {
     mapSettings,
@@ -175,7 +176,10 @@
   }
 
   function onPointerDown(e: PointerEvent) {
-    if (e.button !== 0) return;
+    // A27: a marker press belongs to the marker's click (open / expand), never
+    // to a drag: no capture, no select box, no clearing of the active area.
+    const inMarker = e.target instanceof Element && !!e.target.closest("[data-marker]");
+    if (!shouldStartDrag({ inMarker, button: e.button })) return;
     openCluster = null;
     const at = localXY(e);
     svgEl?.setPointerCapture(e.pointerId);
@@ -635,6 +639,7 @@
 
       {#each clusters as c (c.key)}
         <g
+          data-marker
           role="button"
           tabindex="0"
           aria-label={c.count === 1
