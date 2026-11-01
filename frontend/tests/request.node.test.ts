@@ -10,10 +10,13 @@ import {
   SLOW_TIMEOUT_MS,
   anySignal,
   batchPatchItems,
+  canWrite,
   changeMyPassword,
   deleteLibrary,
   diagnoseLibrary,
   errorMessage,
+  probeDownload,
+  transferDownloadUrl,
   errorStatus,
   retryAllExtracts,
   retryExtracts,
@@ -383,4 +386,42 @@ test("anySignal fallback honours an already-aborted input", () => {
   const s = anySignal([new AbortController().signal, ac.signal]);
   assert.equal(s.aborted, true);
   assert.equal((s.reason as DOMException).name, "AbortError");
+});
+
+// A29 / ruling 8 (option A): the download probe is a one-byte ranged GET.
+test("probeDownload: 206 resolves; sends GET with Range bytes=0-0 and the cookie", async () => {
+  stub(() => new Response("h", { status: 206, headers: { "content-range": "bytes 0-0/5" } }));
+  await probeDownload("t1");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/v1/transfers/t1/download");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal((calls[0].init.headers as Record<string, string>).Range, "bytes=0-0");
+  assert.equal(calls[0].init.credentials, "same-origin");
+  assert.equal(transferDownloadUrl("t1"), "/api/v1/transfers/t1/download");
+});
+
+test("probeDownload: 409 rejects with ApiError carrying the detail", async () => {
+  stub(() => new Response(JSON.stringify({ detail: "Transfer has expired" }), {
+    status: 409, headers: { "content-type": "application/json" },
+  }));
+  await assert.rejects(probeDownload("t1"), (e: unknown) => {
+    assert.ok(e instanceof ApiError);
+    assert.equal(e.status, 409);
+    assert.equal(errorMessage(e, { verb: "download" }), "Transfer has expired");
+    return true;
+  });
+});
+
+// The targeted-scan route is require_scope("write"); write is held by the
+// write and admin roles alike.
+test("canWrite follows the write scope, not the admin scope", () => {
+  const base = { id: "1", username: "u", email: null, kind: "user", disabled: false };
+  assert.equal(canWrite(null), false);
+  assert.equal(canWrite(undefined), false);
+  assert.equal(canWrite({ ...base, global_role: "editor", scopes: ["read", "write"] }), true);
+  assert.equal(canWrite({ ...base, global_role: "admin", scopes: ["admin", "read", "write"] }), true);
+  assert.equal(canWrite({ ...base, global_role: "viewer", scopes: ["read"] }), false);
+  // older payloads without scopes fall back to the admin role check
+  assert.equal(canWrite({ ...base, global_role: "admin" }), true);
+  assert.equal(canWrite({ ...base, global_role: "user" }), false);
 });

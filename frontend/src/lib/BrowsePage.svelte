@@ -19,7 +19,7 @@
   // pure hash mutation (App owns the router; this component reads props and emits
   // hash changes via gotoBrowse). All names render as text (untrusted).
   import {
-    isAdminPrincipal,
+    canWrite,
     libraryTree,
     listLibraries,
     targetedScan,
@@ -63,9 +63,10 @@
   const canOpen = $derived(!!buildOpenUrl(sharePrefix));
   let libName = $state<string>("");
   // A21: an agent-hosted library is scanned by its agent (the scan endpoint
-  // answers 422), and scans need write scope: hide the controls in both cases.
+  // answers 422), and scans need the write scope (write or admin role): hide the
+  // controls in both cases.
   let libAgentId = $state<string | null>(null);
-  const isWriter = $derived(authDisabled || isAdminPrincipal(me));
+  const isWriter = $derived(authDisabled || canWrite(me));
   const canScan = $derived(isWriter && !libAgentId);
   let copied = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout>;

@@ -475,8 +475,11 @@ export function transferDownloadUrl(id: string): string {
 /** Ask whether the staged file is downloadable before navigating to it, so a
  *  409/401/403 surfaces as an ``ApiError`` (inline) instead of a failed browser
  *  download. A one-byte ranged GET: FastAPI GET routes answer 405 to HEAD (the
- *  backend ticket to add HEAD is in the ledger). The partial range does not
- *  mark the transfer downloaded; the 1-byte body is discarded. */
+ *  backend ticket to add HEAD is in the ledger). The backend answers 206 with
+ *  one byte, and a partial range does not mark the transfer downloaded; the
+ *  body is discarded. If a proxy strips ``Range``, the answer is a 200 with the
+ *  FULL file, which ``expect: "response"`` reads once into memory before the
+ *  anchor download starts (accepted; the HEAD ticket removes it). */
 export async function probeDownload(id: string): Promise<void> {
   await send("GET", `/transfers/${id}/download`, {
     expect: "response",
@@ -2468,6 +2471,12 @@ export interface AuthPrincipal {
  *  roles too — never test `global_role === "admin"` in the UI). */
 export const isAdminPrincipal = (me: AuthPrincipal | null | undefined): boolean =>
   !!me && (me.scopes ? me.scopes.includes("admin") : me.global_role === "admin");
+
+/** True when the principal holds the ``write`` scope (the gate on write
+ *  routes such as targeted scans; the write and admin roles both carry it).
+ *  Payloads without ``scopes`` fall back to the admin check. */
+export const canWrite = (me: AuthPrincipal | null | undefined): boolean =>
+  !!me && (me.scopes ? me.scopes.includes("write") : isAdminPrincipal(me));
 
 // --- Account (self-service) --------------------------------------------------
 export interface ProfilePatch {
