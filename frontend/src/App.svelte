@@ -54,6 +54,7 @@
     type AuthPrincipal,
   } from "./lib/api";
   import * as safeStorage from "./lib/safeStorage";
+  import { safeHref } from "./lib/pathlinks";
   import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./lib/osFormat.svelte";
   import type { FormatPref } from "./lib/osFormat";
@@ -88,6 +89,8 @@
   // (FILEARR_SOURCE_URL) so a fork can point users at its modified source without
   // a frontend rebuild; fall back to the Vite build-time default.
   let sourceUrl = $state<string>(__SOURCE_URL__);
+  // D9: /version's source_url is server data — only a safe scheme becomes a link.
+  const sourceHref = $derived(safeHref(sourceUrl));
   // P5-T1/W6-D4: the distributed-agent feature is opt-in (FILEARR_AGENTS_ENABLED);
   // gate the Agents nav entry so it only shows when the surface is live.
   let agentsEnabled = $state(false);
@@ -435,11 +438,15 @@
       rel="noopener noreferrer">API Docs</a>
     <span class="px-1">·</span>
     <!-- AGPL-3.0 §13: offer the running instance's Corresponding Source. -->
-    <a
-      class="underline hover:text-[var(--accent)]"
-      href={sourceUrl}
-      target="_blank"
-      rel="noopener noreferrer">Source</a>
+    {#if sourceHref}
+      <a
+        class="underline hover:text-[var(--accent)]"
+        href={sourceHref}
+        target="_blank"
+        rel="noopener noreferrer">Source</a>
+    {:else}
+      <span>Source: {sourceUrl}</span>
+    {/if}
     <span class="px-1">·</span>
     <span>AGPL-3.0-or-later</span>
   </footer>

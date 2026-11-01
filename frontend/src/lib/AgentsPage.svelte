@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   import { intOrNull } from "./numInput";
   import ScheduleField from "./ScheduleField.svelte";
   import {
@@ -853,7 +854,7 @@
   async function copyAbout(a: AgentOut) {
     const report = about[a.id];
     if (!report) return;
-    await copyText(agentAboutMarkdown(report));
+    if (!(await copyText(agentAboutMarkdown(report)))) return toast(COPY_FAILED, { tone: "warn" });
     aboutCopied = a.id;
     setTimeout(() => (aboutCopied = null), 2000);
   }

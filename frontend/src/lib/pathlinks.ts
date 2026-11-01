@@ -10,11 +10,41 @@
 
 export type PrefixKind = "unc" | "url" | "posix" | "unknown";
 
+/** Schemes a dynamic href may carry: web plus the network-share family. */
+export const SAFE_SCHEMES = ["http", "https", "smb", "sftp", "ftp", "ftps", "nfs", "webdav", "webdavs", "file"];
+
+/**
+ * Gate for every dynamic `href` (D9/M26): returns `value` only when it is a URL
+ * whose scheme is allowed (default SAFE_SCHEMES, case-insensitive) or an
+ * absolute path (`/…`) / UNC (`\\…`); otherwise null and the caller renders
+ * plain text. `javascript:`, `data:`, `vbscript:` and friends never pass —
+ * including with leading whitespace/control chars, which browsers ignore.
+ */
+export function safeHref(value: unknown, opts: { schemes?: string[] } = {}): string | null {
+  if (typeof value !== "string") return null;
+  // Strip what the URL parser strips, so the check sees what the browser does.
+  const v = value.replace(/^[\u0000-\u0020]+/, "");
+  if (!v) return null;
+  if (v.startsWith("\\\\")) return value; // UNC
+  // Absolute path, but not `//host` or `/\host` (protocol-relative to a browser).
+  if (v.startsWith("/")) return /^\/[\/\\]/.test(v) ? null : value;
+  let url: URL;
+  try {
+    url = new URL(v);
+  } catch {
+    return null;
+  }
+  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+  const allowed = (opts.schemes ?? SAFE_SCHEMES).map((s) => s.toLowerCase());
+  return allowed.includes(scheme) ? value : null;
+}
+
 /** Classify a share_prefix into one of the handled shapes. */
 export function classifyPrefix(prefix: string): PrefixKind {
   if (!prefix) return "unknown";
   if (prefix.startsWith("\\\\")) return "unc"; // \\host\share
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(prefix)) return "url"; // smb://, ftp://, file://
+  // smb://, ftp://, file:// — a scheme outside SAFE_SCHEMES (javascript://x) is unknown.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(prefix)) return safeHref(prefix) ? "url" : "unknown";
   if (prefix.startsWith("/")) return "posix"; // /Volumes/media
   return "unknown";
 }

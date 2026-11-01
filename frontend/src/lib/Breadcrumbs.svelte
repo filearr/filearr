@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   // UI-T12 — shared path breadcrumb used by BOTH the item detail view (Part 2)
   // and the in-page browse view (Part 3). Renders: library root + each rel_path
   // directory segment + (for a file) the filename. Directory segments navigate
@@ -47,6 +48,9 @@
   const sharePrefix = $derived(
     formatShare(shareLocation(shareUrl, shareUnc), shareFormat.pref, detectedPlatform),
   );
+  // D9: buildOpenUrl is "" for a prefix it will not link (unsafe scheme,
+  // relative path) — no "Open" link then, only Copy path.
+  const canOpen = $derived(!!buildOpenUrl(sharePrefix));
 
   type Crumb = { label: string; relTo: string; isDir: boolean };
 
@@ -75,23 +79,8 @@
   }
 
   async function copy(label: string, textToCopy: string) {
-    try {
-      await copyText(textToCopy);
-    } catch {
-      // Fallback for insecure contexts / older browsers.
-      const ta = document.createElement("textarea");
-      ta.value = textToCopy;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        /* give up silently */
-      }
-      document.body.removeChild(ta);
-    }
+    // copyText already carries the insecure-context fallback.
+    if (!(await copyText(textToCopy))) return toast(COPY_FAILED, { tone: "warn" });
     copied = label;
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => (copied = null), 1200);
@@ -137,7 +126,7 @@
           <div
             class="absolute left-0 top-full z-20 mt-1 w-max min-w-[10rem] rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-800"
             role="menu">
-            {#if sharePrefix}
+            {#if canOpen}
               <a
                 class="block rounded px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-700"
                 href={buildOpenUrl(sharePrefix, c.relTo)}
@@ -160,7 +149,7 @@
 
   {#if isFile && !hideFileActions}
     <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-      {#if sharePrefix}
+      {#if canOpen}
         <a
           class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
           href={buildOpenUrl(sharePrefix, relPath)}

@@ -14,8 +14,10 @@
 </script>
 
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   import * as safeStorage from "./safeStorage";
+  import { safeHref } from "./pathlinks";
   import {
     type ItemPermissions,
     type PermissionAce,
@@ -82,14 +84,15 @@
   // library-share_prefix "Open file" row in <Breadcrumbs> (suppressed below).
   // Null => render nothing (no fabricated location, no empty state).
   const itemShareUrl = $derived(str("share_url"));
+  // D9: only an allowed scheme / absolute path becomes a link; else plain text.
+  const itemShareHref = $derived(safeHref(itemShareUrl));
   // Roadmap §5 P3 provenance: extracted download-source URLs (never user-editable).
   const extractedMeta = $derived(
     (item?.metadata as Record<string, unknown> | undefined) ?? {},
   );
-  const safeHttpUrl = (v: unknown): string | null =>
-    typeof v === "string" && /^(https?|s?ftp):\/\//i.test(v) ? v : null;
-  const originUrl = $derived(safeHttpUrl(extractedMeta["origin_url"]));
-  const referrerUrl = $derived(safeHttpUrl(extractedMeta["referrer_url"]));
+  const WEB = { schemes: ["http", "https"] };
+  const originUrl = $derived(safeHref(extractedMeta["origin_url"], WEB));
+  const referrerUrl = $derived(safeHref(extractedMeta["referrer_url"], WEB));
   const shareSource = $derived(str("share_source"));
   const shareSourceLabel = $derived(
     shareSource === "agent_hint"
@@ -103,9 +106,9 @@
   let shareCopied = $state(false);
   let shareCopiedTimer: ReturnType<typeof setTimeout>;
   async function copyShare(text: string) {
-    // FIX-5 plain-http-safe helper (navigator.clipboard is unavailable over
+    // FIX-5 plain-http-safe helper (the async clipboard API is unavailable over
     // http://<lan-ip>); it falls back to a textarea + execCommand copy.
-    await copyText(text);
+    if (!(await copyText(text))) return toast(COPY_FAILED, { tone: "warn" });
     shareCopied = true;
     clearTimeout(shareCopiedTimer);
     shareCopiedTimer = setTimeout(() => (shareCopied = false), 1500);
@@ -396,16 +399,10 @@
   };
 
   async function copyCopyPath(path: string) {
-    try {
-      await copyText(path);
-      copiedPath = path;
-      clearTimeout(copiedTimer);
-      copiedTimer = setTimeout(() => (copiedPath = null), 2000);
-    } catch {
-      copiedPath = "(clipboard blocked)";
-      clearTimeout(copiedTimer);
-      copiedTimer = setTimeout(() => (copiedPath = null), 2000);
-    }
+    if (!(await copyText(path))) return toast(COPY_FAILED, { tone: "warn" });
+    copiedPath = path;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedPath = null), 2000);
   }
 
   // A16: bumped per opened item; every fetch the item-change effect starts (and
@@ -506,13 +503,19 @@
              when present; replaces the library-share "Open file" row above. -->
         {#if itemShareUrl}
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <a
-              class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
-              href={itemShareUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open the file at its network location. Browsers may block smb:// / file:// links — use Copy if nothing happens."
-              >{itemShareUrl}</a>
+            {#if itemShareHref}
+              <a
+                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+                href={itemShareHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the file at its network location. Browsers may block smb:// / file:// links — use Copy if nothing happens."
+                >{itemShareUrl}</a>
+            {:else}
+              <span
+                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                title={itemShareUrl}>{itemShareUrl}</span>
+            {/if}
             <button
               type="button"
               class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"

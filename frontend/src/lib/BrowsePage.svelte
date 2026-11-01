@@ -10,7 +10,7 @@
 
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
   import { latest } from "./latest";
   // UI-T12 Part 3 — in-page folder navigation. Renders the breadcrumb header
   // (shared Breadcrumbs component), a folder list (click → deeper), and the file
@@ -47,6 +47,9 @@
   const sharePrefix = $derived(
     formatShare(shareLocation(shareUrlRaw, shareUncRaw), shareFormat.pref, detectedPlatform),
   );
+  // D9: buildOpenUrl is "" for a prefix it will not link (unsafe scheme,
+  // relative path) — no "Open" link then, only Copy path.
+  const canOpen = $derived(!!buildOpenUrl(sharePrefix));
   let libName = $state<string>("");
   let copied = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout>;
@@ -128,22 +131,8 @@
   });
 
   async function copy(label: string, textToCopy: string) {
-    try {
-      await copyText(textToCopy);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = textToCopy;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        /* ignore */
-      }
-      document.body.removeChild(ta);
-    }
+    // copyText already carries the insecure-context fallback.
+    if (!(await copyText(textToCopy))) return flashToast(COPY_FAILED, false);
     copied = label;
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => (copied = null), 1200);
@@ -313,7 +302,7 @@
               <div
                 class="absolute right-2 top-full z-20 mt-1 w-max min-w-[10rem] rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-800"
                 role="menu">
-                {#if sharePrefix}
+                {#if canOpen}
                   <a
                     class="block rounded px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-700"
                     href={buildOpenUrl(sharePrefix, folderRel(f.name))}

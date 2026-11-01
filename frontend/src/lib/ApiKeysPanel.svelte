@@ -16,6 +16,8 @@
     type ApiKeyScopeInfo,
     type ServiceAccountOut,
   } from "./api";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
 
   let keys = $state<ApiKeyRow[]>([]);
   let scopes = $state<ApiKeyScopeInfo[]>([]);
@@ -111,7 +113,7 @@
 
   async function copyKey() {
     if (!minted?.key) return;
-    await navigator.clipboard.writeText(minted.key);
+    if (!(await copyText(minted.key))) return toast(COPY_FAILED, { tone: "warn" });
     copied = true;
     setTimeout(() => (copied = false), 1500);
   }

@@ -13,7 +13,8 @@
 </script>
 
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { listKeyAction } from "./searchKeys";
   import * as safeStorage from "./safeStorage";
   import { onMount, onDestroy } from "svelte";
   import { VList, type VListHandle } from "virtua/svelte";
@@ -1127,12 +1128,8 @@
   async function copyPath(h: Hit | undefined) {
     if (!h) return;
     const p = resolvePath(h);
-    try {
-      await copyText(p);
-      flash(`Copied ${p}`);
-    } catch {
-      flash("Copy failed (clipboard blocked)");
-    }
+    if (await copyText(p)) flash(`Copied ${p}`);
+    else flash(COPY_FAILED);
   }
 
   function flash(msg: string) {
@@ -1142,38 +1139,41 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    const editable = inEditable(document.activeElement);
-    // '/' or Cmd/Ctrl+K → focus search (guarded: '/' only when not already
-    // typing; the shortcut alias works from anywhere).
-    if ((e.key === "/" && !editable) || ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K"))) {
-      e.preventDefault();
-      searchInput?.focus();
-      searchInput?.select();
-      return;
-    }
-    if (selected) return; // ItemDetail modal owns keys while open
-    // R8-UI: on the map, arrows pan. The map's own handler stops propagation
-    // while it has focus; this keeps the arrows from silently walking a results
-    // list nobody can see when it does not.
-    if (view === "map") return;
-    if (!hits.length) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      moveSel(1);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      moveSel(-1);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (e.metaKey || e.ctrlKey) copyPath(hits[selectedIndex]);
-      else openItem(hits[selectedIndex]);
-    } else if (e.key === " ") {
-      // IN-T4: Space toggles the roving row's SELECTION (shift extends). The
-      // keyboard path had no way to build a selection otherwise, and Space was
-      // previously unbound here (its default is to page-scroll the listbox,
-      // which arrow navigation already does better).
-      e.preventDefault();
-      toggleSelect(selectedIndex, e.shiftKey);
+    const el = e.target instanceof Element ? e.target : document.activeElement;
+    // A1: list keys only from the results listbox (or the bare page) — see
+    // searchKeys.ts. IN-T4: Space toggles the roving row's selection (shift
+    // extends); Cmd/Ctrl+Enter copies its path.
+    const action = listKeyAction(
+      e,
+      {
+        tag: el?.tagName ?? "BODY",
+        editable: inEditable(el),
+        inListbox: !!el?.closest("#search-results"),
+      },
+      { modalOpen: !!selected, view, hasHits: hits.length > 0 },
+    );
+    if (!action) return;
+    e.preventDefault();
+    switch (action) {
+      case "focusSearch":
+        searchInput?.focus();
+        searchInput?.select();
+        break;
+      case "move:1":
+        moveSel(1);
+        break;
+      case "move:-1":
+        moveSel(-1);
+        break;
+      case "open":
+        openItem(hits[selectedIndex]);
+        break;
+      case "copy":
+        copyPath(hits[selectedIndex]);
+        break;
+      case "toggle":
+        toggleSelect(selectedIndex, e.shiftKey);
+        break;
     }
   }
 
@@ -1843,6 +1843,7 @@
                grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
         role="listbox"
         tabindex={0}
+        id="search-results"
         aria-label="Search results (grid)"
         aria-activedescendant={activeDescendant}
         onscroll={onGridScroll}
@@ -1903,6 +1904,7 @@
       onscroll={onScroll}
       role="listbox"
       tabindex={0}
+      id="search-results"
       aria-label="Search results"
       aria-activedescendant={activeDescendant}
       class="mt-2 rounded-lg border border-slate-200 dark:border-slate-800"

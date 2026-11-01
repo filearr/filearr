@@ -14,6 +14,7 @@
   // tested) — this component is layout only.
   import { systemAbout, friendlyError } from "./api";
   import { copyText } from "./clipboard";
+  import { safeHref } from "./pathlinks";
   import {
     aboutMarkdown,
     embeddingSummary,
@@ -82,7 +83,18 @@
     warn: "text-amber-600 dark:text-amber-400",
     muted: "text-slate-600 dark:text-slate-500",
   };
+  // D9: every URL on this page is server-reported; only http(s) becomes a link.
+  const WEB = { schemes: ["http", "https"] };
 </script>
+
+{#snippet ext(url: unknown, label: string | null, cls = "", title?: string | null)}
+  {@const href = safeHref(url, WEB)}
+  {#if href}
+    <a class="{cls} underline hover:text-[var(--accent)]" href={href} target="_blank" rel="noopener noreferrer" {title}>{label}</a>
+  {:else}
+    <span class={cls} {title}>{label}</span>
+  {/if}
+{/snippet}
 
 <div class="space-y-6">
   <header class="flex flex-wrap items-baseline gap-3">
@@ -139,13 +151,13 @@
         <div class="flex gap-2">
           <dt class="w-36 shrink-0 text-slate-500">License</dt>
           <dd>
-            <a class="underline hover:text-[var(--accent)]" href={app.license_url} target="_blank" rel="noopener noreferrer">{app.license}</a>
+            {@render ext(app.license_url, app.license)}
           </dd>
         </div>
         <div class="flex gap-2">
           <dt class="w-36 shrink-0 text-slate-500" title="AGPL-3.0 §13: the Corresponding Source of this running instance.">Source</dt>
           <dd class="break-all">
-            <a class="underline hover:text-[var(--accent)]" href={app.source_url} target="_blank" rel="noopener noreferrer">{app.source_url}</a>
+            {@render ext(app.source_url, app.source_url)}
           </dd>
         </div>
         <!--
@@ -205,7 +217,7 @@
               {@const cell = serviceCell(s)}
               <tr class="border-t border-slate-100 dark:border-slate-800">
                 <td class="py-1.5 pr-4">
-                  <a class="underline hover:text-[var(--accent)]" href={s.url} target="_blank" rel="noopener noreferrer">{s.name}</a>
+                  {@render ext(s.url, s.name)}
                 </td>
                 <td class="py-1.5 pr-4 font-mono break-all {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
                 <td class="py-1.5 text-slate-600 dark:text-slate-400">{s.detail ?? ""}</td>
@@ -239,7 +251,7 @@
                 </td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}">{cell.text}</td>
                 <td class="py-1.5 break-all">
-                  <a class="text-slate-500 underline hover:text-[var(--accent)]" href={p.url} target="_blank" rel="noopener noreferrer">{p.url}</a>
+                  {@render ext(p.url, p.url, "text-slate-500")}
                 </td>
               </tr>
             {/each}
@@ -273,7 +285,7 @@
                   <td class="py-1.5 pr-4 font-mono text-slate-800 dark:text-slate-100">{p.version}</td>
                   <td class="py-1.5 pr-4 text-slate-600 dark:text-slate-400">{p.kind === "runtime" ? "ships in the bundle" : "build tooling"}</td>
                   <td class="py-1.5 break-all">
-                    <a class="text-slate-500 underline hover:text-[var(--accent)]" href={p.url} target="_blank" rel="noopener noreferrer">{p.url}</a>
+                    {@render ext(p.url, p.url, "text-slate-500")}
                   </td>
                 </tr>
               {/each}
@@ -310,7 +322,7 @@
               {@const cell = toolCell(t)}
               <tr class="border-t border-slate-100 dark:border-slate-800">
                 <td class="py-1.5 pr-4">
-                  <a class="underline hover:text-[var(--accent)]" href={t.url} target="_blank" rel="noopener noreferrer">{t.name}</a>
+                  {@render ext(t.url, t.name)}
                 </td>
                 <td class="py-1.5 pr-4 text-slate-500">{t.purpose}</td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
@@ -377,7 +389,7 @@
             <tr class="border-t border-slate-100 dark:border-slate-800">
               <td class="py-1.5 pr-4 text-slate-500">Hugging Face repository</td>
               <td class="py-1.5 break-all">
-                <a class="underline hover:text-[var(--accent)]" href={e.model_url} target="_blank" rel="noopener noreferrer">{e.repo}</a>
+                {@render ext(e.model_url, e.repo)}
                 <span class="text-slate-600 dark:text-slate-400"> · {e.file}</span>
               </td>
             </tr>
@@ -385,9 +397,7 @@
               <td class="py-1.5 pr-4 text-slate-500">Cached revision</td>
               <td class="py-1.5 break-all">
                 {#if e.revision}
-                  <a class="font-mono underline hover:text-[var(--accent)]" href={e.revision_url} target="_blank" rel="noopener noreferrer" title={e.revision}>
-                    {shortSha(e.revision)}
-                  </a>
+                  {@render ext(e.revision_url, shortSha(e.revision), "font-mono", e.revision)}
                   <span class="text-slate-600 dark:text-slate-400"> — the exact upstream commit these weights came from</span>
                 {:else}
                   <span class="text-slate-600 dark:text-slate-400">not downloaded</span>

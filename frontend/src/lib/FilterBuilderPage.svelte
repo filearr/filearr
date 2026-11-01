@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import DslHelp from "./DslHelp.svelte";
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   import { encodeSearchHash } from "./searchparams";
   import { setReportPrefill, takeBuilderPrefill } from "./handoff";
   import {
@@ -204,7 +205,7 @@
   // ------------------------------------------------------------------ //
   let copied = $state(false);
   async function copyDsl() {
-    await copyText(dsl);
+    if (!(await copyText(dsl))) return toast(COPY_FAILED, { tone: "warn" });
     copied = true;
     setTimeout(() => (copied = false), 1200);
   }

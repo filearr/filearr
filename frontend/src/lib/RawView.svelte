@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   // P4-T11 — generic "Raw" view: dumps EVERY field of the item record as a flat
   // key/value table. It iterates the response keys (no hardcoded allowlist) so
   // future backend columns (e.g. P4-T7 provenance) appear automatically. The two
@@ -35,13 +36,9 @@
 
   let copied = $state<string | null>(null);
   async function copy(key: string, v: unknown) {
-    try {
-      await copyText(pretty(v));
-      copied = key;
-      setTimeout(() => { if (copied === key) copied = null; }, 1200);
-    } catch {
-      // Clipboard unavailable (insecure context) — ignore silently.
-    }
+    if (!(await copyText(pretty(v)))) return toast(COPY_FAILED, { tone: "warn" });
+    copied = key;
+    setTimeout(() => { if (copied === key) copied = null; }, 1200);
   }
 
   // Alphabetize for scanability; iteration order is otherwise payload order.
