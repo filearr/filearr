@@ -12,7 +12,10 @@
 // request by buildParams() (searchDsl.ts), so nothing here folds DSL params in.
 
 import { fmtBytes, fmtDate } from "./format.ts";
-import { boxError, parseBox, type GeoBox } from "./map/geo.ts";
+import { boxError, boxParams, parseBox, type GeoBox } from "./map/geo.ts";
+
+/** A bare lowercase-hex string (16..64 chars) is an exact-hash lookup (P3-T1). */
+export const HASH_RE = /^[0-9a-f]{16,64}$/;
 
 export type Bounds = { min: number; max: number };
 export type SearchIn = "all" | "content" | "names";
@@ -45,6 +48,14 @@ const GEO_KEYS = ["geo_top_lat", "geo_right_lng", "geo_bottom_lat", "geo_left_ln
 // Display-only params: restoring them never starts a search on its own
 // (roadmap §20 blank slate; live report 2026-08-08).
 const DISPLAY_ONLY = new Set(["view", "sort", "semantic"]);
+
+// Values that are the default and so filter nothing (item 5): a bundle made of
+// only these is not searchable either. (world_readable="" is already blank.)
+const NO_OP: Record<string, readonly string[]> = {
+  search_in: ["all"],
+  include_sidecars: ["false"],
+  share_mismatch: ["false"],
+};
 
 const ENUMS: Record<string, readonly string[]> = {
   search_in: ["all", "content", "names"],
@@ -104,8 +115,9 @@ const numeric = (v: string): boolean => v.trim() !== "" && Number.isFinite(Numbe
 /** Validate a flat param bundle and turn it into page state.
  *  - `invalid`: keys dropped (unknown key, enum value outside its set,
  *    non-numeric range or semantic, partial / inverted geo box), in param order.
- *  - `searchable`: some kept, non-display param has a value — false means the
- *    page returns to the blank slate instead of searching (A6). */
+ *  - `searchable`: some kept, non-display param has a value that filters
+ *    something (not a default like search_in=all) — false means the page
+ *    returns to the blank slate instead of searching (A6). */
 export function applyParamsPure(
   p: Record<string, string>,
   bounds: { size: Bounds | null; mtime: Bounds | null },
@@ -168,7 +180,7 @@ export function applyParamsPure(
   }
 
   const searchable = Object.entries(p).some(
-    ([k, v]) => v !== "" && v != null && !bad.has(k) && !DISPLAY_ONLY.has(k),
+    ([k, v]) => v !== "" && v != null && !bad.has(k) && !DISPLAY_ONLY.has(k) && !(Object.hasOwn(NO_OP, k) && NO_OP[k].includes(v)),
   );
   return { state, searchable, invalid: Object.keys(p).filter((k) => bad.has(k)) };
 }
@@ -203,4 +215,67 @@ export function clearRangePair(pending: Record<string, string>, pair: RangePair)
 /** True while that pair still carries a URL / saved-search value. */
 export function pairPending(pending: Record<string, string>, pair: RangePair): boolean {
   return RANGE_PAIRS[pair].some((k) => !!pending[k]);
+}
+
+// ---- the UI state → flat params (the reflectHash / saved-search side) -------
+
+/** Everything uiParamsPure() reads: the applied state plus the slider bounds
+ *  and whether the semantic feature is on. */
+export type UiState = SearchState & {
+  sizeBounds: Bounds | null;
+  mtimeBounds: Bounds | null;
+  semanticEnabled: boolean;
+};
+
+/** The UI state as typed. q carries any query DSL VERBATIM: nothing derived
+ *  from it (searchDsl.ts) is folded in here — SearchPage's buildParams()
+ *  translates it per request — so the hash and a saved search keep
+ *  `modified:>7d` relative instead of freezing it into a date (item 11). */
+export function uiParamsPure(s: UiState): Record<string, string> {
+  const term = s.q.trim();
+  const p: Record<string, string> = {};
+  if (HASH_RE.test(term)) p.hash = term;
+  else p.q = s.q;
+  if (s.extension) p.extension = s.extension;
+  // Multi-select taxonomy filters ride as one comma-joined value each;
+  // api.search() expands them into repeatable ``file_category`` /
+  // ``file_group`` query params for the backend's List[str].
+  if (s.selectedCategories.length) p.file_category = s.selectedCategories.join(",");
+  if (s.selectedGroups.length) p.file_group = s.selectedGroups.join(",");
+  if (s.selectedLibraries.length) p.library = s.selectedLibraries.join(",");
+  if (s.selectedPrincipals.length) p.principal = s.selectedPrincipals.join(",");
+  if (s.worldReadable) p.world_readable = s.worldReadable;
+  if (s.exposure) p.exposure = s.exposure;
+  if (s.shareMismatch) p.share_mismatch = "true";
+  if (s.selectedTags.length) p.tags = s.selectedTags.join(",");
+  if (s.includeSidecars) p.include_sidecars = "true";
+  if (s.searchIn !== "all") p.search_in = s.searchIn;
+  // Range filters: only send a bound when the slider is narrowed off it, so a
+  // full-range slider is a no-op (and lets the bounds keep refreshing).
+  const { sizeBounds: sb, mtimeBounds: mb } = s;
+  if (sb && s.sizeLo > sb.min) p.size_gte = String(Math.round(s.sizeLo));
+  if (sb && s.sizeHi < sb.max) p.size_lte = String(Math.round(s.sizeHi));
+  if (mb && s.mtimeLo > mb.min) p.mtime_gte = String(Math.round(s.mtimeLo));
+  if (mb && s.mtimeHi < mb.max) p.mtime_lte = String(Math.round(s.mtimeHi));
+  // Range params from an applied saved search / deep link, until a slider moves.
+  for (const k of RANGE_KEYS) {
+    if (!(k in p) && s.pendingRange[k]) p[k] = s.pendingRange[k];
+  }
+  if (s.sortMode) p.sort = s.sortMode;
+  if (s.view !== "list") p.view = s.view;
+  // R8-UI: the map's area selection is a FILTER like any other — four flat
+  // params on the same query. boxParams() emits nothing for a box the API
+  // would reject (inverted / antimeridian-crossing), so a bad box degrades to
+  // "no area filter" instead of a 422.
+  Object.assign(p, boxParams(s.geoBox));
+  // Only send a semantic ratio when the feature is on AND the user dialed it
+  // up — a 0 keeps the keyword path byte-identical (and deep links stay clean).
+  if (s.semanticEnabled && s.semantic > 0) p.semantic = String(s.semantic);
+  return p;
+}
+
+/** The non-empty UI param bundle — what the URL hash reflects and a saved
+ *  search stores (no DSL-derived keys; see uiParamsPure). */
+export function currentParamsPure(s: UiState): Record<string, string> {
+  return Object.fromEntries(Object.entries(uiParamsPure(s)).filter(([, v]) => v !== ""));
 }

@@ -12,8 +12,12 @@ import {
   UI_ONLY_PARAMS,
   applyParamsPure,
   clearRangePair,
+  currentParamsPure,
   pendingRangeChips,
+  uiParamsPure,
+  type UiState,
 } from "../src/lib/searchState.ts";
+import { dslToParams } from "../src/lib/searchDsl.ts";
 
 const NO_BOUNDS = { size: null, mtime: null };
 
@@ -168,6 +172,14 @@ test("applyParamsPure: display-only params are not searchable (A6 blank slate)",
     [{ file_category: "video" }, true],
     [{ search_in: "content" }, true],
     [{ include_sidecars: "true" }, true],
+    // Item 5: values that filter nothing are not searchable either.
+    [{ search_in: "all" }, false],
+    [{ include_sidecars: "false" }, false],
+    [{ share_mismatch: "false" }, false],
+    [{ world_readable: "" }, false],
+    [{ search_in: "all", include_sidecars: "false", share_mismatch: "false", world_readable: "", view: "grid" }, false],
+    [{ share_mismatch: "true" }, true],
+    [{ world_readable: "false" }, true],
   ];
   for (const [p, want] of cases) assert.equal(applyParamsPure(p, NO_BOUNDS).searchable, want, JSON.stringify(p));
 });
@@ -234,4 +246,73 @@ test("applyParamsPure: Object.prototype names are unknown keys, never thrown on"
     assert.equal(withQ.searchable, true, `${k} + q`);
     assert.equal(withQ.state.q, "x");
   }
+});
+
+// ---- item 11: the hash / saved-search bundle --------------------------------
+const BLANK: UiState = {
+  q: "",
+  extension: "",
+  selectedCategories: [],
+  selectedGroups: [],
+  selectedLibraries: [],
+  selectedPrincipals: [],
+  worldReadable: "",
+  exposure: "",
+  shareMismatch: false,
+  selectedTags: [],
+  includeSidecars: false,
+  searchIn: "all",
+  sortMode: "",
+  view: "list",
+  geoBox: null,
+  semantic: 0,
+  semanticEnabled: false,
+  pendingRange: {},
+  sizeBounds: null,
+  mtimeBounds: null,
+  sizeLo: 0,
+  sizeHi: 0,
+  mtimeLo: 0,
+  mtimeHi: 0,
+};
+
+test("currentParamsPure: hash and saved params carry no DSL-derived keys", () => {
+  const q = "report kind:video ext:pdf size:100..2000 modified:>7d tag:keep group:spreadsheet";
+  const derived = Object.keys(dslToParams(q).params);
+  assert.ok(derived.length >= 7, "the query really does translate");
+  const p = currentParamsPure({ ...BLANK, q });
+  assert.deepEqual(p, { q }, "the query is kept verbatim and nothing is lifted out of it");
+  for (const k of derived) assert.equal(k in p, false, k);
+});
+
+test("currentParamsPure: chips still contribute their own params next to a DSL query", () => {
+  const p = currentParamsPure({ ...BLANK, q: "kind:image", selectedCategories: ["video"], extension: "mp4" });
+  assert.deepEqual(p, { q: "kind:image", extension: "mp4", file_category: "video" });
+});
+
+test("uiParamsPure: an exact hash rides `hash`; empty values are dropped by currentParamsPure", () => {
+  const h = "0123456789abcdef0123";
+  assert.deepEqual(uiParamsPure({ ...BLANK, q: ` ${h} ` }), { hash: h });
+  assert.deepEqual(uiParamsPure(BLANK), { q: "" });
+  assert.deepEqual(currentParamsPure(BLANK), {});
+});
+
+test("uiParamsPure: sliders send a bound only when narrowed; pending ranges fill the rest", () => {
+  const s: UiState = {
+    ...BLANK,
+    sizeBounds: { min: 0, max: 100 },
+    sizeLo: 10.4,
+    sizeHi: 100,
+    mtimeBounds: { min: 0, max: 50 },
+    mtimeLo: 0,
+    mtimeHi: 50,
+    pendingRange: { size_lte: "90", mtime_gte: "5" },
+  };
+  assert.deepEqual(currentParamsPure(s), { size_gte: "10", size_lte: "90", mtime_gte: "5" });
+});
+
+test("uiParamsPure: display prefs, semantic only when enabled and dialled up", () => {
+  const s: UiState = { ...BLANK, q: "x", view: "grid", sortMode: "newest", semantic: 0.4 };
+  assert.deepEqual(uiParamsPure(s), { q: "x", sort: "newest", view: "grid" });
+  assert.deepEqual(uiParamsPure({ ...s, semanticEnabled: true }), { q: "x", sort: "newest", view: "grid", semantic: "0.4" });
 });

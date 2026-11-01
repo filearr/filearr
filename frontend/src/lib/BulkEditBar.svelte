@@ -29,6 +29,7 @@
     count,
     targets,
     busy = false,
+    cancelling = false,
     progress = "",
     onApply,
     onClear,
@@ -40,6 +41,9 @@
      *  intersection. */
     targets: FieldTarget[];
     busy?: boolean;
+    /** A cancelled run is still settling: Apply reads "Cancelling…" (and the
+     *  caller keeps `busy` on) until its in-flight chunk returns. */
+    cancelling?: boolean;
     /** Chunk progress of a multi-request run ("1/3"), shown on the button. */
     progress?: string;
     onApply: (ops: BulkOps) => void;
@@ -201,7 +205,7 @@
       variant="primary"
       disabled={busy || nothingToDo}
       title={nothingToDo ? "Choose a tag, year or custom-field change first" : "Apply to every selected item"}
-      onclick={apply}>{busy ? `Applying…${progress ? ` ${progress}` : ""}` : `Apply to ${count}`}</Button>
+      onclick={apply}>{cancelling ? "Cancelling…" : busy ? `Applying…${progress ? ` ${progress}` : ""}` : `Apply to ${count}`}</Button>
   </div>
   <!-- Validation of the operations above, right under the Apply button. -->
   {#if error}

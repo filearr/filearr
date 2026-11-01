@@ -41,17 +41,17 @@ const TOOL: AboutTool = {
   impact: null,
 };
 
-test("formatBytes: the shared byte format, and an unknown size is never a zero", () => {
+test("formatBytes: the shared byte format, and an unknown size reads 'unknown', never a zero", () => {
   assert.equal(formatBytes(0), "0 B");
   assert.equal(formatBytes(512), "512 B");
   assert.equal(formatBytes(1024), "1 KB");
   assert.equal(formatBytes(133_000_000), "126.8 MB");
   assert.equal(formatBytes(5 * 1024 ** 3), "5 GB");
-  // The states that must never become "0 B".
-  assert.equal(formatBytes(null), "—");
-  assert.equal(formatBytes(undefined), "—");
-  assert.equal(formatBytes(Number.NaN), "—");
-  assert.equal(formatBytes(-1), "—");
+  // The states that must never become "0 B" — the module's explicit word (item 17).
+  assert.equal(formatBytes(null), "unknown");
+  assert.equal(formatBytes(undefined), "unknown");
+  assert.equal(formatBytes(Number.NaN), "unknown");
+  assert.equal(formatBytes(-1), "unknown");
 });
 
 test("shortSha truncates but never invents", () => {

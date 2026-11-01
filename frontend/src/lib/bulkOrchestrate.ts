@@ -141,3 +141,40 @@ export async function runBulk(
   out.summary = mergeSummaries(parts);
   return out;
 }
+
+// ---- cancel → re-apply ordering (final-review item 2) ------------------------
+// A cancelled run's in-flight chunk still commits server-side, and its page-
+// side mirror (applyLocally) runs when it returns. A re-apply started before
+// that would GET pre-commit tags and overwrite the tag the cancelled run added.
+// The page hands every cancelled run to hold(); the next run awaits wait()
+// before resolving tags, and `busy` keeps Apply disabled ("Cancelling…") until
+// every held run has settled (fulfilled or rejected alike).
+
+export interface SettleGate {
+  /** Remember a cancelled run; resolves when every held run has settled. */
+  hold(run: Promise<unknown>): Promise<void>;
+  /** Resolves once nothing is held (immediately when idle). */
+  wait(): Promise<void>;
+  /** True while a held run has not settled. */
+  readonly busy: boolean;
+}
+
+export function createSettleGate(): SettleGate {
+  let settling: Promise<void> | null = null;
+  const settled = (p: Promise<unknown>): Promise<void> => p.then(() => undefined, () => undefined);
+  return {
+    hold(run) {
+      const mine: Promise<void> = Promise.all([settling ?? Promise.resolve(), settled(run)]).then(() => {
+        if (settling === mine) settling = null;
+      });
+      settling = mine;
+      return mine;
+    },
+    wait() {
+      return settling ?? Promise.resolve();
+    },
+    get busy() {
+      return settling !== null;
+    },
+  };
+}

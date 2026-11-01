@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RETRY_DELAY_MS, placeholderText, retryUrl, thumbable } from "../src/lib/thumbPolicy.ts";
+import { RETRY_DELAY_MS, placeholderText, retryUrl, shouldRetry, thumbable } from "../src/lib/thumbPolicy.ts";
 
 test("thumbable table", () => {
   const cases: [string | null | undefined, string | null | undefined, boolean][] = [
@@ -40,4 +40,11 @@ test("placeholderText: first three letters of the category", () => {
   assert.equal(placeholderText("three-d-cad"), "3d");
   assert.equal(placeholderText(null), "");
   assert.equal(placeholderText("archive"), "arc");
+});
+
+test("shouldRetry: only a video miss means 'queued; retry shortly' (item 13)", () => {
+  assert.equal(shouldRetry("video"), true);
+  for (const c of ["image", "audio", "three-d-cad", "document", "archive", "other", "", null, undefined]) {
+    assert.equal(shouldRetry(c), false, String(c));
+  }
 });

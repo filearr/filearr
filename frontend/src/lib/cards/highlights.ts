@@ -7,10 +7,13 @@
 // card covers audiobooks (chapters) the same way. development / archive /
 // system / other have no hand-written card and fall back to KeyFactsCard.
 //
-// HIGHLIGHT_KEYS: each card imports its list and uses it twice: it renders
+// HIGHLIGHT_KEYS: each card imports its list and uses it twice: it reads
 // every key (as a stat chip, a table, a banner or a plain row) and passes the
-// same list as KeyFactsCard's `exclude`, so a fact is never hidden from
-// "More details" without being shown above it.
+// same list as KeyFactsCard's `exclude`, so "More details" never repeats a
+// fact the card owns. Most keys render whenever they have a value; a few feed
+// a composite instead (width + height → "Dimensions" / "Resolution") and show
+// only when the composite does — a lone width without its height is hidden
+// from both places.
 
 export const BACKEND_CATEGORIES = [
   "image",

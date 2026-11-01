@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { runBulk, type BulkApi } from "../src/lib/bulkOrchestrate.ts";
+import { createSettleGate, runBulk, type BulkApi } from "../src/lib/bulkOrchestrate.ts";
 import { EMPTY_OPS, type BulkOps, type BulkTarget, type ItemPatchBody } from "../src/lib/bulkEdit.ts";
 
 const target = (id: string, tags: string[] = []): BulkTarget => ({
@@ -216,4 +216,85 @@ test("an abort during an in-flight chunk that then rejects reports aborted, not 
   assert.equal(out.failed, null);
   assert.equal(out.summary.ok.length, 500);
   assert.equal(out.notAttempted.length, 200);
+});
+
+// ---- final-review item 2: cancel then re-apply ------------------------------
+// The cancelled run's in-flight chunk still commits server-side. A re-apply
+// that read tags before that commit would overwrite the tag the cancelled run
+// added, so the page holds the cancelled run in a settle gate and the next run
+// waits on it before resolving live tags.
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+test("cancel then re-apply: the second run waits for the first to settle and reads its commit", async () => {
+  const live: Record<string, string[]> = { x: ["a"] };
+  const release = deferred<void>();
+  let firstBatch = true;
+  const gets: string[][] = [];
+  const api: BulkApi = {
+    async getItem(id) {
+      gets.push([...live[id]]);
+      return { id, tags: [...live[id]] };
+    },
+    async batchPatch(body) {
+      if (firstBatch) { firstBatch = false; await release.promise; }
+      for (const [id, p] of Object.entries(body)) if (p.tags) live[id] = p.tags;
+      return { results: Object.fromEntries(Object.keys(body).map((k) => [k, "ok"])) };
+    },
+  };
+  const gate = createSettleGate();
+  assert.equal(gate.busy, false);
+
+  // Run 1 adds "b"; its chunk is in flight when the user cancels.
+  const c1 = new AbortController();
+  const run1 = runBulk([target("x")], ops({ tagsAdd: ["b"] }), api, { signal: c1.signal });
+  await new Promise((r) => setImmediate(r)); // run 1 is now inside batchPatch
+  c1.abort();
+  const held = gate.hold(run1);
+  assert.equal(gate.busy, true, "Apply stays disabled while the cancelled run settles");
+
+  // Run 2 adds "c": it must not resolve tags until run 1's commit landed.
+  let run2Started = false;
+  const run2 = (async () => {
+    await gate.wait();
+    run2Started = true;
+    return runBulk([target("x")], ops({ tagsAdd: ["c"] }), api, {});
+  })();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(run2Started, false, "re-apply waits on the cancelled run");
+  assert.equal(gets.length, 1, "only run 1 has read tags so far");
+
+  release.resolve();
+  const out1 = await run1;
+  await held;
+  assert.equal(out1.aborted, true);
+  assert.deepEqual(out1.patchesApplied, { x: { tags: ["a", "b"] } }, "the in-flight chunk committed");
+  assert.equal(gate.busy, false);
+
+  const out2 = await run2;
+  assert.deepEqual(gets[1], ["a", "b"], "run 2 read the post-commit tags");
+  assert.deepEqual(out2.patchesApplied, { x: { tags: ["a", "b", "c"] } }, "run 1's tag survives");
+  assert.deepEqual(live.x, ["a", "b", "c"]);
+});
+
+test("settle gate: wait() resolves at once when idle; two holds settle together; rejections count as settled", async () => {
+  const gate = createSettleGate();
+  await gate.wait();
+  const a = deferred<void>();
+  const b = deferred<void>();
+  gate.hold(a.promise);
+  gate.hold(b.promise.then(() => { throw new Error("late failure"); }));
+  let waited = false;
+  const w = gate.wait().then(() => { waited = true; });
+  a.resolve();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(waited, false, "still waiting on the second hold");
+  assert.equal(gate.busy, true);
+  b.resolve();
+  await w;
+  assert.equal(gate.busy, false);
 });

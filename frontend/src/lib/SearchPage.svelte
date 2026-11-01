@@ -55,20 +55,24 @@
     type BulkTarget,
     type FieldTarget,
   } from "./bulkEdit";
-  import { runBulk } from "./bulkOrchestrate";
+  import { createSettleGate, runBulk } from "./bulkOrchestrate";
   import { buildDisplayPath } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import { encodeSearchHash, isSearchHash, parseSearchHash } from "./searchparams";
-  import { createHashSync } from "./searchHash";
+  import { createHashSync, type HashMode } from "./searchHash";
   import {
+    HASH_RE,
     SORTS,
     UI_ONLY_PARAMS,
     applyParamsPure,
     clearRangePair,
+    currentParamsPure,
     pairPending,
     pendingRangeChips,
+    uiParamsPure,
     type RangePair,
+    type UiState,
   } from "./searchState";
   import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
   import {
@@ -82,7 +86,6 @@
   import { semanticEnabled as probeSemantic } from "./semanticProbe";
   import {
     MAP_POINT_CAP,
-    boxParams,
     formatBox,
     geoOf,
     type GeoBox,
@@ -121,8 +124,6 @@
   // Top-N extensions surfaced by the type-ahead-lite (P3-T4). The facet list can
   // be long; we rank by live count and show a bounded slice.
   const EXT_LIMIT = 10;
-  // A bare lowercase-hex string (16..64 chars) is an exact-hash lookup (P3-T1).
-  const HASH_RE = /^[0-9a-f]{16,64}$/;
 
   let q = $state("");
   // P6 (A2): /search passes q to Meilisearch verbatim, so the translatable DSL
@@ -139,7 +140,9 @@
     const u = dsl.unsupported;
     if (!u.length) return "No matches. Try fewer words, remove a filter chip, or set Match in to everything.";
     const one = u.length === 1;
-    return `No matches. ${u.map((t) => `\`${t}\``).join(", ")} ${one ? "is" : "are"} not supported in search — remove ${one ? "it" : "them"} or see the query help.`;
+    // StateBlock renders a plain string (no snippet), so the tokens go in bare —
+    // literal backticks read as noise (item 9).
+    return `No matches. ${u.join(", ")} ${one ? "is" : "are"} not supported in search — remove ${one ? "it" : "them"} or see the query help.`;
   });
   // W8 file taxonomy filters. Both multi-select; each rides the deep-link hash as
   // one comma-joined value and api.search() expands it into a repeatable param.
@@ -272,10 +275,6 @@
   // Retry succeeds (no re-fire on every scroll event).
   let loadMoreError = $state("");
   let loadMoreBlocked = $state(false);
-  // A8: set by the first keystroke in the query box, so a deep link applied on
-  // mount never overwrites what the user already typed.
-  let userTyped = false;
-
   // Roving LOGICAL selection (P3-T3): NOT DOM focus — rows unmount under
   // virtualization, so we track an index + drive aria-activedescendant instead.
   let selectedIndex = $state(0);
@@ -395,19 +394,40 @@
   let bulkErrorLead = $state("");
   const bulkErrorLines = $derived(bulkError ? bulkError.split("; ") : []);
 
-  function cancelBulk() {
+  // Final-review item 2: a cancelled run's in-flight chunk still commits, so
+  // it is held in `bulkSettling` until it returns; Apply shows "Cancelling…"
+  // and stays disabled meanwhile, and the next run waits on it before reading
+  // live tags (bulkOrchestrate.ts createSettleGate).
+  const bulkSettling = createSettleGate();
+  let bulkCancelling = $state(false);
+  // The in-flight applyBulk run (what a cancel hands to bulkSettling).
+  let bulkRun: Promise<void> | null = null;
+  // The run that has passed the settle gate and may mirror rows.
+  let bulkWriter: AbortController | null = null;
+  // The abort reason of the user's own Clear: that cancel needs no toast.
+  const USER_CLEAR = "user-clear";
+
+  function cancelBulk(reason?: typeof USER_CLEAR) {
     if (!bulkController) return;
-    bulkController.abort();
+    bulkController.abort(reason);
     bulkController = null;
     bulkBusy = false;
     bulkProgress = "";
+    if (bulkRun) {
+      bulkCancelling = true;
+      void bulkSettling.hold(bulkRun).then(() => {
+        if (!bulkSettling.busy) bulkCancelling = false;
+      });
+    }
   }
 
-  function clearSelection() {
-    cancelBulk();
+  function clearSelection(reason?: typeof USER_CLEAR) {
+    cancelBulk(reason);
     selectedIds = new Set();
     lastToggledIndex = -1;
   }
+  // The Clear buttons: the user's own cancel, so no "cancelled" toast.
+  const userClearSelection = () => clearSelection(USER_CLEAR);
 
   function selectAllLoaded() {
     cancelBulk();
@@ -506,7 +526,22 @@
     bulkErrorLead = "";
     bulkSummary = null;
     bulkFailuresOpen = false;
+    const run = runBulkEdit(ops, ctrl);
+    bulkRun = run;
+    await run;
+    if (bulkRun === run) bulkRun = null;
+  }
+
+  async function runBulkEdit(ops: BulkOps, ctrl: AbortController) {
     try {
+      // A cancelled earlier run may still be committing: read live tags only
+      // after it has landed, or its added tag would be overwritten.
+      await bulkSettling.wait();
+      if (ctrl.signal.aborted) {
+        if (ctrl.signal.reason !== USER_CLEAR) toast("Bulk edit cancelled — nothing was changed.", { tone: "warn" });
+        return;
+      }
+      bulkWriter = ctrl;
       // Chunked at exactly the server's cap inside runBulk: a request over 500
       // keys is rejected with a 413, so chunking is the contract.
       const out = await runBulk(
@@ -520,14 +555,19 @@
           },
         },
       );
-      // Whatever committed is mirrored, even when the run was cut short.
-      applyLocally(out.summary.ok, out.patchesApplied);
+      // Whatever committed is mirrored, even when the run was cut short —
+      // unless a newer run already owns the rows (the settle gate makes that
+      // impossible today; the guard keeps a late mirror from ever undoing one).
+      if (bulkWriter === ctrl || bulkWriter === null) applyLocally(out.summary.ok, out.patchesApplied);
       // Cancelled or superseded: only the local mirror and the cancel toast —
       // no error, summary or "nothing to change" for a run the user left,
-      // which would also overwrite a newer run's state.
+      // which would also overwrite a newer run's state. A cancel the user did
+      // not make with Clear (a checkbox, Select all, a new query) says so.
       if (out.aborted || bulkController !== ctrl) {
         if (Object.keys(out.patchesApplied).length) {
           toast(`Bulk edit cancelled — ${out.summary.ok.length} items were already updated.`, { tone: "warn" });
+        } else if (ctrl.signal.reason !== USER_CLEAR) {
+          toast("Bulk edit cancelled — nothing was changed.", { tone: "warn" });
         }
         return;
       }
@@ -555,7 +595,11 @@
       // Per-ITEM failures come back inside a 200 and are shown in the list.
       bulkSummary = sum;
       bulkFailuresOpen = sum.failures.length > 0;
-      if (!sum.failures.length) clearSelection();
+      if (!sum.failures.length) {
+        // Not clearSelection(): that would cancel (and hold) this very run.
+        selectedIds = new Set();
+        lastToggledIndex = -1;
+      }
       toast(
         sum.failures.length
           ? `${sum.ok.length} updated, ${sum.failures.length} failed — search index updates shortly.`
@@ -566,57 +610,30 @@
       if (bulkController !== ctrl) return;
       bulkError = errorMessage(e, { verb: "edit these items" });
     } finally {
+      if (bulkWriter === ctrl) bulkWriter = null;
       if (bulkController === ctrl) {
         bulkController = null;
         bulkBusy = false;
         bulkProgress = "";
+        bulkRun = null;
       }
     }
   }
 
   // ---- query params -------------------------------------------------------
-  // The UI state as typed: q carries any DSL verbatim (see currentParams()).
+  // The UI state as searchState.ts reads it (uiParamsPure / currentParamsPure:
+  // q carries any DSL verbatim; item 11 pins that no DSL-derived key leaks in).
+  function uiState(): UiState {
+    return {
+      q, extension, selectedCategories, selectedGroups, selectedLibraries,
+      selectedPrincipals, worldReadable, exposure, shareMismatch, selectedTags,
+      includeSidecars, searchIn, sortMode, view, geoBox, semantic, semanticEnabled,
+      pendingRange, sizeBounds, mtimeBounds, sizeLo, sizeHi, mtimeLo, mtimeHi,
+    };
+  }
   function uiParams(): Record<string, string> {
-    const term = q.trim();
-    hashMode = HASH_RE.test(term);
-    const p: Record<string, string> = {};
-    if (hashMode) p.hash = term;
-    else p.q = q;
-    if (extension) p.extension = extension;
-    // Multi-select taxonomy filters ride as one comma-joined value each;
-    // api.search() expands them into repeatable ``file_category`` /
-    // ``file_group`` query params for the backend's List[str].
-    if (selectedCategories.length) p.file_category = selectedCategories.join(",");
-    if (selectedGroups.length) p.file_group = selectedGroups.join(",");
-    if (selectedLibraries.length) p.library = selectedLibraries.join(",");
-    if (selectedPrincipals.length) p.principal = selectedPrincipals.join(",");
-    if (worldReadable) p.world_readable = worldReadable;
-    if (exposure) p.exposure = exposure;
-    if (shareMismatch) p.share_mismatch = "true";
-    if (selectedTags.length) p.tags = selectedTags.join(",");
-    if (includeSidecars) p.include_sidecars = "true";
-    if (searchIn !== "all") p.search_in = searchIn;
-    // Range filters: only send a bound when the slider is narrowed off it, so a
-    // full-range slider is a no-op (and lets the bounds keep refreshing).
-    if (sizeBounds && sizeLo > sizeBounds.min) p.size_gte = String(Math.round(sizeLo));
-    if (sizeBounds && sizeHi < sizeBounds.max) p.size_lte = String(Math.round(sizeHi));
-    if (mtimeBounds && mtimeLo > mtimeBounds.min) p.mtime_gte = String(Math.round(mtimeLo));
-    if (mtimeBounds && mtimeHi < mtimeBounds.max) p.mtime_lte = String(Math.round(mtimeHi));
-    // Range params from an applied saved search / deep link, until a slider moves.
-    for (const k of ["size_gte", "size_lte", "mtime_gte", "mtime_lte"]) {
-      if (!(k in p) && pendingRange[k]) p[k] = pendingRange[k];
-    }
-    if (sortMode) p.sort = sortMode;
-    if (view !== "list") p.view = view;
-    // R8-UI: the map's area selection is a FILTER like any other — four flat
-    // params on the same query. boxParams() emits nothing for a box the API
-    // would reject (inverted / antimeridian-crossing), so a bad box degrades to
-    // "no area filter" instead of a 422.
-    Object.assign(p, boxParams(geoBox));
-    // Only send a semantic ratio when the feature is on AND the user dialed it
-    // up — a 0 keeps the keyword path byte-identical (and deep links stay clean).
-    if (semanticEnabled && semantic > 0) p.semantic = String(semantic);
-    return p;
+    hashMode = HASH_RE.test(q.trim());
+    return uiParamsPure(uiState());
   }
 
   // What /search (results, paging, map) receives: the UI params with the query DSL translated
@@ -634,9 +651,7 @@
   // `modified:>7d` is never frozen into a date: the DSL is re-translated by
   // buildParams() on every request, including after applying a saved search.
   function currentParams(): Record<string, string> {
-    return Object.fromEntries(
-      Object.entries(uiParams()).filter(([, v]) => v !== ""),
-    );
+    return currentParamsPure(uiState());
   }
 
   // Reflect the current params into the location hash (#/search?...). Guarded
@@ -645,8 +660,11 @@
   // writing "#/search" over "#/jobs" is exactly the snap-back bug this fixes
   // (live 2026-08-04). Ruling 2 (A9): typing and slider drags REPLACE the
   // current history entry; committed changes (chips, saved search, Enter,
-  // view/sort) PUSH one. sync records the write either way (searchHash.ts).
-  function reflectHash(mode: "push" | "replace") {
+  // view/sort) PUSH one. sync records the write either way and upgrades the
+  // first replace of an editing session to a push, so the committed entry under
+  // it survives Back; "canonical" re-encodes a hash the page was just handed
+  // (deep link, Back/Forward) and always replaces (searchHash.ts).
+  function reflectHash(mode: HashMode) {
     if (!isSearchHash(location.hash)) return;
     const h = encodeSearchHash(currentParams());
     const { write } = sync.reflect(location.hash, h, mode);
@@ -669,9 +687,9 @@
   // Apply a flat param bundle (deep link, back/forward, or a saved search) into
   // the UI state and re-query. searchState.ts validates every value (A36) and
   // keeps range params in pendingRange until that pair's slider moves (A7).
-  // `mode` is how a re-encoded hash is written: "replace" when the bundle came
+  // `mode` is how a re-encoded hash is written: "canonical" when the bundle came
   // from the URL (Back/Forward, deep link), "push" for a saved search.
-  function applyParams(p: Record<string, string>, mode: "push" | "replace") {
+  function applyParams(p: Record<string, string>, mode: "push" | "canonical") {
     const { state: s, searchable, invalid } = applyParamsPure(p, { size: sizeBounds, mtime: mtimeBounds });
     q = s.q;
     extension = s.extension;
@@ -743,7 +761,7 @@
     // re-ran a search and wrote "#/search" back — reverting the navigation.
     const act = sync.incoming(location.hash);
     if (!isSearchHash(location.hash) || act === "ignore") return;
-    applyParams(parseSearchHash(location.hash), "replace");
+    applyParams(parseSearchHash(location.hash), "canonical");
   }
 
   // A slider drag takes over from that pair's applied/deep-linked range only;
@@ -845,20 +863,25 @@
 
   const BOTH_PAIRS: readonly RangePair[] = ["size", "date"];
 
-  function applyStats(r: SearchResponse, pairs: readonly RangePair[] = BOTH_PAIRS) {
+  function applyStats(
+    r: SearchResponse,
+    pairs: readonly RangePair[],
+    narrowing: Record<string, string>,
+  ) {
     // Update slider bounds from facetStats ONLY while that facet isn't being
     // narrowed — otherwise an active filter would shrink its own track. A
-    // pending (URL / saved-search) range narrows it too: keep the bounds we had.
-    // With none yet, runFresh's bounds probe supplies the unfiltered stats
-    // (`pairs` limits which pairs a response may set).
+    // pending (URL / saved-search) range or a query `size:` / `modified:` term
+    // (`narrowing`) narrows it too: keep the bounds we had. With none yet,
+    // runFresh's bounds probe supplies the unfiltered stats (`pairs` limits
+    // which pairs a response may set).
     const ss = pairs.includes("size") ? r.facet_stats?.size : undefined;
-    if (ss && !sizeActive && !(sizeBounds && pairPending(pendingRange, "size"))) {
+    if (ss && !sizeActive && !(sizeBounds && pairPending(narrowing, "size"))) {
       sizeBounds = { min: ss.min, max: ss.max };
       sizeLo = ss.min;
       sizeHi = ss.max;
     }
     const ms = pairs.includes("date") ? r.facet_stats?.mtime : undefined;
-    if (ms && !mtimeActive && !(mtimeBounds && pairPending(pendingRange, "date"))) {
+    if (ms && !mtimeActive && !(mtimeBounds && pairPending(narrowing, "date"))) {
       mtimeBounds = { min: ms.min, max: ms.max };
       mtimeLo = ms.min;
       mtimeHi = ms.max;
@@ -866,7 +889,7 @@
   }
 
   // ---- fetching -----------------------------------------------------------
-  async function runFresh(mode: "push" | "replace" = "push") {
+  async function runFresh(mode: HashMode = "push") {
     // Cancel any in-flight request so a stale response can never overwrite a
     // newer one (P3-T3 AbortController on the 150 ms debounce).
     controller?.abort();
@@ -875,6 +898,9 @@
     searched = true;
     error = "";
     loading = true;
+    // Item 4: the old query's cursor dies now, so a failed fresh search can
+    // never page the NEW query (pages.start below) from the old offset.
+    nextCursor = null;
     loadMoreError = "";
     loadMoreBlocked = false;
     copyCountsGen++;
@@ -892,7 +918,9 @@
     // without the range keys reads the unfiltered facet_stats for those pairs,
     // so the sliders show the whole range (ruling, P6 Task 3). Same controller:
     // a newer search aborts it too. A failed probe falls back to the main stats.
-    const probePairs = boundsProbePairs(pendingRange, { size: sizeBounds, mtime: mtimeBounds });
+    // Item 3: a DSL range narrows its pair exactly like a pending one.
+    const narrowing = { ...pendingRange, ...dsl.params };
+    const probePairs = boundsProbePairs(narrowing, { size: sizeBounds, mtime: mtimeBounds });
     const probe = probePairs.length
       ? search(boundsProbeParams(params), ctrl.signal).catch(() => null)
       : null;
@@ -904,11 +932,11 @@
       facets = r.facets;
       nextCursor = r.next_cursor;
       selectedIndex = 0;
-      applyStats(r, BOTH_PAIRS.filter((pr) => !probePairs.includes(pr)));
+      applyStats(r, BOTH_PAIRS.filter((pr) => !probePairs.includes(pr)), narrowing);
       if (probe) {
         void probe.then((pr) => {
           if (ctrl.signal.aborted || controller !== ctrl) return;
-          applyStats(pr ?? r, probePairs);
+          applyStats(pr ?? r, probePairs, narrowing);
         });
       }
       copyCountMap = {};
@@ -1117,13 +1145,13 @@
     }
   }
 
-  // Typing replaces the current history entry (A9); a half-composed IME
+  // Typing replaces the current history entry (A9) — after the first keystroke
+  // of a session, which reflectHash/searchHash upgrade to a push; a half-composed IME
   // string never searches (A43) — compositionend schedules the search instead,
   // since Chrome fires no plain input event after it.
   let inputPending = false;
   function onInput(e: Event) {
     if ((e as InputEvent).isComposing) return;
-    userTyped = true;
     clearTimeout(debounce);
     inputPending = true;
     debounce = setTimeout(() => {
@@ -1134,8 +1162,10 @@
 
   // Enter commits the query: a still-debounced edit runs now and pushes its own
   // history entry; an already-reflected one pushes nothing new.
+  // keyCode 229 is the IME's own Enter: Safari fires it after compositionend
+  // with isComposing already false (item 6).
   function onQueryKeydown(e: KeyboardEvent) {
-    if (e.key !== "Enter" || e.isComposing) return;
+    if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     if (inputPending) {
       clearTimeout(debounce);
@@ -1309,7 +1339,9 @@
   const activeFilters = $derived.by<Chip[]>(() => {
     const out: Chip[] = [];
     for (const c of selectedCategories) out.push({ key: `fc:${c}`, label: `category: ${categoryLabel(c)}`, clear: () => toggleCategory(c) });
-    if (extension) out.push({ key: "ext", label: `ext: ${extension}`, clear: () => { extension = ""; reset(); } });
+    // Item 10: a query `ext:` wins over the chip (mergeDslParams), so say so.
+    const extOverridden = !!dsl.params.extension && dsl.params.extension !== extension;
+    if (extension) out.push({ key: "ext", label: `ext: ${extension}${extOverridden ? " (overridden by query)" : ""}`, clear: () => { extension = ""; reset(); } });
     for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
     for (const l of selectedLibraries) out.push({ key: `lib:${l}`, label: `library: ${libraryLabel(l)}`, clear: () => toggleLibrary(l) });
     for (const pr of selectedPrincipals) out.push({ key: `pr:${pr}`, label: `readable by: ${pr}`, clear: () => removePrincipal(pr) });
@@ -1515,7 +1547,7 @@
     const on = await probeSemantic();
     if (destroyed) return;
     semanticEnabled = on;
-    if (on && semantic > 0 && searched && isSearchHash(location.hash)) runFresh("replace");
+    if (on && semantic > 0 && searched && isSearchHash(location.hash)) runFresh("canonical");
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -1533,7 +1565,9 @@
     // labels land; nothing below resets the applied state. A BARE visit stays
     // empty (roadmap §20) — no match-all preload.
     const initial = isSearchHash(location.hash) ? parseSearchHash(location.hash) : {};
-    if (!userTyped && Object.keys(initial).length) applyParams(initial, "replace");
+    // (No "the user already typed" guard: this runs synchronously in the first
+    // onMount tick, before the query box can receive input.)
+    if (Object.keys(initial).length) applyParams(initial, "canonical");
     loadSaved();
     await Promise.all([loadLibraries(), loadTaxonomy(), loadSemantic()]);
   });
@@ -2042,7 +2076,7 @@
       <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
         <Button size="sm" onclick={selectAllLoaded}>Select all loaded ({hits.length})</Button>
         {#if selectedIds.size}
-          <Button size="sm" onclick={clearSelection}>Clear selection</Button>
+          <Button size="sm" onclick={userClearSelection}>Clear selection</Button>
         {:else}
           <span>
             Tick a row (or press Space) to select; shift-click extends a range.
@@ -2055,10 +2089,11 @@
       <BulkEditBar
         count={selectedIds.size}
         targets={bulkTargets}
-        busy={bulkBusy}
+        busy={bulkBusy || bulkCancelling}
+        cancelling={bulkCancelling}
         progress={bulkProgress}
         onApply={applyBulk}
-        onClear={clearSelection} />
+        onClear={userClearSelection} />
     {/if}
 
     <!-- Duplicate badges failed to load: the results stand, the badges retry. -->

@@ -3,7 +3,7 @@
   import KeyFactsCard from "./KeyFactsCard.svelte";
   import { effectiveMeta } from "./keyfacts";
   import { HIGHLIGHT_KEYS } from "./highlights";
-  import { asStr } from "./format";
+  import { asStr, fmtWhen } from "./format";
 
   let { item }: { item: Record<string, unknown> } = $props();
   const m = $derived(effectiveMeta(item));
@@ -16,7 +16,7 @@
     { label: "Format", value: asStr(m.format) },
     { label: "Colour mode", value: asStr(m.mode) },
     { label: "Camera", value: asStr(m.camera) },
-    { label: "Taken at", value: asStr(m.taken_at) },
+    { label: "Taken at", ...fmtWhen(m.taken_at) },
   ]);
 </script>
 

@@ -16,7 +16,7 @@ import {
   type CardName,
 } from "../src/lib/cards/highlights.ts";
 import { extractError, orderKeyFacts } from "../src/lib/cards/keyfacts.ts";
-import { asStr, fmtAudioBitrate } from "../src/lib/cards/format.ts";
+import { asStr, fmtAudioBitrate, fmtWhen } from "../src/lib/cards/format.ts";
 
 // ---- registry ---------------------------------------------------------------
 
@@ -168,4 +168,13 @@ test("fmtAudioBitrate: bit/s above 10000, kbit/s otherwise", () => {
   assert.equal(fmtAudioBitrate(0), null);
   assert.equal(fmtAudioBitrate(null), null);
   assert.equal(fmtAudioBitrate("x"), null);
+});
+
+test("fmtWhen: EXIF and ISO dates render local with a UTC title; absent drops; unparseable stays raw", () => {
+  process.env.TZ = "UTC";
+  assert.deepEqual(fmtWhen("2024:05:06 07:08:09"), { value: "2024-05-06 07:08", title: "2024-05-06T07:08:09Z" });
+  assert.deepEqual(fmtWhen("2024-05-06T07:08:09Z"), { value: "2024-05-06 07:08", title: "2024-05-06T07:08:09Z" });
+  assert.deepEqual(fmtWhen(null), { value: null });
+  assert.deepEqual(fmtWhen(""), { value: null });
+  assert.deepEqual(fmtWhen("D:20240506"), { value: "D:20240506" }, "an unparseable value is not hidden");
 });

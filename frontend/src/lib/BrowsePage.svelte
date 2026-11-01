@@ -340,7 +340,11 @@
   {:else if !tree}
     <StateBlock state="loading" class="mt-6" />
   {:else}
-    {#if tree.folders.length === 0 && tree.items.length === 0}
+    {#if offset > 0 && tree.items.length === 0 && tree.total_items > 0}
+      <!-- Item 16: a later page emptied by removals is not an empty folder;
+           Prev below leads back to the files. -->
+      <StateBlock state="empty" class="mt-6" message="No files on this page." />
+    {:else if tree.folders.length === 0 && tree.items.length === 0}
       <StateBlock
         state="empty"
         class="mt-6"

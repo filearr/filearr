@@ -3,14 +3,15 @@
   // The box always renders a placeholder (the category's short name), so a row
   // or tile is the same size with or without a picture. Only items the server
   // can render (thumbPolicy.thumbable, mirroring backend thumbs.py) request an
-  // image, layered over the placeholder. A failed load retries once after
+  // image, layered over the placeholder. A failed VIDEO load retries once after
   // RETRY_DELAY_MS — a video poster that is still queued is a 404 at first —
-  // and a second failure leaves the placeholder. `onFail` fires once per item
+  // and a second failure leaves the placeholder; any other category's first
+  // failure is final (thumbPolicy.shouldRetry). `onFail` fires once per item
   // when that placeholder is final (second failure, or not thumbable) so a
   // caller such as the detail preview can drop the box; rows keep it.
   import { onDestroy } from "svelte";
   import { thumbUrl } from "./api";
-  import { RETRY_DELAY_MS, placeholderText, retryUrl, thumbable } from "./thumbPolicy";
+  import { RETRY_DELAY_MS, placeholderText, retryUrl, shouldRetry, thumbable } from "./thumbPolicy";
 
   interface Props {
     id: string;
@@ -23,8 +24,8 @@
     filename?: string | null;
     /** "contain" for previews that must show the whole picture. */
     fit?: "cover" | "contain";
-    /** called once when the placeholder is final: the retry failed too, or
-     *  the item is not thumbable (no request is made). */
+    /** called once when the placeholder is final: the load failed (a video:
+     *  its retry failed too), or the item is not thumbable (no request). */
     onFail?: () => void;
   }
   let {
@@ -65,7 +66,7 @@
   function onError() {
     if (destroyed) return;
     const key = base;
-    if (phase === "first") {
+    if (phase === "first" && shouldRetry(category)) {
       load = { key, phase: "waiting" };
       clearTimeout(timer);
       timer = setTimeout(() => {

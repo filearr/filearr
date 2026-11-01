@@ -52,8 +52,9 @@
   // a pending retry never reopens a stream on a destroyed panel.
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   // A29: Cancel pressed while initiate is still in flight (no id yet); honoured
-  // as soon as initiateTransfer resolves.
-  let cancelRequested = false;
+  // as soon as initiateTransfer resolves. State (item 18): Cancel reads
+  // "Cancelling…" and is disabled until then.
+  let cancelRequested = $state(false);
   // Bumped by the reset effect's cleanup (item change / unmount): an initiate
   // that resolves for an older generation is dropped.
   let generation = 0;
@@ -211,13 +212,14 @@
       if (gen !== generation) return;
       transferId = r.transfer_id;
       if (cancelRequested) {
-        cancelRequested = false;
         await cancel();
+        cancelRequested = false;
         return;
       }
       openStream(r.transfer_id);
     } catch (e) {
       if (gen !== generation) return;
+      cancelRequested = false;
       phase = "failed";
       message = friendlyError(e, "retrieve");
     }
@@ -297,7 +299,8 @@
         title="Pull this file from the hosting agent to the server, then download it"
       >{phase === "idle" ? "Retrieve" : "Retrieve again"}</Button>
     {:else}
-      <Button size="sm" onclick={cancel}>Cancel</Button>
+      <Button size="sm" onclick={cancel} disabled={cancelRequested}
+        >{cancelRequested ? "Cancelling…" : "Cancel"}</Button>
     {/if}
     {#if canDownload}
       <Button

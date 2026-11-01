@@ -18,6 +18,14 @@ export function thumbable(category: string | null | undefined, filename?: string
  *  shortly"); one retry after this delay catches the common case. */
 export const RETRY_DELAY_MS = 2000;
 
+/** Whether a failed load is worth the one retry. Only video posters are
+ *  rendered by a queued worker job; every other category is rendered inline
+ *  on request, so its miss is final at once (item 13: the detail preview then
+ *  collapses immediately instead of jumping after RETRY_DELAY_MS). */
+export function shouldRetry(category: string | null | undefined): boolean {
+  return category === "video";
+}
+
 /** The retry URL: a distinct query so the browser does not reuse the 404. */
 export function retryUrl(url: string): string {
   return url + (url.includes("?") ? "&" : "?") + "r=1";

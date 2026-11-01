@@ -11,7 +11,8 @@
 //
 // searchOnly sections (fuzzy ~terms) are grammar-valid but the reports
 // translator rejects fuzzy, so the shared component labels them "not supported
-// in reports" there.
+// in reports" there; since P6 the Search page cannot honour them either (no ~
+// in Meilisearch), so the section is shown in reports only, labelled as such.
 //
 // P6 (finding A2, ruling 1): the Search page does not send the DSL to a parser —
 // searchDsl.ts translates only kind:/group:/ext:/size:/modified:/tag: into flat /search
@@ -66,8 +67,8 @@ export const DSL_SECTIONS: DslSection[] = [
     // Meilisearch has no ~ operator, so the Search page cannot honour it either.
     contexts: REPORTS,
     body:
-      "Prefix a term with ~ for typo-tolerant matching. Fuzzy applies to free-text " +
-      "terms only (never to filters). Available on search; reports need exact filters.",
+      "Prefix a term with ~ for typo-tolerant matching (free-text terms only, never " +
+      "filters). The grammar accepts it, but neither search nor reports can honour it yet.",
     examples: [{ q: "~documentaru", note: "matches ‘documentary’ despite the typo" }],
   },
   {

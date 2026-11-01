@@ -3,7 +3,7 @@
   import KeyFactsCard from "./KeyFactsCard.svelte";
   import { effectiveMeta } from "./keyfacts";
   import { HIGHLIGHT_KEYS } from "./highlights";
-  import { asStr } from "./format";
+  import { asStr, fmtWhen } from "./format";
   import { Alert } from "../ui";
 
   let { item }: { item: Record<string, unknown> } = $props();
@@ -15,8 +15,8 @@
   const highlights = $derived([
     { label: "Pages", value: asStr(m.pages) },
     { label: "Author", value: asStr(m.author) },
-    { label: "Created", value: asStr(m.created) },
-    { label: "Modified", value: asStr(m.modified) },
+    { label: "Created", ...fmtWhen(m.created) },
+    { label: "Modified", ...fmtWhen(m.modified) },
     { label: "Encrypted", value: m.encrypted == null ? null : m.encrypted ? "yes" : "no" },
     { label: "Paragraphs", value: asStr(m.paragraphs) },
   ]);

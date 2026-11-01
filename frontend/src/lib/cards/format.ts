@@ -1,6 +1,6 @@
 // Small display helpers shared by the per-type detail cards (P4-T10). Pure.
 
-import { fmtBytes as bytes, fmtDuration as duration } from "../format.ts";
+import { fmtBytes as bytes, fmtDateTime, fmtDuration as duration, fmtUtc } from "../format.ts";
 
 // The cards' formatting comes from ../format (A32). These two keep the cards'
 // contract on top of it: metadata values are `unknown` (often numeric strings)
@@ -54,4 +54,17 @@ export function asRows(v: unknown): Record<string, unknown>[] | null {
   if (!Array.isArray(v) || v.length === 0) return null;
   const rows = v.filter((x) => x != null && typeof x === "object" && !Array.isArray(x));
   return rows.length ? (rows as Record<string, unknown>[]) : null;
+}
+
+/** A metadata timestamp (EXIF `taken_at`, document `created` / `modified`)
+ *  for Highlights: local `YYYY-MM-DD HH:mm` with the UTC instant as `title`
+ *  (format.ts parses EXIF and ISO). Absent → `value: null` so the fact is
+ *  dropped; a value format.ts cannot read stays as the raw text rather than
+ *  vanishing. */
+export function fmtWhen(v: unknown): { value: string | null; title?: string } {
+  const raw = asStr(v);
+  if (raw == null) return { value: null };
+  if (typeof v !== "string" && typeof v !== "number") return { value: raw };
+  const local = fmtDateTime(v);
+  return local === "—" ? { value: raw } : { value: local, title: fmtUtc(v) };
 }
