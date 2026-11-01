@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { COPY_FAILED, copyText } from "./clipboard";
   import {
@@ -859,13 +859,54 @@
     }
   }
 
+  // Below-table panels (agent details, a history version's JSON) open from a
+  // row button but render after the whole table, so opening one moves focus
+  // to its heading and closing it from the panel returns focus to the row's
+  // button. DataTable renders each cell twice (one copy hidden by CSS), so the
+  // button is found by a data attribute and the visible copy is picked.
+  const detailsId = (agentId: string) => `${uid}-details-${agentId}`;
+  const historyJsonId = (seq: number) => `${uid}-history-json-${seq}`;
+
+  async function focusPanel(id: string) {
+    await tick();
+    const heading = document.getElementById(`${id}-heading`);
+    heading?.scrollIntoView({ block: "nearest" });
+    heading?.focus({ preventScroll: true });
+  }
+
+  async function focusRowButton(attr: string, key: string) {
+    await tick();
+    const buttons = document.querySelectorAll<HTMLElement>(`[${attr}="${CSS.escape(key)}"]`);
+    Array.from(buttons).find((b) => b.offsetParent !== null)?.focus();
+  }
+
   async function toggleDetail(a: AgentOut) {
     if (expanded === a.id) {
       expanded = null;
       return;
     }
     expanded = a.id;
+    void focusPanel(detailsId(a.id));
     await loadEffective(a.id);
+  }
+
+  function hideDetail(a: AgentOut) {
+    expanded = null;
+    void focusRowButton("data-details-for", a.id);
+  }
+
+  function toggleHistoryJson(h: ConfigVersionOut) {
+    if (historyOpenSeq === h.seq) {
+      historyOpenSeq = null;
+      return;
+    }
+    historyOpenSeq = h.seq;
+    void focusPanel(historyJsonId(h.seq));
+  }
+
+  function hideHistoryJson(h: ConfigVersionOut) {
+    historyOpenSeq = null;
+    void focusRowButton("data-json-for", String(h.seq));
   }
 
   // ---- per-agent About / dependency report (2026-08-11) --------------------
@@ -2055,7 +2096,9 @@
 {#snippet agentOnlineCell(a: AgentOut)}
   {@const online = isOnline(a)}
   <div class="flex flex-wrap items-center gap-1" title={healthTitle(a)}>
-    <Badge tone={toneForStatus(online ? "online" : "offline")}>{online ? "online" : "offline"}</Badge>
+    <!-- Offline only matters for an active agent; a pending or revoked one is
+         expected to be offline, and its Status badge already says why. -->
+    <Badge tone={online ? toneForStatus("online") : a.status === "active" ? toneForStatus("offline") : "neutral"}>{online ? "online" : "offline"}</Badge>
     <span
       class="text-xs tabular-nums text-muted"
       title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">{relTime(a.last_seen_at)}</span>
@@ -2123,6 +2166,8 @@
       size="sm"
       variant="ghost"
       aria-expanded={expanded === a.id}
+      aria-controls={expanded === a.id ? detailsId(a.id) : undefined}
+      data-details-for={a.id}
       title="Show what this agent can actually do (advertised capabilities + host tools) and which of its effective policy settings it will ignore."
       onclick={() => toggleDetail(a)}>{expanded === a.id ? "hide" : "details"}</Button>
     {#if a.status !== "revoked"}
@@ -2415,7 +2460,9 @@
       size="sm"
       variant="ghost"
       aria-expanded={historyOpenSeq === h.seq}
-      onclick={() => (historyOpenSeq = historyOpenSeq === h.seq ? null : h.seq)}>
+      aria-controls={historyOpenSeq === h.seq ? historyJsonId(h.seq) : undefined}
+      data-json-for={h.seq}
+      onclick={() => toggleHistoryJson(h)}>
       {historyOpenSeq === h.seq ? "hide" : "view JSON"}
     </Button>
     {#if h.version !== dialog?.currentVersion}
@@ -3002,11 +3049,11 @@
     {/if}
     {#each agents as a (a.id)}
       {#if expanded === a.id}
-        <section aria-label="Details — {a.name}" class="mt-3">
+        <section id={detailsId(a.id)} aria-labelledby="{detailsId(a.id)}-heading" class="mt-3">
           <div class="mb-2 flex items-center gap-2">
-            <h4 class="text-sm font-semibold">Details — {a.name}</h4>
+            <h4 id="{detailsId(a.id)}-heading" tabindex="-1" class="text-sm font-semibold">Details — {a.name}</h4>
             <span class="grow"></span>
-            <Button size="sm" variant="ghost" onclick={() => toggleDetail(a)}>Hide</Button>
+            <Button size="sm" variant="ghost" onclick={() => hideDetail(a)}>Hide</Button>
           </div>
           {@render agentDetail(a)}
         </section>
@@ -3395,8 +3442,12 @@
       {/if}
       {#each historyRows as h (h.seq)}
         {#if historyOpenSeq === h.seq}
-          <section aria-label="Version {h.version} JSON" class="mt-2">
-            <h4 class="text-xs font-semibold">Version {h.version} — settings and policy</h4>
+          <section id={historyJsonId(h.seq)} aria-labelledby="{historyJsonId(h.seq)}-heading" class="mt-2">
+            <div class="flex items-center gap-2">
+              <h4 id="{historyJsonId(h.seq)}-heading" tabindex="-1" class="text-xs font-semibold">Version {h.version} — settings and policy</h4>
+              <span class="grow"></span>
+              <Button size="sm" variant="ghost" onclick={() => hideHistoryJson(h)}>Hide</Button>
+            </div>
             <pre class="mt-1 max-h-72 overflow-auto rounded-control bg-surface-3 p-2 font-mono text-2xs text-fg">{JSON.stringify(
                 { settings: h.settings, policy: h.policy },
                 null,
@@ -3949,7 +4000,7 @@
                     <Checkbox
                       size="sm"
                       label="set in this group"
-                      aria-label="Set {f.label} in this group"
+                      description={f.label}
                       title="Write this key into THIS group's policy section. Unticked leaves it absent, which is not the same as off — the key is then supplied by a lower-priority group, or falls back to {f.fallback}."
                       checked={d.policyForm[f.key]?.set ?? false}
                       onchange={(e) => setExplicit(f.key, e.currentTarget.checked)} />
