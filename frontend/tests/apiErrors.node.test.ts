@@ -4,9 +4,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ApiError, errorMessage, errorStatus, friendlyError } from "../src/lib/apiErrors.ts";
+import { ApiError, NetworkError, errorMessage, errorStatus, friendlyError } from "../src/lib/apiErrors.ts";
 
 const json = (o: unknown) => JSON.stringify(o);
+const statusOf409 = "That conflicts with the current state. Reload and try again.";
 
 test("ApiError keeps the legacy '<status>: <body>' message and parses detail", () => {
   const e = new ApiError(409, json({ detail: "already exists" }));
@@ -55,9 +56,31 @@ test("detail.validation array joins msg / message / string items", () => {
   assert.equal(errorMessage(new ApiError(422, body)), "unknown field 'foo'; bad operator; trailing junk");
 });
 
-test("other detail objects are JSON-stringified", () => {
+test("other detail objects fall back to the status sentence, not JSON", () => {
   const body = json({ detail: { code: "locked", until: 5 } });
-  assert.equal(errorMessage(new ApiError(423, body)), json({ code: "locked", until: 5 }));
+  assert.equal(errorMessage(new ApiError(423, body)), "Request failed (423).");
+  assert.equal(errorMessage(new ApiError(409, json({ detail: { id: "x" } }))), statusOf409);
+});
+
+test("pydantic loc ending in an index renders parent[index]", () => {
+  const body = json({
+    detail: [
+      { loc: ["body", "tags", 3], msg: "String should have at most 64 characters" },
+      { loc: ["body", "items", 0, "name"], msg: "Field required" },
+    ],
+  });
+  assert.equal(
+    errorMessage(new ApiError(422, body)),
+    "tags[3]: String should have at most 64 characters; name: Field required",
+  );
+});
+
+test("NetworkError renders the connection sentence and has no status", () => {
+  const e = new NetworkError(new TypeError("Load failed"));
+  assert.equal(e.name, "NetworkError");
+  assert.ok(e.cause instanceof TypeError);
+  assert.equal(errorMessage(e), "Can't reach the server. Check your connection and try again.");
+  assert.equal(errorStatus(e), null);
 });
 
 test("status sentences when there is no usable detail", () => {

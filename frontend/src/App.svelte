@@ -49,6 +49,7 @@
     authMe,
     authLogout,
     errorMessage,
+    errorStatus,
     setUnauthorizedHandler,
     type AuthMode,
     type AuthPrincipal,
@@ -163,7 +164,9 @@
       await authLogout();
       me = null;
     } catch (e) {
-      toast(errorMessage(e), { tone: "danger" });
+      // A 401 means the session was already gone: signed out either way.
+      if (errorStatus(e) === 401) me = null;
+      else toast(errorMessage(e), { tone: "danger" });
     }
     // Either way the server decides what is shown next.
     await probeAuth();
@@ -249,7 +252,9 @@
     // A lapsed session mid-use: drop to the wall. Flipping `gated` unmounts
     // <main>, so every page's pollers stop in their onDestroy.
     setUnauthorizedHandler(() => {
-      if (authMode !== "disabled" && me) {
+      // Only a running app can lose its session; a late 401 while probing or
+      // unreachable must not strand the splash.
+      if (authState === "ready" && authMode !== "disabled" && me) {
         // A probe that read /auth/me just before expiry must not restore me.
         probeSeq++;
         me = null;

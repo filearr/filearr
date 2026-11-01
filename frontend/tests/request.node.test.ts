@@ -6,12 +6,21 @@ import { afterEach, test } from "node:test";
 
 import {
   ApiError,
+  NetworkError,
+  SLOW_TIMEOUT_MS,
   anySignal,
+  batchPatchItems,
   changeMyPassword,
   deleteLibrary,
+  diagnoseLibrary,
   errorMessage,
+  errorStatus,
+  retryAllExtracts,
+  retryExtracts,
+  runReport,
   send,
   setUnauthorizedHandler,
+  syncTaxonomySeed,
 } from "../src/lib/api.ts";
 
 type Call = { url: string; init: RequestInit };
@@ -28,11 +37,13 @@ function stub(respond: (url: string, init: RequestInit) => Response | Promise<Re
 }
 
 const realAny = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+const realTimeout = AbortSignal.timeout;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
   setUnauthorizedHandler(null);
   if (realAny) Object.defineProperty(AbortSignal, "any", realAny);
+  AbortSignal.timeout = realTimeout;
 });
 
 /** A fetch that only ever settles by rejecting with its signal's reason. */
@@ -132,12 +143,77 @@ test("401 invokes the unauthorized handler exactly once and still throws", async
   assert.deepEqual(seen, ["/libraries"]);
 });
 
-test("/auth/me 401 does not invoke the handler", async () => {
+test("GET /auth/me 401 does not invoke the handler", async () => {
   let n = 0;
   setUnauthorizedHandler(() => n++);
   stub(() => jsonRes({ detail: "no session" }, 401));
   await assert.rejects(send("GET", "/auth/me"), ApiError);
   assert.equal(n, 0);
+});
+
+test("hook skip is method-aware: only the probe, login and bootstrap calls skip it", async () => {
+  const seen: string[] = [];
+  setUnauthorizedHandler((p) => seen.push(p));
+  stub(() => jsonRes({ detail: "x" }, 401));
+  for (const [m, p] of [
+    ["GET", "/auth/status"],
+    ["GET", "/auth/me"],
+    ["POST", "/auth/login"],
+    ["POST", "/auth/bootstrap"],
+    ["PATCH", "/auth/me"],
+    ["POST", "/auth/password"],
+    ["POST", "/auth/logout"],
+    ["POST", "/auth/status"],
+  ]) {
+    await assert.rejects(send(m, p), ApiError);
+  }
+  assert.deepEqual(seen, ["/auth/me", "/auth/password", "/auth/logout", "/auth/status"]);
+});
+
+test("a fetch rejecting with Safari's 'Load failed' becomes NetworkError", async () => {
+  stub(() => Promise.reject(new TypeError("Load failed")));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => {
+    assert.ok(e instanceof NetworkError);
+    assert.ok((e as NetworkError).cause instanceof TypeError);
+    assert.equal(errorMessage(e), "Can't reach the server. Check your connection and try again.");
+    assert.equal(errorStatus(e), null);
+    return true;
+  });
+});
+
+test("a fetch rejecting with AbortError is re-thrown unchanged", async () => {
+  const abort = new DOMException("stopped", "AbortError");
+  stub(() => Promise.reject(abort));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => {
+    assert.equal(e, abort);
+    assert.equal(errorMessage(e), "The request was cancelled.");
+    return true;
+  });
+  const err = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+  stub(() => Promise.reject(err));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => e === err);
+});
+
+test("synchronous bulk/admin endpoints opt in to longer timeouts", async () => {
+  const seen: number[] = [];
+  AbortSignal.timeout = (ms: number) => {
+    seen.push(ms);
+    return realTimeout.call(AbortSignal, ms);
+  };
+  stub(() => jsonRes({}));
+  const expect = async (call: () => Promise<unknown>, ms: number, label: string) => {
+    seen.length = 0;
+    await call();
+    assert.deepEqual(seen, [ms], label);
+  };
+  await expect(() => deleteLibrary("lib1", "name"), 10 * 60_000, "deleteLibrary");
+  await expect(() => runReport("largest_files"), SLOW_TIMEOUT_MS, "runReport");
+  await expect(() => retryExtracts("lib1"), SLOW_TIMEOUT_MS, "retryExtracts");
+  await expect(() => retryAllExtracts(), SLOW_TIMEOUT_MS, "retryAllExtracts");
+  await expect(() => diagnoseLibrary("lib1"), SLOW_TIMEOUT_MS, "diagnoseLibrary");
+  await expect(() => batchPatchItems({}), SLOW_TIMEOUT_MS, "batchPatchItems");
+  await expect(() => syncTaxonomySeed(), SLOW_TIMEOUT_MS, "syncTaxonomySeed");
+  await expect(() => send("GET", "/x"), 30_000, "default");
 });
 
 test("a timeout aborts and renders as 'The request timed out.'", async () => {

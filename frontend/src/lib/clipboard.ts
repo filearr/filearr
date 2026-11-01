@@ -12,7 +12,7 @@ export const COPY_FAILED = "Copy failed — select the text and copy it manually
  * false (COPY_FAILED) rather than claim success. Never throws.
  */
 export async function copyText(text: string): Promise<boolean> {
-  if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
+  if (typeof navigator !== "undefined" && navigator.clipboard && globalThis.isSecureContext) {
     try {
       await navigator.clipboard.writeText(text);
       return true;

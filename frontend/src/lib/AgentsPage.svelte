@@ -641,7 +641,7 @@
       if (e instanceof ApiError && e.status === 409) {
         error = `An inventory run is already queued or running on "${a.name}".`;
       } else if (e instanceof ApiError && e.status === 422) {
-        error = `"${a.name}": ${e.message} — see the agent's group settings, Inventory section.`;
+        error = `"${a.name}": ${errorMessage(e)} — see the agent's group settings, Inventory section.`;
       } else {
         error = errorMessage(e);
       }

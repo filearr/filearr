@@ -22,10 +22,13 @@ export const SAFE_SCHEMES = ["http", "https", "smb", "sftp", "ftp", "ftps", "nfs
  */
 export function safeHref(value: unknown, opts: { schemes?: string[] } = {}): string | null {
   if (typeof value !== "string") return null;
-  // Strip what the URL parser strips, so the check sees what the browser does.
-  const v = value.replace(/^[\u0000-\u0020]+/, "");
+  // Strip what the URL parser strips (leading C0/space, tab/CR/LF anywhere),
+  // so the check sees what the browser does.
+  const v = value.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+/, "");
   if (!v) return null;
-  if (v.startsWith("\\\\")) return value; // UNC
+  const allowed = (opts.schemes ?? SAFE_SCHEMES).map((s) => s.toLowerCase());
+  // UNC opens as file:, so it passes only where file is allowed.
+  if (v.startsWith("\\\\")) return allowed.includes("file") ? value : null;
   // Absolute path, but not `//host` or `/\host` (protocol-relative to a browser).
   if (v.startsWith("/")) return /^\/[\/\\]/.test(v) ? null : value;
   let url: URL;
@@ -35,7 +38,6 @@ export function safeHref(value: unknown, opts: { schemes?: string[] } = {}): str
     return null;
   }
   const scheme = url.protocol.replace(/:$/, "").toLowerCase();
-  const allowed = (opts.schemes ?? SAFE_SCHEMES).map((s) => s.toLowerCase());
   return allowed.includes(scheme) ? value : null;
 }
 

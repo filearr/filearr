@@ -61,6 +61,19 @@ test("safeHref schemes option narrows the allow-list", () => {
   assert.equal(safeHref("javascript:alert(1)", web), null);
 });
 
+test("safeHref strips tab/CR/LF anywhere before checking", () => {
+  assert.equal(safeHref("/\t/evil"), null);
+  assert.equal(safeHref("/\n/evil"), null);
+  assert.equal(safeHref("java\tscript:alert(1)"), null);
+  assert.equal(safeHref("jav\r\nascript:alert(1)"), null);
+});
+
+test("safeHref applies the schemes option to UNC (UNC is file)", () => {
+  assert.equal(safeHref("\\\\host\\share", { schemes: ["http", "https"] }), null);
+  assert.equal(safeHref("\\\\host\\share"), "\\\\host\\share");
+  assert.equal(safeHref("\\\\host\\share", { schemes: ["file"] }), "\\\\host\\share");
+});
+
 test("classifyPrefix/buildOpenUrl refuse a disallowed scheme", () => {
   assert.equal(classifyPrefix("javascript://x"), "unknown");
   assert.equal(buildOpenUrl("javascript://x"), "");

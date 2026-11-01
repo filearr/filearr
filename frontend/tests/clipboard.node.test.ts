@@ -32,8 +32,12 @@ function stubDom(execResult: boolean | "throw") {
   return log;
 }
 
+const realNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+
 afterEach(() => {
   delete (globalThis as Record<string, unknown>).document;
+  delete (globalThis as Record<string, unknown>).isSecureContext;
+  if (realNavigator) Object.defineProperty(globalThis, "navigator", realNavigator);
 });
 
 test("copyText fallback: success returns true, removes textarea, restores focus", async () => {
@@ -56,4 +60,15 @@ test("copyText fallback: execCommand throws → false, no textarea left behind",
 
 test("copyText without a DOM → false (never throws)", async () => {
   assert.equal(await copyText("x"), false);
+});
+
+test("copyText uses navigator.clipboard in a secure context (no window global needed)", async () => {
+  const written: string[] = [];
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { clipboard: { writeText: async (t: string) => void written.push(t) } },
+  });
+  (globalThis as Record<string, unknown>).isSecureContext = true;
+  assert.equal(await copyText("hello"), true);
+  assert.deepEqual(written, ["hello"]);
 });

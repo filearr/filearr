@@ -19,7 +19,7 @@ import type { About } from "./about";
 // ("not reported" vs "version unknown" vs "not installed") and the Markdown
 // dump are pure, so they are unit-tested on Node.
 import type { AgentAbout } from "./agentAbout";
-import { ApiError } from "./apiErrors.ts";
+import { ApiError, NetworkError } from "./apiErrors.ts";
 
 export type { About } from "./about";
 export type {
@@ -70,16 +70,18 @@ export function thumbUrl(id: string, tier: "grid" | "preview" = "grid"): string 
 
 // ApiError + the error-to-sentence rules live in ./apiErrors (DOM-free, so they
 // are unit-tested on Node); re-exported so callers keep one import site.
-export { ApiError, errorMessage, errorStatus, friendlyError } from "./apiErrors.ts";
+export { ApiError, NetworkError, errorMessage, errorStatus, friendlyError } from "./apiErrors.ts";
 
 let onUnauthorized: ((path: string) => void) | null = null;
 
-/** Register the hook every non-``/auth/`` 401 calls before it throws (the app
+/** Register the hook every 401 (bar the probe/login calls) runs before it throws (the app
  *  uses it to drop back to the login wall). ``null`` unregisters. */
 export function setUnauthorizedHandler(fn: ((path: string) => void) | null): void {
   onUnauthorized = fn;
 }
 
+/** ``timeoutMs`` defaults to 30 s; synchronous bulk endpoints (the server does
+ *  all the work before answering) must opt in to a longer timeout. */
 export type SendOpts = {
   body?: unknown;
   headers?: Record<string, string>;
@@ -91,17 +93,19 @@ export type SendOpts = {
 /** Downloads and exports stream large bodies; give them ten minutes. */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 /** Server-side heavy lifting (report runs, folder walks, live provider tests). */
-const SLOW_TIMEOUT_MS = 120_000;
+export const SLOW_TIMEOUT_MS = 120_000;
 
 // 401s from these are expected answers (probe, login wall), not a lapsed session.
+// Method-aware: a 401 on PATCH /auth/me, /auth/password or /auth/logout is one.
 const AUTH_HOOK_SKIP = new Set([
-  "/auth/status",
-  "/auth/me",
-  "/auth/login",
-  "/auth/logout",
-  "/auth/bootstrap",
-  "/auth/password",
+  "GET /auth/status",
+  "GET /auth/me",
+  "POST /auth/login",
+  "POST /auth/bootstrap",
 ]);
+
+const isAbort = (e: unknown) =>
+  (e instanceof Error || e instanceof DOMException) && (e.name === "AbortError" || e.name === "TimeoutError");
 
 /** ``AbortSignal.any`` with a fallback: Safari < 17.4 lacks it. */
 export function anySignal(signals: AbortSignal[]): AbortSignal {
@@ -138,15 +142,21 @@ export async function send<T>(method: string, path: string, opts: SendOpts = {})
   const signals = [signal, AbortSignal.timeout(timeoutMs ?? 30_000)].filter(
     (s): s is AbortSignal => s !== undefined,
   );
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: payload,
-    credentials: "same-origin",
-    signal: anySignal(signals),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: payload,
+      credentials: "same-origin",
+      signal: anySignal(signals),
+    });
+  } catch (e) {
+    if (isAbort(e)) throw e;
+    throw new NetworkError(e);
+  }
   if (!res.ok) {
-    if (res.status === 401 && !AUTH_HOOK_SKIP.has(path.split("?")[0])) {
+    if (res.status === 401 && !AUTH_HOOK_SKIP.has(`${method.toUpperCase()} ${path.split("?")[0]}`)) {
       try {
         onUnauthorized?.(path);
       } catch {
@@ -251,10 +261,7 @@ export interface BatchPatchResponse {
  *  a 413, so chunking is the contract, not an optimisation. Partial failure is
  *  normal and is reported per item, never as a request-level error. */
 export const batchPatchItems = (patches: Record<string, ItemPatchBody>) =>
-  request<BatchPatchResponse>("/items/batch", {
-    method: "POST",
-    body: JSON.stringify(patches),
-  });
+  send<BatchPatchResponse>("POST", "/items/batch", { body: patches, timeoutMs: SLOW_TIMEOUT_MS });
 
 /** A full single-item record: every stored column, with ``metadata`` and
  *  ``user_metadata`` returned as separate unmerged objects. Backs the Raw tab. */
@@ -758,13 +765,13 @@ export const addTaxonomyExtension = (groupKey: string, ext: string) =>
 /** Adopt extensions/groups the shipped built-in seed has gained since this
  *  DB was seeded (add-only; operator placements are never overridden). */
 export const syncTaxonomySeed = (dryRun = false) =>
-  request<{
+  send<{
     dry_run: boolean;
     added_count: number;
     added: Record<string, string[]>;
     skipped: { ext: string; kept_in?: string; seed_wants?: string; reason?: string }[];
     version?: number | null;
-  }>(`/taxonomy/sync-seed${dryRun ? "?dry_run=true" : ""}`, { method: "POST" });
+  }>("POST", `/taxonomy/sync-seed${dryRun ? "?dry_run=true" : ""}`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Recompute every active item's (file_category, file_group) from the CURRENT
  *  taxonomy and re-sync changed search docs — applies taxonomy edits to items
@@ -887,7 +894,11 @@ export const updateLibrary = (
  * ``ApiError`` the dialog can classify by status.
  */
 export async function deleteLibrary(id: string, confirm: string): Promise<void> {
-  await send("DELETE", `/libraries/${id}?confirm=${encodeURIComponent(confirm)}`, { expect: "none" });
+  // Cascades the items and prunes Meilisearch inside the request.
+  await send("DELETE", `/libraries/${id}?confirm=${encodeURIComponent(confirm)}`, {
+    expect: "none",
+    timeoutMs: 10 * 60_000,
+  });
 }
 
 // ---- P4-T3 custom fields (admin-defined user_metadata field definitions) ----
@@ -1123,21 +1134,20 @@ export interface LibraryDiagnosis {
   context: Record<string, unknown>;
 }
 export const diagnoseLibrary = (id: string) =>
-  request<LibraryDiagnosis>(`/libraries/${id}/diagnose`);
+  send<LibraryDiagnosis>("GET", `/libraries/${id}/diagnose`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Clear stored extraction errors for a library and re-defer extraction for the
  *  affected items (plus any never-hashed items). Returns the number requeued. */
 export const retryExtracts = (id: string) =>
-  request<{ library_id: string; retried: number }>(
-    `/libraries/${id}/retry-extracts`,
-    { method: "POST" },
-  );
+  send<{ library_id: string; retried: number }>("POST", `/libraries/${id}/retry-extracts`, {
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 
 /** Global drain: clear stored extraction errors in EVERY library and re-defer
  *  extraction for all affected items (plus any never-hashed items with no
  *  pending job). Returns the total requeued. */
 export const retryAllExtracts = () =>
-  request<{ retried: number }>(`/system/retry-extracts`, { method: "POST" });
+  send<{ retried: number }>("POST", `/system/retry-extracts`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Per-library count of items whose stored hashes were computed under an older
  *  hashing scheme, plus whether a light re-hash job is already queued/running.
@@ -2162,7 +2172,7 @@ function reportQuery(opts: ReportRunOpts): string {
 
 /** Run a canned report and return one JSON page. */
 export const runReport = (id: string, opts: ReportRunOpts = {}, signal?: AbortSignal) =>
-  request<ReportPage>(`/reports/${id}${reportQuery(opts)}`, { signal });
+  send<ReportPage>("GET", `/reports/${id}${reportQuery(opts)}`, { signal, timeoutMs: SLOW_TIMEOUT_MS });
 
 // ---- IN-T3 folder tree (treemap drill-down) ---------------------------------
 /** One direct child of the requested folder. ``name`` is the single path segment

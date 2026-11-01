@@ -19,6 +19,16 @@ export class ApiError extends Error {
   }
 }
 
+/** ``fetch`` itself rejected (offline, DNS, refused, CORS): no HTTP status.
+ *  ``send`` wraps every non-abort rejection in this so the message does not
+ *  depend on each browser's wording (Safari says "Load failed"). */
+export class NetworkError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "NetworkError";
+  }
+}
+
 function parseDetail(body: string): unknown {
   try {
     const parsed: unknown = JSON.parse(body);
@@ -40,7 +50,14 @@ function pydanticItem(item: unknown): string {
   const text = typeof msg === "string" ? msg : "";
   const parts = Array.isArray(loc) ? [...loc] : [];
   if (parts.length && LOC_HEADS.has(String(parts[0]))) parts.shift();
-  return parts.length ? `${String(parts[parts.length - 1])}: ${text}` : text;
+  if (!parts.length) return text;
+  const last = parts[parts.length - 1];
+  // A list element: "tags[3]" says which one, "3" alone does not.
+  if (typeof last === "number") {
+    const parent = parts.length > 1 ? String(parts[parts.length - 2]) : "";
+    return `${parent}[${last}]: ${text}`;
+  }
+  return `${String(last)}: ${text}`;
 }
 
 function validationItem(item: unknown): string {
@@ -60,7 +77,6 @@ function detailText(detail: unknown): string {
   if (detail && typeof detail === "object") {
     const v = (detail as { validation?: unknown }).validation;
     if (Array.isArray(v)) return v.map(validationItem).filter(Boolean).join("; ");
-    return JSON.stringify(detail);
   }
   return "";
 }
@@ -91,6 +107,8 @@ export function errorMessage(e: unknown, opts: { verb?: string } = {}): string {
     }
     return statusSentence(e.status, opts.verb);
   }
+  if (e instanceof NetworkError) return "Can't reach the server. Check your connection and try again.";
+  // Fallback for callers that call fetch directly, bypassing send().
   if (e instanceof TypeError && /fetch|network/i.test(e.message)) {
     return "Can't reach the server. Check your connection and try again.";
   }
