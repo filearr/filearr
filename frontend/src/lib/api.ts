@@ -747,13 +747,14 @@ export const createTaxonomyCategory = (body: {
   key: string;
   label: string;
   description?: string;
-  extractor?: string;
+  /** null = no extractor (the server rejects any other spelling). */
+  extractor?: string | null;
   sort_order?: number;
 }) => request<TaxonomyVersion>("/taxonomy/categories", { method: "POST", body: JSON.stringify(body) });
 
 export const updateTaxonomyCategory = (
   key: string,
-  patch: Partial<{ label: string; description: string; extractor: string; sort_order: number }>,
+  patch: Partial<{ label: string; description: string; extractor: string | null; sort_order: number }>,
 ) => request<TaxonomyVersion>(`/taxonomy/categories/${encodeURIComponent(key)}`, {
   method: "PATCH",
   body: JSON.stringify(patch),

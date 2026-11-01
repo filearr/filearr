@@ -150,6 +150,10 @@
     return intOrNull(v) ?? undefined;
   }
 
+  // The select's "none" option means no extractor; the API spells that null
+  // and rejects the string "none" with a 422.
+  const extractorOut = (v: string): string | null => (v === "none" || v === "" ? null : v);
+
   async function saveDialog() {
     if (!dialog) return;
     if (dialog.mode === "create" && !dialog.key.trim()) {
@@ -173,14 +177,14 @@
             key: dialog.key.trim(),
             label: dialog.label.trim(),
             description: dialog.description.trim() || undefined,
-            extractor: dialog.extractor,
+            extractor: extractorOut(dialog.extractor),
             sort_order: sortNum(dialog.sortOrder),
           });
         } else {
           await updateTaxonomyCategory(dialog.key, {
             label: dialog.label.trim(),
             description: dialog.description.trim(),
-            extractor: dialog.extractor,
+            extractor: extractorOut(dialog.extractor),
             ...(sortNum(dialog.sortOrder) != null ? { sort_order: sortNum(dialog.sortOrder) } : {}),
           });
         }
