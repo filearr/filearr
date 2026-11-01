@@ -2,6 +2,7 @@
 
 **Date:** 2026-11-01 · **Scope:** `frontend/src` (34.6k lines Svelte 5 + TS) against `backend/filearr` · **Branch reviewed:** `main` at 1b240e9 + P2 merge (PR #27)
 **Supersedes the plan in `frontend-ui-review.md` from P3 onward.** P1 and P2 of that plan are merged; its a11y/layout/design findings still stand where not fixed.
+**Status (2026-11-01):** P3 implemented on `claude/frontend-p3-request-auth` (plan `frontend-p3-request-auth.md`): one `send()` request core + `errorMessage()`, fail-closed auth with a 401 hook, `latest()` sequencing at 13 sites, typed numeric inputs, the search keyboard gate, honest clipboard, `safeHref`. Closes C1/D1, C2/D2, A1, B1/C3, A4, B8, A10/B5/I3, A11/I10, A16, A18, A28, A33/D10, B13, B25/B26, D8, D9/M26, D12, D18/A23, I1, I4, M2/D20, M14, M15, M18/A30. Carried into P4+: `send` response-headers mode, `hashCeiling` badInput, nested row-button keys, combobox arrows from the query box, LogsPanel load-older, backend tickets §10.
 
 ## Method and evidence
 
