@@ -15,6 +15,7 @@
     Select,
     StateBlock,
     Textarea,
+    confirm,
     toast,
     toneForStatus,
     type Tone,
@@ -149,7 +150,27 @@
   // inside the group dialog.
   // Prefix for the few ids this page wires by hand (policy-field errors).
   const uid = $props.id();
-  let error = $state("");
+  // Errors by origin. The page load: a StateBlock in place of the page on the
+  // first load, an Alert over the kept data on a later refresh. Every action
+  // error sits beside the control that raised it, keyed by its row where the
+  // control is per-row, until dismissed or retried.
+  let loadError = $state("");
+  let loaded = $state(false);
+  /** Fleet row actions (update … delete, and the re-hash band check), by agent id. */
+  let rowErr = $state<Record<string, string>>({});
+  /** Saving an agent's configuration-group membership, by agent id. */
+  let memberErr = $state<Record<string, string>>({});
+  /** Revoking / deleting an enrollment token, by token hash. */
+  let tokenErr = $state<Record<string, string>>({});
+  /** Promote / cancel on a live rollout, by rollout id. */
+  let rolloutErr = $state<Record<string, string>>({});
+  /** Deleting a configuration group, by group id. */
+  let groupErr = $state<Record<string, string>>({});
+  /** The priority arrows of a configuration group, by group id. */
+  let reorderErr = $state<Record<string, string>>({});
+  let mintErr = $state("");
+  let installerErr = $state("");
+  let relErr = $state("");
   let agents = $state<AgentOut[]>([]);
   let tokens = $state<EnrollmentTokenOut[]>([]);
   let groups = $state<ConfigGroupOut[]>([]);
@@ -183,7 +204,7 @@
   }
 
   async function refresh() {
-    error = "";
+    loadError = "";
     try {
       const [page, toks, grps] = await Promise.all([
         listAgents(AGENTS_PAGE, agentsOffset),
@@ -204,8 +225,9 @@
       tokens = toks;
       groups = grps;
       await Promise.all([refreshSummary(), refreshSweeps()]);
+      loaded = true;
     } catch (e) {
-      error = errorMessage(e);
+      loadError = errorMessage(e);
     }
   }
 
@@ -433,7 +455,7 @@
   async function submitRelRollout() {
     if (relTierError || !relVersion.trim()) return;
     relBusy = true;
-    error = "";
+    relErr = "";
     try {
       await createReleaseRollout(relVersion.trim(), {
         tiers: relTiers,
@@ -443,40 +465,48 @@
       relStartsAt = "";
       await reloadRollouts();
     } catch (e) {
-      error = `release rollout: ${errorMessage(e)}`;
+      relErr = `release rollout: ${errorMessage(e)}`;
     } finally {
       relBusy = false;
     }
   }
   async function promoteRelRollout(r: ReleaseRolloutOut) {
-    if (!confirm(`Promote the ${r.release_version} rollout to its next tier now? A tier only ever widens.`)) return;
+    const ok = await confirm({
+      title: `Promote the ${r.release_version} rollout?`,
+      message: `Promote the ${r.release_version} rollout to its next tier now? A tier only ever widens.`,
+      confirmLabel: "Promote now",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
+    rolloutErr[r.id] = "";
     try {
       await promoteReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `promote: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `promote: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
   }
   async function cancelRelRollout(r: ReleaseRolloutOut) {
-    if (
-      !confirm(
-        `Cancel the phased rollout of ${r.release_version}?\n\n` +
-          "Central STOPS OFFERING it to agents not yet covered. Nothing rolls back: an agent " +
-          "that already swapped its binary keeps running it (only the agent's own boot-counter " +
-          "rollback can un-install a binary). The version stays available — a per-agent update " +
-          "click still applies it.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Cancel the phased rollout of ${r.release_version}?`,
+      message:
+        "Central STOPS OFFERING it to agents not yet covered. Nothing rolls back: an agent " +
+        "that already swapped its binary keeps running it (only the agent's own boot-counter " +
+        "rollback can un-install a binary). The version stays available — a per-agent update " +
+        "click still applies it.",
+      confirmLabel: "Cancel rollout",
+      cancelLabel: "Keep rolling out",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
+    rolloutErr[r.id] = "";
     try {
       await cancelReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `cancel: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `cancel: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
@@ -510,19 +540,20 @@
     // Consequential and fleet-visible (it changes the document the machine
     // receives), so it confirms like the other agent-scoped actions.
     const names = ids.map((id) => groupsById.get(id)?.name ?? id);
-    if (
-      !confirm(
-        `Set agent "${a.name}" configuration groups to: ${
-          names.length ? names.join(", ") : "(Global only)"
-        }?\n\n` +
-          "Groups layer in priority order and the highest-priority group wins " +
-          "each key it sets. The new document lands on the agent's next poll " +
-          "(~1 min).",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Set agent "${a.name}" configuration groups?`,
+      message: `Set agent "${a.name}" configuration groups to: ${
+        names.length ? names.join(", ") : "(Global only)"
+      }?`,
+      details: [
+        "Groups layer in priority order and the highest-priority group wins each key it sets.",
+        "The new document lands on the agent's next poll (~1 min).",
+      ],
+      confirmLabel: "Save membership",
+    });
+    if (!ok) return;
     savingMembers[a.id] = true;
-    error = "";
+    memberErr[a.id] = "";
     try {
       const res = await setAgentConfigGroups(a.id, ids);
       a.config_group_ids = res.group_ids;
@@ -533,7 +564,7 @@
       delete effective[a.id];
       await Promise.all([reloadGroups(), refreshSummary()]);
     } catch (e) {
-      error = `configuration groups for ${a.name}: ${errorMessage(e)}`;
+      memberErr[a.id] = `configuration groups for ${a.name}: ${errorMessage(e)}`;
       delete memberDraft[a.id];
       await refresh(); // resync the checkboxes to server truth
     } finally {
@@ -548,11 +579,12 @@
   let updating: Record<string, boolean> = $state({});
   async function updateAgentNow(id: string, name: string) {
     updating[id] = true;
+    rowErr[id] = "";
     try {
       await triggerAgentUpdate(id);
       await refresh();
     } catch (e) {
-      error = `update ${name}: ${errorMessage(e)}`;
+      rowErr[id] = `update ${name}: ${errorMessage(e)}`;
       await refresh();
     } finally {
       updating[id] = false;
@@ -567,17 +599,21 @@
     const want = !a.health?.suspended;
     if (
       want &&
-      !confirm(
-        `Suspend agent "${a.name}"? It stops scanning and replicating until resumed (it keeps checking in for commands, so you can resume it from here).`,
-      )
+      !(await confirm({
+        title: `Suspend agent "${a.name}"?`,
+        message:
+          "It stops scanning and replicating until resumed (it keeps checking in for commands, so you can resume it from here).",
+        confirmLabel: "Suspend",
+      }))
     )
       return;
     suspending[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await suspendAgent(a.id, want);
       await refresh();
     } catch (e) {
-      error = `suspend ${a.name}: ${errorMessage(e)}`;
+      rowErr[a.id] = `suspend ${a.name}: ${errorMessage(e)}`;
     } finally {
       suspending[a.id] = false;
     }
@@ -586,11 +622,12 @@
   let maintaining: Record<string, boolean> = $state({});
   async function maintainAgent(a: AgentOut) {
     maintaining[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await runAgentMaintenance(a.id);
       await refresh();
     } catch (e) {
-      error = `maintenance ${a.name}: ${errorMessage(e)}`;
+      rowErr[a.id] = `maintenance ${a.name}: ${errorMessage(e)}`;
     } finally {
       maintaining[a.id] = false;
     }
@@ -631,11 +668,12 @@
 
   async function reconcileNow(a: AgentOut) {
     reconciling[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await reconcileAgent(a.id);
       await refresh();
     } catch (e) {
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `A reconcile is already queued or running on "${a.name}".`
           : errorMessage(e);
@@ -651,16 +689,17 @@
 
   async function inventoryNow(a: AgentOut) {
     inventorying[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await inventoryAgent(a.id);
       await refresh();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        error = `An inventory run is already queued or running on "${a.name}".`;
+        rowErr[a.id] = `An inventory run is already queued or running on "${a.name}".`;
       } else if (e instanceof ApiError && e.status === 422) {
-        error = `"${a.name}": ${errorMessage(e)} — see the agent's group settings, Inventory section.`;
+        rowErr[a.id] = `"${a.name}": ${errorMessage(e)} — see the agent's group settings, Inventory section.`;
       } else {
-        error = errorMessage(e);
+        rowErr[a.id] = errorMessage(e);
       }
     } finally {
       inventorying[a.id] = false;
@@ -669,22 +708,24 @@
 
   async function reextract(a: AgentOut) {
     // Fleet-visible and potentially hours long on a large index, so it confirms
-    // first — same idiom as suspend/revoke (a plain confirm() naming the agent
-    // and stating the cost).
-    if (
-      !confirm(
-        `Re-extract metadata on agent "${a.name}"? It sweeps every item in that agent's index and can run for hours on a large library. The sweep is resumable and re-emits metadata only — file contents never leave the agent.`,
-      )
-    )
-      return;
+    // first — same idiom as suspend/revoke (a confirm() naming the agent and
+    // stating the cost).
+    const ok = await confirm({
+      title: `Re-extract metadata on agent "${a.name}"?`,
+      message:
+        "It sweeps every item in that agent's index and can run for hours on a large library. The sweep is resumable and re-emits metadata only — file contents never leave the agent.",
+      confirmLabel: "Re-extract",
+    });
+    if (!ok) return;
     reextracting[a.id] = true;
+    rowErr[a.id] = "";
     try {
       await reextractAgent(a.id);
       await refresh();
     } catch (e) {
       // 409 = the single-sweep guard (two sweeps would fight over one cursor).
       // Say that plainly instead of surfacing the raw endpoint detail.
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `re-extract ${a.name}: a sweep is already running on this agent`
           : `re-extract ${a.name}: ${errorMessage(e)}`;
@@ -712,8 +753,9 @@
     const min = b.min.trim() === "" ? 65537 : Number(b.min);
     const max = b.max.trim() === "" ? 131072 : Number(b.max);
     const items = b.items.trim() === "" ? undefined : Number(b.items);
+    rowErr[a.id] = "";
     if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || min > max) {
-      error = `re-hash ${a.name}: the size band must satisfy 0 < min ≤ max`;
+      rowErr[a.id] = `re-hash ${a.name}: the size band must satisfy 0 < min ≤ max`;
       return;
     }
     // The confirm has to state the REAL cost, because this action's cost is
@@ -723,17 +765,19 @@
     const inBand = a.health?.index_items
       ? `That index holds about ${a.health.index_items.toLocaleString()} items in total; typically a few percent fall in this band. `
       : "";
-    if (
-      !confirm(
-        `Re-hash files on agent "${a.name}"?\n\n` +
-          `It re-reads EVERY indexed file between ${min.toLocaleString()} and ${max.toLocaleString()} bytes — ` +
-          `the whole file, not a sample — to recompute its hashes. ${inBand}` +
-          `On the live fleet this was ~99,000 files and ran for hours; over a network mount, longer.\n\n` +
-          `It is safe to stop (suspend the agent) and resume: the cursor is durable. ` +
-          `Only files whose stored hash is actually wrong are re-sent, and file contents never leave the agent.`,
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Re-hash files on agent "${a.name}"?`,
+      message:
+        `It re-reads EVERY indexed file between ${min.toLocaleString()} and ${max.toLocaleString()} bytes — ` +
+        `the whole file, not a sample — to recompute its hashes. ${inBand}` +
+        `On the live fleet this was ~99,000 files and ran for hours; over a network mount, longer.`,
+      details: [
+        "It is safe to stop (suspend the agent) and resume: the cursor is durable.",
+        "Only files whose stored hash is actually wrong are re-sent, and file contents never leave the agent.",
+      ],
+      confirmLabel: "Re-hash",
+    });
+    if (!ok) return;
     rehashingNow[a.id] = true;
     try {
       await rehashSweepAgent(a.id, {
@@ -744,7 +788,7 @@
       await refresh();
     } catch (e) {
       // 409 = the single-sweep guard (two sweeps would fight over one cursor).
-      error =
+      rowErr[a.id] =
         e instanceof ApiError && e.status === 409
           ? `re-hash ${a.name}: a hash migration is already running on this agent`
           : `re-hash ${a.name}: ${errorMessage(e)}`;
@@ -856,7 +900,11 @@
 
   async function toggleAbout(a: AgentOut) {
     aboutOpen[a.id] = !aboutOpen[a.id];
-    if (!aboutOpen[a.id] || about[a.id] || aboutLoading[a.id]) return;
+    if (aboutOpen[a.id]) await loadAbout(a);
+  }
+
+  async function loadAbout(a: AgentOut) {
+    if (about[a.id] || aboutLoading[a.id]) return;
     aboutLoading[a.id] = true;
     aboutError[a.id] = "";
     try {
@@ -915,18 +963,33 @@
   }
 
   async function dropAgent(id: string, name: string) {
-    if (!confirm(`Revoke agent "${name}"? It will be denied all replication/config access.`)) return;
+    const ok = await confirm({
+      title: `Revoke agent "${name}"?`,
+      message: "It will be denied all replication/config access.",
+      confirmLabel: "Revoke",
+      tone: "danger",
+    });
+    if (!ok) return;
+    rowErr[id] = "";
     try {
       await revokeAgent(id);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      rowErr[id] = errorMessage(e);
     }
   }
   // Hard delete: 409 while the agent still owns libraries/items — that message
   // surfaces verbatim (preserve the 409-owns-data messaging).
   async function purgeAgent(id: string, name: string) {
-    if (!confirm(`DELETE agent "${name}" permanently?`)) return;
+    const ok = await confirm({
+      title: `DELETE agent "${name}" permanently?`,
+      message: "This is a hard delete and cannot be undone. It only succeeds while the agent owns no libraries or items.",
+      confirmLabel: "Delete agent",
+      tone: "danger",
+      typedName: name,
+    });
+    if (!ok) return;
+    rowErr[id] = "";
     try {
       await deleteAgent(id);
       await refresh();
@@ -935,28 +998,29 @@
       // The agent owns libraries/items: offer the one-action cascade instead
       // of sending the operator off to delete each library by hand first.
       if (e instanceof ApiError && e.status === 409 && detail.includes("replicated data")) {
-        if (
-          confirm(
-            `Agent "${name}" still owns replicated data:
-${detail}
-
-` +
-              "Delete the agent AND all of its libraries (including their " +
-              "items and scan history)? This cannot be undone.",
-          )
-        ) {
+        const cascade = await confirm({
+          title: `Agent "${name}" still owns replicated data`,
+          message: detail,
+          details: [
+            "Delete the agent AND all of its libraries (including their items and scan history)?",
+            "This cannot be undone.",
+          ],
+          confirmLabel: "Delete agent and libraries",
+          tone: "danger",
+        });
+        if (cascade) {
           try {
             await deleteAgent(id, true);
             await refresh();
             return;
           } catch (e2) {
-            error = errorMessage(e2);
+            rowErr[id] = errorMessage(e2);
             return;
           }
         }
         return;
       }
-      error = detail;
+      rowErr[id] = detail;
     }
   }
 
@@ -980,13 +1044,13 @@ ${detail}
   async function mint() {
     minting = true;
     mintedCopied = false;
-    error = "";
+    mintErr = "";
     try {
       const r = await mintEnrollmentToken(newGroupNames, newTtl || undefined);
       minted = { token: r.token, expires_at: r.expires_at };
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      mintErr = errorMessage(e);
     } finally {
       minting = false;
     }
@@ -995,12 +1059,22 @@ ${detail}
     if (minted) mintedCopied = await copyText(minted.token);
   }
   async function dropToken(hash: string, force = false) {
-    if (force && !confirm("Delete this consumed token row? Its consumed-by link is preserved in the audit log.")) return;
+    if (
+      force &&
+      !(await confirm({
+        title: "Delete this token row?",
+        message: "Delete this consumed token row? Its consumed-by link is preserved in the audit log.",
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    )
+      return;
+    tokenErr[hash] = "";
     try {
       await revokeEnrollmentToken(hash, force);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      tokenErr[hash] = errorMessage(e);
     }
   }
 
@@ -1025,7 +1099,7 @@ ${detail}
     issuing = true;
     sidecarCopied = false;
     hintCopied = null;
-    error = "";
+    installerErr = "";
     try {
       installer = await issueInstallerConfig({
         agent_name: insName.trim() || null,
@@ -1034,7 +1108,7 @@ ${detail}
       });
       await refresh(); // the mint created a new token row
     } catch (e) {
-      error = errorMessage(e);
+      installerErr = errorMessage(e);
     } finally {
       issuing = false;
     }
@@ -1128,6 +1202,31 @@ ${detail}
   let dialog = $state<GroupForm | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
+
+  // Discard check for the dialog (Modal `dirty`): the form as it was opened,
+  // and the inventory collectors it was opened with (the collector editor
+  // lives outside the form and loads after it opens).
+  let dialogBaseline = "";
+  let collectorBaseline = "";
+  const collectorKey = (names: string[]): string => [...names].sort().join("\n");
+  function markDialogClean(storedCollectors: string[]) {
+    dialogBaseline = JSON.stringify(dialog);
+    collectorBaseline = collectorKey(storedCollectors);
+  }
+  function dialogDirty(): boolean {
+    if (!dialog) return false;
+    if (JSON.stringify(dialog) !== dialogBaseline) return true;
+    return collectorKey(collectorsToSave(collectorEditor, dialog.collectorsText)) !== collectorBaseline;
+  }
+  const dialogTitle = $derived(
+    !dialog
+      ? ""
+      : dialog.id === null
+        ? "New configuration group"
+        : dialog.isSystem
+          ? "Edit the Global group"
+          : `Edit “${dialog.name}”`,
+  );
 
   // --- dialog section accordion ----------------------------------------------
   // The dialog now holds ~40 fields (settings + every policy key), so everything
@@ -1351,17 +1450,18 @@ ${detail}
 
   async function restoreVersion(v: ConfigVersionOut) {
     if (!dialog?.id) return;
-    if (
-      !confirm(
-        `Restore version ${v.version} of "${dialog.name}"?\n\n` +
-          "It is copied forward as a NEW version and published IMMEDIATELY — " +
-          "reverting a bad configuration should not wait behind a rollout, so " +
-          "any live rollout for this group is cancelled and the agents it had " +
-          "already covered fall back with everyone else. Unsaved edits in this " +
-          "dialog are discarded.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Restore version ${v.version} of "${dialog.name}"?`,
+      message:
+        "It is copied forward as a NEW version and published IMMEDIATELY — " +
+        "reverting a bad configuration should not wait behind a rollout, so " +
+        "any live rollout for this group is cancelled and the agents it had " +
+        "already covered fall back with everyone else. Unsaved edits in this " +
+        "dialog are discarded.",
+      confirmLabel: "Restore and publish",
+    });
+    // The dialog may have been closed while the confirm was up.
+    if (!ok || !dialog?.id) return;
     dialogBusy = true;
     dialogError = "";
     try {
@@ -1501,6 +1601,7 @@ ${detail}
       authRequired: "",
       ...PERMS_DEFAULTS,
     };
+    markDialogClean([]);
     void loadCollectorCatalogue([]);
   }
 
@@ -1559,6 +1660,7 @@ ${detail}
       auditAlertOnChange: a?.alert_on_change ?? PERMS_DEFAULTS.auditAlertOnChange,
       auditWatchPathsText: (a?.watch_paths ?? []).join("\n"),
     };
+    markDialogClean(s.inventory?.collectors ?? []);
     // The STORED names drive the merge: any of them the catalogue does not know
     // comes back as a ticked "unrecognised" row, so an edit can never drop it.
     void loadCollectorCatalogue(s.inventory?.collectors ?? []);
@@ -1788,19 +1890,24 @@ ${detail}
 
   async function removeGroup(g: ConfigGroupOut) {
     const n = g.member_count;
-    if (!confirm(
-      `Delete configuration group "${g.name}"?` +
-        (n > 0
-          ? ` ${n} member agent(s) stop receiving its keys — each of those keys ` +
+    const ok = await confirm({
+      title: `Delete configuration group "${g.name}"?`,
+      message:
+        n > 0
+          ? `${n} member agent(s) stop receiving its keys — each of those keys ` +
             "falls back to the next-highest group that sets it, or to the " +
             "agent's built-in default."
-          : "")
-    )) return;
+          : undefined,
+      confirmLabel: "Delete group",
+      tone: "danger",
+    });
+    if (!ok) return;
+    groupErr[g.id] = "";
     try {
       await deleteConfigGroup(g.id);
       await refresh();
     } catch (e) {
-      error = errorMessage(e);
+      groupErr[g.id] = errorMessage(e);
     }
   }
 
@@ -1842,14 +1949,14 @@ ${detail}
     }
 
     reordering = true;
-    error = "";
+    reorderErr[g.id] = "";
     try {
       if (mine !== g.priority) await updateConfigGroup(g.id, { priority: mine });
       if (theirs !== other.priority)
         await updateConfigGroup(other.id, { priority: theirs });
       await reloadGroups();
     } catch (e) {
-      error = `reorder ${g.name}: ${errorMessage(e)}`;
+      reorderErr[g.id] = `reorder ${g.name}: ${errorMessage(e)}`;
       await reloadGroups(); // a half-applied swap must not linger on screen
     } finally {
       reordering = false;
@@ -1870,22 +1977,22 @@ ${detail}
   ]);
 
   async function promoteRollout(r: RolloutOut) {
-    if (
-      !confirm(
-        `Promote "${r.group_name}" to the next tier now?\n\n` +
-          `Version ${r.target_version} immediately reaches the next tier's share ` +
-          "of the fleet instead of waiting out the configured delay. This cannot " +
-          "be un-promoted — a tier only ever widens.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Promote "${r.group_name}" to the next tier now?`,
+      message:
+        `Version ${r.target_version} immediately reaches the next tier's share ` +
+        "of the fleet instead of waiting out the configured delay. This cannot " +
+        "be un-promoted — a tier only ever widens.",
+      confirmLabel: "Promote now",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
-    error = "";
+    rolloutErr[r.id] = "";
     try {
       await promoteConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `promote ${r.group_name}: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `promote ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;
@@ -1893,23 +2000,24 @@ ${detail}
   }
 
   async function cancelRollout(r: RolloutOut) {
-    if (
-      !confirm(
-        `Cancel the rollout of version ${r.target_version} for "${r.group_name}"?\n\n` +
-          `The group stays on its current version, so the ${r.covered_percent}% of ` +
-          "agents already covered ROLL BACK to it on their next poll. The version " +
-          "itself is kept — start a new rollout, or publish it immediately, to " +
-          "deliver it later.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: `Cancel the rollout of version ${r.target_version} for "${r.group_name}"?`,
+      message:
+        `The group stays on its current version, so the ${r.covered_percent}% of ` +
+        "agents already covered ROLL BACK to it on their next poll. The version " +
+        "itself is kept — start a new rollout, or publish it immediately, to " +
+        "deliver it later.",
+      confirmLabel: "Cancel rollout",
+      cancelLabel: "Keep rolling out",
+    });
+    if (!ok) return;
     rolloutBusy[r.id] = true;
-    error = "";
+    rolloutErr[r.id] = "";
     try {
       await cancelConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `cancel ${r.group_name}: ${errorMessage(e)}`;
+      rolloutErr[r.id] = `cancel ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;
@@ -2078,6 +2186,9 @@ ${detail}
       title="Hard delete — only while the agent owns no libraries/items"
       onclick={() => purgeAgent(a.id, a.name)}>delete</Button>
   </div>
+  {#if rowErr[a.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (rowErr[a.id] = "")}>{rowErr[a.id]}</Alert>
+  {/if}
 {/snippet}
 
 <!-- ---- enrollment-token table cells ---------------------------------------- -->
@@ -2107,6 +2218,9 @@ ${detail}
       <Button size="sm" variant="danger" onclick={() => dropToken(t.token_hash, true)}>delete</Button>
     {/if}
   </div>
+  {#if tokenErr[t.token_hash]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (tokenErr[t.token_hash] = "")}>{tokenErr[t.token_hash]}</Alert>
+  {/if}
 {/snippet}
 
 <!-- ---- rollouts-in-flight table cells --------------------------------------- -->
@@ -2193,6 +2307,9 @@ ${detail}
         onclick={() => cancelRelRollout(r)}>cancel</Button>
     {/if}
   </div>
+  {#if rolloutErr[row.r.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (rolloutErr[row.r.id] = "")}>{rolloutErr[row.r.id]}</Alert>
+  {/if}
 {/snippet}
 
 <!-- ---- configuration-groups table cells ------------------------------------- -->
@@ -2227,6 +2344,9 @@ ${detail}
         onclick={() => reorderGroup(g, 1)}><span aria-hidden="true">↓</span></Button>
     {/if}
   </span>
+  {#if reorderErr[g.id]}
+    <Alert tone="danger" class="mt-1" onDismiss={() => (reorderErr[g.id] = "")}>{reorderErr[g.id]}</Alert>
+  {/if}
 {/snippet}
 
 {#snippet groupMembersCell(g: ConfigGroupOut)}
@@ -2260,6 +2380,9 @@ ${detail}
       <Button size="sm" variant="danger" onclick={() => removeGroup(g)}>delete</Button>
     {/if}
   </div>
+  {#if groupErr[g.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => (groupErr[g.id] = "")}>{groupErr[g.id]}</Alert>
+  {/if}
 {/snippet}
 
 <!-- ---- version-history table cells (group dialog) --------------------------- -->
@@ -2313,7 +2436,14 @@ ${detail}
     <Button size="sm" onclick={refresh}>Refresh</Button>
   </div>
 
-  {#if error}<p class="mt-2 text-sm text-red-600">{error}</p>{/if}
+  {#if !loaded && loadError}
+    <!-- The first load failed: nothing on this page is trustworthy yet. -->
+    <StateBlock state="error" message={loadError} onRetry={refresh} />
+  {:else}
+  {#if loadError}
+    <!-- A later refresh failed: the data below is the last good copy. -->
+    <Alert tone="danger" class="mt-3" onDismiss={() => (loadError = "")}>{loadError}</Alert>
+  {/if}
 
   <!-- Status header: fleet count tiles (auto-refresh ~15s) -->
   <div class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -2471,15 +2601,22 @@ ${detail}
             <Button size="sm" variant="ghost" onclick={() => delete memberDraft[a.id]}>discard</Button>
           </div>
         {/if}
+        {#if memberErr[a.id]}
+          <Alert tone="danger" class="mt-1.5" onDismiss={() => (memberErr[a.id] = "")}>{memberErr[a.id]}</Alert>
+        {/if}
       </div>
 
       <!-- Effective extraction policy + the ignored-settings verdict -->
       <div class="border-t border-border pt-2">
         <span class="font-medium text-muted">Effective content-extraction settings</span>
         {#if effLoading[a.id]}
-          <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
+          <StateBlock state="loading" compact message="Loading the effective configuration…" />
         {:else if effError[a.id]}
-          <p class="mt-1 text-red-600">Could not load the effective configuration: {effError[a.id]}</p>
+          <StateBlock
+            state="error"
+            compact
+            message="Could not load the effective configuration: {effError[a.id]}"
+            onRetry={() => loadEffective(a.id)} />
         {:else if effective[a.id]}
           {@const eff = effective[a.id]}
           {@const merged = policyOf(eff)}
@@ -2602,7 +2739,7 @@ ${detail}
               <span class="font-medium text-muted">Group settings</span>
               <span class="text-muted"> — delivered under <code class="font-mono">group</code></span>
               {#if Object.keys(settingsOf(eff)).length === 0}
-                <p class="mt-1 text-slate-600 dark:text-slate-400">No group supplies any settings — the agent uses its own configuration.</p>
+                <p class="mt-1 text-muted">No group supplies any settings — the agent uses its own configuration.</p>
               {:else}
                 <div class="mt-1 grid gap-x-4 gap-y-1 md:grid-cols-2">
                   {#each Object.entries(settingsOf(eff)) as [key, value] (key)}
@@ -2704,9 +2841,13 @@ ${detail}
 
         {#if aboutOpen[a.id]}
           {#if aboutLoading[a.id]}
-            <p class="mt-1 text-slate-600 dark:text-slate-400">Loading…</p>
+            <StateBlock state="loading" compact message="Loading this agent's About report…" />
           {:else if aboutError[a.id]}
-            <p class="mt-1 text-red-600">Could not load this agent's About report: {aboutError[a.id]}</p>
+            <StateBlock
+              state="error"
+              compact
+              message="Could not load this agent's About report: {aboutError[a.id]}"
+              onRetry={() => loadAbout(a)} />
           {:else if about[a.id]}
             {@const rep = about[a.id]}
             {@const mods = modulesSummary(rep)}
@@ -2841,6 +2982,7 @@ ${detail}
       ]}
       rows={agents}
       rowKey={(a) => a.id}
+      loading={!loaded}
       emptyMessage="No agents registered. Enrol an agent to see it here." />
     {#if agentsTotal > 0}
       <!-- The Config groups column's legend (it used to be a header tooltip). -->
@@ -2916,16 +3058,18 @@ ${detail}
       </Field>
       <Button variant="primary" disabled={minting} onclick={mint}>Mint token</Button>
     </div>
+    {#if mintErr}
+      <Alert tone="danger" class="mt-2" onDismiss={() => (mintErr = "")}>{mintErr}</Alert>
+    {/if}
 
     {#if minted}
-      <div class="mt-2 rounded-lg border border-amber-400 bg-amber-50 p-2 text-sm dark:bg-amber-950/30">
-        <p class="font-medium">Copy this token now — it will not be shown again.</p>
+      <Alert tone="warn" class="mt-2" title="Copy this token now — it will not be shown again.">
         <div class="mt-1 flex items-center gap-2">
           <code class="grow break-all font-mono text-xs">{minted.token}</code>
           <Button size="sm" onclick={copyMinted}>{mintedCopied ? "Copied" : "Copy"}</Button>
         </div>
-        <p class="mt-1 text-xs text-slate-500">Expires {fmt(minted.expires_at)}</p>
-      </div>
+        <p class="mt-1 text-xs">Expires {fmt(minted.expires_at)}</p>
+      </Alert>
     {/if}
 
     <!-- Installer sidecar generator -->
@@ -2967,39 +3111,42 @@ ${detail}
         </Field>
         <Button variant="primary" disabled={issuing} onclick={issueInstaller}>Generate</Button>
       </div>
+      {#if installerErr}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (installerErr = "")}>{installerErr}</Alert>
+      {/if}
 
       {#if installer}
-        <div class="mt-3 rounded-lg border border-amber-400 bg-amber-50 p-3 text-sm dark:bg-amber-950/30">
+        <Alert tone="warn" class="mt-3">
           <div class="flex flex-wrap items-center gap-2">
             <p class="font-medium">Sidecar (<code class="font-mono">filearr-agent.json</code>) — contains a show-once token.</p>
             <span class="grow"></span>
-            <span class="text-xs text-slate-500">Token expires {fmt(installer.expires_at)}</span>
+            <span class="text-xs">Token expires {fmt(installer.expires_at)}</span>
           </div>
-          <pre class="mt-2 max-h-64 overflow-auto rounded bg-slate-900/90 p-2 font-mono text-xs text-slate-100">{sidecarJson}</pre>
+          <pre class="mt-2 max-h-64 overflow-auto rounded-control bg-surface p-2 font-mono text-xs text-fg">{sidecarJson}</pre>
           <div class="mt-2 flex flex-wrap gap-2">
             <Button size="sm" onclick={copySidecar}>{sidecarCopied ? "Copied" : "Copy JSON"}</Button>
             <Button size="sm" variant="primary" onclick={downloadSidecar}>Download filearr-agent.json</Button>
           </div>
 
           <div class="mt-3">
-            <p class="text-xs font-medium text-slate-600 dark:text-slate-300">Install one-liners</p>
+            <p class="text-xs font-medium">Install one-liners</p>
             {#each [["windows", "Windows"], ["linux", "Linux"], ["macos", "macOS"]] as [os, label]}
               <div class="mt-1.5">
                 <div class="flex items-center gap-2">
-                  <span class="w-16 text-xs text-slate-500">{label}</span>
+                  <span class="w-16 text-xs">{label}</span>
                   <Button size="sm" aria-label="Copy the {label} one-liner" onclick={() => copyHint(os as "windows" | "linux" | "macos")}>
                     {hintCopied === os ? "Copied" : "Copy"}
                   </Button>
                 </div>
-                <pre class="mt-1 overflow-auto rounded bg-slate-100 p-2 font-mono text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-200">{installer.install_hint[os as "windows" | "linux" | "macos"]}</pre>
+                <pre class="mt-1 overflow-auto rounded-control bg-surface p-2 font-mono text-2xs text-fg">{installer.install_hint[os as "windows" | "linux" | "macos"]}</pre>
               </div>
             {/each}
-            <p class="mt-1 text-[11px] text-slate-600 dark:text-slate-400">
+            <p class="mt-1 text-2xs">
               Replace <code class="font-mono">{"{agent_id}"}</code> / <code class="font-mono">{"{version}"}</code>
               from the fleet console after enrollment (the artifact path is agent-authenticated).
             </p>
           </div>
-        </div>
+        </Alert>
       {/if}
     </div>
 
@@ -3018,6 +3165,7 @@ ${detail}
       ]}
       rows={tokens}
       rowKey={(t) => t.token_hash}
+      loading={!loaded}
       emptyMessage="No enrollment tokens. Mint one above to enrol an agent." />
   </div>
 
@@ -3072,7 +3220,6 @@ ${detail}
           size="sm"
           disabled={relTiers.length >= MAX_ROLLOUT_TIERS}
           onclick={() => { const last = relTiers[relTiers.length - 1]; relTiers = [...relTiers, { percent: Math.min(100, (last?.percent ?? 0) + 25), delay_minutes: 60 }]; }}>+ add tier</Button>
-        {#if relTierError}<span class="text-xs text-red-600">{relTierError}</span>{/if}
         <div class="grow"></div>
         <Button variant="ghost" onclick={() => (relFormOpen = false)}>Cancel</Button>
         <Button
@@ -3080,6 +3227,13 @@ ${detail}
           disabled={relBusy || !!relTierError || !relVersion.trim()}
           onclick={submitRelRollout}>Start rollout</Button>
       </div>
+      {#if relTierError}
+        <!-- Live validation of the tier list; it clears as the tiers are fixed. -->
+        <Alert tone="danger" class="mt-2">{relTierError}</Alert>
+      {/if}
+      {#if relErr}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (relErr = "")}>{relErr}</Alert>
+      {/if}
     </div>
   {/if}
 
@@ -3140,6 +3294,7 @@ ${detail}
       ]}
       rows={groups}
       rowKey={(g) => g.id}
+      loading={!loaded}
       emptyMessage="No configuration groups yet. Create one with New group." />
     <!-- Legends for the Priority and Version columns (formerly header tooltips). -->
     <dl class="mt-2 grid gap-1 text-xs text-muted sm:grid-cols-[auto_1fr] sm:gap-x-3">
@@ -3151,6 +3306,7 @@ ${detail}
   </div>
 
   {@render registeredAgents()}
+  {/if}
 </div>
 
 <!-- A collapsible dialog section. Everything except General starts closed: the
@@ -3169,30 +3325,25 @@ ${detail}
   </button>
 {/snippet}
 
-<!-- Config-group create/edit dialog -->
-{#if dialog}
-  <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-    <div class="my-8 w-full max-w-3xl rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-      <div class="flex flex-wrap items-center gap-3">
-        <h3 class="text-lg font-semibold">
-          {dialog.id === null
-            ? "New configuration group"
-            : dialog.isSystem
-              ? "Edit the Global group"
-              : `Edit “${dialog.name}”`}
-        </h3>
-        <div class="grow"></div>
-        <button class="text-slate-500" onclick={() => (dialog = null)}>✕</button>
-      </div>
-      {@render groupDialogBody(dialog)}
-      {#if !historyView}
-        <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
-          {@render groupDialogFooter(dialog, () => (dialog = null))}
-        </div>
+<!-- Config-group create/edit dialog. State-driven: `dialog` holds the form.
+     A successful save sets it to null, which closes without asking; every user
+     dismissal (Escape, backdrop, ×, Cancel → close()) asks "Discard changes?"
+     first while the form differs from what was opened. -->
+<Modal open={!!dialog} onClose={() => (dialog = null)} dirty={dialogDirty} size="xl" title={dialogTitle}>
+  {#snippet children()}
+    {#if dialog}{@render groupDialogBody(dialog)}{/if}
+  {/snippet}
+  {#snippet footer({ close })}
+    {#if dialog}
+      {#if dialogError}
+        <!-- Save, publish and restore errors: in the footer beside the buttons
+             that raised them, which stay in view while the body scrolls. -->
+        <Alert tone="danger" class="w-full" onDismiss={() => (dialogError = "")}>{dialogError}</Alert>
       {/if}
-    </div>
-  </div>
-{/if}
+      {#if !historyView}{@render groupDialogFooter(dialog, close)}{/if}
+    {/if}
+  {/snippet}
+</Modal>
 
 {#snippet groupDialogBody(d: GroupForm)}
   {#if d.id !== null}
@@ -3212,24 +3363,13 @@ ${detail}
     </div>
   {/if}
 
-  {#if dialogError}
-    <p class="mt-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{dialogError}</p>
-  {/if}
-
   {#if historyView}
     <!-- In-dialog history view. Deliberately a VIEW rather than a second
          modal: restoring re-seeds the form behind it, so stacking two
          dialogs would hide the thing that just changed. -->
     <div>
       <Button size="sm" variant="ghost" onclick={() => (historyView = false)}>← back to editing</Button>
-      {#if historyLoading}
-        <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">Loading version history…</p>
-      {:else if historyError}
-        <p class="mt-2 text-sm text-red-600">Could not load the history: {historyError}</p>
-      {:else if historyRows.length === 0}
-        <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">No versions recorded for this group.</p>
-      {:else}
-        <DataTable
+      <DataTable
           class="mt-2"
           caption="Version history of {d.name}"
           captionHidden
@@ -3242,24 +3382,29 @@ ${detail}
             { key: "actions", label: "Actions", align: "right", cell: historyActionsCell },
           ]}
           rows={historyRows}
-          rowKey={(h) => h.seq} />
+          rowKey={(h) => h.seq}
+          loading={historyLoading}
+          error={historyError ? `Could not load the history: ${historyError}` : null}
+          onRetry={openHistory}
+          emptyMessage="No versions recorded for this group. Save a change to start its history." />
+      {#if historyRows.length}
         <p class="mt-2 text-xs text-muted">
           <b>Generation</b> is the fleet-wide generation counter a snapshot advanced —
           the number an agent echoes back as its applied generation.
         </p>
-        {#each historyRows as h (h.seq)}
-          {#if historyOpenSeq === h.seq}
-            <section aria-label="Version {h.version} JSON" class="mt-2">
-              <h4 class="text-xs font-semibold">Version {h.version} — settings and policy</h4>
-              <pre class="mt-1 max-h-72 overflow-auto rounded-control bg-surface-3 p-2 font-mono text-2xs text-fg">{JSON.stringify(
-                  { settings: h.settings, policy: h.policy },
-                  null,
-                  2,
-                )}</pre>
-            </section>
-          {/if}
-        {/each}
       {/if}
+      {#each historyRows as h (h.seq)}
+        {#if historyOpenSeq === h.seq}
+          <section aria-label="Version {h.version} JSON" class="mt-2">
+            <h4 class="text-xs font-semibold">Version {h.version} — settings and policy</h4>
+            <pre class="mt-1 max-h-72 overflow-auto rounded-control bg-surface-3 p-2 font-mono text-2xs text-fg">{JSON.stringify(
+                { settings: h.settings, policy: h.policy },
+                null,
+                2,
+              )}</pre>
+          </section>
+        {/if}
+      {/each}
     </div>
   {:else}
     <div class="flex flex-col gap-3">
@@ -3268,12 +3413,12 @@ ${detail}
       {#if openSections.general}
         <div class="flex flex-col gap-3 rounded-control border border-border p-3">
           {#if d.isSystem}
-            <p class="rounded-lg border border-slate-300 bg-slate-50 p-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+            <Alert tone="info" live={false} class="text-xs">
               This is the permanent <b>Global</b> group. Every agent is a member, it
               always applies first, and its name and priority are fixed — every
               other group layers on top of what you set here. Its document is the
               only sensible place for a fleet-wide default.
-            </p>
+            </Alert>
           {/if}
           <Field label="Name">
             <Input
@@ -3301,8 +3446,7 @@ ${detail}
       <!-- 2026-08-23: three schedules exist in this document and operators
            could not tell them apart (user report). One glance-table up top
            says what each one does, who runs it and on whose clock. -->
-      <div class="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
-        <p class="font-medium">Where schedules live in this group</p>
+      <Alert tone="info" live={false} class="text-xs" title="Where schedules live in this group">
         <ul class="mt-1 list-disc space-y-0.5 pl-4">
           <li><span class="font-medium">Media scans</span> (the agent scanning its own roots) —
             <span class="font-medium">Scheduling (media scans)</span> section below, policy key <code class="font-mono">scan_cron</code> / <code class="font-mono">scan_interval_seconds</code>.
@@ -3313,7 +3457,7 @@ ${detail}
           <li><span class="font-medium">Legacy group scan schedule</span> (<code class="font-mono">scan_schedule_cron</code>) — only shown in the Delivery section when a group still has one; the Scheduling section's <code class="font-mono">scan_cron</code> outranks it.</li>
           <li>Scans of libraries mounted on central itself are scheduled on the Libraries page, not here.</li>
         </ul>
-      </div>
+      </Alert>
 
       {@render sectionHead("delivery", SETTINGS_SECTIONS[0].label, SETTINGS_SECTIONS[0].blurb)}
       {#if openSections.delivery}
@@ -3420,8 +3564,9 @@ ${detail}
             </div>
 
             {#if collectorEditor.mode === "loading"}
-              <p class="mt-1 text-xs text-slate-600 dark:text-slate-400"
-                title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">Loading the collector catalogue…</p>
+              <div title="Fetching GET /agents/inventory-collectors — the shipped catalogue plus every collector your enrolled agents advertise. Only requested when this dialog opens, because it is admin-only and costs a query over the agents table.">
+                <StateBlock state="loading" compact message="Loading the collector catalogue…" />
+              </div>
             {:else if collectorEditor.mode === "list"}
               <div class="mt-1 flex flex-col gap-1.5">
                 {#each collectorEditor.choices as c (c.name)}
@@ -3485,14 +3630,14 @@ ${detail}
               <!-- Catalogue fetch failed. Falling back to the free-text field is
                    the honest degradation: an empty checkbox list would read as
                    "no collectors exist" and invite saving an emptied group. -->
-              <p class="mt-1 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                title="GET /agents/inventory-collectors failed, so the console cannot show the checkbox list. Your stored collectors are unchanged and still editable as text below — nothing has been dropped. Reopen the dialog to retry.">
+              <Alert tone="warn" class="mt-1 text-xs">
                 Could not load the collector list ({collectorEditor.reason}) — editing
                 as text instead. Known names: <code class="font-mono">stat</code>,
                 <code class="font-mono">owner</code>, <code class="font-mono">perms</code>,
                 <code class="font-mono">placeholder</code>, plus anything a newer agent
-                build implements. Nothing has been dropped.
-              </p>
+                build implements. Nothing has been dropped. Your stored collectors are
+                unchanged and still editable as text below; reopen the dialog to retry.
+              </Alert>
               <Field label="Collectors (comma or newline separated)" class="mt-1">
                 <Input
                   title="Which inventory collectors to run, by name, comma or newline separated. Central deliberately does not hard-code the vocabulary — a name no agent implements is ignored, not rejected. Max 64 names. Naming `permissions` here is one of the two things the permissions block below needs."
@@ -3696,7 +3841,7 @@ ${detail}
             <Button size="sm" onclick={() => dialog && (dialog.selections = [...dialog.selections, emptySel()])}>+ add selection</Button>
           </div>
           {#if d.selections.length === 0}
-            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">No selections — the agent falls back to its defaults.</p>
+            <StateBlock state="empty" compact message="No selections — the agent falls back to its defaults. Add one to choose its scan roots." />
           {/if}
           {#each d.selections as sel, i (i)}
             <div class="mt-3 rounded-control border border-border p-3">
@@ -3963,7 +4108,7 @@ ${detail}
           </ul>
 
           {#if unknownKeys.length || unparsedKeys.length}
-            <div class="mt-3 rounded-lg border border-slate-300 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900/40">
+            <Alert tone="warn" live={false} class="mt-3 text-xs">
               {#if unknownKeys.length}
                 <p>
                   <b>{unknownKeys.length} key(s) this console does not model</b>
@@ -3973,14 +4118,14 @@ ${detail}
                 </p>
               {/if}
               {#if unparsedKeys.length}
-                <p class="mt-1 text-amber-700 dark:text-amber-400">
+                <p class="mt-1">
                   <b>Unexpected value shape</b> for
                   <code class="font-mono">{unparsedKeys.join(", ")}</code> — the
                   fields above show these as “Inherit” but the stored value is
                   kept as-is. Fix them in the raw JSON below.
                 </p>
               {/if}
-            </div>
+            </Alert>
           {/if}
 
           <Button size="sm" class="mt-3" aria-expanded={rawOpen} onclick={openRaw}>{rawOpen ? "Hide" : "Show"} raw policy JSON</Button>
@@ -4015,11 +4160,12 @@ ${detail}
           <!-- Layering preview, computed client-side because the draft is not
                saved yet. Amber rather than red: being overridden is a normal,
                intended state — it is only a surprise when nobody said so. -->
-          <p class="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-            title="These keys are set by a group with a HIGHER priority, which applies after this one. For any agent that is in both groups, that group's value wins. Agents in this group but not that one still get the value you set here.">
-            <b>Overridden for agents that are also in a higher-priority group:</b>
-            {#each shadowedKeys as s, i (s.key)}{i > 0 ? ", " : " "}<code class="font-mono">{s.key}</code> (by {s.by}){/each}
-          </p>
+          <Alert tone="warn" live={false} class="mb-3 text-xs">
+            <span title="These keys are set by a group with a HIGHER priority, which applies after this one. For any agent that is in both groups, that group's value wins. Agents in this group but not that one still get the value you set here.">
+              <b>Overridden for agents that are also in a higher-priority group:</b>
+              {#each shadowedKeys as s, i (s.key)}{i > 0 ? ", " : " "}<code class="font-mono">{s.key}</code> (by {s.by}){/each}
+            </span>
+          </Alert>
         {/if}
         {#if d.id !== null}
           <Field label="Change note (optional)">
@@ -4085,7 +4231,8 @@ ${detail}
               </Field>
             </div>
             {#if tierError}
-              <p class="mt-2 text-xs text-red-600">{tierError}</p>
+              <!-- Live validation of the tier list; it clears as the tiers are fixed. -->
+              <Alert tone="danger" class="mt-2">{tierError}</Alert>
             {/if}
           </div>
         {/if}
