@@ -15,6 +15,7 @@
 
 <script lang="ts">
   import { copyText } from "./clipboard";
+  import * as safeStorage from "./safeStorage";
   import {
     ApiError,
     type ItemPermissions,
@@ -352,11 +353,11 @@
   // 2026-08-20: grid (thumbnails) or table (name/similarity/type/size/modified)
   // view for the similar list. Sticky per browser.
   let similarView = $state<"grid" | "table">(
-    (localStorage.getItem("filearr.similarView") as "grid" | "table") || "grid",
+    (safeStorage.get("filearr.similarView") as "grid" | "table") || "grid",
   );
   function setSimilarView(v: "grid" | "table") {
     similarView = v;
-    localStorage.setItem("filearr.similarView", v);
+    safeStorage.set("filearr.similarView", v);
   }
   const simPct = (h: Record<string, unknown>): string =>
     typeof h.similarity === "number" ? `${(h.similarity * 100).toFixed(1)}%` : "—";

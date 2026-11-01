@@ -14,6 +14,7 @@
 
 <script lang="ts">
   import { copyText } from "./clipboard";
+  import * as safeStorage from "./safeStorage";
   import { onMount, onDestroy } from "svelte";
   import { VList, type VListHandle } from "virtua/svelte";
   import Thumb from "./Thumb.svelte";
@@ -142,8 +143,8 @@
   // filename hit alone stops returning the item; "names" is the inverse.
   let searchIn = $state<"all" | "content" | "names">("all");
   // Roadmap §20: the Filters/Saved open-closed choice persists across visits
-  // (same localStorage pattern as the theme choice) — collapsed by default.
-  let filtersOpen = $state(localStorage.getItem("searchFiltersOpen") === "1");
+  // (same safeStorage pattern as the theme choice) — collapsed by default.
+  let filtersOpen = $state(safeStorage.get("searchFiltersOpen") === "1");
   let hashMode = $state(false);
   // Explicit ordering (P3-T7 deep-linkable): round-trips through save/apply + hash.
   let sortMode = $state("");
@@ -189,15 +190,15 @@
 
   // P3-T7 saved searches (named, persisted param bundles).
   let saved = $state<SavedSearch[]>([]);
-  let savedOpen = $state(localStorage.getItem("searchSavedOpen") === "1");
+  let savedOpen = $state(safeStorage.get("searchSavedOpen") === "1");
 
   function toggleFiltersOpen() {
     filtersOpen = !filtersOpen;
-    localStorage.setItem("searchFiltersOpen", filtersOpen ? "1" : "0");
+    safeStorage.set("searchFiltersOpen", filtersOpen ? "1" : "0");
   }
   function toggleSavedOpen() {
     savedOpen = !savedOpen;
-    localStorage.setItem("searchSavedOpen", savedOpen ? "1" : "0");
+    safeStorage.set("searchSavedOpen", savedOpen ? "1" : "0");
   }
 
   // Roadmap §20: the page starts EMPTY — no match-all preload implying the

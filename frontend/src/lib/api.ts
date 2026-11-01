@@ -19,6 +19,7 @@ import type { About } from "./about";
 // ("not reported" vs "version unknown" vs "not installed") and the Markdown
 // dump are pure, so they are unit-tested on Node.
 import type { AgentAbout } from "./agentAbout";
+import { ApiError } from "./apiErrors.ts";
 
 export type { About } from "./about";
 export type {
@@ -56,62 +57,91 @@ export interface SearchResponse {
   next_cursor: string | null;
 }
 
-const KEY = () => localStorage.getItem("apiKey") ?? "";
-
-/** The stored API key, if any. Empty string when auth is disabled / no key set. */
-export const apiKey = (): string => KEY();
-
 /** API base path (shared by fetch requests and the SSE EventSource URL). */
 export const API_BASE = "/api/v1";
 
 /** Immutable, content-addressed thumbnail URL for an item + tier (S12/P12).
- *  Used as an ``<img src>``, which cannot send an Authorization header, so the
- *  read-scope key rides as ``?api_key=`` exactly like the SSE events stream.
- *  ``tier`` is one of the serve-endpoint enum values ("grid" | "preview"). */
+ *  Used as an ``<img src>``; the session cookie authenticates it like any
+ *  same-origin request. ``tier`` is one of the serve-endpoint enum values
+ *  ("grid" | "preview"). */
 export function thumbUrl(id: string, tier: "grid" | "preview" = "grid"): string {
-  const key = KEY();
-  const auth = key ? `&api_key=${encodeURIComponent(key)}` : "";
-  return `${API_BASE}/items/${id}/thumb?tier=${tier}${auth}`;
+  return `${API_BASE}/items/${id}/thumb?tier=${tier}`;
 }
 
-/** An HTTP error carrying the numeric status, so callers can branch on 401/403/
- *  404 (P6-T4 RBAC). ``message`` keeps the legacy ``"<status>: <body>"`` shape
- *  so existing ``String(e)`` render paths are unchanged. */
-export class ApiError extends Error {
-  status: number;
-  body: string;
-  constructor(status: number, body: string) {
-    super(`${status}: ${body}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.body = body;
+// ApiError + the error-to-sentence rules live in ./apiErrors (DOM-free, so they
+// are unit-tested on Node); re-exported so callers keep one import site.
+export { ApiError, errorMessage, errorStatus, friendlyError } from "./apiErrors.ts";
+
+let onUnauthorized: ((path: string) => void) | null = null;
+
+/** Register the hook every non-``/auth/`` 401 calls before it throws (the app
+ *  uses it to drop back to the login wall). ``null`` unregisters. */
+export function setUnauthorizedHandler(fn: ((path: string) => void) | null): void {
+  onUnauthorized = fn;
+}
+
+export type SendOpts = {
+  body?: unknown;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  expect?: "json" | "none" | "blob" | "text";
+};
+
+/** Downloads and exports stream large bodies; give them ten minutes. */
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+
+const isJsonType = (ct: string | null) => !!ct && /\bjson\b/i.test(ct);
+
+/** The one request core: every API call goes through here. Throws ``ApiError``
+ *  for any non-2xx (and for a non-JSON 200 when JSON was expected, so a proxy's
+ *  HTML page never surfaces as a ``SyntaxError``). The session cookie is the
+ *  only browser credential. */
+export async function send<T>(method: string, path: string, opts: SendOpts = {}): Promise<T> {
+  const { body, signal, timeoutMs, expect = "json" } = opts;
+  const headers: Record<string, string> = { ...opts.headers };
+  let payload: BodyInit | undefined;
+  if (body !== undefined) {
+    // FormData/Blob carry their own Content-Type; a string is already-encoded JSON.
+    if (body instanceof FormData || body instanceof Blob) payload = body;
+    else {
+      payload = typeof body === "string" ? body : JSON.stringify(body);
+      headers["Content-Type"] ??= "application/json";
+    }
   }
-}
-
-/** Map an error to a friendly, non-technical sentence for RBAC-denied surfaces
- *  (403 = permission, 404 = not visible/gone) — so a scoped user sees a clear
- *  message instead of a blank pane or a raw status dump. Falls back to the raw
- *  message for anything else. */
-export function friendlyError(e: unknown, verb = "view"): string {
-  if (e instanceof ApiError) {
-    if (e.status === 403) return `You don't have permission to ${verb} this item.`;
-    if (e.status === 404) return "This item is not available (it may be outside your access or removed).";
-    if (e.status === 401) return "Please sign in to continue.";
-  }
-  return String(e);
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const signals = [signal, AbortSignal.timeout(timeoutMs ?? 30_000)].filter(
+    (s): s is AbortSignal => s !== undefined,
+  );
   const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-      ...init?.headers,
-    },
+    method,
+    headers,
+    body: payload,
+    credentials: "same-origin",
+    signal: AbortSignal.any(signals),
   });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return res.json() as Promise<T>;
+  if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth/")) onUnauthorized?.(path);
+    throw new ApiError(res.status, await res.text());
+  }
+  if (expect === "none" || res.status === 204 || res.status === 205 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
+  if (expect === "blob") return (await res.blob()) as T;
+  if (expect === "text") return (await res.text()) as T;
+  const text = await res.text();
+  if (!text.trim()) return undefined as T;
+  if (!isJsonType(res.headers.get("content-type"))) throw new ApiError(res.status, text);
+  return JSON.parse(text) as T;
+}
+
+/** Legacy fetch-shaped wrapper over ``send``: callers already ``JSON.stringify``
+ *  their bodies, which ``send`` passes through as-is. */
+function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return send<T>(init?.method ?? "GET", path, {
+    body: init?.body ?? undefined,
+    headers: init?.headers as Record<string, string> | undefined,
+    signal: init?.signal ?? undefined,
+  });
 }
 
 // W8: type filtering is now the two-level file taxonomy — ``file_category``
@@ -251,11 +281,7 @@ export function searchPrincipals(
 
 /** Frecency use ping (fire-and-forget; 204 with no body). Callers swallow errors. */
 export async function touchItem(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/items/${id}/touch`, {
-    method: "POST",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("POST", `/items/${id}/touch`, { expect: "none" });
 }
 
 /** P10-T3: ask the owning agent to re-verify an agent-hosted item's existence
@@ -366,14 +392,11 @@ export const mintTransferEventsToken = (id: string) =>
     { method: "POST" },
   );
 
-/** Fetch the verified staged file (auth header) and save it as ``filename``.
- *  Mirrors ``downloadExport`` — a blob save so the Bearer header is sent (an
- *  ``<a href>`` cannot), served only for a verified, staged/downloaded transfer. */
+/** Fetch the verified staged file and save it as ``filename``. Mirrors
+ *  ``downloadExport`` (a blob save); served only for a verified,
+ *  staged/downloaded transfer. */
 export async function downloadTransfer(id: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/transfers/${id}/download`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, filename || `transfer-${id}`);
+  await saveBlob(`/transfers/${id}/download`, filename || `transfer-${id}`);
 }
 
 // P3-T9 — related / near-duplicate items via the semantic vector. Returns 409
@@ -563,11 +586,7 @@ export const patchPreset = (
     body: JSON.stringify(body),
   });
 export async function deletePreset(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/presets/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/presets/${encodeURIComponent(name)}`, { expect: "none" });
 }
 
 // ---- file groups (controlled vocabulary for the search file_group facet) ----
@@ -825,20 +844,11 @@ export const updateLibrary = (
 /**
  * UI-T2 — hard-delete a library (admin scope). The contract requires an exact
  * name match in `?confirm=`; the server returns 204 on success, 409 while a scan
- * is running, 422 on a confirm mismatch, 404 if unknown. `request()` can't be
- * reused because a 204 carries no JSON body, so we fetch directly and translate
- * the status codes into a thrown Error the dialog can classify.
+ * is running, 422 on a confirm mismatch, 404 if unknown; failures throw an
+ * ``ApiError`` the dialog can classify by status.
  */
 export async function deleteLibrary(id: string, confirm: string): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/libraries/${id}?confirm=${encodeURIComponent(confirm)}`,
-    {
-      method: "DELETE",
-      headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    },
-  );
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/libraries/${id}?confirm=${encodeURIComponent(confirm)}`, { expect: "none" });
 }
 
 // ---- P4-T3 custom fields (admin-defined user_metadata field definitions) ----
@@ -894,12 +904,7 @@ export const updateCustomField = (
 
 // Soft-delete: drops the definition; existing user_metadata values are untouched.
 export async function deleteCustomField(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-fields/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/custom-fields/${id}`, { expect: "none" });
 }
 
 export const scanLibrary = (id: string) =>
@@ -1505,14 +1510,11 @@ export const listBackups = () =>
     incomplete_note: string;
   }>("/system/backups");
 
-/** Download one bundle's Postgres dump. Blob save, not an `<a href>`: the
- *  endpoint is admin-scoped and a plain link cannot carry the Bearer header
- *  (same reasoning as `downloadExport`). */
+/** Download one bundle's Postgres dump (admin-scoped). Blob save, like
+ *  `downloadExport`, so a failure surfaces as an error instead of a saved
+ *  error page. */
 export async function downloadBackup(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/system/backups/${encodeURIComponent(name)}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `${name}.dump`);
+  await saveBlob(`/system/backups/${encodeURIComponent(name)}`, `${name}.dump`);
 }
 
 /** Override an editable task's schedule and/or toggle it (admin). Pass
@@ -1711,12 +1713,7 @@ export const updateSavedSearch = (
 ) => request<SavedSearch>(`/saved-searches/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteSavedSearch(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/saved-searches/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/saved-searches/${id}`, { expect: "none" });
 }
 
 // ---- P4-T1 metadata profiles (read-only field vocabulary for key-facts) ----
@@ -1785,8 +1782,6 @@ export function detectWebhookFormat(url: string): WebhookFormat {
 
 /** Sentinel a client sends to KEEP an existing (encrypted) channel secret. */
 export const UNCHANGED = "__unchanged__";
-/** Marker the API returns in place of any stored secret on read. */
-export const REDACTED = "__redacted__";
 
 export interface AlertChannel {
   id: string;
@@ -1819,12 +1814,7 @@ export const updateAlertChannel = (
 ) => request<AlertChannel>(`/alert-channels/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteAlertChannel(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/alert-channels/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/alert-channels/${id}`, { expect: "none" });
 }
 
 export interface TestFireResult {
@@ -1910,12 +1900,7 @@ export const updateAlertRule = (
 ) => request<AlertRule>(`/alert-rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteAlertRule(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/alert-rules/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/alert-rules/${id}`, { expect: "none" });
 }
 
 export type AlertEventStatus = "delivered" | "failed" | "pending";
@@ -2166,12 +2151,11 @@ export const folderTree = (
   return request<FolderTreeResponse>(`/reports/folder-tree${s ? `?${s}` : ""}`);
 };
 
-/** Save a streamed fetch Response body to a download file. Central because a
- *  bare <a download> link can't carry the Bearer auth header, so every export
- *  goes fetch -> blob -> object URL -> synthetic click. */
-async function saveBlob(res: Response, filename: string): Promise<void> {
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  const blob = await res.blob();
+/** Fetch ``path`` as a blob and save it as a download file. Central so every
+ *  export goes send -> blob -> object URL -> synthetic click, with the long
+ *  download timeout and an ``ApiError`` (not a saved error page) on failure. */
+async function saveBlob(path: string, filename: string): Promise<void> {
+  const blob = await send<Blob>("GET", path, { expect: "blob", timeoutMs: DOWNLOAD_TIMEOUT_MS });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -2187,7 +2171,7 @@ function stampToday(): string {
 }
 
 /** Download a canned report in a chosen streaming format (csv/ndjson/xml). Uses
- *  fetch (auth header) + a blob so the streamed body is saved, not rendered. */
+ *  a blob fetch so the streamed body is saved, not rendered. */
 export async function downloadReport(
   id: string,
   format: ExportFormat,
@@ -2195,10 +2179,7 @@ export async function downloadReport(
 ): Promise<void> {
   const q = reportQuery({ ...opts, offset: undefined });
   const sep = q ? "&" : "?";
-  const res = await fetch(`${API_BASE}/reports/${id}${q}${sep}format=${format}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `filearr-${id}-${stampToday()}.${format}`);
+  await saveBlob(`/reports/${id}${q}${sep}format=${format}`, `filearr-${id}-${stampToday()}.${format}`);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2259,12 +2240,9 @@ export const listExports = () =>
 
 export const getExport = (id: string) => request<ReportExport>(`/exports/${id}`);
 
-/** Fetch a finished export artifact (auth header) and save it as a file. */
+/** Fetch a finished export artifact and save it as a file. */
 export async function downloadExport(ex: ReportExport): Promise<void> {
-  const res = await fetch(`${API_BASE}/exports/${ex.id}/download`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `filearr-export-${ex.id}.${ex.format}`);
+  await saveBlob(`/exports/${ex.id}/download`, `filearr-export-${ex.id}.${ex.format}`);
 }
 
 // ---- Scheduled reports (P11-T9) ----
@@ -2319,12 +2297,7 @@ export const updateReportSchedule = (
   });
 
 export async function deleteReportSchedule(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/report-schedules/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/report-schedules/${id}`, { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -2460,12 +2433,7 @@ export const patchRole = (
   body: { display_name?: string; description?: string; scopes?: string[]; ceiling_actions?: string[] },
 ) => request<RoleDef>(`/rbac/roles/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify(body) });
 export async function deleteRole(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/roles/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/rbac/roles/${encodeURIComponent(name)}`, { expect: "none" });
 }
 
 export interface LoginResult {
@@ -2477,10 +2445,12 @@ export const authStatus = () => request<AuthStatus>("/auth/status");
 
 /** Current session principal, or null when not authenticated (401). */
 export async function authMe(): Promise<AuthPrincipal | null> {
-  const res = await fetch(`${API_BASE}/auth/me`, { credentials: "same-origin" });
-  if (res.status === 401) return null;
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  return res.json() as Promise<AuthPrincipal>;
+  try {
+    return await send<AuthPrincipal>("GET", "/auth/me");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return null;
+    throw e;
+  }
 }
 
 export function authLogin(username: string, password: string): Promise<LoginResult> {
@@ -2498,7 +2468,7 @@ export function authBootstrap(username: string, password: string): Promise<AuthP
 }
 
 export async function authLogout(): Promise<void> {
-  await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "same-origin" });
+  await send("POST", "/auth/logout", { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -2555,31 +2525,18 @@ export const createGroup = (name: string, description: string | null) =>
     body: JSON.stringify({ name, description }),
   });
 export async function deleteGroup(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/groups/${id}`, { expect: "none" });
 }
 export const listMembers = (groupId: string) =>
   request<RbacMember[]>(`/rbac/groups/${groupId}/members`);
 export async function addMember(groupId: string, principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${groupId}/members`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-    },
-    body: JSON.stringify({ principal_id: principalId }),
+  await send("POST", `/rbac/groups/${groupId}/members`, {
+    body: { principal_id: principalId },
+    expect: "none",
   });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
 }
 export async function removeMember(groupId: string, principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${groupId}/members/${principalId}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/groups/${groupId}/members/${principalId}`, { expect: "none" });
 }
 
 export const listGrants = () => request<RbacGrant[]>("/rbac/grants");
@@ -2596,11 +2553,7 @@ export const createGrant = (body: {
     body: JSON.stringify(body),
   });
 export async function deleteGrant(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/grants/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/grants/${id}`, { expect: "none" });
 }
 
 export const rbacPreview = (
@@ -2707,11 +2660,7 @@ export const updateCustomReport = (
   });
 
 export async function deleteCustomReport(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-reports/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/custom-reports/${id}`, { expect: "none" });
 }
 
 export const runCustomReport = (
@@ -2730,13 +2679,10 @@ export async function downloadCustomReport(
   name: string,
   format: ExportFormat,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-reports/${id}/run?format=${format}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
   // The server sets a safe Content-Disposition filename; the client name is only
   // a friendly default (sanitised for the filesystem).
   const safe = name.replace(/[^\w.-]+/g, "_") || "report";
-  await saveBlob(res, `filearr-${safe}-${stampToday()}.${format}`);
+  await saveBlob(`/custom-reports/${id}/run?format=${format}`, `filearr-${safe}-${stampToday()}.${format}`);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2768,13 +2714,7 @@ export const updateUser = (
 ) => request<AuthPrincipal>(`/auth/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteUser(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/users/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    credentials: "same-origin",
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/users/${id}`, { expect: "none" });
 }
 
 // ---- Active sessions (P6-T11) ----
@@ -2790,36 +2730,18 @@ export interface AuthSession {
 export const listMySessions = () => request<AuthSession[]>("/auth/sessions");
 
 export async function revokeMySession(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/sessions/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/sessions/${id}`, { expect: "none" });
 }
 
 export async function revokeAllMySessions(): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/sessions/revoke-all`, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("POST", "/auth/sessions/revoke-all", { expect: "none" });
 }
 
 export const listUserSessions = (principalId: string) =>
   request<AuthSession[]>(`/auth/users/${principalId}/sessions`);
 
 export async function revokeUserSessions(principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/users/${principalId}/sessions`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/users/${principalId}/sessions`, { expect: "none" });
 }
 
 // ---- Security audit feed (P6-T9, admin) ----
@@ -2903,21 +2825,11 @@ export interface QueryKeys {
 /** Live-preview a querydsl string against real data (read scope, RBAC-scoped).
  *  On a parse/translation error the server returns 422 with the same structured
  *  `{ detail: { validation: [...] } }` body the reports validate/run paths use. */
-export async function previewQuery(
+export function previewQuery(
   body: { query: string; limit?: number; offset?: number },
   signal?: AbortSignal,
 ): Promise<QueryPreviewResponse> {
-  const res = await fetch(`${API_BASE}/query/preview`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return res.json() as Promise<QueryPreviewResponse>;
+  return send<QueryPreviewResponse>("POST", "/query/preview", { body, signal });
 }
 
 /** Extract the structured validation errors from a failed previewQuery (422). */
@@ -3080,15 +2992,7 @@ export const mintEnrollmentToken = (
  *  token's row (which carries the consumed_by link) needs `force` — the audit
  *  event preserves the link before the row goes. */
 export async function revokeEnrollmentToken(tokenHash: string, force = false): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/agents/enrollment-tokens/${encodeURIComponent(tokenHash)}${force ? "?force=true" : ""}`,
-    {
-      method: "DELETE",
-      credentials: "same-origin",
-      headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    },
-  );
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agents/enrollment-tokens/${encodeURIComponent(tokenHash)}${force ? "?force=true" : ""}`, { expect: "none" });
 }
 
 /** Revoke = application-layer denylist (row retained, history kept). */
@@ -3246,13 +3150,6 @@ export interface AgentCommandOut {
   requested_by: string | null;
 }
 
-export const AGENT_COMMAND_TERMINAL: AgentCommandStatus[] = [
-  "done",
-  "failed",
-  "expired",
-  "cancelled",
-];
-
 /** Newest-first command listing. `kind` / `state` are the server-side filters
  *  the endpoint already exposes — the fleet console uses them to answer "is a
  *  sweep in flight on this agent?" in ONE request for the whole page instead of
@@ -3331,12 +3228,7 @@ export const updateAgentShareMap = (
   });
 
 export async function deleteAgentShareMap(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/agent-share-maps/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agent-share-maps/${id}`, { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -3760,12 +3652,7 @@ export const updateConfigGroup = (id: string, patch: ConfigGroupUpdateIn) =>
   });
 
 export async function deleteConfigGroup(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/agents/config-groups/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agents/config-groups/${id}`, { expect: "none" });
 }
 
 // ---- console installer distribution (POST /agents/installer-config) ----------
@@ -3869,11 +3756,7 @@ export function mintLlmKey(body: MintLlmKeyRequest): Promise<LlmKey> {
 }
 
 export async function revokeLlmKey(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/llm-keys/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/llm-keys/${id}`, { expect: "none" });
 }
 
 // --- Ordinary API keys (read / write / admin Bearer tokens; admin-minted) ---
@@ -3902,11 +3785,7 @@ export const patchServiceAccount = (
     body: JSON.stringify(body),
   });
 export async function deleteServiceAccount(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/service-accounts/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/service-accounts/${id}`, { expect: "none" });
 }
 
 export interface ApiKeyRow {
@@ -3948,11 +3827,7 @@ export function mintApiKey(body: {
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api-keys/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/api-keys/${id}`, { expect: "none" });
 }
 
 // --- GUI auth-provider config (2026-08-20) --------------------------------- //

@@ -2,18 +2,19 @@
 import { setShareFormat } from "./osFormat.svelte";
 import type { FormatPref } from "./osFormat";
 import { DEFAULT_ACCENT, normalizeAccent, onAccentColor } from "./color";
+import * as safeStorage from "./safeStorage";
 
 export type Mode = "light" | "dark" | "system";
 const MODES: readonly Mode[] = ["light", "dark", "system"];
 const FORMATS: readonly FormatPref[] = ["auto", "url", "unc"];
 
-const rawMode = localStorage.getItem("theme");
+const rawMode = safeStorage.get("theme");
 const stored: Mode = MODES.includes(rawMode as Mode) ? (rawMode as Mode) : "system";
 // Defined in color.ts (DOM-free, so normalizeAccent is testable under Node);
 // re-exported because the account page imports it from here.
 export { DEFAULT_ACCENT };
 
-export const theme = $state({ mode: stored, accent: normalizeAccent(localStorage.getItem("accent")) ?? DEFAULT_ACCENT });
+export const theme = $state({ mode: stored, accent: normalizeAccent(safeStorage.get("accent")) ?? DEFAULT_ACCENT });
 
 export function applyTheme() {
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -22,17 +23,13 @@ export function applyTheme() {
   document.documentElement.style.setProperty("--accent", theme.accent);
   // Text on the accent flips to dark when the chosen accent is too pale for white.
   document.documentElement.style.setProperty("--accent-fg", onAccentColor(theme.accent));
-  try {
-    localStorage.setItem("theme", theme.mode);
-    localStorage.setItem("accent", theme.accent);
-  } catch {
-    /* private-mode / disabled storage — the in-memory value still applies */
-  }
+  safeStorage.set("theme", theme.mode);
+  safeStorage.set("accent", theme.accent);
 }
 
 /** Server-side account preferences → local stores. Called after login (App)
  *  and after the account page saves, so the person's choices follow them
- *  across browsers: server values WIN over localStorage. Malformed or missing
+ *  across browsers: server values WIN over local storage. Malformed or missing
  *  values are ignored field-by-field. Returns true when anything was applied. */
 export function applyServerPreferences(prefs: unknown): boolean {
   if (!prefs || typeof prefs !== "object") return false;

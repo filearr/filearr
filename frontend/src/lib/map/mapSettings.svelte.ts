@@ -9,6 +9,8 @@
 // library. That is a real disclosure, so it is OFF by default, never enabled as
 // a side effect of anything else, and the map says out loud which state it is in.
 
+import * as safeStorage from "../safeStorage";
+
 /** OpenStreetMap's standard tile server. Only ever contacted after an explicit
  *  opt-in; operators pointing at their own tile server just replace the URL. */
 export const DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -16,13 +18,13 @@ export const DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 export const mapSettings = $state({
   // Default OFF. Read as an exact "on" so any other stored value (including a
   // half-written one) fails closed.
-  tiles: localStorage.getItem("mapTiles") === "on",
-  tileUrl: localStorage.getItem("mapTileUrl") || DEFAULT_TILE_URL,
+  tiles: safeStorage.get("mapTiles") === "on",
+  tileUrl: safeStorage.get("mapTileUrl") || DEFAULT_TILE_URL,
 });
 
 export function saveMapSettings() {
-  localStorage.setItem("mapTiles", mapSettings.tiles ? "on" : "off");
-  localStorage.setItem("mapTileUrl", mapSettings.tileUrl);
+  safeStorage.set("mapTiles", mapSettings.tiles ? "on" : "off");
+  safeStorage.set("mapTileUrl", mapSettings.tileUrl);
 }
 
 /** Host shown in the "tiles are on" warning, so the user can see WHO they are
