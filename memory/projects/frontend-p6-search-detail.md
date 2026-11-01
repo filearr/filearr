@@ -164,3 +164,51 @@
 ## Self-review notes
 - Spec coverage: DSL (T2), hash reducer + replaceState (T3), pending-range chips (T3), `applyParams(initial)` first + probe (T4), loadMore snapshot + de-dupe (T4), comma-safe (ruling 3 + T3 parser + T4 `searchTags`), ItemDetail token guard (P5) + `onChanged` (T5) + facts header (T6), bulk tags (T5), card registry/CURATED/`_extract_error` (T6), Thumb (T6), Browse stale guard (P3) + status + Rescan gating (T7), map pointerdown (T7), blank-field NaN (P3), Retrieve streaming/error/cancel (T7), `format.ts` (T1). P6 checklist: zero-result copy becomes filter-aware in T2 (mention unsupported terms) — add to T2 Step 4; combobox arrows (T3); tile grid Up/Down and `aria-activedescendant` on virtualised rows stay P9 (ruling 9).
 - Types: `dslToParams` returns strings only; `mergeHits` generic; `runBulk` takes the existing `BulkTarget`/`BulkOps`/`BatchPatchResponse` types from `bulkEdit.ts`/`api.ts`; `thumbable` takes `(category, filename)`.
+
+
+## Amendments and hand-offs (from the SDD run — these supersede the text above where they conflict)
+
+**Rulings amended during execution**
+- **Ruling 1 / Task 2:** `A..B` date ranges on `modified:` ARE translated (both bounds); `group:` → `file_group` is translatable; `hash:` stays unsupported (whole-query hash mode exists). The hash and saved searches store the typed query only; DSL-derived params exist on the request path alone. `FilterBuilderPage` uses the reports help context.
+- **Ruling 6 / Task 6:** `three-d-cad` thumbnails ARE requested (the serve path renders 3D on demand; `is_thumbnailable` only gates the extract-time ride-along). Retry applies to `video` only (fix wave).
+- **Ruling 8 / Task 7:** the HEAD probe is replaced by a one-byte ranged GET (`Range: bytes=0-0`, 200/206 ok) because FastAPI GET routes answer 405 to HEAD; one code path, then the anchor navigation. Task 7 Step 1's `isAdminPrincipal(me)` gate became `canWrite(me)` (`me.scopes.includes("write")`, falling back to the admin role when `scopes` is absent) to match the backend's `require_scope("write")`.
+- **Task 3:** the editing-session history rule (fix wave): the first replace after a push or an applied incoming hash is upgraded to a push, so each typing or drag session gets exactly one entry.
+- **Task 4:** a bounds probe (same params minus the range keys, `limit=1`) runs when a deep link carries a pending range and no bounds exist; `configCache` is invalidated by `CustomFieldsPanel` on create/update/delete.
+- **Task 5:** a cancelled bulk run keeps Apply disabled until its in-flight chunk settles; a superseded run writes no error or summary state.
+- **Task 8 extra:** `Thumb.onFail` collapses the detail preview slot.
+
+**Backend tickets raised**
+- Server-side DSL for `/search` (`meta.*`, `cf.*`, `path:`, `created:`, `-tag:`), or an official statement that the help is reports-only.
+- Repeatable `tags` / `principal` params so values containing commas can be filtered.
+- A cheap `GET /system/features` (semantic flag) in place of the `/stats` probe.
+- `TreeItem.status` and `TreeItem.mtime` for Browse (the UI already renders them when present).
+- HEAD on `/transfers/{id}/download` (removes the one-byte probe's audit line and the stripped-`Range` buffering case).
+- `/search/tags` accepting several `library` values.
+- Exclude subtitles (`file_group === "subtitle"`) from `is_thumbnailable` and the serve path; stop enqueuing a doomed `thumb_item` job on every miss.
+- Taxonomy extractor contract (`"none"` vs `null`) from P5.
+
+**Deferred to later phases**
+- P9: A24/A25 share-path consistency (`resolveItemPath`), A35 tile-grid row movement and scroll-into-view, A37 slider scales, `aria-activedescendant` on virtualised rows, Breadcrumb ⋯ menu dismissal (A40), `Highlights.svelte` contrast, a results page shorter than the list never triggering `loadMore`, `errorMessage` "; " split moved into `apiErrors.ts`, the kind/group chip-vs-DSL union reading as OR.
+- P10: dead `semanticStats()` export in `api.ts`; `invalidateProfiles()` has no caller until a profile editor exists.
+
+## Execution ledger (from the SDD run)
+
+**Outcome:** 15 commits over main f0a7085; 8 tasks, 5 with one fix round; whole-branch review in two parallel halves → 2 Important code findings + 1 docs finding + 16 minors fixed in one wave (this section is the docs fix), re-reviewed clean. Acceptance: `review-2/p6-acceptance.md` (36/36 flows).
+
+**Rulings made during execution:**
+- Ruling: T2 Step 1's `ext:mp4;mkv` expectation is `extension:"mp4"`, `unsupported:["ext:mkv"]` (ruling 1); the crossed-out alternative in the plan text is not the spec — cost if wrong: none.
+- Ruling: FilterBuilderPage help context → "reports" (one line, outside the task's list) — it accepts the full syntax — cost if wrong: none. Ruling: date ranges `A..B` on modified ARE translated (ruling 1 text withdrawn on that point; brief test wins). Ruling: hash and saved searches store the typed query, never DSL-derived params; only the request path merges the translation — relative dates stay relative — cost if wrong: a saved search re-translates on apply (intended). Ruling: `group:` → file_group translatable; `hash:` stays unsupported.
+- Ruling: slider bounds on a filtered deep link — Task 4 runs one extra bounds request (same params minus range keys, smallest limit the backend allows) when pendingRange is active and no bounds exist, so the sliders show the unfiltered range — cost if wrong: one extra request on range deep links.
+- Ruling: CustomFieldsPanel.svelte may receive the one-line `invalidateCustomFields()` calls (outside the task's list) — cost if wrong: none.
+- Ruling (Task 8 extra): Thumb gains `onFail?: () => void` fired when the placeholder is final; ItemDetail collapses the 256 px preview slot on it so audio-without-artwork and .srt items show no dead box — cost if wrong: one prop.
+- Ruling: probe = GET with `Range: bytes=0-0` (200/206 = ok), one code path, then anchor navigation — cost if wrong: one extra download audit line per click. Backend ticket: add HEAD to /transfers/{id}/download.
+
+**Deferred minors (non-blocking per the final reviewers):**
+- Task 1: minor (deferred): fmtDate(0) renders 1970-01-01 (old SearchPage copy returned —; reachable only with zero bounds); no test for the 1e12 s/ms boundary or negative epochs.
+- Task 2: minor (deferred): size chip label rounds (`size_lte=1048575` → "≤ 1 MB"); an extension chip and a "from query: ext" chip can both show when the DSL overrides; backticks render literally in the zero-result StateBlock copy; modified range form is prose-only in the help (backend pins 32 chips).
+- Task 3: minor (deferred): Enter after the debounce pushes nothing (duplicate entry impossible; acceptable); single-result deep link leaves the size slider "range unavailable" (bounds need an unfiltered stats request → Task 4 note / P9 sliders). Unbriefed calls 1–7 accepted by the reviewer and the controller.
+- Task 4: minor (deferred): semantic deep-link re-run calls runFresh (clears selection; rare, untested live); map error Alert replaces MapPanel so a drawn box is clearable only via chips until Retry; semanticProbe.ts has no direct test; `semanticStats()` in api.ts is now a dead export (P10 cleanup); /search/tags accepts one `library` (backend ticket).
+- Task 5: minor (deferred): errorMessage "; " split in SearchPage is a stopgap (move to apiErrors.ts later); `bulkErrorLead` left set after dismiss (harmless); full-success clearSelection aborts a finished controller (harmless).
+- Task 6: minor (deferred): cards source-level test is weak (regex `m.key` match; no assertion on lead rows / live=false Alert); Thumb A→B→A reuse retries once more (harmless); Highlights.svelte 4.34 contrast pre-existing (P9).
+- Task 7: minor (deferred): scan controls flash before the library lookup resolves for agent-hosted libraries; a proxy that strips Range makes the probe buffer the body (disclosed); window Escape handler preventDefaults while a folder menu is open.
+- Task 8: review clean (0 Important). minor (deferred): most flows list-view only (disclosed); preview collapse persists per mounted ItemDetail; Thumb $effect tracks onFail (harmless).
