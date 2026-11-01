@@ -31,6 +31,8 @@
   import { gotoBrowse } from "./routes";
   import Breadcrumbs from "./Breadcrumbs.svelte";
   import Thumb from "./Thumb.svelte";
+  import { Alert, Button, Checkbox, Field, Input, StateBlock } from "./ui";
+  import { toast } from "./ui/toast.svelte";
 
   let { libraryId, path }: { libraryId: string; path: string } = $props();
 
@@ -132,7 +134,7 @@
 
   async function copy(label: string, textToCopy: string) {
     // copyText already carries the insecure-context fallback.
-    if (!(await copyText(textToCopy))) return flashToast(COPY_FAILED, false);
+    if (!(await copyText(textToCopy))) return toast(COPY_FAILED, { tone: "warn" });
     copied = label;
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => (copied = null), 1200);
@@ -145,26 +147,31 @@
 
   // W9 targeted rescan (file or folder, optionally recursive). A transient toast
   // confirms the enqueue; the run then appears in the Admin scan list / SSE.
-  let toast = $state<{ msg: string; ok: boolean } | null>(null);
-  let toastTimer: ReturnType<typeof setTimeout>;
-  function flashToast(msg: string, ok: boolean) {
-    toast = { msg, ok };
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toast = null), 3500);
+  // A failure from a file row's Rescan stays under that row (keyed by its
+  // rel_path); the folder menu has closed by then, so its failures are toasts.
+  let rowErrors = $state<Record<string, string>>({});
+  function setRowError(rel: string, msg: string) {
+    const next = { ...rowErrors };
+    if (msg) next[rel] = msg;
+    else delete next[rel];
+    rowErrors = next;
   }
 
-  async function scanTarget(rel: string, recursive: boolean, label: string) {
+  async function scanTarget(rel: string, recursive: boolean, label: string, fromRow = false) {
     openFolderMenu = null;
+    if (fromRow) setRowError(rel, "");
     try {
       const r = await targetedScan(libraryId, { path: rel, recursive });
-      flashToast(
+      toast(
         r.coalesced
           ? `Scan of ${label} already in progress — joined it.`
           : `Scan of ${label} queued.`,
-        true,
+        { tone: "ok" },
       );
     } catch (e) {
-      flashToast(`Could not scan ${label}: ${errorMessage(e, { verb: "scan this folder" })}`, false);
+      const msg = `Could not scan ${label}: ${errorMessage(e, { verb: "scan this folder" })}`;
+      if (fromRow) setRowError(rel, msg);
+      else toast(msg, { tone: "danger" });
     }
   }
 
@@ -174,23 +181,25 @@
   let scanPath = $state("");
   let scanRecursive = $state(true);
   let scanBusy = $state(false);
+  let scanError = $state("");
   async function submitScanForm(e: Event) {
     e.preventDefault();
     if (scanBusy) return;
     scanBusy = true;
+    scanError = "";
     const target = scanPath.trim();
     try {
       const r = await targetedScan(libraryId, { path: target, recursive: scanRecursive });
-      flashToast(
+      toast(
         r.coalesced
           ? `Scan of "${target || "whole library"}" already in progress — joined it.`
           : `Scan of "${target || "whole library"}" queued${r.is_file ? " (file)" : ""}.`,
-        true,
+        { tone: "ok" },
       );
       showScanForm = false;
       scanPath = "";
     } catch (e2) {
-      flashToast(`Could not scan "${target}": ${errorMessage(e2, { verb: "scan this folder" })}`, false);
+      scanError = `Could not scan "${target}": ${errorMessage(e2, { verb: "scan this folder" })}`;
     } finally {
       scanBusy = false;
     }
@@ -213,7 +222,7 @@
 </script>
 
 <div class="mx-auto max-w-5xl">
-  <div class="mt-2 rounded-xl border border-slate-200 p-3 dark:border-slate-800">
+  <div class="mt-2 rounded-panel border border-border p-3">
     <div class="flex items-center gap-2">
       <div class="min-w-0 grow">
         <Breadcrumbs
@@ -225,86 +234,77 @@
           onNavigate={(p) => gotoBrowse(libraryId, p)}
         />
       </div>
-      <button
-        type="button"
-        class="shrink-0 rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+      <Button
+        size="sm"
+        class="shrink-0"
+        aria-expanded={showScanForm}
         title="Rescan this folder, or a specific path under this library, without a full library scan"
-        onclick={() => (showScanForm = !showScanForm)}>Targeted scan</button>
+        onclick={() => (showScanForm = !showScanForm)}>Targeted scan</Button>
     </div>
 
     {#if showScanForm}
-      <form class="mt-3 flex flex-wrap items-end gap-2 border-t border-slate-200 pt-3 dark:border-slate-800" onsubmit={submitScanForm}>
-        <label class="flex min-w-[16rem] grow flex-col gap-1 text-xs">
-          <span class="text-slate-500">Path under the library root (blank = whole library; a file or folder)</span>
-          <input
-            class="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
-            placeholder={path || "e.g. Movies/Incoming"}
-            bind:value={scanPath} />
-        </label>
-        <label class="flex items-center gap-1 text-xs" title="Ignored when the path is a file">
-          <input type="checkbox" bind:checked={scanRecursive} />
-          Include subfolders
-        </label>
-        <button
-          type="button"
-          class="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
-          title="Fill in the folder you are currently viewing"
-          onclick={() => (scanPath = path)}>Use current folder</button>
-        <button
-          type="submit"
-          disabled={scanBusy}
-          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-xs font-medium text-[var(--accent-fg)] disabled:opacity-50">
-          {scanBusy ? "Queueing…" : "Scan"}
-        </button>
+      <form class="mt-3 border-t border-border pt-3" onsubmit={submitScanForm}>
+        <div class="flex flex-wrap items-end gap-2">
+          <Field label="Path under the library root (blank = whole library; a file or folder)" class="min-w-[16rem] grow">
+            <Input placeholder={path || "e.g. Movies/Incoming"} bind:value={scanPath} />
+          </Field>
+          <span class="pb-1.5" title="Ignored when the path is a file">
+            <Checkbox size="sm" label="Include subfolders" bind:checked={scanRecursive} />
+          </span>
+          <Button
+            size="sm"
+            title="Fill in the folder you are currently viewing"
+            onclick={() => (scanPath = path)}>Use current folder</Button>
+          <Button type="submit" variant="primary" size="sm" disabled={scanBusy}>
+            {scanBusy ? "Queueing…" : "Scan"}
+          </Button>
+        </div>
+        {#if scanError}
+          <Alert tone="danger" class="mt-2" onDismiss={() => (scanError = "")}>{scanError}</Alert>
+        {/if}
       </form>
     {/if}
   </div>
 
-  {#if toast}
-    <div
-      class="mt-2 rounded-lg border px-3 py-2 text-sm {toast.ok
-        ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
-        : 'border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-200'}"
-      role="status">
-      {toast.msg}
-    </div>
-  {/if}
-
   {#if error}
-    <p class="mt-6 text-red-500">{error}</p>
+    <StateBlock state="error" class="mt-6" message={error} onRetry={load} />
   {:else if !tree}
-    <p class="mt-6 text-slate-500">Loading…</p>
+    <StateBlock state="loading" class="mt-6" />
   {:else}
     {#if tree.folders.length === 0 && tree.items.length === 0}
-      <p class="mt-6 text-slate-500">This folder is empty.</p>
+      <StateBlock
+        state="empty"
+        class="mt-6"
+        message="This folder is empty. Add files to it on disk, then run a targeted scan to index them." />
     {/if}
 
     {#if tree.folders.length > 0}
-      <h3 class="mt-6 text-sm font-semibold text-slate-500">Folders</h3>
+      <h2 class="mt-6 text-sm font-semibold text-muted">Folders</h2>
       <ul class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {#each tree.folders as f (f.name)}
-          <li class="relative flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+          <li class="relative flex items-center gap-2 rounded-panel border border-border px-3 py-2">
             <button
               type="button"
               class="flex min-w-0 grow items-center gap-2 text-left"
               onclick={() => gotoBrowse(libraryId, folderRel(f.name))}>
-              <span class="text-slate-600 dark:text-slate-400">📁</span>
+              <span class="text-muted">📁</span>
               <span class="truncate font-medium" title={f.name}>{f.name}</span>
-              <span class="ml-auto shrink-0 text-xs text-slate-600 dark:text-slate-400">{f.item_count}</span>
+              <span class="ml-auto shrink-0 text-xs text-muted">{f.item_count}</span>
             </button>
             <button
               type="button"
-              class="rounded px-1 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+              class="rounded-control px-1 text-xs text-muted hover:bg-surface-3 hover:text-fg"
               aria-label="Folder actions for {f.name}"
+              aria-expanded={openFolderMenu === f.name}
               title="Folder actions"
               onclick={() => (openFolderMenu = openFolderMenu === f.name ? null : f.name)}>⋯</button>
             {#if openFolderMenu === f.name}
               <div
-                class="absolute right-2 top-full z-20 mt-1 w-max min-w-[10rem] rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-800"
+                class="absolute right-2 top-full z-20 mt-1 w-max min-w-[10rem] rounded-control border border-border-strong bg-surface-2 p-1 text-xs shadow-lg"
                 role="menu">
                 {#if canOpen}
                   <a
-                    class="block rounded px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-700"
+                    class="block rounded-control px-2 py-1 hover:bg-surface-3"
                     href={buildOpenUrl(sharePrefix, folderRel(f.name))}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -313,7 +313,7 @@
                 {/if}
                 <button
                   type="button"
-                  class="block w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                  class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
                   onclick={() =>
                     copy(
                       `folder-${f.name}`,
@@ -323,13 +323,13 @@
                 </button>
                 <button
                   type="button"
-                  class="block w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                  class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
                   onclick={() => scanTarget(folderRel(f.name), true, f.name)}>
                   Scan folder + subfolders
                 </button>
                 <button
                   type="button"
-                  class="block w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                  class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
                   onclick={() => scanTarget(folderRel(f.name), false, f.name)}>
                   Scan this folder only
                 </button>
@@ -342,18 +342,18 @@
 
     {#if tree.items.length > 0}
       <div class="mt-6 flex items-baseline gap-3">
-        <h3 class="text-sm font-semibold text-slate-500">Files</h3>
-        <span class="text-xs text-slate-600 dark:text-slate-400">showing {shownFrom}–{shownTo} of {tree.total_items}</span>
+        <h2 class="text-sm font-semibold text-muted">Files</h2>
+        <span class="text-xs text-muted">showing {shownFrom}–{shownTo} of {tree.total_items}</span>
         <span class="grow"></span>
-        <div class="flex items-center overflow-hidden rounded-full border border-slate-300 text-xs dark:border-slate-700" role="group" aria-label="File layout">
+        <div class="flex items-center overflow-hidden rounded-full border border-border-strong text-xs" role="group" aria-label="File layout">
           <button
             type="button"
-            class="px-2 py-0.5 {filesView === 'list' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+            class="px-2 py-0.5 {filesView === 'list' ? 'bg-accent text-accent-fg' : ''}"
             aria-pressed={filesView === 'list'}
             onclick={() => (filesView = 'list')}>List</button>
           <button
             type="button"
-            class="px-2 py-0.5 {filesView === 'grid' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+            class="px-2 py-0.5 {filesView === 'grid' ? 'bg-accent text-accent-fg' : ''}"
             aria-pressed={filesView === 'grid'}
             onclick={() => (filesView = 'grid')}>Grid</button>
         </div>
@@ -363,40 +363,46 @@
           {#each tree.items as it (it.id)}
             <button
               type="button"
-              class="flex flex-col overflow-hidden rounded-lg border border-slate-200 text-left hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700"
+              class="flex flex-col overflow-hidden rounded-panel border border-border text-left hover:border-border-strong"
               onclick={() => (selected = it.id)}>
               <Thumb id={it.id} size="aspect-square w-full h-auto" rounded="rounded-none" />
               <div class="flex flex-col gap-1 p-2">
                 <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 <span class="flex items-center gap-1">
-                  <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{it.file_category}</span>
-                  <span class="ml-auto shrink-0 text-[10px] text-slate-600 dark:text-slate-400">{fmtSize(it.size)}</span>
+                  <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs">{it.file_category}</span>
+                  <span class="ml-auto shrink-0 text-2xs text-muted">{fmtSize(it.size)}</span>
                 </span>
               </div>
             </button>
           {/each}
         </div>
       {:else}
-      <ul class="mt-2 divide-y divide-slate-200 dark:divide-slate-800">
+      <ul class="mt-2 divide-y divide-border">
         {#each tree.items as it (it.id)}
-          <li class="flex items-center gap-1">
-            <button
-              type="button"
-              class="flex w-full items-center gap-3 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
-              onclick={() => (selected = it.id)}>
-              <Thumb id={it.id} size="h-9 w-9" />
-              <span class="rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800">{it.file_category}</span>
-              <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
-              {#if it.year}<span class="text-sm text-slate-500">({it.year})</span>{/if}
-              <span class="grow"></span>
-              <span class="shrink-0 text-xs text-slate-600 dark:text-slate-400">{fmtSize(it.size)}</span>
-            </button>
-            <button
-              type="button"
-              class="shrink-0 rounded px-2 py-1 text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
-              title="Rescan just this file"
-              aria-label="Rescan {it.filename}"
-              onclick={() => scanTarget(it.rel_path, false, it.filename)}>Rescan</button>
+          <li class="flex flex-col">
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                class="flex w-full items-center gap-3 py-3 text-left hover:bg-surface-3"
+                onclick={() => (selected = it.id)}>
+                <Thumb id={it.id} size="h-9 w-9" />
+                <span class="rounded-control bg-surface-3 px-2 py-0.5 text-xs">{it.file_category}</span>
+                <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
+                {#if it.year}<span class="text-sm text-muted">({it.year})</span>{/if}
+                <span class="grow"></span>
+                <span class="shrink-0 text-xs text-muted">{fmtSize(it.size)}</span>
+              </button>
+              <Button
+                size="sm"
+                variant="ghost"
+                class="shrink-0"
+                title="Rescan just this file"
+                aria-label="Rescan {it.filename}"
+                onclick={() => scanTarget(it.rel_path, false, it.filename, true)}>Rescan</Button>
+            </div>
+            {#if rowErrors[it.rel_path]}
+              <Alert tone="danger" class="mb-2" onDismiss={() => setRowError(it.rel_path, "")}>{rowErrors[it.rel_path]}</Alert>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -404,14 +410,12 @@
 
       {#if tree.total_items > LIMIT}
         <div class="mt-3 flex items-center gap-2">
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-700"
+          <Button
             disabled={offset === 0}
-            onclick={() => (offset = Math.max(0, offset - LIMIT))}>Prev</button>
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-700"
+            onclick={() => (offset = Math.max(0, offset - LIMIT))}>Prev</Button>
+          <Button
             disabled={offset + LIMIT >= tree.total_items}
-            onclick={() => (offset = offset + LIMIT)}>Next</button>
+            onclick={() => (offset = offset + LIMIT)}>Next</Button>
         </div>
       {/if}
     {/if}
@@ -425,10 +429,11 @@
     {#await loadItemDetail() then m}
       <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
     {:catch}
-      <div role="alert" class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-600 shadow dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-        Item details failed to load — Filearr may have been updated.
-        <button class="ml-2 rounded-lg border border-slate-300 px-2 py-0.5 dark:border-slate-700"
-          onclick={() => location.reload()}>Reload</button>
+      <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
+        <Alert tone="danger">
+          Item details failed to load — Filearr may have been updated.
+          <Button size="sm" class="ml-2" onclick={() => location.reload()}>Reload</Button>
+        </Alert>
       </div>
     {/await}
   {/if}
