@@ -36,6 +36,39 @@ function contrast(a: number, b: number): number {
   return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
+/** WCAG 2.x contrast ratio between two `#rrggbb` colours (1–21, order-free). */
+export function contrastRatio(a: string, b: string): number {
+  return contrast(relativeLuminance(a), relativeLuminance(b));
+}
+
+/** Channel-wise sRGB blend of `a` toward `b` by `t` (0 = a, 1 = b), as `#rrggbb`.
+ *  Plain sRGB like CSS `color-mix(in srgb, …)`, so the no-JS fallback matches. */
+export function mixHex(a: string, b: string, t: number): string {
+  const x = parseInt(a.slice(1), 16);
+  const y = parseInt(b.slice(1), 16);
+  let out = "#";
+  for (const shift of [16, 8, 0]) {
+    const ca = (x >> shift) & 0xff;
+    const cb = (y >> shift) & 0xff;
+    out += Math.round(ca + (cb - ca) * t).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+/** The accent as readable text on `surface`: the accent itself when it already
+ *  meets `min`, else the smallest 5 % step toward white (dark surface) or black
+ *  (light surface) that does. The accent is user-chosen, so a fixed mix would
+ *  over-correct some accents and under-correct others. */
+export function accentTextColor(accent: string, surface: string, min = 4.5): string {
+  if (contrastRatio(accent, surface) >= min) return accent;
+  const target = relativeLuminance(surface) < 0.5 ? "#ffffff" : "#000000";
+  for (let i = 1; i < 20; i++) {
+    const c = mixHex(accent, target, i / 20);
+    if (contrastRatio(c, surface) >= min) return c;
+  }
+  return target;
+}
+
 /** Foreground for text on the accent: white unless slate-900 contrasts better.
  *  Ties go to white so the default indigo family keeps its familiar look. */
 export function onAccentColor(hex: string): "#ffffff" | "#0f172a" {

@@ -8,10 +8,13 @@
   --surface-2: #f8fafc;
   --surface-3: #f1f5f9;
   --border: #e2e8f0;
-  --border-strong: #cbd5e1;
+  /* Control edges (inputs, checkboxes) must meet 3:1 (WCAG 1.4.11): 3.5:1 on white. */
+  --border-strong: #7c8ba1;
   --fg: #0f172a;
   --muted: #475569;
-  --accent-text: var(--accent, #4f46e5);
+  /* applyTheme computes --accent-text-light (color.ts accentTextColor); the raw
+     accent is the no-JS fallback. */
+  --accent-text: var(--accent-text-light, var(--accent, #4f46e5));
   --ok: #047857;
   --ok-bg: #d1fae5;
   --warn: #b45309;
@@ -26,12 +29,12 @@
   --surface-2: #0f172a;
   --surface-3: #1e293b;
   --border: #1e293b;
-  --border-strong: #334155;
+  --border-strong: #64748b; /* 4.2:1 on slate-950, 3.7:1 on slate-900 */
   --fg: #f1f5f9;
   --muted: #94a3b8;
-  /* The raw accent is too dark to read as text on slate-950/900, so accent text
-     is lightened toward white (same idea as the dark focus ring below). */
-  --accent-text: color-mix(in srgb, var(--accent, #4f46e5) 70%, white);
+  /* applyTheme computes --accent-text-dark: the accent lightened just enough for
+     4.5:1 on slate-900. The fixed 70 % mix is only the no-JS fallback. */
+  --accent-text: var(--accent-text-dark, color-mix(in srgb, var(--accent, #4f46e5) 70%, white));
   --ok: #6ee7b7;
   --ok-bg: #064e3b;
   --warn: #fcd34d;

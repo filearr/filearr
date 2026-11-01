@@ -135,6 +135,42 @@ test("expect blob / text / none", async () => {
   assert.equal(await send("GET", "/x", { expect: "none" }), undefined);
 });
 
+test("expect response: 200 JSON resolves status, headers and the parsed body", async () => {
+  stub(
+    () =>
+      new Response(JSON.stringify({ ok: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-total-count": "42" },
+      }),
+  );
+  const r = await send<{ ok: number }>("GET", "/x", { expect: "response" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: 1 });
+  assert.equal(r.headers.get("x-total-count"), "42");
+});
+
+test("expect response: 204 resolves status 204 with body undefined", async () => {
+  stub(() => new Response(null, { status: 204 }));
+  const r = await send("DELETE", "/x", { expect: "response" });
+  assert.equal(r.status, 204);
+  assert.equal(r.body, undefined);
+  assert.ok(r.headers instanceof Headers);
+});
+
+test("expect response: a non-JSON or empty body resolves body undefined", async () => {
+  stub(() => new Response("<html/>", { status: 202, headers: { "content-type": "text/html" } }));
+  const r = await send("POST", "/x", { expect: "response" });
+  assert.equal(r.status, 202);
+  assert.equal(r.body, undefined);
+  stub(() => new Response("", { status: 200, headers: { "content-type": "application/json" } }));
+  assert.equal((await send("POST", "/x", { expect: "response" })).body, undefined);
+});
+
+test("expect response: a non-2xx still throws ApiError", async () => {
+  stub(() => jsonRes({ detail: "nope" }, 409));
+  await assert.rejects(send("POST", "/x", { expect: "response" }), (e: unknown) => e instanceof ApiError && e.status === 409);
+});
+
 test("401 invokes the unauthorized handler exactly once and still throws", async () => {
   const seen: string[] = [];
   setUnauthorizedHandler((p) => seen.push(p));
