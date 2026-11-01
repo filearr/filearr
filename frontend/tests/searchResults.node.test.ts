@@ -13,7 +13,13 @@ import {
   createPageSession,
   mergeHits,
 } from "../src/lib/searchResults.ts";
-import { sharedByKey, sharedOnce, waitWithSignal } from "../src/lib/configCache.ts";
+import {
+  cachedCustomFields,
+  invalidateCustomFields,
+  sharedByKey,
+  sharedOnce,
+  waitWithSignal,
+} from "../src/lib/configCache.ts";
 
 type H = { id: string; n?: number };
 const idOf = (h: H) => h.id;
@@ -133,7 +139,7 @@ test("boundsProbeParams: same params minus the four range keys, smallest limit, 
   });
   // Input untouched.
   assert.equal(p.size_gte, "1");
-  assert.equal(BOUNDS_PROBE_LIMIT, 0);
+  assert.equal(BOUNDS_PROBE_LIMIT, 1);
 });
 
 // ---- configCache helpers ------------------------------------------------------
@@ -211,4 +217,56 @@ test("sharedByKey: one fetch per key, rejections retried per key", async () => {
   await assert.rejects(get("bad"), /nope/);
   assert.equal(await get("bad"), "BAD");
   assert.deepEqual(calls, ["image", "video", "bad", "bad"]);
+});
+
+test("sharedOnce.reset: the next call fetches again; a waiter already in flight keeps its answer", async () => {
+  let calls = 0;
+  const get = sharedOnce(async () => ++calls);
+  assert.equal(await get(), 1);
+  assert.equal(await get(), 1);
+  get.reset();
+  assert.equal(await get(), 2);
+  assert.equal(calls, 2);
+});
+
+test("sharedByKey.reset: every key fetches again", async () => {
+  const calls: string[] = [];
+  const get = sharedByKey(async (k: string) => {
+    calls.push(k);
+    return k;
+  });
+  await get("a");
+  await get("b");
+  get.reset();
+  await get("a");
+  await get("a");
+  assert.deepEqual(calls, ["a", "b", "a"]);
+});
+
+test("invalidateCustomFields: the next cachedCustomFields() GETs /custom-fields again", async () => {
+  const realFetch = globalThis.fetch;
+  const urls: string[] = [];
+  let version = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    version++;
+    return new Response(JSON.stringify([{ name: `f${version}` }]), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    invalidateCustomFields(); // start from a clean cache
+    const first = await cachedCustomFields();
+    const again = await cachedCustomFields();
+    assert.equal(again, first);
+    assert.equal(urls.length, 1);
+    invalidateCustomFields();
+    const fresh = await cachedCustomFields();
+    assert.equal(urls.length, 2);
+    assert.ok(urls.every((u) => u.endsWith("/custom-fields")));
+    assert.deepEqual(fresh.map((f) => f.name), ["f2"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

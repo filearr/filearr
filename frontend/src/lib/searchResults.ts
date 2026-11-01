@@ -62,9 +62,10 @@ export function createPageSession(): PageSession {
   };
 }
 
-/** The smallest `limit` /search accepts (`limit: int = Query(le=200)`, no
- *  lower bound): Meilisearch returns facet_stats with no hits. */
-export const BOUNDS_PROBE_LIMIT = 0;
+/** The probe's page size. /search declares no lower bound (`limit: int =
+ *  Query(le=200)`) and 0 works today, but 1 stays safe if the backend ever
+ *  treats a falsy limit as "default page size"; only facet_stats is read. */
+export const BOUNDS_PROBE_LIMIT = 1;
 
 const RANGE_KEYS = [...RANGE_PAIRS.size, ...RANGE_PAIRS.date];
 
