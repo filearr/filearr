@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import { onMount, onDestroy } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import {
@@ -25,13 +26,6 @@
   const anyRunning = $derived(
     exports.some((e) => e.status === "queued" || e.status === "running"),
   );
-
-  function fmtBytes(b: number | null): string {
-    if (b == null || b <= 0) return "—";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-  }
 
   async function refresh() {
     loading = true;
@@ -99,7 +93,7 @@
   {/if}
 {/snippet}
 {#snippet rowsCell(ex: ReportExport)}<span class="tabular-nums">{ex.row_count ?? "—"}</span>{/snippet}
-{#snippet sizeCell(ex: ReportExport)}<span class="tabular-nums">{fmtBytes(ex.file_size_bytes)}</span>{/snippet}
+{#snippet sizeCell(ex: ReportExport)}<span class="tabular-nums">{fmtBytes(ex.file_size_bytes, { zero: "—" })}</span>{/snippet}
 {#snippet createdCell(ex: ReportExport)}
   <span class="text-xs text-muted">{ex.created_at ? new Date(ex.created_at).toLocaleString() : ""}</span>
 {/snippet}

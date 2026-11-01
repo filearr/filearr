@@ -271,8 +271,8 @@ test("labelColor: flips with the fill's lightness", () => {
 
 test("fmtBytes: human sizes, and a hard zero for nothing", () => {
   assert.equal(fmtBytes(0), "0 B");
-  assert.equal(fmtBytes(-1), "0 B");
+  assert.equal(fmtBytes(-1), "—");
   assert.equal(fmtBytes(512), "512 B");
-  assert.equal(fmtBytes(1024), "1.0 KB");
-  assert.equal(fmtBytes(1024 ** 3 * 2), "2.0 GB");
+  assert.equal(fmtBytes(1024), "1 KB");
+  assert.equal(fmtBytes(1024 ** 3 * 2), "2 GB");
 });

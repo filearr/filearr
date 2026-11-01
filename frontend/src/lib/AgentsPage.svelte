@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { COPY_FAILED, copyText } from "./clipboard";
@@ -252,9 +253,8 @@
   function fmt(iso: string | null): string {
     return iso ? new Date(iso).toLocaleString() : "—";
   }
-  /** Countdown to a FUTURE timestamp. `relTime` clamps at zero (it only ever
-   *  looks backwards), so reusing it for a scheduled promotion would render
-   *  every pending tier as "0s ago". */
+  /** Countdown to a FUTURE timestamp, to the minute ("in 2h 15m"), with a
+   *  "due now" floor — finer than the shared `relTime`'s "in 2 h". */
   function untilTime(iso: string | null): string {
     if (!iso) return "—";
     const s = Math.floor((new Date(iso).getTime() - Date.now()) / 1000);
@@ -265,16 +265,6 @@
     const h = Math.floor(m / 60);
     if (h < 24) return `in ${h}h ${m % 60}m`;
     return `in ${Math.floor(h / 24)}d ${h % 24}h`;
-  }
-  function relTime(iso: string | null): string {
-    if (!iso) return "never";
-    const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
   }
   // Compact tooltip from the agent's self-reported health snapshot (rides its
   // command poll; stored verbatim on the agent row). Pre-2026-08 agent builds
@@ -2099,7 +2089,7 @@
     <Badge tone={online ? toneForStatus("online") : a.status === "active" ? toneForStatus("offline") : "neutral"}>{online ? "online" : "offline"}</Badge>
     <span
       class="text-xs tabular-nums text-muted"
-      title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">{relTime(a.last_seen_at)}</span>
+      title="Last heartbeat: every authenticated request from the agent (command poll ~60s, update poll, replication) refreshes it.">{a.last_seen_at ? relTime(a.last_seen_at) : "never"}</span>
     {#if a.health?.suspended}
       <span title="Operator-suspended: this agent is not scanning or replicating (self-reported at its last check-in). It still polls for commands — resume it with the actions on the right."><Badge tone="warn">suspended</Badge></span>
     {/if}

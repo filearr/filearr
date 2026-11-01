@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes, relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { latest } from "./latest";
@@ -86,13 +87,6 @@
     } finally {
       libStatsBusy = false;
     }
-  }
-
-  function fmtBytes(b: number): string {
-    if (!isFinite(b) || b <= 0) return "0 B";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
   }
 
   function statCell(libId: string, kind: "count" | "bytes"): string {
@@ -596,21 +590,6 @@
       .map((k) => `${k} ${st[k]}`);
     if (lv && lv.rate !== undefined) parts.push(`${lv.rate.toFixed(1)}/s`);
     return parts.length ? `${base} — ${parts.join(", ")}` : base;
-  }
-
-  // FIX-10: relative time for a persisted last-scan timestamp (compact, no deps).
-  function relTime(iso: string): string {
-    const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-    if (secs < 60) return "just now";
-    const mins = Math.round(secs / 60);
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.round(hours / 24);
-    if (days < 30) return `${days}d ago`;
-    const months = Math.round(days / 30);
-    if (months < 12) return `${months}mo ago`;
-    return `${Math.round(months / 12)}y ago`;
   }
 
   // §17: "slower than usual" verdict from real history — this run's walk rate

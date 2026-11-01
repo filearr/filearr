@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import { onDestroy } from "svelte";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { latest } from "./latest";
@@ -207,18 +208,6 @@
 
   const shownFrom = $derived(tree && tree.total_items > 0 ? offset + 1 : 0);
   const shownTo = $derived(tree ? Math.min(offset + LIMIT, tree.total_items) : 0);
-
-  function fmtSize(n: number): string {
-    if (n < 1024) return `${n} B`;
-    const units = ["KB", "MB", "GB", "TB"];
-    let v = n / 1024;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(1)} ${units[i]}`;
-  }
 </script>
 
 <div class="mx-auto max-w-5xl">
@@ -370,7 +359,7 @@
                 <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 <span class="flex items-center gap-1">
                   <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs">{it.file_category}</span>
-                  <span class="ml-auto shrink-0 text-2xs text-muted">{fmtSize(it.size)}</span>
+                  <span class="ml-auto shrink-0 text-2xs text-muted">{fmtBytes(it.size)}</span>
                 </span>
               </div>
             </button>
@@ -390,7 +379,7 @@
                 <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 {#if it.year}<span class="text-sm text-muted">({it.year})</span>{/if}
                 <span class="grow"></span>
-                <span class="shrink-0 text-xs text-muted">{fmtSize(it.size)}</span>
+                <span class="shrink-0 text-xs text-muted">{fmtBytes(it.size)}</span>
               </button>
               <Button
                 size="sm"

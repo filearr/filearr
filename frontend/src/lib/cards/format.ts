@@ -1,26 +1,27 @@
 // Small display helpers shared by the per-type detail cards (P4-T10). Pure.
 
+import { fmtBytes as bytes, fmtDuration as duration } from "../format.ts";
+
+// The cards' formatting comes from ../format (A32). These two keep the cards'
+// contract on top of it: metadata values are `unknown` (often numeric strings)
+// and an absent or non-positive value is null, so Highlights drops the fact
+// and ArchiveSection omits the size instead of printing "—" or "0 B".
+const positive = (v: unknown): number | null => {
+  const n = typeof v === "number" ? v : Number(v);
+  return v != null && v !== "" && Number.isFinite(n) && n > 0 ? n : null;
+};
+
 /** Human duration from a seconds value; null when absent/non-positive. */
-export function fmtDuration(sec: unknown): string | null {
-  const n = typeof sec === "number" ? sec : Number(sec);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const s = Math.round(n);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const ss = s % 60;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${ss}s`;
-  return `${ss}s`;
-}
+export const fmtDuration = (sec: unknown): string | null => {
+  const n = positive(sec);
+  return n == null ? null : duration(n);
+};
 
 /** Human byte size; null when absent/non-positive. */
-export function fmtBytes(b: unknown): string | null {
-  const n = typeof b === "number" ? b : Number(b);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-}
+export const fmtBytes = (b: unknown): string | null => {
+  const n = positive(b);
+  return n == null ? null : bytes(n);
+};
 
 /** Coerce an arbitrary metadata value to a short display string, or null. */
 export function asStr(v: unknown): string | null {
@@ -28,6 +29,7 @@ export function asStr(v: unknown): string | null {
   if (typeof v === "string") return v.trim() ? v : null;
   if (typeof v === "number") return Number.isFinite(v) ? String(v) : null;
   if (typeof v === "boolean") return v ? "yes" : "no";
+  if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
 

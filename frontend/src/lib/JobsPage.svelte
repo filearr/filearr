@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes, fmtDuration, relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { latest } from "./latest";
@@ -138,34 +139,9 @@
   let prevNet = $state<{ rx: number; tx: number; t: number } | null>(null);
   let netRate = $state<{ rx: number; tx: number } | null>(null);
 
-  // Compact relative time for the agent-replication tile.
-  function relTime(iso: string): string {
-    const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-    if (secs < 60) return `${secs}s ago`;
-    const m = Math.round(secs / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.round(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.round(h / 24)}d ago`;
-  }
-
   // FIX-11 — human GB for the low-space banner.
   function fmtGB(bytes: number): string {
     return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  }
-
-  // Auto-scaling binary size (B/KiB/MiB/GiB/TiB) for the disk indicator + the
-  // thumbnail-cache size, so a small cache reads "820 MiB" not "0.0 GB".
-  function fmtBytes(bytes: number): string {
-    if (!isFinite(bytes) || bytes <= 0) return "0 B";
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let v = bytes;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(i === 0 || v >= 100 ? 0 : 1)} ${units[i]}`;
   }
 
   // Friendly names for the disk watch roles. The backend labels rows by ROLE
@@ -565,7 +541,7 @@
     }
   }
 
-  // Auto-scaled byte-rate ("12.4 MiB/s").
+  // Auto-scaled byte-rate ("12.4 MB/s").
   function fmtRate(bytesPerSec: number): string {
     return `${fmtBytes(bytesPerSec)}/s`;
   }
@@ -591,18 +567,6 @@
     if (d > 0) return `in ${d}d ${h}h`;
     if (h > 0) return `in ${h}h ${m}m`;
     return `in ${m}m`;
-  }
-
-  function fmtDuration(secs: number): string {
-    if (!isFinite(secs) || secs < 0) return "—";
-    const s = Math.round(secs);
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ${s % 60}s`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ${m % 60}m`;
-    const d = Math.floor(h / 24);
-    return `${d}d ${h % 24}h`;
   }
 
   // FIX-12 — the "attempts" column used to show procrastinate's raw per-job

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
   // P4-T11 — generic "Raw" view: dumps EVERY field of the item record as a flat
@@ -30,9 +31,6 @@
     return nl > CLAMP_CHARS / 2 ? nl : CLAMP_CHARS;
   }
   const lineCount = (s: string): number => s.split("\n").length;
-  function fmtSize(chars: number): string {
-    return chars >= 4096 ? `${(chars / 1024).toFixed(0)} KB` : `${chars} chars`;
-  }
 
   let copied = $state<string | null>(null);
   async function copy(key: string, v: unknown) {
@@ -69,7 +67,7 @@
                 class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:border-accent hover:text-accent-text dark:border-slate-700"
                 aria-expanded={open}
                 onclick={() => (expanded[key] = !expanded[key])}
-              >{open ? "Show less" : `Show all (${lineCount(text)} lines, ${fmtSize(text.length)})`}</button>
+              >{open ? "Show less" : `Show all (${lineCount(text)} lines, ${text.length >= 4096 ? fmtBytes(text.length) : `${text.length} chars`})`}</button>
             {/if}
           {:else}
             <span class="break-words font-mono text-xs">{String(value)}</span>

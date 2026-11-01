@@ -14,6 +14,7 @@
 </script>
 
 <script lang="ts">
+  import { fmtBytes, fmtDate } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
   import * as safeStorage from "./safeStorage";
@@ -388,19 +389,6 @@
   }
   const simPct = (h: Record<string, unknown>): string =>
     typeof h.similarity === "number" ? `${(h.similarity * 100).toFixed(1)}%` : "—";
-  const simSize = (h: Record<string, unknown>): string => {
-    const n = h.size;
-    if (typeof n !== "number") return "—";
-    if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GiB`;
-    if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MiB`;
-    if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KiB`;
-    return `${n} B`;
-  };
-  const simWhen = (h: Record<string, unknown>): string => {
-    const t = h.mtime;
-    return typeof t === "number" ? new Date(t * 1000).toLocaleDateString() : "—";
-  };
-
   async function toggleSimilar() {
     similarOpen = !similarOpen;
     if (!similarOpen || similarLoaded || similarLoading) return;
@@ -893,8 +881,8 @@
                         <td class="max-w-[16rem] truncate py-1 pr-2" title={hitLabel(h)}>{hitLabel(h)}</td>
                         <td class="pr-2 font-mono">{simPct(h)}</td>
                         <td class="pr-2 text-muted">{h.file_group ?? h.file_category ?? "—"}</td>
-                        <td class="pr-2 text-muted">{simSize(h)}</td>
-                        <td class="pr-2 text-muted">{simWhen(h)}</td>
+                        <td class="pr-2 text-muted">{typeof h.size === "number" ? fmtBytes(h.size) : "—"}</td>
+                        <td class="pr-2 text-muted">{fmtDate(typeof h.mtime === "number" ? h.mtime : null)}</td>
                         <td class="max-w-[18rem] truncate font-mono text-2xs text-muted" title={hitPath(h)}>{hitPath(h)}</td>
                       </tr>
                     {/each}

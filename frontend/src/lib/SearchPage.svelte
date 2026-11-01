@@ -13,6 +13,7 @@
 </script>
 
 <script lang="ts">
+  import { fmtBytes, fmtDate } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { listKeyAction } from "./searchKeys";
   import * as safeStorage from "./safeStorage";
@@ -1237,17 +1238,6 @@
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) loadMore();
   }
 
-  // ---- formatting ---------------------------------------------------------
-  function fmtBytes(b: number): string {
-    if (!isFinite(b) || b <= 0) return "0 B";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-  }
-  function fmtDate(epoch: number): string {
-    if (!isFinite(epoch) || epoch <= 0) return "—";
-    return new Date(epoch * 1000).toISOString().slice(0, 10);
-  }
   const activeDescendant = $derived(
     hits.length && hits[selectedIndex] ? `row-${hitId(hits[selectedIndex])}` : undefined,
   );
