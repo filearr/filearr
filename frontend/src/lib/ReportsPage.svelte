@@ -22,6 +22,7 @@
     type Library,
     errorMessage,
   } from "./api";
+  import { Alert, Button, Checkbox, DataTable, Field, Input, Popover, Select, StateBlock } from "./ui";
 
   // ------------------------------------------------------------------ //
   // P11 reporting v1 + polish — pick a canned report, run it (paginated  //
@@ -37,7 +38,12 @@
   let library = $state("");
   let page = $state<ReportPage | null>(null);
   let offset = $state(0);
+  // `listError`: the report registry load (in place of the list); `error`: a
+  // run (in place of the result table); `dlError`: a download/queue failure,
+  // under the Download menu.
+  let listError = $state("");
   let error = $state("");
+  let dlError = $state("");
   let loading = $state(false);
   let downloading = $state(false);
   let downloadOpen = $state(false);
@@ -148,6 +154,9 @@
     // `stale_files`) so the first run matches what the description promises.
     thresholdDays = r.default_threshold_days ?? 0;
     if (!r.supports_library) library = "";
+    // Another report's rows (and columns) must not linger dimmed while this
+    // one runs; paging the same report keeps its rows on screen.
+    page = null;
     await load();
   }
 
@@ -193,7 +202,7 @@
   async function download(format: ExportFormat) {
     if (!selected) return;
     downloadOpen = false;
-    error = "";
+    dlError = "";
     downloading = true;
     try {
       await downloadReport(selected.id, format, {
@@ -202,7 +211,7 @@
         thresholdDays: thresholdParam,
       });
     } catch (e) {
-      error = errorMessage(e);
+      dlError = errorMessage(e);
     } finally {
       downloading = false;
     }
@@ -212,7 +221,7 @@
     if (!selected) return;
     downloadOpen = false;
     queued = "";
-    error = "";
+    dlError = "";
     try {
       await enqueueReportExport(selected.id, format, {
         libraryId: selected.supports_library ? library || undefined : undefined,
@@ -220,225 +229,209 @@
       });
       queued = `Queued a background ${format.toUpperCase()} export — see the Exports panel below.`;
     } catch (e) {
-      error = errorMessage(e);
+      dlError = errorMessage(e);
     }
   }
 
-  onMount(async () => {
+  async function loadRegistry() {
+    listError = "";
     try {
       [reports, libs] = await Promise.all([listReports(), listLibraries()]);
     } catch (e) {
-      error = errorMessage(e);
+      listError = errorMessage(e);
     }
-  });
+  }
+  onMount(loadRegistry);
+
+  // DataTable columns for the current page: one per visible report column,
+  // plus the row_link action when the report has one.
+  const tableColumns = $derived([
+    ...visibleColumns.map((c) => ({
+      key: c,
+      label: c,
+      align: (BYTE_COLUMNS.has(c) ? "right" : "left") as "left" | "right",
+    })),
+    ...(rowActionLabel() ? [{ key: "__action", label: "Actions", align: "right" as const, cell: actionCell }] : []),
+  ]);
+  // Report rows carry no id; a row's index in the page is stable while shown.
+  const rowIndex = (row: Record<string, unknown>) => page?.rows.indexOf(row) ?? -1;
 </script>
 
+{#snippet actionCell(row: Record<string, unknown>)}
+  <Button size="sm" onclick={() => activateRow(row)} disabled={rowActionDisabled(row)}>
+    {rowActionLabel()}
+  </Button>
+{/snippet}
+
 <div class="grid grid-cols-1 gap-6 lg:grid-cols-[20rem_1fr]">
-  <!-- registry list -->
+  <!-- registry list: report tiles are bespoke selectable surfaces -->
   <aside class="space-y-2">
     <h2 class="text-lg font-semibold">Reports</h2>
+    {#if listError}
+      <StateBlock state="error" message={listError} onRetry={loadRegistry} compact />
+    {:else if reports.length === 0}
+      <StateBlock state="loading" message="Loading reports…" compact />
+    {/if}
     {#each reports as r (r.id)}
       <button
-        class="w-full rounded-lg border px-3 py-2 text-left text-sm transition
+        type="button"
+        class="w-full rounded-control border px-3 py-2 text-left text-sm transition
           {selected?.id === r.id
-          ? 'border-[var(--accent)] bg-[var(--accent)]/10'
-          : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}"
+          ? 'border-accent bg-accent/10'
+          : 'border-border hover:border-border-strong'}"
+        aria-pressed={selected?.id === r.id}
         onclick={() => select(r)}>
         <div class="font-medium">{r.title}</div>
-        <div class="mt-0.5 text-xs text-slate-500">{r.description}</div>
+        <div class="mt-0.5 text-xs text-muted">{r.description}</div>
       </button>
     {/each}
-    {#if reports.length === 0 && !error}
-      <p class="text-sm text-slate-500">Loading reports…</p>
-    {/if}
   </aside>
 
   <!-- result panel -->
   <section class="min-w-0">
-    {#if error}
-      <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-        {error}
-      </p>
-    {/if}
-    {#if queued}
-      <p class="mb-3 rounded-lg bg-green-100 px-3 py-2 text-sm text-green-800 dark:bg-green-950 dark:text-green-200">
-        {queued}
-      </p>
-    {/if}
-
     {#if !selected}
-      <p class="text-sm text-slate-500">Select a report to run it.</p>
+      <StateBlock state="empty" message="Select a report to run it." />
     {:else}
-      <div class="mb-3 flex flex-wrap items-center gap-3">
+      <div class="mb-3 flex flex-wrap items-end gap-3">
         <h3 class="text-base font-semibold">{selected.title}</h3>
         {#if selected.supports_library}
-          <select
-            class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-            bind:value={library}
-            onchange={() => { offset = 0; load(); }}>
-            <option value="">All libraries</option>
-            {#each libs as l (l.id)}
-              <option value={l.id}>{l.name}</option>
-            {/each}
-          </select>
+          <!-- Kit controls fill their parent: sizing wrapper. -->
+          <div>
+            <Select
+              size="sm"
+              aria-label="Filter by library"
+              bind:value={library}
+              onchange={() => { offset = 0; load(); }}>
+              <option value="">All libraries</option>
+              {#each libs as l (l.id)}
+                <option value={l.id}>{l.name}</option>
+              {/each}
+            </Select>
+          </div>
         {/if}
         {#if selected.supports_threshold}
           <!-- IN-T2 threshold. Rendered off the report's own metadata, with the
                report's own label ("Not modified in the last N days") — the page
                knows nothing about which report this is. -->
-          <label class="inline-flex items-center gap-1.5 text-xs text-slate-500">
-            {selected.threshold_label || "Threshold (days)"}
-            <input
-              type="number"
-              class="w-24 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
-              min="1"
-              max="36500"
-              step="1"
-              bind:value={thresholdDays}
-              onchange={() => { offset = 0; load(); }} />
-          </label>
+          <Field label={selected.threshold_label || "Threshold (days)"}>
+            <div class="w-24">
+              <Input
+                type="number"
+                size="sm"
+                min="1"
+                max="36500"
+                step="1"
+                bind:value={thresholdDays}
+                onchange={() => { offset = 0; load(); }} />
+            </div>
+          </Field>
         {/if}
         {#if hasWideColumns && !showTreemap}
-          <label class="inline-flex items-center gap-1.5 text-xs text-slate-500">
-            <input type="checkbox" bind:checked={showAllColumns} />
-            Show path columns
-          </label>
+          <Checkbox size="sm" label="Show path columns" bind:checked={showAllColumns} />
         {/if}
         {#if treemapAvailable}
           <!-- IN-T3 table/treemap toggle. Same chip-group convention as the
-               Search page's list/grid/map switch. -->
+               Search page's list/grid/map switch (segment chrome, not Buttons). -->
           <div
-            class="flex items-center overflow-hidden rounded-lg border border-slate-300 dark:border-slate-700"
+            class="flex items-center overflow-hidden rounded-control border border-border-strong"
             role="group"
             aria-label="Folder view">
             <button
               type="button"
-              class="px-3 py-1 text-sm {viewMode === 'table' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+              class="px-3 py-1 text-sm {viewMode === 'table' ? 'bg-accent text-accent-fg' : ''}"
               aria-pressed={viewMode === "table"}
               title="The canned report: a flat top-N of the largest folders across every depth"
               onclick={() => (viewMode = "table")}>Table</button>
             <button
               type="button"
-              class="px-3 py-1 text-sm {viewMode === 'treemap' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : ''}"
+              class="px-3 py-1 text-sm {viewMode === 'treemap' ? 'bg-accent text-accent-fg' : ''}"
               aria-pressed={viewMode === "treemap"}
               title="A drill-down map: one level at a time, cell area proportional to folder size"
               onclick={() => (viewMode = "treemap")}>Treemap</button>
           </div>
         {/if}
         <div class="grow"></div>
-        <!-- Download dropdown: CSV / NDJSON / XML streaming exports -->
-        <div class="relative">
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 text-sm disabled:opacity-50 dark:border-slate-700"
-            onclick={() => (downloadOpen = !downloadOpen)}
-            disabled={downloading}>
-            {downloading ? "Preparing…" : "Download ▾"}
-          </button>
-          {#if downloadOpen}
-            <div
-              class="absolute right-0 z-10 mt-1 w-32 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
-              {#each EXPORT_FORMATS as f (f)}
-                <button
-                  class="block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
-                  onclick={() => download(f)}>
-                  {f.toUpperCase()}
-                </button>
-              {/each}
-              <div class="border-t border-slate-200 dark:border-slate-700"></div>
-              {#each EXPORT_FORMATS as f (f)}
-                <button
-                  class="block w-full px-3 py-1.5 text-left text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                  onclick={() => queueBackground(f)}>
-                  Background {f.toUpperCase()}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
+        <!-- Download menu: CSV / NDJSON / XML streaming exports, plus the same
+             formats queued as background exports. -->
+        <Popover bind:open={downloadOpen} ariaLabel="Download" align="end" class="w-40 p-1">
+          {#snippet trigger({ props })}
+            <Button size="sm" {...props} disabled={downloading}>
+              {downloading ? "Preparing…" : "Download"}<span aria-hidden="true"> ▾</span>
+            </Button>
+          {/snippet}
+          {#each EXPORT_FORMATS as f (f)}
+            <button
+              type="button"
+              class="block w-full rounded-control px-3 py-1.5 text-left text-sm hover:bg-surface-3"
+              onclick={() => download(f)}>
+              {f.toUpperCase()}
+            </button>
+          {/each}
+          <div class="my-1 border-t border-border"></div>
+          {#each EXPORT_FORMATS as f (f)}
+            <button
+              type="button"
+              class="block w-full rounded-control px-3 py-1.5 text-left text-xs text-muted hover:bg-surface-3 hover:text-fg"
+              onclick={() => queueBackground(f)}>
+              Background {f.toUpperCase()}
+            </button>
+          {/each}
+        </Popover>
       </div>
+      {#if dlError}
+        <Alert tone="danger" class="mb-3" onDismiss={() => (dlError = "")}>{dlError}</Alert>
+      {/if}
+      {#if queued}
+        <Alert tone="ok" class="mb-3" onDismiss={() => (queued = "")}>{queued}</Alert>
+      {/if}
 
       {#if selected.id === "duplicate_files" || selected.id === "duplicate_files_detail"}
         <!-- The same amber caveat covers the per-COPY report (IN-T1): hash_tier
              rides every row there, and an operator about to feed the export to a
              delete script needs the sampled-vs-verified distinction in front of
-             them, not only in the docs. -->
-        <p class="mb-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          A <code>quick_hash</code> tier is a <strong>sampled signal, not
-          byte-verified</strong> — groups keyed on a partial (head+tail) hash may
-          include files that merely share those windows. A <code>content_hash</code>
-          tier is a full-hash-confirmed exact duplicate. Zero-byte files are
-          excluded.
-          {#if selected.id === "duplicate_files_detail"}
-            <strong>keep_hint</strong> is DATA, not a decision: rank 0 is simply the
-            newest copy in its group. Filearr never touches your files — export the
-            rows and let your own script act.
-          {/if}
-        </p>
+             them, not only in the docs. Standing caveat: no live role. -->
+        <Alert tone="warn" class="mb-3" live={false}>
+          <p class="text-xs">
+            A <code>quick_hash</code> tier is a <strong>sampled signal, not
+            byte-verified</strong> — groups keyed on a partial (head+tail) hash may
+            include files that merely share those windows. A <code>content_hash</code>
+            tier is a full-hash-confirmed exact duplicate. Zero-byte files are
+            excluded.
+            {#if selected.id === "duplicate_files_detail"}
+              <strong>keep_hint</strong> is DATA, not a decision: rank 0 is simply the
+              newest copy in its group. Filearr never touches your files — export the
+              rows and let your own script act.
+            {/if}
+          </p>
+        </Alert>
       {/if}
 
       {#if showTreemap}
         <!-- Treemap mode replaces the table only; the report selector, library
              filter and exports above stay exactly as they were. -->
         <FolderTreemap libraryId={selected.supports_library ? library : ""} />
-      {:else if loading}
-        <p class="text-sm text-slate-500">Running…</p>
-      {:else if page}
-        <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-          <table class="w-full text-sm">
-            <thead class="bg-slate-50 text-left dark:bg-slate-900">
-              <tr>
-                {#each visibleColumns as col (col)}
-                  <th class="px-3 py-2 font-medium">{col}</th>
-                {/each}
-                {#if rowActionLabel()}
-                  <th class="px-3 py-2 font-medium"></th>
-                {/if}
-              </tr>
-            </thead>
-            <tbody>
-              {#each page.rows as row, i (i)}
-                <tr class="border-t border-slate-100 dark:border-slate-800">
-                  {#each visibleColumns as col (col)}
-                    <td class="px-3 py-1.5 align-top {BYTE_COLUMNS.has(col) ? 'tabular-nums' : ''}">
-                      {cell(row, col)}
-                    </td>
-                  {/each}
-                  {#if rowActionLabel()}
-                    <td class="px-3 py-1 align-top text-right">
-                      <button
-                        class="rounded border border-slate-300 px-2 py-0.5 text-xs text-[var(--accent)] disabled:opacity-40 dark:border-slate-700"
-                        onclick={() => activateRow(row)}
-                        disabled={rowActionDisabled(row)}>
-                        {rowActionLabel()}
-                      </button>
-                    </td>
-                  {/if}
-                </tr>
-              {/each}
-              {#if page.rows.length === 0}
-                <tr>
-                  <td
-                    class="px-3 py-3 text-slate-500"
-                    colspan={visibleColumns.length + (rowActionLabel() ? 1 : 0)}>
-                    No rows.
-                  </td>
-                </tr>
-              {/if}
-            </tbody>
-          </table>
-        </div>
+      {:else}
+        <DataTable
+          caption="{selected.title} results"
+          captionHidden
+          columns={tableColumns}
+          rows={page?.rows ?? []}
+          rowKey={rowIndex}
+          accessor={(row, k) => cell(row, k)}
+          {loading}
+          error={error || null}
+          onRetry={load}
+          emptyMessage="No rows. Change the library filter or threshold, or pick another report." />
 
-        <div class="mt-3 flex items-center gap-3 text-sm">
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 disabled:opacity-40 dark:border-slate-700"
-            onclick={prevPage} disabled={offset <= 0}>Previous</button>
-          <span class="text-slate-500">
-            rows {page.count === 0 ? 0 : offset + 1}–{offset + page.count}
-          </span>
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 disabled:opacity-40 dark:border-slate-700"
-            onclick={nextPage} disabled={!page.has_more}>Next</button>
-        </div>
+        {#if page}
+          <div class="mt-3 flex items-center gap-3 text-sm">
+            <Button size="sm" onclick={prevPage} disabled={offset <= 0 || loading}>Previous</Button>
+            <span class="text-muted">
+              rows {page.count === 0 ? 0 : offset + 1}–{offset + page.count}
+            </span>
+            <Button size="sm" onclick={nextPage} disabled={!page.has_more || loading}>Next</Button>
+          </div>
+        {/if}
       {/if}
     {/if}
   </section>

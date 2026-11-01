@@ -17,6 +17,7 @@
     type ExportFormat,
     errorMessage,
   } from "./api";
+  import { Alert, Button, DataTable, Field, Input, Select, confirm, type SortState } from "./ui";
 
   // P11-T9 — schedule manager: list/create/toggle/delete scheduled report
   // deliveries. The cron is authored with the shared friendly ScheduleField
@@ -26,8 +27,15 @@
   let canned = $state<ReportMeta[]>([]);
   let custom = $state<ReportDefinition[]>([]);
   let channels = $state<AlertChannel[]>([]);
+  // `error` is the list load; `createError` sits under Create; `rowError`
+  // holds a toggle/delete failure per schedule, shown under the table.
   let error = $state("");
+  let loading = $state(true);
+  let loaded = $state(false);
+  let createError = $state("");
+  let rowError = $state<Record<string, string>>({});
   let creating = $state(false);
+  let sort = $state<SortState>(null);
 
   // create form
   let name = $state("");
@@ -45,8 +53,11 @@
         listAlertChannels().catch(() => [] as AlertChannel[]),
       ]);
       error = "";
+      loaded = true;
     } catch (e) {
       error = errorMessage(e);
+    } finally {
+      loading = false;
     }
   }
 
@@ -64,11 +75,11 @@
 
   async function create() {
     if (!name.trim() || !source || !cron) {
-      error = "Name, report, and a schedule are required.";
+      createError = "Name, report, and a schedule are required.";
       return;
     }
     creating = true;
-    error = "";
+    createError = "";
     try {
       const [kind, id] = source.split(":");
       await createReportSchedule({
@@ -85,103 +96,106 @@
       channelId = "";
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "manage report schedules" });
+      createError = errorMessage(e, { verb: "manage report schedules" });
     } finally {
       creating = false;
     }
   }
 
   async function toggle(s: ReportSchedule) {
+    rowError[s.id] = "";
     try {
       await updateReportSchedule(s.id, { enabled: !s.enabled });
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "manage report schedules" });
+      rowError[s.id] = errorMessage(e, { verb: "manage report schedules" });
     }
   }
 
   async function remove(s: ReportSchedule) {
-    if (!confirm(`Delete schedule "${s.name}"?`)) return;
+    const ok = await confirm({
+      title: "Delete schedule?",
+      message: `Delete schedule "${s.name}"?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    rowError[s.id] = "";
     try {
       await deleteReportSchedule(s.id);
       await refresh();
     } catch (e) {
-      error = errorMessage(e, { verb: "manage report schedules" });
+      rowError[s.id] = errorMessage(e, { verb: "manage report schedules" });
     }
+  }
+
+  // Sort keys for the computed columns read the same labels the cells show.
+  function sortValue(s: ReportSchedule, key: string): unknown {
+    if (key === "report") return sourceLabel(s);
+    if (key === "channel") return channelLabel(s.channel_id);
+    return (s as unknown as Record<string, unknown>)[key];
   }
 
   onMount(refresh);
 </script>
 
+{#snippet formatCell(s: ReportSchedule)}<span class="uppercase">{s.format}</span>{/snippet}
+{#snippet cronCell(s: ReportSchedule)}<span class="font-mono text-xs">{s.cron}</span>{/snippet}
+{#snippet enabledCell(s: ReportSchedule)}
+  <Button size="sm" onclick={() => toggle(s)} title={s.enabled ? "Click to disable" : "Click to enable"}>
+    {s.enabled ? "On" : "Off"}
+  </Button>
+{/snippet}
+{#snippet actionsCell(s: ReportSchedule)}
+  <Button size="sm" variant="danger" onclick={() => remove(s)} aria-label="Delete {s.name}">Delete</Button>
+{/snippet}
+
 <section class="mt-8">
   <h2 class="mb-3 text-lg font-semibold">Scheduled reports</h2>
 
-  {#if error}
-    <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-      {error}
-    </p>
+  {#if error && loaded}
+    <!-- A failed refresh after a change keeps the last list on screen. -->
+    <Alert tone="danger" class="mb-3" onDismiss={() => (error = "")}>{error}</Alert>
   {/if}
 
   <!-- existing schedules -->
-  {#if schedules.length > 0}
-    <div class="mb-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-      <table class="w-full text-sm">
-        <thead class="bg-slate-50 text-left dark:bg-slate-900">
-          <tr>
-            <th class="px-3 py-2 font-medium">Name</th>
-            <th class="px-3 py-2 font-medium">Report</th>
-            <th class="px-3 py-2 font-medium">Format</th>
-            <th class="px-3 py-2 font-medium">Cron (UTC)</th>
-            <th class="px-3 py-2 font-medium">Channel</th>
-            <th class="px-3 py-2 font-medium">Enabled</th>
-            <th class="px-3 py-2 font-medium"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each schedules as s (s.id)}
-            <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="px-3 py-1.5">{s.name}</td>
-              <td class="px-3 py-1.5">{sourceLabel(s)}</td>
-              <td class="px-3 py-1.5 uppercase">{s.format}</td>
-              <td class="px-3 py-1.5 font-mono text-xs">{s.cron}</td>
-              <td class="px-3 py-1.5">{channelLabel(s.channel_id)}</td>
-              <td class="px-3 py-1.5">
-                <button
-                  class="rounded border border-slate-300 px-2 py-0.5 text-xs dark:border-slate-700"
-                  onclick={() => toggle(s)}>
-                  {s.enabled ? "On" : "Off"}
-                </button>
-              </td>
-              <td class="px-3 py-1 text-right">
-                <button
-                  class="rounded border border-slate-300 px-2 py-0.5 text-xs text-red-600 dark:border-slate-700"
-                  onclick={() => remove(s)}>Delete</button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {:else}
-    <p class="mb-4 text-sm text-slate-500">No scheduled reports yet.</p>
-  {/if}
+  <DataTable
+    class="mb-4"
+    caption="Scheduled reports"
+    captionHidden
+    columns={[
+      { key: "name", label: "Name", sortable: true },
+      { key: "report", label: "Report", sortable: true },
+      { key: "format", label: "Format", sortable: true, cell: formatCell },
+      { key: "cron", label: "Cron (UTC)", cell: cronCell },
+      { key: "channel", label: "Channel", sortable: true },
+      { key: "enabled", label: "Enabled", sortable: true, cell: enabledCell },
+      { key: "actions", label: "Actions", align: "right", cell: actionsCell },
+    ]}
+    rows={schedules}
+    rowKey={(s) => s.id}
+    accessor={sortValue}
+    bind:sort
+    {loading}
+    error={loaded ? null : error || null}
+    onRetry={refresh}
+    emptyMessage="No scheduled reports yet. Create one below to deliver a report on a cron schedule."
+  />
+  {#each schedules as s (s.id)}
+    {#if rowError[s.id]}
+      <Alert tone="danger" class="mb-2" onDismiss={() => (rowError[s.id] = "")}>{s.name}: {rowError[s.id]}</Alert>
+    {/if}
+  {/each}
 
   <!-- create form -->
-  <div class="space-y-3 rounded-lg border border-slate-200 p-4 dark:border-slate-800">
+  <div class="space-y-3 rounded-panel border border-border p-4">
     <h3 class="text-sm font-semibold">New schedule</h3>
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <label class="block text-sm">
-        <span class="text-slate-500">Name</span>
-        <input
-          class="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-          bind:value={name}
-          placeholder="Weekly largest files" />
-      </label>
-      <label class="block text-sm">
-        <span class="text-slate-500">Report</span>
-        <select
-          class="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-          bind:value={source}>
+      <Field label="Name" required>
+        <Input bind:value={name} placeholder="Weekly largest files" />
+      </Field>
+      <Field label="Report" required>
+        <Select bind:value={source}>
           <option value="">Select a report…</option>
           <optgroup label="Canned">
             {#each canned as r (r.id)}
@@ -195,39 +209,35 @@
               {/each}
             </optgroup>
           {/if}
-        </select>
-      </label>
-      <label class="block text-sm">
-        <span class="text-slate-500">Format</span>
-        <select
-          class="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-          bind:value={format}>
+        </Select>
+      </Field>
+      <Field label="Format">
+        <Select bind:value={format}>
           {#each EXPORT_FORMATS as f (f)}
             <option value={f}>{f.toUpperCase()}</option>
           {/each}
-        </select>
-      </label>
-      <label class="block text-sm">
-        <span class="text-slate-500">Deliver to channel</span>
-        <select
-          class="mt-1 w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-          bind:value={channelId}>
+        </Select>
+      </Field>
+      <Field label="Deliver to channel">
+        <Select bind:value={channelId}>
           <option value="">No channel (generate only)</option>
           {#each channels as c (c.id)}
             <option value={c.id}>{c.name} ({c.type})</option>
           {/each}
-        </select>
-      </label>
+        </Select>
+      </Field>
     </div>
     <div class="text-sm">
-      <span class="text-slate-500">Schedule</span>
+      <span class="text-xs font-medium text-fg">Schedule</span>
       <ScheduleField value={cron} onChange={(c) => (cron = c)} />
     </div>
-    <button
-      class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
-      onclick={create}
-      disabled={creating}>
-      {creating ? "Creating…" : "Create schedule"}
-    </button>
+    <div>
+      <Button variant="primary" onclick={create} disabled={creating}>
+        {creating ? "Creating…" : "Create schedule"}
+      </Button>
+      {#if createError}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (createError = "")}>{createError}</Alert>
+      {/if}
+    </div>
   </div>
 </section>

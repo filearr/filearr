@@ -21,6 +21,7 @@
     type CustomRunPage,
     errorMessage,
   } from "./api";
+  import { Alert, Button, Checkbox, DataTable, Field, Input, Popover, Select, StateBlock, confirm } from "./ui";
 
   // ------------------------------------------------------------------ //
   // P11 custom (saved-query) reports. A report is a querydsl string +   //
@@ -30,7 +31,14 @@
 
   let defs = $state<ReportDefinition[]>([]);
   let registry = $state<ColumnRegistry | null>(null);
-  let error = $state("");
+  // Errors by origin: `listError` is the definitions load (in place of the
+  // list), `saveError` sits under Save, `rowError` holds a Copy/Download/
+  // Delete failure under its report's row, `runError` replaces the result.
+  let listError = $state("");
+  let loaded = $state(false);
+  let saveError = $state("");
+  let rowError = $state<Record<string, string>>({});
+  let runError = $state("");
 
   // form state
   let showForm = $state(false);
@@ -143,6 +151,7 @@
     fFormat = "csv";
     vErrors = [];
     vOk = true;
+    saveError = "";
     showForm = true;
   }
   function openEdit(d: ReportDefinition) {
@@ -155,6 +164,7 @@
     fFormat = d.format;
     vErrors = [];
     vOk = true;
+    saveError = "";
     showForm = true;
     scheduleValidate();
   }
@@ -165,13 +175,13 @@
 
   // Round-trip to the visual builder: parse this report's DSL back into rows.
   async function copyReport(d: ReportDefinition) {
-    error = "";
+    rowError[d.id] = "";
     try {
       const copy = await copyCustomReport(d.id);
       defs = await listCustomReports();
       openEdit(copy); // land straight in the edit form: copy-and-edit in one click
     } catch (e) {
-      error = errorMessage(e);
+      rowError[d.id] = errorMessage(e);
     }
   }
 
@@ -181,7 +191,7 @@
   }
 
   async function save() {
-    error = "";
+    saveError = "";
     saving = true;
     try {
       const body = {
@@ -196,15 +206,21 @@
       editingId = null;
       defs = await listCustomReports();
     } catch (e) {
-      error = errorMessage(e, { verb: "save this report" });
+      saveError = errorMessage(e, { verb: "save this report" });
     } finally {
       saving = false;
     }
   }
 
   async function remove(d: ReportDefinition) {
-    if (!confirm(`Delete custom report “${d.name}”?`)) return;
-    error = "";
+    const ok = await confirm({
+      title: "Delete custom report?",
+      message: `Delete custom report “${d.name}”?`,
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    rowError[d.id] = "";
     try {
       await deleteCustomReport(d.id);
       if (runId === d.id) {
@@ -213,20 +229,22 @@
       }
       defs = await listCustomReports();
     } catch (e) {
-      error = errorMessage(e, { verb: "delete this report" });
+      rowError[d.id] = errorMessage(e, { verb: "delete this report" });
     }
   }
 
   async function run(d: ReportDefinition, offset = 0) {
-    error = "";
+    runError = "";
     running = true;
+    // A different report's rows must not linger dimmed under this one's title.
+    if (runId !== d.id) runPage = null;
     runId = d.id;
     runName = d.name;
     runOffset = offset;
     try {
       runPage = await runCustomReport(d.id, { limit: RUN_LIMIT, offset });
     } catch (e) {
-      error = errorMessage(e);
+      runError = errorMessage(e);
       runPage = null;
     } finally {
       running = false;
@@ -235,23 +253,46 @@
 
   async function download(d: ReportDefinition, format: ExportFormat) {
     downloadMenuId = null;
-    error = "";
+    rowError[d.id] = "";
     try {
       await downloadCustomReport(d.id, d.name, format);
     } catch (e) {
-      error = errorMessage(e);
+      rowError[d.id] = errorMessage(e);
     }
   }
 
-  onMount(async () => {
+  // Paging / retry re-run the report currently shown, at a given offset.
+  function rerun(offset: number) {
+    const d = defs.find((x) => x.id === runId);
+    if (d) run(d, offset);
+  }
+
+  // Run rows carry no id; a row's index in the page is stable while shown.
+  const runRowIndex = (row: Record<string, unknown>) => runPage?.rows.indexOf(row) ?? -1;
+  const runColumns = $derived([
+    ...(runPage?.columns ?? []).map((c) => ({
+      key: c,
+      label: c,
+      align: (BYTE_COLUMNS.has(c) ? "right" : "left") as "left" | "right",
+    })),
+    { key: "__open", label: "Actions", align: "right" as const, cell: openCell },
+  ]);
+
+  async function loadDefs() {
+    listError = "";
     try {
       [defs, registry] = await Promise.all([
         listCustomReports(),
         getColumnRegistry(),
       ]);
+      loaded = true;
     } catch (e) {
-      error = errorMessage(e);
+      listError = errorMessage(e);
     }
+  }
+
+  onMount(async () => {
+    await loadDefs();
     // Handoff from the filter builder ("Save as custom report"): open the create
     // form pre-filled with the compiled DSL + a sensible column projection.
     const pf = takeReportPrefill();
@@ -269,136 +310,132 @@
   });
 </script>
 
-<div class="mt-8 border-t border-slate-200 pt-6 dark:border-slate-800">
+{#snippet openCell(row: Record<string, unknown>)}
+  <Button size="sm" onclick={() => row.item_id && (detailId = String(row.item_id))} disabled={!row.item_id}>Open</Button>
+{/snippet}
+
+<div class="mt-8 border-t border-border pt-6">
   <div class="mb-3 flex items-center gap-3">
     <h2 class="text-lg font-semibold">Custom reports</h2>
     <div class="grow"></div>
-    <button
-      class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)]"
-      onclick={openCreate}>New custom report</button>
+    <Button variant="primary" size="sm" onclick={openCreate}>New custom report</Button>
   </div>
-
-  {#if error}
-    <p class="mb-3 rounded-lg bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-      {error}
-    </p>
-  {/if}
 
   <!-- create / edit form -->
   {#if showForm}
-    <div class="mb-5 rounded-lg border border-slate-300 p-4 dark:border-slate-700">
+    <div class="mb-5 rounded-panel border border-border-strong p-4">
       <div class="grid gap-3 sm:grid-cols-2">
-        <label class="text-sm">
-          <span class="mb-1 block text-slate-500">Name</span>
-          <input
-            class="w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-            bind:value={fName} placeholder="e.g. Low-res videos" />
-        </label>
-        <label class="text-sm">
-          <span class="mb-1 block text-slate-500">Default format</span>
-          <select
-            class="w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 dark:border-slate-700"
-            bind:value={fFormat}>
+        <Field label="Name" required>
+          <Input bind:value={fName} placeholder="e.g. Low-res videos" />
+        </Field>
+        <Field label="Default format">
+          <Select bind:value={fFormat}>
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
-          </select>
-        </label>
+          </Select>
+        </Field>
       </div>
 
-      <label class="mt-3 block text-sm">
-        <span class="mb-1 block text-slate-500">Query (filter DSL)</span>
-        <input
-          class="w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono dark:border-slate-700"
+      <Field label="Query (filter DSL)" class="mt-3">
+        <Input
+          class="font-mono"
           bind:value={fQuery}
           oninput={scheduleValidate}
           placeholder="kind:video meta.height:>=1080 -tag:archived" />
-      </label>
+      </Field>
       <DslHelp onInsert={insertDsl} context="reports" />
 
-      <div class="mt-3 text-sm">
-        <span class="mb-1 block text-slate-500">Columns</span>
-        <div class="flex flex-wrap gap-x-4 gap-y-1">
+      <fieldset class="mt-3 text-sm">
+        <legend class="mb-1 text-xs font-medium text-fg">Columns</legend>
+        <div class="flex flex-wrap gap-x-4 gap-y-1 font-mono">
           {#each registryColumns() as c (c)}
-            <label class="inline-flex items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={fSelected.has(c)}
-                onchange={() => toggleColumn(c)} />
-              <span class="font-mono text-xs">{c}</span>
-            </label>
+            <Checkbox size="sm" label={c} checked={fSelected.has(c)} onchange={() => toggleColumn(c)} />
           {/each}
         </div>
-        <label class="mt-2 block">
-          <span class="mb-1 block text-xs text-slate-500">
-            Extra meta./cf. columns (comma-separated)
-          </span>
-          <input
-            class="w-full rounded-lg border border-slate-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-slate-700"
+        <Field label="Extra meta./cf. columns (comma-separated)" class="mt-2">
+          <Input
+            size="sm"
+            class="font-mono"
             bind:value={fExtra}
             oninput={scheduleValidate}
             placeholder="meta.video_codec, meta.bitrate" />
-        </label>
-      </div>
+        </Field>
+      </fieldset>
 
       {#if vErrors.length}
-        <ul class="mt-3 space-y-1">
-          {#each vErrors as e, i (i)}
-            <li class="rounded bg-amber-100 px-2 py-1 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
-              {errText(e)}
-            </li>
-          {/each}
-        </ul>
+        <!-- Live validation as you type: shown, not announced on every keystroke. -->
+        <Alert tone="warn" class="mt-3" live={false}>
+          <ul class="space-y-1 text-xs">
+            {#each vErrors as e, i (i)}
+              <li>{errText(e)}</li>
+            {/each}
+          </ul>
+        </Alert>
       {:else if fQuery || formColumns().length}
-        <p class="mt-3 text-xs text-emerald-600 dark:text-emerald-400">Query is valid.</p>
+        <p class="mt-3 text-xs text-ok">Query is valid.</p>
       {/if}
 
       <div class="mt-4 flex items-center gap-2">
-        <button
-          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm text-[var(--accent-fg)] disabled:opacity-50"
+        <Button
+          variant="primary"
+          size="sm"
           onclick={save}
           disabled={saving || !vOk || !fName || !formColumns().length}>
           {saving ? "Saving…" : editingId ? "Save changes" : "Create"}
-        </button>
-        <button
-          class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-          onclick={cancelForm}>Cancel</button>
+        </Button>
+        <Button size="sm" onclick={cancelForm}>Cancel</Button>
       </div>
+      {#if saveError}
+        <Alert tone="danger" class="mt-2" onDismiss={() => (saveError = "")}>{saveError}</Alert>
+      {/if}
     </div>
   {/if}
 
   <!-- definitions list -->
-  {#if defs.length === 0}
-    <p class="text-sm text-slate-500">No custom reports yet.</p>
+  {#if listError}
+    <StateBlock state="error" message={listError} onRetry={loadDefs} />
+  {:else if !loaded}
+    <StateBlock state="loading" />
+  {:else if defs.length === 0}
+    <StateBlock
+      state="empty"
+      message="No custom reports yet. Use New custom report (or Save as custom report in the filter builder) to save a query." />
   {:else}
     <div class="space-y-2">
       {#each defs as d (d.id)}
-        <div class="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-700">
-          <div class="min-w-0">
-            <div class="font-medium">{d.name}</div>
-            <div class="truncate font-mono text-xs text-slate-500">{d.query || "(all items)"}</div>
+        <div class="rounded-control border border-border px-3 py-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="min-w-0">
+              <div class="font-medium">{d.name}</div>
+              <div class="truncate font-mono text-xs text-muted">{d.query || "(all items)"}</div>
+            </div>
+            <div class="grow"></div>
+            <Button size="sm" onclick={() => run(d)}>Run</Button>
+            <Popover
+              bind:open={() => downloadMenuId === d.id, (v) => (downloadMenuId = v ? d.id : null)}
+              label="Download"
+              ariaLabel="Download {d.name}"
+              size="sm"
+              align="end"
+              class="w-32 p-1">
+              {#each EXPORT_FORMATS as f (f)}
+                <button
+                  type="button"
+                  class="block w-full rounded-control px-3 py-1.5 text-left text-sm hover:bg-surface-3"
+                  onclick={() => download(d, f)}>{f.toUpperCase()}</button>
+              {/each}
+            </Popover>
+            <Button
+              size="sm"
+              title="Clone this report and open the clone for editing — the original is untouched"
+              onclick={() => copyReport(d)}>Copy</Button>
+            <Button size="sm" onclick={() => editInBuilder(d)}>Edit in builder</Button>
+            <Button size="sm" onclick={() => openEdit(d)}>Edit</Button>
+            <Button size="sm" variant="danger" onclick={() => remove(d)}>Delete</Button>
           </div>
-          <div class="grow"></div>
-          <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={() => run(d)}>Run</button>
-          <div class="relative">
-            <button
-              class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-              onclick={() => (downloadMenuId = downloadMenuId === d.id ? null : d.id)}>Download ▾</button>
-            {#if downloadMenuId === d.id}
-              <div class="absolute right-0 z-10 mt-1 w-32 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
-                {#each EXPORT_FORMATS as f (f)}
-                  <button
-                    class="block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800"
-                    onclick={() => download(d, f)}>{f.toUpperCase()}</button>
-                {/each}
-              </div>
-            {/if}
-          </div>
-          <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
-            title="Clone this report and open the clone for editing — the original is untouched"
-            onclick={() => copyReport(d)}>Copy</button>
-          <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={() => editInBuilder(d)}>Edit in builder</button>
-          <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700" onclick={() => openEdit(d)}>Edit</button>
-          <button class="rounded-lg border border-red-300 px-3 py-1 text-sm text-red-700 dark:border-red-800 dark:text-red-300" onclick={() => remove(d)}>Delete</button>
+          {#if rowError[d.id]}
+            <Alert tone="danger" class="mt-2" onDismiss={() => (rowError[d.id] = "")}>{rowError[d.id]}</Alert>
+          {/if}
         </div>
       {/each}
     </div>
@@ -408,53 +445,30 @@
   {#if runId}
     <div class="mt-5">
       <h3 class="mb-2 text-base font-semibold">Result — {runName}</h3>
-      {#if running}
-        <p class="text-sm text-slate-500">Running…</p>
-      {:else if runPage}
-        <div class="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-          <table class="w-full text-sm">
-            <thead class="bg-slate-50 text-left dark:bg-slate-900">
-              <tr>
-                {#each runPage.columns as col (col)}
-                  <th class="px-3 py-2 font-medium">{col}</th>
-                {/each}
-                <th class="px-3 py-2 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each runPage.rows as row, i (i)}
-                <tr class="border-t border-slate-100 dark:border-slate-800">
-                  {#each runPage.columns as col (col)}
-                    <td class="px-3 py-1.5 align-top {BYTE_COLUMNS.has(col) ? 'tabular-nums' : ''}">
-                      {cell(row, col)}
-                    </td>
-                  {/each}
-                  <td class="px-3 py-1 align-top text-right">
-                    <button
-                      class="rounded border border-slate-300 px-2 py-0.5 text-xs text-[var(--accent)] disabled:opacity-40 dark:border-slate-700"
-                      onclick={() => row.item_id && (detailId = String(row.item_id))}
-                      disabled={!row.item_id}>Open</button>
-                  </td>
-                </tr>
-              {/each}
-              {#if runPage.rows.length === 0}
-                <tr><td class="px-3 py-3 text-slate-500" colspan={runPage.columns.length + 1}>No rows.</td></tr>
-              {/if}
-            </tbody>
-          </table>
-        </div>
+      <DataTable
+        caption="Result — {runName}"
+        captionHidden
+        columns={runColumns}
+        rows={runPage?.rows ?? []}
+        rowKey={runRowIndex}
+        accessor={(row, k) => cell(row, k)}
+        loading={running}
+        error={runError || null}
+        onRetry={() => rerun(runOffset)}
+        emptyMessage="No rows match this report's query. Edit the query to widen it." />
+      {#if runPage}
         <div class="mt-3 flex items-center gap-3 text-sm">
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 disabled:opacity-40 dark:border-slate-700"
-            onclick={() => defs.find((x) => x.id === runId) && run(defs.find((x) => x.id === runId)!, Math.max(0, runOffset - RUN_LIMIT))}
-            disabled={runOffset <= 0}>Previous</button>
-          <span class="text-slate-500">
+          <Button
+            size="sm"
+            onclick={() => rerun(Math.max(0, runOffset - RUN_LIMIT))}
+            disabled={runOffset <= 0 || running}>Previous</Button>
+          <span class="text-muted">
             rows {runPage.count === 0 ? 0 : runOffset + 1}–{runOffset + runPage.count}
           </span>
-          <button
-            class="rounded-lg border border-slate-300 px-3 py-1 disabled:opacity-40 dark:border-slate-700"
-            onclick={() => defs.find((x) => x.id === runId) && run(defs.find((x) => x.id === runId)!, runOffset + RUN_LIMIT)}
-            disabled={!runPage.has_more}>Next</button>
+          <Button
+            size="sm"
+            onclick={() => rerun(runOffset + RUN_LIMIT)}
+            disabled={!runPage.has_more || running}>Next</Button>
         </div>
       {/if}
     </div>
