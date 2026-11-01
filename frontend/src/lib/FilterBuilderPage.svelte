@@ -578,7 +578,7 @@
 
         <Button size="sm" class="mt-3" onclick={addRow}>+ Add condition</Button>
         <p class="mt-1 text-xs text-muted">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
-        <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="search" />
+        <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="reports" />
       {/if}
 
       <!-- compiled DSL preview -->

@@ -62,6 +62,7 @@
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import { encodeSearchHash, parseSearchHash } from "./searchparams";
+  import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
   import {
     MAP_POINT_CAP,
     boxParams,
@@ -116,6 +117,22 @@
   const HASH_RE = /^[0-9a-f]{16,64}$/;
 
   let q = $state("");
+  // P6 (A2): /search passes q to Meilisearch verbatim, so the translatable DSL
+  // operators (kind:/group:/ext:/size:/modified:/tag:) are lifted into flat params by
+  // searchDsl.ts. This live reading drives the "from query" chips and the
+  // unsupported-term notice; buildParams() re-translates at request time.
+  const dsl = $derived(HASH_RE.test(q.trim()) ? dslToParams("") : dslToParams(q));
+  // The notice is dismissable per SET of unsupported tokens: typing a different
+  // unsupported term brings it back.
+  const unsupportedKey = $derived([...new Set(dsl.unsupported)].sort().join("\n"));
+  let dismissedUnsupported = $state("");
+  // Zero results: name the unsupported terms first — they are the likely cause.
+  const noMatchesMessage = $derived.by(() => {
+    const u = dsl.unsupported;
+    if (!u.length) return "No matches. Try fewer words, remove a filter chip, or set Match in to everything.";
+    const one = u.length === 1;
+    return `No matches. ${u.map((t) => `\`${t}\``).join(", ")} ${one ? "is" : "are"} not supported in search — remove ${one ? "it" : "them"} or see the query help.`;
+  });
   // W8 file taxonomy filters. Both multi-select; each rides the deep-link hash as
   // one comma-joined value and api.search() expands it into a repeatable param.
   // Empty set = "all". Options populated from GET /taxonomy (see onMount).
@@ -498,7 +515,8 @@
   }
 
   // ---- query params -------------------------------------------------------
-  function buildParams(): Record<string, string> {
+  // The UI state as typed: q carries any DSL verbatim (see currentParams()).
+  function uiParams(): Record<string, string> {
     const term = q.trim();
     hashMode = HASH_RE.test(term);
     const p: Record<string, string> = {};
@@ -541,12 +559,23 @@
     return p;
   }
 
-  // The current, non-empty param bundle — what a saved search stores and what the
-  // URL hash reflects (deep-linkable). Identical shape to the backend /search
-  // params, so save -> apply -> /search replays byte-identically server-side.
+  // What /search (results, paging, map) receives: the UI params with the query DSL translated
+  // (searchDsl.ts). DSL list params union with the chips, the DSL extension and
+  // ranges win over the chip and sliders, and q loses the translated and
+  // unsupported tokens. A query without DSL tokens is returned untouched.
+  function buildParams(): Record<string, string> {
+    const p = uiParams();
+    return hashMode ? p : mergeDslParams(p, dslToParams(q));
+  }
+
+  // The current, non-empty UI param bundle — what the URL hash reflects and a
+  // saved search stores. It keeps the query AS TYPED and carries none of the
+  // DSL-derived params (chips still contribute theirs), so a relative
+  // `modified:>7d` is never frozen into a date: the DSL is re-translated by
+  // buildParams() on every request, including after applying a saved search.
   function currentParams(): Record<string, string> {
     return Object.fromEntries(
-      Object.entries(buildParams()).filter(([, v]) => v !== ""),
+      Object.entries(uiParams()).filter(([, v]) => v !== ""),
     );
   }
 
@@ -1108,7 +1137,8 @@
   }
 
   // Active filters rendered as removable chips (P3-T4). Each carries a clearer.
-  type Chip = { key: string; label: string; clear: () => void };
+  // DSL-derived chips carry no clearer: the way to clear one is editing the query.
+  type Chip = { key: string; label: string; clear?: () => void };
   const activeFilters = $derived.by<Chip[]>(() => {
     const out: Chip[] = [];
     for (const c of selectedCategories) out.push({ key: `fc:${c}`, label: `category: ${categoryLabel(c)}`, clear: () => toggleCategory(c) });
@@ -1126,8 +1156,28 @@
     if (geoBox) out.push({ key: "geo", label: `area ${formatBox(geoBox)}`, clear: () => onMapBox(null) });
     if (sizeActive) out.push({ key: "size", label: `size ${fmtBytes(sizeLo)}–${fmtBytes(sizeHi)}`, clear: snapSize });
     if (mtimeActive) out.push({ key: "mtime", label: `date ${fmtDate(mtimeLo)}–${fmtDate(mtimeHi)}`, clear: snapMtime });
+    out.push(...dslChips(dsl.params));
     return out;
   });
+
+  // "from query: …" chips for the filters searchDsl.ts lifted out of q.
+  function dslChips(d: DslResult["params"]): Chip[] {
+    const out: Chip[] = [];
+    const list = (v: string | undefined) => (v ? v.split(",") : []);
+    const range = (lo: string | undefined, hi: string | undefined, f: (n: number) => string) =>
+      lo && hi ? `${f(Number(lo))}–${f(Number(hi))}` : lo ? `≥ ${f(Number(lo))}` : `≤ ${f(Number(hi))}`;
+    for (const c of list(d.file_category)) out.push({ key: `dsl:fc:${c}`, label: `from query: kind ${c}` });
+    for (const g of list(d.file_group)) out.push({ key: `dsl:fg:${g}`, label: `from query: group ${g}` });
+    if (d.extension) out.push({ key: "dsl:ext", label: `from query: ext ${d.extension}` });
+    for (const t of list(d.tags)) out.push({ key: `dsl:tag:${t}`, label: `from query: tag ${t}` });
+    if (d.size_gte || d.size_lte) {
+      out.push({ key: "dsl:size", label: `from query: size ${range(d.size_gte, d.size_lte, (n) => fmtBytes(n))}` });
+    }
+    if (d.mtime_gte || d.mtime_lte) {
+      out.push({ key: "dsl:mtime", label: `from query: modified ${range(d.mtime_gte, d.mtime_lte, fmtDate)}` });
+    }
+    return out;
+  }
 
   // ---- keyboard nav -------------------------------------------------------
   function inEditable(el: Element | null): boolean {
@@ -1324,6 +1374,13 @@
     bind:value={q}
     oninput={onInput}
   />
+  {#if unsupportedKey && unsupportedKey !== dismissedUnsupported}
+    <Alert tone="warn" live={false} class="mt-2" onDismiss={() => (dismissedUnsupported = unsupportedKey)}>
+      Not supported in search:
+      {#each dsl.unsupported as tok, i (i)}{#if i > 0}{", "}{/if}<code class="font-mono">{tok}</code>{/each}
+      — see the query help.
+    </Alert>
+  {/if}
 
   <!-- W8 file_category chips (coarse, MULTI-select) with live facet counts. The
        primary type filter row; the granular file_group row sits below it. -->
@@ -1452,11 +1509,13 @@
       {#each activeFilters as chip (chip.key)}
         <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-accent-text">
           {chip.label}
-          <button
-            type="button"
-            class="rounded-full px-1 leading-none hover:bg-accent/25"
-            aria-label={`Remove filter ${chip.label}`}
-            onclick={chip.clear}>×</button>
+          {#if chip.clear}
+            <button
+              type="button"
+              class="rounded-full px-1 leading-none hover:bg-accent/25"
+              aria-label={`Remove filter ${chip.label}`}
+              onclick={chip.clear}>×</button>
+          {/if}
         </span>
       {/each}
     </div>
@@ -1856,7 +1915,7 @@
       <StateBlock
         state="empty"
         class="mt-2"
-        message="No matches. Try fewer words, remove a filter chip, or set Match in to everything." />
+        message={noMatchesMessage} />
     {:else if view === "grid"}
       <!-- P12 slice 2: responsive thumbnail GRID. Non-virtualized (a CSS grid of
            the already-loaded, paginated hits) with lazy <img>s (loading="lazy")

@@ -4,7 +4,9 @@
   // truth, backend-verified against the real parser). Chips INSERT their example
   // into the caller's query box via `onInsert`. Collapsed by default; the chevron
   // toggle matches the Filters/Saved panels' existing style.
-  import { DSL_SECTIONS } from "./dslHelp";
+  // P6 (A2): the sections shown depend on `context` — Search lists only the
+  // operators searchDsl.ts translates; Reports keep the full grammar.
+  import { dslSectionsFor } from "./dslHelp";
 
   let {
     onInsert,
@@ -12,6 +14,7 @@
   }: { onInsert: (frag: string) => void; context?: "search" | "reports" } = $props();
 
   let open = $state(false);
+  const sections = $derived(dslSectionsFor(context));
 </script>
 
 <div class="mt-2">
@@ -32,7 +35,7 @@
         everything is ANDed. Click an example to add it to your query.
       </p>
       <div class="mt-3 grid gap-3 sm:grid-cols-2">
-        {#each DSL_SECTIONS as sec (sec.title)}
+        {#each sections as sec (sec.title)}
           {@const blocked = context === "reports" && !!sec.searchOnly}
           <div>
             <div class="flex flex-wrap items-center gap-2">
