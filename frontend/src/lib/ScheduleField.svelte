@@ -19,6 +19,7 @@
   } from "./schedule";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
+  import { Field, Input, Select } from "./ui";
 
   let {
     value,
@@ -71,7 +72,7 @@
   let mode = $state<ScheduleMode>(init.mode);
   // Hourly minute-past-the-hour.
   let hourlyMinute = $state(init.mode === "hourly" ? (init.minute ?? 0) : 0);
-  // Shared local time-of-day for daily/weekly/monthly, as an <input type=time>.
+  // Shared local time-of-day for daily/weekly/monthly, as a type="time" Input.
   let timeStr = $state(
     init.hour != null ? `${pad2(init.hour)}:${pad2(init.minute ?? 0)}` : "03:00",
   );
@@ -154,90 +155,93 @@
   }
 </script>
 
+<!-- Compact row layout: the mode and weekday toggles stay raw segment buttons
+     (aria-pressed), and the inline controls are named by aria-label because
+     the sentence around them ("At minute … past every hour") leaves no room
+     for a visible Field label. -->
 <div class="flex flex-col gap-2">
   <div class="flex flex-wrap gap-1">
     {#each MODES as m}
       <button
         type="button"
+        aria-pressed={mode === m.id}
         class="rounded-full border px-3 py-1 text-xs {mode === m.id
-          ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-          : 'border-slate-300 dark:border-slate-700'}"
+          ? 'border-transparent bg-accent text-accent-fg'
+          : 'border-border-strong hover:bg-surface-3'}"
         onclick={() => (mode = m.id)}>{m.label}</button>
     {/each}
   </div>
 
   {#if mode === "hourly"}
-    <label class="flex items-center gap-2 text-xs text-slate-500">
+    <div class="flex items-center gap-2 text-xs text-muted">
       At minute
-      <input
-        type="number"
-        min="0"
-        max="59"
-        class="w-20 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-        bind:value={hourlyMinute} />
+      <span class="w-20">
+        <Input size="sm" type="number" min="0" max="59" aria-label="Minute past every hour" bind:value={hourlyMinute} />
+      </span>
       past every hour
-    </label>
+    </div>
   {:else if mode === "daily"}
-    <label class="flex items-center gap-2 text-xs text-slate-500">
+    <div class="flex items-center gap-2 text-xs text-muted">
       At
-      <input
-        type="time"
-        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-        bind:value={timeStr} />
+      <span class="w-32">
+        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+      </span>
       ({tzName})
-    </label>
+    </div>
   {:else if mode === "weekly"}
-    <div class="flex flex-wrap items-center gap-1">
+    <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Days of the week">
       {#each DOW as day}
         <button
           type="button"
+          aria-pressed={daysOfWeek.includes(day.d)}
           class="rounded-full border px-2 py-1 text-xs {daysOfWeek.includes(day.d)
-            ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
-            : 'border-slate-300 dark:border-slate-700'}"
+            ? 'border-transparent bg-accent text-accent-fg'
+            : 'border-border-strong hover:bg-surface-3'}"
           onclick={() => toggleDay(day.d)}>{day.label}</button>
       {/each}
     </div>
-    <label class="flex items-center gap-2 text-xs text-slate-500">
+    <div class="flex items-center gap-2 text-xs text-muted">
       At
-      <input
-        type="time"
-        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-        bind:value={timeStr} />
+      <span class="w-32">
+        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+      </span>
       ({tzName})
-    </label>
+    </div>
   {:else if mode === "monthly"}
-    <label class="flex items-center gap-2 text-xs text-slate-500">
+    <div class="flex items-center gap-2 text-xs text-muted">
       On day
-      <select
-        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-        bind:value={dayOfMonth}>
-        {#each Array.from({ length: 31 }, (_, i) => i + 1) as d}
-          <option value={d}>{d}</option>
-        {/each}
-      </select>
+      <span class="w-20">
+        <Select size="sm" aria-label="Day of the month" bind:value={dayOfMonth}>
+          {#each Array.from({ length: 31 }, (_, i) => i + 1) as d}
+            <option value={d}>{d}</option>
+          {/each}
+        </Select>
+      </span>
       at
-      <input
-        type="time"
-        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-        bind:value={timeStr} />
+      <span class="w-32">
+        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+      </span>
       ({tzName})
-    </label>
-    <p class="text-xs text-slate-600 dark:text-slate-400">
+    </div>
+    <p class="text-xs text-muted">
       Day 29-31 is skipped in months without that day.
     </p>
   {:else if mode === "advanced"}
-    <label class="flex items-center gap-1 text-xs text-slate-500">
-      Cron expression <Help text={HELP.scan_cron} label="scan cron" />
-    </label>
-    <input
-      class="w-64 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-slate-700"
-      placeholder={offset === 0 ? "e.g. 0 4 * * *" : "e.g. 0 4 * * * (UTC)"}
-      bind:value={advancedCron} />
+    <div class="flex items-start gap-2">
+      <Field label="Cron expression" class="w-64">
+        <Input
+          size="sm"
+          class="font-mono"
+          placeholder={offset === 0 ? "e.g. 0 4 * * *" : "e.g. 0 4 * * * (UTC)"}
+          bind:value={advancedCron} />
+      </Field>
+      <span class="pt-0.5"><Help text={HELP.scan_cron} label="scan cron" /></span>
+    </div>
   {/if}
 
-  <p class="text-xs text-slate-500">{summary}</p>
+  <p class="text-xs text-muted">{summary}</p>
   {#if showTzNote}
-    <p class="text-xs text-slate-600 dark:text-slate-400">
+    <p class="text-xs text-muted">
       Runs at {parseTimeStr(timeStr)[0].toString().padStart(2, "0")}:{parseTimeStr(
         timeStr,
       )[1]
