@@ -7,6 +7,7 @@
     removeMember,
     type AuthPrincipal, type Library, type RbacActions, type RbacDecision,
     type RbacGrant, type RbacGroup, type RbacMember,
+    errorMessage,
   } from "./api";
 
   // P6-T2 RBAC admin panel: groups + members, path grants, and a decision
@@ -54,7 +55,7 @@
       ]);
       if (meta.actions.length && !meta.actions.includes(gAction)) gAction = meta.actions[0];
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "manage permissions" });
     }
   }
   onMount(refresh);
@@ -66,27 +67,27 @@
       newGroupName = "";
       newGroupDesc = "";
       await refresh();
-    } catch (e) { error = String(e); }
+    } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
   async function removeGroup(id: string) {
     if (!confirm("Delete this group and its grants?")) return;
     try { await deleteGroup(id); if (openGroup === id) openGroup = null; await refresh(); }
-    catch (e) { error = String(e); }
+    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
   async function toggleMembers(id: string) {
     if (openGroup === id) { openGroup = null; return; }
     openGroup = id;
-    try { members = await listMembers(id); } catch (e) { error = String(e); }
+    try { members = await listMembers(id); } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
   async function doAddMember() {
     if (!openGroup || !addMemberId) return;
     try { await addMember(openGroup, addMemberId); members = await listMembers(openGroup); await refresh(); }
-    catch (e) { error = String(e); }
+    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
   async function doRemoveMember(pid: string) {
     if (!openGroup) return;
     try { await removeMember(openGroup, pid); members = await listMembers(openGroup); await refresh(); }
-    catch (e) { error = String(e); }
+    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
 
   function onPickPath(abs: string) {
@@ -108,16 +109,16 @@
       });
       gRelPath = "";
       await refresh();
-    } catch (e) { error = String(e); }
+    } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
   async function removeGrant(id: string) {
-    try { await deleteGrant(id); await refresh(); } catch (e) { error = String(e); }
+    try { await deleteGrant(id); await refresh(); } catch (e) { error = errorMessage(e, { verb: "manage permissions" }); }
   }
 
   async function runPreview() {
     if (!pPrincipal || !pLibrary) { error = "Pick a user and a library"; return; }
     try { decision = await rbacPreview(pPrincipal, pLibrary, pPath, pAction); }
-    catch (e) { error = String(e); decision = null; }
+    catch (e) { error = errorMessage(e, { verb: "manage permissions" }); decision = null; }
   }
 
   const libName = (id: string) => libraries.find((l) => l.id === id)?.name ?? id;

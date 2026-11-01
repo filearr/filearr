@@ -5,7 +5,8 @@
   // are password inputs whose decrypted value NEVER round-trips (empty on edit =
   // keep, via the "__unchanged__" sentinel). Every dynamic string renders as
   // text (Svelte auto-escapes) — a crafted path/error can't inject markup.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
   import {
     CHANNEL_TYPES,
     DISPATCH_LOCALITIES,
@@ -38,6 +39,7 @@
     type WebhookFormat,
     type Library,
     type TestFireResult,
+    errorMessage,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -55,18 +57,30 @@
     id ? (libraries.find((l) => l.id === id)?.name ?? id) : "All libraries";
   const chName = (id: string) => channels.find((c) => c.id === id)?.name ?? id;
 
+  // Last-request-wins for both loaders: back-to-back mutations each refresh,
+  // and filter flips each reload events; only the newest response lands.
+  const configLoader = latest((signal) =>
+    Promise.all([listLibraries(signal), listAlertChannels(signal), listAlertRules(signal)]),
+  );
+  const eventsLoader = latest(
+    (signal, filters: { rule_id?: string; status?: AlertEventStatus; limit: number }) =>
+      Promise.all([listAlertEvents(filters, signal), alertEventsSummary(undefined, signal)]),
+  );
+  onDestroy(() => {
+    configLoader.cancel();
+    eventsLoader.cancel();
+  });
+
   async function refresh() {
     loading = true;
     try {
-      [libraries, channels, rules] = await Promise.all([
-        listLibraries(),
-        listAlertChannels(),
-        listAlertRules(),
-      ]);
+      const r = await configLoader.run();
+      if (r === undefined) return;
+      [libraries, channels, rules] = r;
       error = "";
+      loading = false;
     } catch (e) {
-      error = String(e);
-    } finally {
+      error = errorMessage(e);
       loading = false;
     }
   }
@@ -209,7 +223,7 @@
       resetChannelForm();
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     } finally {
       chBusy = false;
     }
@@ -221,7 +235,7 @@
       await deleteAlertChannel(c.id);
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -230,7 +244,7 @@
       await updateAlertChannel(c.id, { enabled: !c.enabled });
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -239,7 +253,7 @@
     try {
       testResults = { ...testResults, [c.id]: await testAlertChannel(c.id) };
     } catch (err) {
-      testResults = { ...testResults, [c.id]: { error: String(err) } };
+      testResults = { ...testResults, [c.id]: { error: errorMessage(err) } };
     }
   }
 
@@ -295,7 +309,7 @@
       bulkTouchChannels = false;
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       bulkBusy = false;
     }
@@ -408,7 +422,7 @@
       resetRuleForm();
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     } finally {
       rlBusy = false;
     }
@@ -420,7 +434,7 @@
       await deleteAlertRule(r.id);
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -429,7 +443,7 @@
       await updateAlertRule(r.id, { enabled: !r.enabled });
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -453,18 +467,17 @@
   async function loadEvents() {
     evLoading = true;
     try {
-      [events, summary] = await Promise.all([
-        listAlertEvents({
-          rule_id: evRule || undefined,
-          status: evStatus || undefined,
-          limit: 100,
-        }),
-        alertEventsSummary(),
-      ]);
+      const r = await eventsLoader.run({
+        rule_id: evRule || undefined,
+        status: evStatus || undefined,
+        limit: 100,
+      });
+      if (r === undefined) return;
+      [events, summary] = r;
       error = "";
+      evLoading = false;
     } catch (e) {
-      error = String(e);
-    } finally {
+      error = errorMessage(e);
       evLoading = false;
     }
   }

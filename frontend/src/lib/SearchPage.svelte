@@ -13,14 +13,15 @@
 </script>
 
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { listKeyAction } from "./searchKeys";
+  import * as safeStorage from "./safeStorage";
   import { onMount, onDestroy } from "svelte";
   import { VList, type VListHandle } from "virtua/svelte";
   import Thumb from "./Thumb.svelte";
   import DslHelp from "./DslHelp.svelte";
   import BulkEditBar from "./BulkEditBar.svelte";
   import {
-    ApiError,
     batchPatchItems,
     getItem,
     search,
@@ -40,6 +41,7 @@
     type SavedSearch,
     type TagSuggestion,
     type ItemPatchBody,
+    errorMessage,
   } from "./api";
   import {
     buildPatches,
@@ -142,8 +144,8 @@
   // filename hit alone stops returning the item; "names" is the inverse.
   let searchIn = $state<"all" | "content" | "names">("all");
   // Roadmap §20: the Filters/Saved open-closed choice persists across visits
-  // (same localStorage pattern as the theme choice) — collapsed by default.
-  let filtersOpen = $state(localStorage.getItem("searchFiltersOpen") === "1");
+  // (same safeStorage pattern as the theme choice) — collapsed by default.
+  let filtersOpen = $state(safeStorage.get("searchFiltersOpen") === "1");
   let hashMode = $state(false);
   // Explicit ordering (P3-T7 deep-linkable): round-trips through save/apply + hash.
   let sortMode = $state("");
@@ -189,15 +191,15 @@
 
   // P3-T7 saved searches (named, persisted param bundles).
   let saved = $state<SavedSearch[]>([]);
-  let savedOpen = $state(localStorage.getItem("searchSavedOpen") === "1");
+  let savedOpen = $state(safeStorage.get("searchSavedOpen") === "1");
 
   function toggleFiltersOpen() {
     filtersOpen = !filtersOpen;
-    localStorage.setItem("searchFiltersOpen", filtersOpen ? "1" : "0");
+    safeStorage.set("searchFiltersOpen", filtersOpen ? "1" : "0");
   }
   function toggleSavedOpen() {
     savedOpen = !savedOpen;
-    localStorage.setItem("searchSavedOpen", savedOpen ? "1" : "0");
+    safeStorage.set("searchSavedOpen", savedOpen ? "1" : "0");
   }
 
   // Roadmap §20: the page starts EMPTY — no match-all preload implying the
@@ -364,21 +366,6 @@
     lastToggledIndex = -1;
   }
 
-  // Local mirror of AgentsPage/TaxonomyPage's helper: pull FastAPI's ``detail``
-  // out of a 4xx body instead of dumping "<status>: <raw json>" at the user.
-  function errDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
-
   /** Resolve each selected item's CURRENT tag list — the input the per-item tag
    *  arithmetic needs, because `tags` replaces the whole list on the wire.
    *
@@ -487,7 +474,7 @@
     } catch (e) {
       // A request-level failure (auth, 413, network). Per-ITEM failures never
       // land here — they come back inside a 200 and are shown in the list.
-      bulkError = errDetail(e);
+      bulkError = errorMessage(e, { verb: "edit these items" });
     } finally {
       bulkBusy = false;
     }
@@ -641,6 +628,16 @@
   }
 
   // ---- saved searches (P3-T7) --------------------------------------------
+  // Hash-only display prefs that are not /search params. POST/PATCH
+  // /saved-searches 422s any key outside the /search vocabulary (A4).
+  const UI_ONLY_PARAMS = ["view"] as const;
+
+  function savedParams(): Record<string, string> {
+    const p = currentParams();
+    for (const k of UI_ONLY_PARAMS) delete p[k];
+    return p;
+  }
+
   async function loadSaved() {
     try {
       saved = await listSavedSearches();
@@ -654,10 +651,10 @@
     if (!name?.trim()) return;
     savedError = "";
     try {
-      await createSavedSearch({ name: name.trim(), params: currentParams() });
+      await createSavedSearch({ name: name.trim(), params: savedParams() });
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -673,7 +670,7 @@
       await updateSavedSearch(ss.id, { name: name.trim() });
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -684,7 +681,7 @@
       await deleteSavedSearch(ss.id);
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -737,7 +734,7 @@
       if (view === "map") loadMapPoints(); // keep the map on the same query
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return; // superseded — ignore
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       if (controller === ctrl) loading = false;
     }
@@ -757,7 +754,7 @@
       refreshCopyCounts(r.hits); // badge the newly-appended rows too
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       if (controller === ctrl) loading = false;
     }
@@ -1131,12 +1128,8 @@
   async function copyPath(h: Hit | undefined) {
     if (!h) return;
     const p = resolvePath(h);
-    try {
-      await copyText(p);
-      flash(`Copied ${p}`);
-    } catch {
-      flash("Copy failed (clipboard blocked)");
-    }
+    if (await copyText(p)) flash(`Copied ${p}`);
+    else flash(COPY_FAILED);
   }
 
   function flash(msg: string) {
@@ -1146,38 +1139,41 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    const editable = inEditable(document.activeElement);
-    // '/' or Cmd/Ctrl+K → focus search (guarded: '/' only when not already
-    // typing; the shortcut alias works from anywhere).
-    if ((e.key === "/" && !editable) || ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K"))) {
-      e.preventDefault();
-      searchInput?.focus();
-      searchInput?.select();
-      return;
-    }
-    if (selected) return; // ItemDetail modal owns keys while open
-    // R8-UI: on the map, arrows pan. The map's own handler stops propagation
-    // while it has focus; this keeps the arrows from silently walking a results
-    // list nobody can see when it does not.
-    if (view === "map") return;
-    if (!hits.length) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      moveSel(1);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      moveSel(-1);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (e.metaKey || e.ctrlKey) copyPath(hits[selectedIndex]);
-      else openItem(hits[selectedIndex]);
-    } else if (e.key === " ") {
-      // IN-T4: Space toggles the roving row's SELECTION (shift extends). The
-      // keyboard path had no way to build a selection otherwise, and Space was
-      // previously unbound here (its default is to page-scroll the listbox,
-      // which arrow navigation already does better).
-      e.preventDefault();
-      toggleSelect(selectedIndex, e.shiftKey);
+    const el = e.target instanceof Element ? e.target : document.activeElement;
+    // A1: list keys only from the results listbox (or the bare page) — see
+    // searchKeys.ts. IN-T4: Space toggles the roving row's selection (shift
+    // extends); Cmd/Ctrl+Enter copies its path.
+    const action = listKeyAction(
+      e,
+      {
+        tag: el?.tagName ?? "BODY",
+        editable: inEditable(el),
+        inListbox: !!el?.closest("#search-results"),
+      },
+      { modalOpen: !!selected, view, hasHits: hits.length > 0 },
+    );
+    if (!action) return;
+    e.preventDefault();
+    switch (action) {
+      case "focusSearch":
+        searchInput?.focus();
+        searchInput?.select();
+        break;
+      case "move:1":
+        moveSel(1);
+        break;
+      case "move:-1":
+        moveSel(-1);
+        break;
+      case "open":
+        openItem(hits[selectedIndex]);
+        break;
+      case "copy":
+        copyPath(hits[selectedIndex]);
+        break;
+      case "toggle":
+        toggleSelect(selectedIndex, e.shiftKey);
+        break;
     }
   }
 
@@ -1847,6 +1843,7 @@
                grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
         role="listbox"
         tabindex={0}
+        id="search-results"
         aria-label="Search results (grid)"
         aria-activedescendant={activeDescendant}
         onscroll={onGridScroll}
@@ -1907,6 +1904,7 @@
       onscroll={onScroll}
       role="listbox"
       tabindex={0}
+      id="search-results"
       aria-label="Search results"
       aria-activedescendant={activeDescendant}
       class="mt-2 rounded-lg border border-slate-200 dark:border-slate-800"

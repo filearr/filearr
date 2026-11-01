@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { latest } from "./latest";
+  import { toast } from "./ui/toast.svelte";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
@@ -10,6 +12,7 @@
     libraryStats,
     type FailedJob, type FailingItem, type Library, type LibraryHashStatus, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
+    errorMessage,
   } from "./api";
   import LibraryEditModal from "./LibraryEditModal.svelte";
   import DeleteLibraryDialog from "./DeleteLibraryDialog.svelte";
@@ -55,7 +58,7 @@
       await rehashLibrary(id);
       if (hashStatus[id]) hashStatus[id] = { ...hashStatus[id], rehash_pending: true };
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "re-hash this library" });
     } finally {
       rehashing[id] = false;
     }
@@ -181,7 +184,7 @@
       }
       await refresh();
     } catch (err) {
-      tgtMsg = { ok: false, text: String(err) };
+      tgtMsg = { ok: false, text: errorMessage(err, { verb: "scan these paths" }) };
     } finally {
       tgtBusy = false;
     }
@@ -217,15 +220,23 @@
   const RETRY_MIN = 1000;
   const RETRY_MAX = 15000;
 
+  // Last-request-wins: a pager click or the safety poll supersedes an older
+  // refresh, so a slow response cannot overwrite a newer page.
+  const snapshot = latest((signal, offset: number) =>
+    Promise.all([
+      listLibraries(signal), listScans(signal), fetchStats(signal),
+      failedJobs(FAILED_PAGE, offset, signal).catch(() => null),
+      listShareMap(signal).catch(() => [] as ShareMapEntry[]),
+      libraryHashStatus(signal).catch(() => null),
+    ]),
+  );
+
   async function refresh() {
     try {
+      const r = await snapshot.run(failedOffset);
+      if (r === undefined) return;
       error = "";
-      const [libs, scs, st, jobs, smap, hs] = await Promise.all([
-        listLibraries(), listScans(), fetchStats(),
-        failedJobs(FAILED_PAGE, failedOffset).catch(() => null),
-        listShareMap().catch(() => [] as ShareMapEntry[]),
-        libraryHashStatus().catch(() => null),
-      ]);
+      const [libs, scs, st, jobs, smap, hs] = r;
       libraries = libs;
       if (hs) hashStatus = Object.fromEntries(hs.map((r) => [r.library_id, r]));
       loaded = true;
@@ -248,7 +259,7 @@
       for (const id of Object.keys(expanded)) if (expanded[id]) await loadFailing(id);
       syncStreams();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -384,7 +395,7 @@
       failing = { ...failing, [libId]: res.items };
       errorCounts = { ...errorCounts, [libId]: res.count };
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -410,7 +421,7 @@
       failedOffset = 0;
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "clear failed items" });
     } finally {
       clearingFailed = false;
     }
@@ -428,7 +439,7 @@
       failing = {};
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "retry failed items" });
     } finally {
       retryingAll = false;
     }
@@ -440,7 +451,7 @@
       await retryExtracts(libId);
       await loadFailing(libId);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "retry failed items" });
     } finally {
       retrying[libId] = false;
     }
@@ -487,10 +498,17 @@
     busy[lib.id] = true;
     queued = { ...queued, [lib.id]: Date.now() }; // reassign, don't mutate
     try {
-      await scanLibrary(lib.id);
+      const res = await scanLibrary(lib.id);
+      if (res.already_running) {
+        // Nothing new was enqueued, so there is no "queued" job to wait for (B8).
+        const { [lib.id]: _dup, ...rest } = queued;
+        queued = rest;
+        toast(`A scan is already running for ${lib.name}.`, { tone: "info" });
+        return;
+      }
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "scan this library" });
       // The enqueue itself failed, so nothing is pending — drop the marker
       // rather than leaving a "queued" row that will never start.
       const { [lib.id]: _failed, ...rest } = queued;
@@ -645,7 +663,7 @@
     loadLibStats();
     listPresets()
       .then((m) => (presetsMeta = m))
-      .catch((e) => (error = String(e)));
+      .catch((e) => (error = errorMessage(e)));
     // W8: taxonomy for the type-gating selectors. Non-fatal — an empty tree just
     // means the selector shows "all types" and libraries can still be created.
     getTaxonomy()
@@ -656,6 +674,7 @@
   });
   onDestroy(() => {
     safety?.stop();
+    snapshot.cancel();
     for (const id of [...streams.keys()]) closeStream(id);
   });
 </script>
@@ -958,14 +977,12 @@
                   onclick={() => (deleting = lib)}>Delete</button>
                 <button
                   class="rounded-lg bg-[var(--accent)] px-2 py-1 text-xs text-[var(--accent-fg)] disabled:opacity-50"
-                  disabled={busy[lib.id]}
+                  disabled={busy[lib.id] || running || stopping}
                   onclick={() => runScan(lib)}>
                   {#if busy[lib.id]}
                     Starting…
                   {:else if isQueued(lib.id)}
                     Queued
-                  {:else if running || stopping}
-                    Restart
                   {:else}
                     Scan
                   {/if}

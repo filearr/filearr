@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { authLogin, authBootstrap, oidcLoginUrl, ApiError, type AuthMode } from "./api";
+  import { authLogin, authBootstrap, oidcLoginUrl, errorMessage, errorStatus, type AuthMode } from "./api";
+  import * as safeStorage from "./safeStorage";
 
   // `mode` is "bootstrap" (no users yet → create the first admin) or "enabled"
   // (normal login). `onAuthed` is called after a successful login/bootstrap so
@@ -26,14 +27,33 @@
     typeof location !== "undefined"
       ? new URLSearchParams(location.search).get("sso_error")
       : null;
+  if (ssoError !== null) {
+    // Shown once: drop the param so a reload or bookmark does not repeat it,
+    // and the failed round trip's saved deep link with it.
+    const params = new URLSearchParams(location.search);
+    params.delete("sso_error");
+    const qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? `?${qs}` : "") + location.hash);
+    safeStorage.remove("oidc.returnHash");
+  }
 
   function startSso() {
+    // The callback returns to "/"; App restores this hash once signed in.
+    safeStorage.set("oidc.returnHash", location.hash);
     // A real top-level navigation (not fetch) so the IdP round-trip + the
     // Set-Cookie on the callback return actually take effect.
     window.location.assign(oidcLoginUrl("/"));
   }
 
   const isBootstrap = $derived(mode === "bootstrap");
+
+  function loginError(err: unknown): string {
+    // Generic on purpose: the backend raises 401/429, LDAP paths may surface 403; no account enumeration.
+    const status = errorStatus(err);
+    if (status === 400 || status === 401 || status === 403) return "Invalid username or password.";
+    if (status === 429) return "Too many attempts. Try again in a minute.";
+    return errorMessage(err);
+  }
 
   async function submit(e: Event) {
     e.preventDefault();
@@ -42,25 +62,35 @@
     busy = true;
     try {
       if (isBootstrap) {
-        await authBootstrap(username.trim(), password);
+        try {
+          await authBootstrap(username.trim(), password);
+        } catch (err) {
+          if (errorStatus(err) === 409) {
+            // Someone else created the admin first: re-probe out of bootstrap mode.
+            error = "An administrator account already exists. Sign in instead.";
+            onAuthed();
+          } else {
+            error = errorMessage(err);
+          }
+          return;
+        }
         // First admin created — log straight in to establish the session.
-        await authLogin(username.trim(), password);
+        try {
+          await authLogin(username.trim(), password);
+        } catch (err) {
+          // The admin exists now: re-probe so the page leaves bootstrap mode
+          // (a retry must sign in, not try to create the admin again).
+          error = loginError(err);
+          onAuthed();
+          return;
+        }
       } else {
         const res = await authLogin(username.trim(), password);
         warning = res.warning;
       }
       onAuthed();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof ApiError && err.status === 429) {
-        // P6-T8: generic lockout message (never reveals whether the username
-        // exists, nor the exact remaining time beyond the server's Retry-After).
-        error = "Too many failed attempts. Please wait a few minutes and try again.";
-      } else if (isBootstrap) {
-        error = `Could not create the first admin: ${msg}`;
-      } else {
-        error = "Invalid username or password.";
-      }
+      error = loginError(err);
     } finally {
       busy = false;
     }
@@ -118,6 +148,7 @@
         type="password"
         bind:value={password}
         autocomplete={isBootstrap ? "new-password" : "current-password"}
+        minlength={isBootstrap ? 8 : undefined}
         required />
     </label>
 

@@ -14,12 +14,15 @@
 </script>
 
 <script lang="ts">
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
+  import * as safeStorage from "./safeStorage";
+  import { safeHref } from "./pathlinks";
   import {
-    ApiError,
     type ItemPermissions,
     type PermissionAce,
     type PermissionPrincipal,
+    errorMessage,
     friendlyError,
     getItem,
     getItemPermissions,
@@ -81,14 +84,15 @@
   // library-share_prefix "Open file" row in <Breadcrumbs> (suppressed below).
   // Null => render nothing (no fabricated location, no empty state).
   const itemShareUrl = $derived(str("share_url"));
+  // D9: only an allowed scheme / absolute path becomes a link; else plain text.
+  const itemShareHref = $derived(safeHref(itemShareUrl));
   // Roadmap §5 P3 provenance: extracted download-source URLs (never user-editable).
   const extractedMeta = $derived(
     (item?.metadata as Record<string, unknown> | undefined) ?? {},
   );
-  const safeHttpUrl = (v: unknown): string | null =>
-    typeof v === "string" && /^(https?|s?ftp):\/\//i.test(v) ? v : null;
-  const originUrl = $derived(safeHttpUrl(extractedMeta["origin_url"]));
-  const referrerUrl = $derived(safeHttpUrl(extractedMeta["referrer_url"]));
+  const WEB = { schemes: ["http", "https"] };
+  const originUrl = $derived(safeHref(extractedMeta["origin_url"], WEB));
+  const referrerUrl = $derived(safeHref(extractedMeta["referrer_url"], WEB));
   const shareSource = $derived(str("share_source"));
   const shareSourceLabel = $derived(
     shareSource === "agent_hint"
@@ -102,9 +106,9 @@
   let shareCopied = $state(false);
   let shareCopiedTimer: ReturnType<typeof setTimeout>;
   async function copyShare(text: string) {
-    // FIX-5 plain-http-safe helper (navigator.clipboard is unavailable over
+    // FIX-5 plain-http-safe helper (the async clipboard API is unavailable over
     // http://<lan-ip>); it falls back to a textarea + execCommand copy.
-    await copyText(text);
+    if (!(await copyText(text))) return toast(COPY_FAILED, { tone: "warn" });
     shareCopied = true;
     clearTimeout(shareCopiedTimer);
     shareCopiedTimer = setTimeout(() => (shareCopied = false), 1500);
@@ -202,19 +206,6 @@
     commitTagDraft();
   }
 
-  function editErrDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
-
   async function saveEdit() {
     if (!item) return;
     if (eTagDraft.trim()) commitTagDraft();
@@ -274,15 +265,21 @@
     }
 
     saving = true;
+    // A16: another item may open mid-save; the PATCH still lands server-side,
+    // but its response must not overwrite the newer item's panel.
+    const mine = itemToken;
     try {
       // The PATCH response IS the updated projection, so the panel refreshes
       // without a second GET (and without waiting on the async index sync).
-      item = await patchItem(id, patch);
+      const r = await patchItem(id, patch);
+      if (mine !== itemToken) return;
+      item = r;
       active = "card";
     } catch (e) {
-      editError = editErrDetail(e);
+      if (mine !== itemToken) return;
+      editError = errorMessage(e, { verb: "edit this item" });
     } finally {
-      saving = false;
+      if (mine === itemToken) saving = false;
     }
   }
 
@@ -352,11 +349,11 @@
   // 2026-08-20: grid (thumbnails) or table (name/similarity/type/size/modified)
   // view for the similar list. Sticky per browser.
   let similarView = $state<"grid" | "table">(
-    (localStorage.getItem("filearr.similarView") as "grid" | "table") || "grid",
+    (safeStorage.get("filearr.similarView") as "grid" | "table") || "grid",
   );
   function setSimilarView(v: "grid" | "table") {
     similarView = v;
-    localStorage.setItem("filearr.similarView", v);
+    safeStorage.set("filearr.similarView", v);
   }
   const simPct = (h: Record<string, unknown>): string =>
     typeof h.similarity === "number" ? `${(h.similarity * 100).toFixed(1)}%` : "—";
@@ -378,15 +375,18 @@
     if (!similarOpen || similarLoaded || similarLoading) return;
     similarLoading = true;
     similarError = "";
+    const mine = itemToken;
     try {
-      similar = await similarItems(id, 10);
+      const r = await similarItems(id, 10);
+      if (mine !== itemToken) return; // another item opened; its effect reset us
+      similar = r;
     } catch (e) {
+      if (mine !== itemToken) return;
       similar = null;
       similarError = "Similar items are unavailable for this item.";
-    } finally {
-      similarLoading = false;
-      similarLoaded = true;
     }
+    similarLoading = false;
+    similarLoaded = true;
   }
 
   const hitLabel = (h: Record<string, unknown>): string => {
@@ -399,19 +399,21 @@
   };
 
   async function copyCopyPath(path: string) {
-    try {
-      await copyText(path);
-      copiedPath = path;
-      clearTimeout(copiedTimer);
-      copiedTimer = setTimeout(() => (copiedPath = null), 2000);
-    } catch {
-      copiedPath = "(clipboard blocked)";
-      clearTimeout(copiedTimer);
-      copiedTimer = setTimeout(() => (copiedPath = null), 2000);
-    }
+    if (!(await copyText(path))) return toast(COPY_FAILED, { tone: "warn" });
+    copiedPath = path;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedPath = null), 2000);
   }
 
+  // A16: bumped per opened item; every fetch the item-change effect starts (and
+  // the lazy Similar fetch) checks it, so a fast second open cannot interleave
+  // the first item's responses into the second item's panel.
+  let itemToken = 0;
+
   $effect(() => {
+    const mine = ++itemToken;
+    const live = () => mine === itemToken;
+    const ac = new AbortController();
     error = "";
     item = null;
     copies = null;
@@ -423,29 +425,36 @@
     similarError = "";
     active = "card"; // reset to the typed card whenever a different item opens
     editError = "";
+    saving = false; // a save for the previous item must not leave the spinner stuck
     // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
     // as KeyFactsCard; a failure just means no custom-field rows to edit.
-    listCustomFields()
-      .then((d) => (defs = d))
-      .catch(() => (defs = []));
-    getItem(id)
-      .then((r) => (item = r))
+    listCustomFields(ac.signal)
+      .then((d) => live() && (defs = d))
+      .catch(() => live() && (defs = []));
+    getItem(id, ac.signal)
+      .then((r) => live() && (item = r))
       // RBAC (P6-T4): a 403/404 shows a friendly line, never a blank/raw dump.
-      .catch((e) => (error = friendlyError(e)));
+      .catch((e) => live() && (error = friendlyError(e)));
     // Permissions (2026-08-23): newest agent-collected ACL; non-blocking, a
     // failure just hides the section.
     perms = null;
-    getItemPermissions(id)
-      .then((r) => (perms = r))
-      .catch(() => (perms = null));
+    getItemPermissions(id, ac.signal)
+      .then((r) => live() && (perms = r))
+      .catch(() => live() && (perms = null));
     // Copies are a separate, non-blocking fetch — a failure just hides the section.
-    itemCopies(id)
-      .then((r) => (copies = r))
-      .catch(() => (copies = null));
+    itemCopies(id, ac.signal)
+      .then((r) => live() && (copies = r))
+      .catch(() => live() && (copies = null));
     // Frecency (roadmap §5 P3): opening the detail view counts as one use for
     // the caller's personal ranking profile. Fire-and-forget: errors (older
-    // backend, feature off, rate budget) are deliberately invisible.
+    // backend, feature off, rate budget) are deliberately invisible. Not
+    // aborted: the open already happened, and it writes no panel state.
     touchItem(id).catch(() => {});
+    // Runs before the next item's effect and on destroy.
+    return () => {
+      itemToken++;
+      ac.abort();
+    };
   });
 
   function onKey(e: KeyboardEvent) {
@@ -494,13 +503,19 @@
              when present; replaces the library-share "Open file" row above. -->
         {#if itemShareUrl}
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <a
-              class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
-              href={itemShareUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open the file at its network location. Browsers may block smb:// / file:// links — use Copy if nothing happens."
-              >{itemShareUrl}</a>
+            {#if itemShareHref}
+              <a
+                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+                href={itemShareHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the file at its network location. Browsers may block smb:// / file:// links — use Copy if nothing happens."
+                >{itemShareUrl}</a>
+            {:else}
+              <span
+                class="min-w-0 max-w-full truncate rounded border border-slate-300 px-2 py-1 font-mono text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                title={itemShareUrl}>{itemShareUrl}</span>
+            {/if}
             <button
               type="button"
               class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"

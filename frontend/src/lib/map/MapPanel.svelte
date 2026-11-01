@@ -16,6 +16,7 @@
   // All the arithmetic lives in ./geo (pure, unit-tested); this file is the DOM.
   import { onMount } from "svelte";
   import { loadBasemap, type Basemap, type Shape } from "./basemap";
+  import { numOrNull } from "../numInput";
   import {
     mapSettings,
     saveMapSettings,
@@ -437,11 +438,14 @@
   });
 
   function applyDraft() {
+    // Blank or junk becomes NaN (not Number("") === 0) so boxError's
+    // "Every edge needs a number" fires (A28).
+    const edge = (s: string) => numOrNull(s) ?? NaN;
     const candidate: GeoBox = {
-      top: Number(draft.top),
-      right: Number(draft.right),
-      bottom: Number(draft.bottom),
-      left: Number(draft.left),
+      top: edge(draft.top),
+      right: edge(draft.right),
+      bottom: edge(draft.bottom),
+      left: edge(draft.left),
     };
     const err = boxError(candidate);
     draftError = err ?? "";

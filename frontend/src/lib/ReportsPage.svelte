@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
   import CustomReportsPage from "./CustomReportsPage.svelte";
   import ExportsPanel from "./ExportsPanel.svelte";
   import ReportSchedulesPanel from "./ReportSchedulesPanel.svelte";
@@ -17,7 +18,9 @@
     type ExportFormat,
     type ReportMeta,
     type ReportPage,
+    type ReportRunOpts,
     type Library,
+    errorMessage,
   } from "./api";
 
   // ------------------------------------------------------------------ //
@@ -148,21 +151,30 @@
     await load();
   }
 
+  // Last-request-wins: switching report or paging aborts the older run, and a
+  // superseded run leaves `loading` to the newer one.
+  const reportLoader = latest((signal, id: string, opts: ReportRunOpts) =>
+    runReport(id, opts, signal),
+  );
+  onDestroy(() => reportLoader.cancel());
+
   async function load() {
     if (!selected) return;
     error = "";
     loading = true;
     try {
-      page = await runReport(selected.id, {
+      const r = await reportLoader.run(selected.id, {
         limit: pageSize,
         offset,
         libraryId: selected.supports_library ? library || undefined : undefined,
         thresholdDays: thresholdParam,
       });
+      if (r === undefined) return;
+      page = r;
+      loading = false;
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
       page = null;
-    } finally {
       loading = false;
     }
   }
@@ -190,7 +202,7 @@
         thresholdDays: thresholdParam,
       });
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       downloading = false;
     }
@@ -208,7 +220,7 @@
       });
       queued = `Queued a background ${format.toUpperCase()} export — see the Exports panel below.`;
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -216,7 +228,7 @@
     try {
       [reports, libs] = await Promise.all([listReports(), listLibraries()]);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   });
 </script>

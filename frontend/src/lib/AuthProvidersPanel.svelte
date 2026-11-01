@@ -5,6 +5,7 @@
     SECRET_UNCHANGED, type AuthProviderConfig, type AuthTestResult,
     type FetchCertResult,
   } from "./api";
+  import { numOrNull } from "./numInput";
 
   // Admin > Authentication (2026-08-20): GUI configuration of AD/LDAP login, the
   // AD directory sync, and OIDC SSO — previously env-only (FILEARR_LDAP_* /
@@ -174,7 +175,10 @@
         continue;
       }
       if (fld.type === "bool") out[fld.key] = Boolean(raw);
-      else if (fld.type === "number") out[fld.key] = raw === "" ? null : Number(raw);
+      // An emptied type="number" binds null: send null (set_config pops the
+      // override so the env value applies; an omitted key stays unchanged),
+      // never Number(null) === 0.
+      else if (fld.type === "number") out[fld.key] = numOrNull(raw);
       else if (fld.type === "json") {
         try { out[fld.key] = JSON.parse((raw as string) || "[]"); }
         catch { throw new Error(`${fld.label}: invalid JSON`); }

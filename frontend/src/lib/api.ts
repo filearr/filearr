@@ -19,6 +19,7 @@ import type { About } from "./about";
 // ("not reported" vs "version unknown" vs "not installed") and the Markdown
 // dump are pure, so they are unit-tested on Node.
 import type { AgentAbout } from "./agentAbout";
+import { ApiError, NetworkError } from "./apiErrors.ts";
 
 export type { About } from "./about";
 export type {
@@ -56,62 +57,138 @@ export interface SearchResponse {
   next_cursor: string | null;
 }
 
-const KEY = () => localStorage.getItem("apiKey") ?? "";
-
-/** The stored API key, if any. Empty string when auth is disabled / no key set. */
-export const apiKey = (): string => KEY();
-
 /** API base path (shared by fetch requests and the SSE EventSource URL). */
 export const API_BASE = "/api/v1";
 
 /** Immutable, content-addressed thumbnail URL for an item + tier (S12/P12).
- *  Used as an ``<img src>``, which cannot send an Authorization header, so the
- *  read-scope key rides as ``?api_key=`` exactly like the SSE events stream.
- *  ``tier`` is one of the serve-endpoint enum values ("grid" | "preview"). */
+ *  Used as an ``<img src>``; the session cookie authenticates it like any
+ *  same-origin request. ``tier`` is one of the serve-endpoint enum values
+ *  ("grid" | "preview"). */
 export function thumbUrl(id: string, tier: "grid" | "preview" = "grid"): string {
-  const key = KEY();
-  const auth = key ? `&api_key=${encodeURIComponent(key)}` : "";
-  return `${API_BASE}/items/${id}/thumb?tier=${tier}${auth}`;
+  return `${API_BASE}/items/${id}/thumb?tier=${tier}`;
 }
 
-/** An HTTP error carrying the numeric status, so callers can branch on 401/403/
- *  404 (P6-T4 RBAC). ``message`` keeps the legacy ``"<status>: <body>"`` shape
- *  so existing ``String(e)`` render paths are unchanged. */
-export class ApiError extends Error {
-  status: number;
-  body: string;
-  constructor(status: number, body: string) {
-    super(`${status}: ${body}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.body = body;
+// ApiError + the error-to-sentence rules live in ./apiErrors (DOM-free, so they
+// are unit-tested on Node); re-exported so callers keep one import site.
+export { ApiError, NetworkError, errorMessage, errorStatus, friendlyError } from "./apiErrors.ts";
+
+let onUnauthorized: ((path: string) => void) | null = null;
+
+/** Register the hook every 401 (bar the probe/login calls) runs before it throws (the app
+ *  uses it to drop back to the login wall). ``null`` unregisters. */
+export function setUnauthorizedHandler(fn: ((path: string) => void) | null): void {
+  onUnauthorized = fn;
+}
+
+/** ``timeoutMs`` defaults to 30 s; synchronous bulk endpoints (the server does
+ *  all the work before answering) must opt in to a longer timeout. */
+export type SendOpts = {
+  body?: unknown;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  expect?: "json" | "none" | "blob" | "text";
+};
+
+/** Downloads and exports stream large bodies; give them ten minutes. */
+const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+/** Server-side heavy lifting (report runs, folder walks, live provider tests). */
+export const SLOW_TIMEOUT_MS = 120_000;
+
+// 401s from these are expected answers (probe, login wall), not a lapsed session.
+// Method-aware: a 401 on PATCH /auth/me, /auth/password or /auth/logout is one.
+const AUTH_HOOK_SKIP = new Set([
+  "GET /auth/status",
+  "GET /auth/me",
+  "POST /auth/login",
+  "POST /auth/bootstrap",
+]);
+
+const isAbort = (e: unknown) =>
+  (e instanceof Error || e instanceof DOMException) && (e.name === "AbortError" || e.name === "TimeoutError");
+
+/** ``AbortSignal.any`` with a fallback: Safari < 17.4 lacks it. */
+export function anySignal(signals: AbortSignal[]): AbortSignal {
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+  const ac = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      ac.abort(s.reason);
+      return ac.signal;
+    }
+  }
+  for (const s of signals) s.addEventListener("abort", () => ac.abort(s.reason), { once: true });
+  return ac.signal;
+}
+
+const isJsonType = (ct: string | null) => !!ct && /\bjson\b/i.test(ct);
+
+/** The one request core: every API call goes through here. Throws ``ApiError``
+ *  for any non-2xx (and for a non-JSON 200 when JSON was expected, so a proxy's
+ *  HTML page never surfaces as a ``SyntaxError``). The session cookie is the
+ *  only browser credential. */
+export async function send<T>(method: string, path: string, opts: SendOpts = {}): Promise<T> {
+  const { body, signal, timeoutMs, expect = "json" } = opts;
+  const headers: Record<string, string> = { ...opts.headers };
+  let payload: BodyInit | undefined;
+  if (body !== undefined) {
+    // FormData/Blob carry their own Content-Type; a string is already-encoded JSON.
+    if (body instanceof FormData || body instanceof Blob) payload = body;
+    else {
+      payload = typeof body === "string" ? body : JSON.stringify(body);
+      headers["Content-Type"] ??= "application/json";
+    }
+  }
+  const signals = [signal, AbortSignal.timeout(timeoutMs ?? 30_000)].filter(
+    (s): s is AbortSignal => s !== undefined,
+  );
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: payload,
+      credentials: "same-origin",
+      signal: anySignal(signals),
+    });
+  } catch (e) {
+    if (isAbort(e)) throw e;
+    throw new NetworkError(e);
+  }
+  if (!res.ok) {
+    if (res.status === 401 && !AUTH_HOOK_SKIP.has(`${method.toUpperCase()} ${path.split("?")[0]}`)) {
+      try {
+        onUnauthorized?.(path);
+      } catch {
+        /* a broken hook must not replace the ApiError below */
+      }
+    }
+    throw new ApiError(res.status, await res.text());
+  }
+  // Blob/text callers get the body as-is, even when it is empty.
+  if (expect === "blob") return (await res.blob()) as T;
+  if (expect === "text") return (await res.text()) as T;
+  if (expect === "none" || res.status === 204 || res.status === 205 || res.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
+  const text = await res.text();
+  if (!text.trim()) return undefined as T;
+  if (!isJsonType(res.headers.get("content-type"))) throw new ApiError(res.status, text);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(res.status, text);
   }
 }
 
-/** Map an error to a friendly, non-technical sentence for RBAC-denied surfaces
- *  (403 = permission, 404 = not visible/gone) — so a scoped user sees a clear
- *  message instead of a blank pane or a raw status dump. Falls back to the raw
- *  message for anything else. */
-export function friendlyError(e: unknown, verb = "view"): string {
-  if (e instanceof ApiError) {
-    if (e.status === 403) return `You don't have permission to ${verb} this item.`;
-    if (e.status === 404) return "This item is not available (it may be outside your access or removed).";
-    if (e.status === 401) return "Please sign in to continue.";
-  }
-  return String(e);
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-      ...init?.headers,
-    },
+/** Legacy fetch-shaped wrapper over ``send``: callers already ``JSON.stringify``
+ *  their bodies, which ``send`` passes through as-is. */
+function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return send<T>(init?.method ?? "GET", path, {
+    body: init?.body ?? undefined,
+    headers: init?.headers as Record<string, string> | undefined,
+    signal: init?.signal ?? undefined,
   });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return res.json() as Promise<T>;
 }
 
 // W8: type filtering is now the two-level file taxonomy — ``file_category``
@@ -184,10 +261,7 @@ export interface BatchPatchResponse {
  *  a 413, so chunking is the contract, not an optimisation. Partial failure is
  *  normal and is reported per item, never as a request-level error. */
 export const batchPatchItems = (patches: Record<string, ItemPatchBody>) =>
-  request<BatchPatchResponse>("/items/batch", {
-    method: "POST",
-    body: JSON.stringify(patches),
-  });
+  send<BatchPatchResponse>("POST", "/items/batch", { body: patches, timeoutMs: SLOW_TIMEOUT_MS });
 
 /** A full single-item record: every stored column, with ``metadata`` and
  *  ``user_metadata`` returned as separate unmerged objects. Backs the Raw tab. */
@@ -201,7 +275,8 @@ export type ItemRecord = Record<string, unknown> & {
 };
 
 /** Fetch one item with every stored field. Powers the Raw detail view. */
-export const getItem = (id: string) => request<ItemRecord>(`/items/${id}`);
+export const getItem = (id: string, signal?: AbortSignal) =>
+  request<ItemRecord>(`/items/${id}`, { signal });
 
 /** Newest agent-collected ACL snapshot for an item (2026-08-23). ``available``
  *  is false (with a reason) for central-scanned items — permissions are
@@ -236,8 +311,8 @@ export interface ItemPermissions {
   };
 }
 export interface PermissionTier { anonymous: boolean; authenticated: boolean; }
-export const getItemPermissions = (id: string) =>
-  request<ItemPermissions>(`/items/${id}/permissions`);
+export const getItemPermissions = (id: string, signal?: AbortSignal) =>
+  request<ItemPermissions>(`/items/${id}/permissions`, { signal });
 
 /** Principal suggestions for the Search page's permission filter (facet search
  *  over perm_principals — SIDs, DOMAIN\names and display names). */
@@ -251,11 +326,7 @@ export function searchPrincipals(
 
 /** Frecency use ping (fire-and-forget; 204 with no body). Callers swallow errors. */
 export async function touchItem(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/items/${id}/touch`, {
-    method: "POST",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("POST", `/items/${id}/touch`, { expect: "none" });
 }
 
 /** P10-T3: ask the owning agent to re-verify an agent-hosted item's existence
@@ -366,14 +437,11 @@ export const mintTransferEventsToken = (id: string) =>
     { method: "POST" },
   );
 
-/** Fetch the verified staged file (auth header) and save it as ``filename``.
- *  Mirrors ``downloadExport`` — a blob save so the Bearer header is sent (an
- *  ``<a href>`` cannot), served only for a verified, staged/downloaded transfer. */
+/** Fetch the verified staged file and save it as ``filename``. Mirrors
+ *  ``downloadExport`` (a blob save); served only for a verified,
+ *  staged/downloaded transfer. */
 export async function downloadTransfer(id: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/transfers/${id}/download`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, filename || `transfer-${id}`);
+  await saveBlob(`/transfers/${id}/download`, filename || `transfer-${id}`);
 }
 
 // P3-T9 — related / near-duplicate items via the semantic vector. Returns 409
@@ -563,11 +631,7 @@ export const patchPreset = (
     body: JSON.stringify(body),
   });
 export async function deletePreset(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/presets/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/presets/${encodeURIComponent(name)}`, { expect: "none" });
 }
 
 // ---- file groups (controlled vocabulary for the search file_group facet) ----
@@ -701,13 +765,13 @@ export const addTaxonomyExtension = (groupKey: string, ext: string) =>
 /** Adopt extensions/groups the shipped built-in seed has gained since this
  *  DB was seeded (add-only; operator placements are never overridden). */
 export const syncTaxonomySeed = (dryRun = false) =>
-  request<{
+  send<{
     dry_run: boolean;
     added_count: number;
     added: Record<string, string[]>;
     skipped: { ext: string; kept_in?: string; seed_wants?: string; reason?: string }[];
     version?: number | null;
-  }>(`/taxonomy/sync-seed${dryRun ? "?dry_run=true" : ""}`, { method: "POST" });
+  }>("POST", `/taxonomy/sync-seed${dryRun ? "?dry_run=true" : ""}`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Recompute every active item's (file_category, file_group) from the CURRENT
  *  taxonomy and re-sync changed search docs — applies taxonomy edits to items
@@ -721,7 +785,7 @@ export const reclassifyExtensions = () =>
 export const deleteTaxonomyExtension = (ext: string) =>
   request<TaxonomyVersion>(`/taxonomy/extensions/${encodeURIComponent(ext)}`, { method: "DELETE" });
 
-export const listLibraries = () => request<Library[]>("/libraries");
+export const listLibraries = (signal?: AbortSignal) => request<Library[]>("/libraries", { signal });
 
 // OPS-T7: the deploy-time network-share mount map (read scope). Credential-free;
 // ``share_url`` is a user-facing reference the library form surfaces as a hint.
@@ -733,7 +797,8 @@ export interface ShareMapEntry {
   unc?: string | null;
 }
 
-export const listShareMap = () => request<ShareMapEntry[]>("/system/share-map");
+export const listShareMap = (signal?: AbortSignal) =>
+  request<ShareMapEntry[]>("/system/share-map", { signal });
 
 /** Longest-container_prefix-wins client mirror of share_map.resolve — used to
  *  preview the auto share_prefix a library root would inherit from the deploy. */
@@ -825,20 +890,15 @@ export const updateLibrary = (
 /**
  * UI-T2 — hard-delete a library (admin scope). The contract requires an exact
  * name match in `?confirm=`; the server returns 204 on success, 409 while a scan
- * is running, 422 on a confirm mismatch, 404 if unknown. `request()` can't be
- * reused because a 204 carries no JSON body, so we fetch directly and translate
- * the status codes into a thrown Error the dialog can classify.
+ * is running, 422 on a confirm mismatch, 404 if unknown; failures throw an
+ * ``ApiError`` the dialog can classify by status.
  */
 export async function deleteLibrary(id: string, confirm: string): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/libraries/${id}?confirm=${encodeURIComponent(confirm)}`,
-    {
-      method: "DELETE",
-      headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    },
-  );
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  // Cascades the items and prunes Meilisearch inside the request.
+  await send("DELETE", `/libraries/${id}?confirm=${encodeURIComponent(confirm)}`, {
+    expect: "none",
+    timeoutMs: 10 * 60_000,
+  });
 }
 
 // ---- P4-T3 custom fields (admin-defined user_metadata field definitions) ----
@@ -863,7 +923,8 @@ export interface CustomField {
   created_at: string;
 }
 
-export const listCustomFields = () => request<CustomField[]>("/custom-fields");
+export const listCustomFields = (signal?: AbortSignal) =>
+  request<CustomField[]>("/custom-fields", { signal });
 
 export const createCustomField = (body: {
   name: string;
@@ -894,16 +955,13 @@ export const updateCustomField = (
 
 // Soft-delete: drops the definition; existing user_metadata values are untouched.
 export async function deleteCustomField(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-fields/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/custom-fields/${id}`, { expect: "none" });
 }
 
+/** Enqueue a full scan. When one is already queued/running for the library the
+ *  server answers `{ job_id: null, already_running: true }` instead (B8). */
 export const scanLibrary = (id: string) =>
-  request<{ job_id: number }>(`/libraries/${id}/scan`, { method: "POST" });
+  request<{ job_id: number | null; already_running?: boolean }>(`/libraries/${id}/scan`, { method: "POST" });
 
 /** W9 targeted rescan of a single FILE or a DIRECTORY under a library root. The
  *  `path` is a rel_path ('' = whole library, file or dir); `recursive` descends
@@ -930,9 +988,9 @@ export const targetedScan = (
     body: JSON.stringify({ path: body.path, recursive: body.recursive ?? true }),
   });
 
-export const listScans = () => request<ScanRun[]>("/scans");
+export const listScans = (signal?: AbortSignal) => request<ScanRun[]>("/scans", { signal });
 
-export const stats = () => request<Record<string, unknown>>("/stats");
+export const stats = (signal?: AbortSignal) => request<Record<string, unknown>>("/stats", { signal });
 
 export const cancelScan = (id: string) =>
   request<{ status: string }>(`/scans/${id}/cancel`, { method: "POST" });
@@ -989,8 +1047,8 @@ export interface FsBrowse {
 
 /** Browse directories under the server's allowlist. A path outside the allowlist
  *  (or a traversal attempt) yields a 422 the picker surfaces inline. */
-export const browseFs = (path = "") =>
-  request<FsBrowse>(`/fs/browse?path=${encodeURIComponent(path)}`);
+export const browseFs = (path = "", signal?: AbortSignal) =>
+  request<FsBrowse>(`/fs/browse?path=${encodeURIComponent(path)}`, { signal });
 
 // ---- T11 error surfacing ----
 export interface FailingItem {
@@ -1076,21 +1134,20 @@ export interface LibraryDiagnosis {
   context: Record<string, unknown>;
 }
 export const diagnoseLibrary = (id: string) =>
-  request<LibraryDiagnosis>(`/libraries/${id}/diagnose`);
+  send<LibraryDiagnosis>("GET", `/libraries/${id}/diagnose`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Clear stored extraction errors for a library and re-defer extraction for the
  *  affected items (plus any never-hashed items). Returns the number requeued. */
 export const retryExtracts = (id: string) =>
-  request<{ library_id: string; retried: number }>(
-    `/libraries/${id}/retry-extracts`,
-    { method: "POST" },
-  );
+  send<{ library_id: string; retried: number }>("POST", `/libraries/${id}/retry-extracts`, {
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 
 /** Global drain: clear stored extraction errors in EVERY library and re-defer
  *  extraction for all affected items (plus any never-hashed items with no
  *  pending job). Returns the total requeued. */
 export const retryAllExtracts = () =>
-  request<{ retried: number }>(`/system/retry-extracts`, { method: "POST" });
+  send<{ retried: number }>("POST", `/system/retry-extracts`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 /** Per-library count of items whose stored hashes were computed under an older
  *  hashing scheme, plus whether a light re-hash job is already queued/running.
@@ -1103,8 +1160,8 @@ export interface LibraryHashStatus {
   rehash_pending: boolean;
   hash_scheme: string;
 }
-export const libraryHashStatus = () =>
-  request<LibraryHashStatus[]>("/libraries/hash-status");
+export const libraryHashStatus = (signal?: AbortSignal) =>
+  request<LibraryHashStatus[]>("/libraries/hash-status", { signal });
 
 /** Queue the light per-library hash refresh: recomputes quick/mid/content
  *  hashes only — no metadata extraction, thumbnails or embeddings. */
@@ -1117,8 +1174,8 @@ export const rehashLibrary = (id: string) =>
 /** Paginated failed Procrastinate jobs (read scope; page capped server-side at
  *  100). Returns {items, total, limit, offset} so the caller can render a pager
  *  (FIX-8 — the list used to grow unbounded on screen). */
-export const failedJobs = (limit = 25, offset = 0) =>
-  request<FailedJobPage>(`/system/failed-jobs?limit=${limit}&offset=${offset}`);
+export const failedJobs = (limit = 25, offset = 0, signal?: AbortSignal) =>
+  request<FailedJobPage>(`/system/failed-jobs?limit=${limit}&offset=${offset}`, { signal });
 
 /** Delete failed Procrastinate rows now (FIX-8, admin scope). Optional ``queue``
  *  scopes the wipe to one queue. Returns the number deleted. */
@@ -1505,14 +1562,11 @@ export const listBackups = () =>
     incomplete_note: string;
   }>("/system/backups");
 
-/** Download one bundle's Postgres dump. Blob save, not an `<a href>`: the
- *  endpoint is admin-scoped and a plain link cannot carry the Bearer header
- *  (same reasoning as `downloadExport`). */
+/** Download one bundle's Postgres dump (admin-scoped). Blob save, like
+ *  `downloadExport`, so a failure surfaces as an error instead of a saved
+ *  error page. */
 export async function downloadBackup(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/system/backups/${encodeURIComponent(name)}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `${name}.dump`);
+  await saveBlob(`/system/backups/${encodeURIComponent(name)}`, `${name}.dump`);
 }
 
 /** Override an editable task's schedule and/or toggle it (admin). Pass
@@ -1621,6 +1675,7 @@ export const fetchLogs = (
     limit?: number;
     before_id?: number;
   } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (opts.min_level) qs.set("min_level", opts.min_level);
@@ -1629,7 +1684,7 @@ export const fetchLogs = (
   if (opts.limit) qs.set("limit", String(opts.limit));
   if (opts.before_id) qs.set("before_id", String(opts.before_id));
   const s = qs.toString();
-  return request<LogsResponse>(`/system/logs${s ? `?${s}` : ""}`);
+  return request<LogsResponse>(`/system/logs${s ? `?${s}` : ""}`, { signal });
 };
 
 /** Re-prioritise a queue's PENDING (todo) jobs (UI-T14, admin scope). `priority`
@@ -1679,9 +1734,11 @@ export const libraryTree = (
   limit = 100,
   offset = 0,
   foldersOffset = 0,
+  signal?: AbortSignal,
 ) =>
   request<TreeResponse>(
     `/libraries/${id}/tree?path=${encodeURIComponent(path)}&limit=${limit}&offset=${offset}&folders_offset=${foldersOffset}`,
+    { signal },
   );
 
 
@@ -1711,12 +1768,7 @@ export const updateSavedSearch = (
 ) => request<SavedSearch>(`/saved-searches/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteSavedSearch(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/saved-searches/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/saved-searches/${id}`, { expect: "none" });
 }
 
 // ---- P4-T1 metadata profiles (read-only field vocabulary for key-facts) ----
@@ -1785,8 +1837,6 @@ export function detectWebhookFormat(url: string): WebhookFormat {
 
 /** Sentinel a client sends to KEEP an existing (encrypted) channel secret. */
 export const UNCHANGED = "__unchanged__";
-/** Marker the API returns in place of any stored secret on read. */
-export const REDACTED = "__redacted__";
 
 export interface AlertChannel {
   id: string;
@@ -1798,7 +1848,8 @@ export interface AlertChannel {
   created_at: string;
 }
 
-export const listAlertChannels = () => request<AlertChannel[]>("/alert-channels");
+export const listAlertChannels = (signal?: AbortSignal) =>
+  request<AlertChannel[]>("/alert-channels", { signal });
 
 export const createAlertChannel = (body: {
   name: string;
@@ -1819,12 +1870,7 @@ export const updateAlertChannel = (
 ) => request<AlertChannel>(`/alert-channels/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteAlertChannel(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/alert-channels/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/alert-channels/${id}`, { expect: "none" });
 }
 
 export interface TestFireResult {
@@ -1837,7 +1883,7 @@ export interface TestFireResult {
 /** Fire a sample alert through the real driver (delivery failures come back in
  *  the 200 body with ok=false; config/secret problems are 4xx/503). */
 export const testAlertChannel = (id: string) =>
-  request<TestFireResult>(`/alert-channels/${id}/test`, { method: "POST" });
+  send<TestFireResult>("POST", `/alert-channels/${id}/test`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 export interface AlertRule {
   id: string;
@@ -1862,7 +1908,8 @@ export interface AlertRule {
   created_at: string;
 }
 
-export const listAlertRules = () => request<AlertRule[]>("/alert-rules");
+export const listAlertRules = (signal?: AbortSignal) =>
+  request<AlertRule[]>("/alert-rules", { signal });
 
 // 2026-08-20 mass edit: one change-set over many rules (throttle switch and/or
 // channel attachment). digest_window null + set_throttle true = immediate.
@@ -1910,12 +1957,7 @@ export const updateAlertRule = (
 ) => request<AlertRule>(`/alert-rules/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteAlertRule(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/alert-rules/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/alert-rules/${id}`, { expect: "none" });
 }
 
 export type AlertEventStatus = "delivered" | "failed" | "pending";
@@ -1937,13 +1979,14 @@ export interface AlertEvent {
 
 export const listAlertEvents = (
   filters: { rule_id?: string; library_id?: string; status?: AlertEventStatus; limit?: number } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (filters.rule_id) qs.set("rule_id", filters.rule_id);
   if (filters.library_id) qs.set("library_id", filters.library_id);
   if (filters.status) qs.set("status", filters.status);
   qs.set("limit", String(filters.limit ?? 100));
-  return request<AlertEvent[]>(`/alert-events?${qs}`);
+  return request<AlertEvent[]>(`/alert-events?${qs}`, { signal });
 };
 
 export interface AlertEventSummary {
@@ -1952,9 +1995,10 @@ export interface AlertEventSummary {
   pending: number;
 }
 
-export const alertEventsSummary = (library_id?: string) =>
+export const alertEventsSummary = (library_id?: string, signal?: AbortSignal) =>
   request<AlertEventSummary>(
     `/alert-events/summary${library_id ? `?library_id=${encodeURIComponent(library_id)}` : ""}`,
+    { signal },
   );
 
 // ---- P3-T10 duplicate awareness (copy counts + copy listing) ----
@@ -1981,8 +2025,8 @@ export interface CopiesResponse {
 
 /** The OTHER active copies of an item (read scope). Used by the ItemDetail
  *  Copies section; `count` is the full group size incl. self. */
-export const itemCopies = (id: string) =>
-  request<CopiesResponse>(`/items/${id}/copies`);
+export const itemCopies = (id: string, signal?: AbortSignal) =>
+  request<CopiesResponse>(`/items/${id}/copies`, { signal });
 
 /** Batch copy-count badges for a page of results (read scope). Body is up to 200
  *  ids; the response maps id -> count ONLY for groups with more than one member.
@@ -2032,10 +2076,14 @@ export interface TimelineResponse {
 
 /** Date histogram of active items by mtime (read scope). `bucket` is month|year;
  *  `library` scopes to one library. */
-export const timeline = (bucket: "month" | "year" = "month", library = "") => {
+export const timeline = (
+  bucket: "month" | "year" = "month",
+  library = "",
+  signal?: AbortSignal,
+) => {
   const qs = new URLSearchParams({ bucket });
   if (library) qs.set("library", library);
-  return request<TimelineResponse>(`/stats/timeline?${qs}`);
+  return request<TimelineResponse>(`/stats/timeline?${qs}`, { signal });
 };
 
 export interface LibraryStatsRow {
@@ -2123,8 +2171,8 @@ function reportQuery(opts: ReportRunOpts): string {
 }
 
 /** Run a canned report and return one JSON page. */
-export const runReport = (id: string, opts: ReportRunOpts = {}) =>
-  request<ReportPage>(`/reports/${id}${reportQuery(opts)}`);
+export const runReport = (id: string, opts: ReportRunOpts = {}, signal?: AbortSignal) =>
+  send<ReportPage>("GET", `/reports/${id}${reportQuery(opts)}`, { signal, timeoutMs: SLOW_TIMEOUT_MS });
 
 // ---- IN-T3 folder tree (treemap drill-down) ---------------------------------
 /** One direct child of the requested folder. ``name`` is the single path segment
@@ -2157,21 +2205,24 @@ export interface FolderTreeResponse {
  *  child per LIBRARY; every deeper call pins the library from the child row. */
 export const folderTree = (
   opts: { libraryId?: string; parent?: string; limit?: number } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (opts.libraryId) qs.set("library_id", opts.libraryId);
   if (opts.parent) qs.set("parent", opts.parent);
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const s = qs.toString();
-  return request<FolderTreeResponse>(`/reports/folder-tree${s ? `?${s}` : ""}`);
+  return send<FolderTreeResponse>("GET", `/reports/folder-tree${s ? `?${s}` : ""}`, {
+    signal,
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 };
 
-/** Save a streamed fetch Response body to a download file. Central because a
- *  bare <a download> link can't carry the Bearer auth header, so every export
- *  goes fetch -> blob -> object URL -> synthetic click. */
-async function saveBlob(res: Response, filename: string): Promise<void> {
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  const blob = await res.blob();
+/** Fetch ``path`` as a blob and save it as a download file. Central so every
+ *  export goes send -> blob -> object URL -> synthetic click, with the long
+ *  download timeout and an ``ApiError`` (not a saved error page) on failure. */
+async function saveBlob(path: string, filename: string): Promise<void> {
+  const blob = await send<Blob>("GET", path, { expect: "blob", timeoutMs: DOWNLOAD_TIMEOUT_MS });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -2187,7 +2238,7 @@ function stampToday(): string {
 }
 
 /** Download a canned report in a chosen streaming format (csv/ndjson/xml). Uses
- *  fetch (auth header) + a blob so the streamed body is saved, not rendered. */
+ *  a blob fetch so the streamed body is saved, not rendered. */
 export async function downloadReport(
   id: string,
   format: ExportFormat,
@@ -2195,10 +2246,7 @@ export async function downloadReport(
 ): Promise<void> {
   const q = reportQuery({ ...opts, offset: undefined });
   const sep = q ? "&" : "?";
-  const res = await fetch(`${API_BASE}/reports/${id}${q}${sep}format=${format}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `filearr-${id}-${stampToday()}.${format}`);
+  await saveBlob(`/reports/${id}${q}${sep}format=${format}`, `filearr-${id}-${stampToday()}.${format}`);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2259,12 +2307,9 @@ export const listExports = () =>
 
 export const getExport = (id: string) => request<ReportExport>(`/exports/${id}`);
 
-/** Fetch a finished export artifact (auth header) and save it as a file. */
+/** Fetch a finished export artifact and save it as a file. */
 export async function downloadExport(ex: ReportExport): Promise<void> {
-  const res = await fetch(`${API_BASE}/exports/${ex.id}/download`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  await saveBlob(res, `filearr-export-${ex.id}.${ex.format}`);
+  await saveBlob(`/exports/${ex.id}/download`, `filearr-export-${ex.id}.${ex.format}`);
 }
 
 // ---- Scheduled reports (P11-T9) ----
@@ -2319,12 +2364,7 @@ export const updateReportSchedule = (
   });
 
 export async function deleteReportSchedule(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/report-schedules/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/report-schedules/${id}`, { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -2460,12 +2500,7 @@ export const patchRole = (
   body: { display_name?: string; description?: string; scopes?: string[]; ceiling_actions?: string[] },
 ) => request<RoleDef>(`/rbac/roles/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify(body) });
 export async function deleteRole(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/roles/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/rbac/roles/${encodeURIComponent(name)}`, { expect: "none" });
 }
 
 export interface LoginResult {
@@ -2477,10 +2512,12 @@ export const authStatus = () => request<AuthStatus>("/auth/status");
 
 /** Current session principal, or null when not authenticated (401). */
 export async function authMe(): Promise<AuthPrincipal | null> {
-  const res = await fetch(`${API_BASE}/auth/me`, { credentials: "same-origin" });
-  if (res.status === 401) return null;
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-  return res.json() as Promise<AuthPrincipal>;
+  try {
+    return await send<AuthPrincipal>("GET", "/auth/me");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return null;
+    throw e;
+  }
 }
 
 export function authLogin(username: string, password: string): Promise<LoginResult> {
@@ -2498,7 +2535,7 @@ export function authBootstrap(username: string, password: string): Promise<AuthP
 }
 
 export async function authLogout(): Promise<void> {
-  await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "same-origin" });
+  await send("POST", "/auth/logout", { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -2555,31 +2592,18 @@ export const createGroup = (name: string, description: string | null) =>
     body: JSON.stringify({ name, description }),
   });
 export async function deleteGroup(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/groups/${id}`, { expect: "none" });
 }
 export const listMembers = (groupId: string) =>
   request<RbacMember[]>(`/rbac/groups/${groupId}/members`);
 export async function addMember(groupId: string, principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${groupId}/members`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-    },
-    body: JSON.stringify({ principal_id: principalId }),
+  await send("POST", `/rbac/groups/${groupId}/members`, {
+    body: { principal_id: principalId },
+    expect: "none",
   });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
 }
 export async function removeMember(groupId: string, principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/groups/${groupId}/members/${principalId}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/groups/${groupId}/members/${principalId}`, { expect: "none" });
 }
 
 export const listGrants = () => request<RbacGrant[]>("/rbac/grants");
@@ -2596,11 +2620,7 @@ export const createGrant = (body: {
     body: JSON.stringify(body),
   });
 export async function deleteGrant(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/rbac/grants/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/rbac/grants/${id}`, { expect: "none" });
 }
 
 export const rbacPreview = (
@@ -2707,11 +2727,7 @@ export const updateCustomReport = (
   });
 
 export async function deleteCustomReport(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-reports/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  await send("DELETE", `/custom-reports/${id}`, { expect: "none" });
 }
 
 export const runCustomReport = (
@@ -2721,7 +2737,9 @@ export const runCustomReport = (
   const qs = new URLSearchParams({ format: "json" });
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   if (opts.offset != null) qs.set("offset", String(opts.offset));
-  return request<CustomRunPage>(`/custom-reports/${id}/run?${qs.toString()}`);
+  return send<CustomRunPage>("GET", `/custom-reports/${id}/run?${qs.toString()}`, {
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 };
 
 /** Download a custom report in a chosen streaming format (csv/ndjson/xml). */
@@ -2730,13 +2748,10 @@ export async function downloadCustomReport(
   name: string,
   format: ExportFormat,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/custom-reports/${id}/run?format=${format}`, {
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
   // The server sets a safe Content-Disposition filename; the client name is only
   // a friendly default (sanitised for the filesystem).
   const safe = name.replace(/[^\w.-]+/g, "_") || "report";
-  await saveBlob(res, `filearr-${safe}-${stampToday()}.${format}`);
+  await saveBlob(`/custom-reports/${id}/run?format=${format}`, `filearr-${safe}-${stampToday()}.${format}`);
 }
 
 // --------------------------------------------------------------------------- //
@@ -2768,13 +2783,7 @@ export const updateUser = (
 ) => request<AuthPrincipal>(`/auth/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
 export async function deleteUser(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/users/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    credentials: "same-origin",
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/users/${id}`, { expect: "none" });
 }
 
 // ---- Active sessions (P6-T11) ----
@@ -2790,36 +2799,18 @@ export interface AuthSession {
 export const listMySessions = () => request<AuthSession[]>("/auth/sessions");
 
 export async function revokeMySession(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/sessions/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/sessions/${id}`, { expect: "none" });
 }
 
 export async function revokeAllMySessions(): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/sessions/revoke-all`, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("POST", "/auth/sessions/revoke-all", { expect: "none" });
 }
 
 export const listUserSessions = (principalId: string) =>
   request<AuthSession[]>(`/auth/users/${principalId}/sessions`);
 
 export async function revokeUserSessions(principalId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/auth/users/${principalId}/sessions`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (res.status === 204) return;
-  throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/auth/users/${principalId}/sessions`, { expect: "none" });
 }
 
 // ---- Security audit feed (P6-T9, admin) ----
@@ -2848,6 +2839,7 @@ export const listAudit = (
     cursor?: string;
     limit?: number;
   } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (filters.event_type) qs.set("event_type", filters.event_type);
@@ -2856,7 +2848,7 @@ export const listAudit = (
   if (filters.until) qs.set("until", filters.until);
   if (filters.cursor) qs.set("cursor", filters.cursor);
   qs.set("limit", String(filters.limit ?? 50));
-  return request<AuditPage>(`/audit?${qs}`);
+  return request<AuditPage>(`/audit?${qs}`, { signal });
 };
 
 // --------------------------------------------------------------------------- //
@@ -2903,21 +2895,11 @@ export interface QueryKeys {
 /** Live-preview a querydsl string against real data (read scope, RBAC-scoped).
  *  On a parse/translation error the server returns 422 with the same structured
  *  `{ detail: { validation: [...] } }` body the reports validate/run paths use. */
-export async function previewQuery(
+export function previewQuery(
   body: { query: string; limit?: number; offset?: number },
   signal?: AbortSignal,
 ): Promise<QueryPreviewResponse> {
-  const res = await fetch(`${API_BASE}/query/preview`, {
-    method: "POST",
-    signal,
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return res.json() as Promise<QueryPreviewResponse>;
+  return send<QueryPreviewResponse>("POST", "/query/preview", { body, signal });
 }
 
 /** Extract the structured validation errors from a failed previewQuery (422). */
@@ -3080,15 +3062,7 @@ export const mintEnrollmentToken = (
  *  token's row (which carries the consumed_by link) needs `force` — the audit
  *  event preserves the link before the row goes. */
 export async function revokeEnrollmentToken(tokenHash: string, force = false): Promise<void> {
-  const res = await fetch(
-    `${API_BASE}/agents/enrollment-tokens/${encodeURIComponent(tokenHash)}${force ? "?force=true" : ""}`,
-    {
-      method: "DELETE",
-      credentials: "same-origin",
-      headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-    },
-  );
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agents/enrollment-tokens/${encodeURIComponent(tokenHash)}${force ? "?force=true" : ""}`, { expect: "none" });
 }
 
 /** Revoke = application-layer denylist (row retained, history kept). */
@@ -3246,13 +3220,6 @@ export interface AgentCommandOut {
   requested_by: string | null;
 }
 
-export const AGENT_COMMAND_TERMINAL: AgentCommandStatus[] = [
-  "done",
-  "failed",
-  "expired",
-  "cancelled",
-];
-
 /** Newest-first command listing. `kind` / `state` are the server-side filters
  *  the endpoint already exposes — the fleet console uses them to answer "is a
  *  sweep in flight on this agent?" in ONE request for the whole page instead of
@@ -3331,12 +3298,7 @@ export const updateAgentShareMap = (
   });
 
 export async function deleteAgentShareMap(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/agent-share-maps/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agent-share-maps/${id}`, { expect: "none" });
 }
 
 // --------------------------------------------------------------------------- //
@@ -3760,12 +3722,7 @@ export const updateConfigGroup = (id: string, patch: ConfigGroupUpdateIn) =>
   });
 
 export async function deleteConfigGroup(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/agents/config-groups/${id}`, {
-    method: "DELETE",
-    credentials: "same-origin",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/agents/config-groups/${id}`, { expect: "none" });
 }
 
 // ---- console installer distribution (POST /agents/installer-config) ----------
@@ -3869,11 +3826,7 @@ export function mintLlmKey(body: MintLlmKeyRequest): Promise<LlmKey> {
 }
 
 export async function revokeLlmKey(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/llm-keys/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/llm-keys/${id}`, { expect: "none" });
 }
 
 // --- Ordinary API keys (read / write / admin Bearer tokens; admin-minted) ---
@@ -3902,11 +3855,7 @@ export const patchServiceAccount = (
     body: JSON.stringify(body),
   });
 export async function deleteServiceAccount(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/service-accounts/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/service-accounts/${id}`, { expect: "none" });
 }
 
 export interface ApiKeyRow {
@@ -3948,11 +3897,7 @@ export function mintApiKey(body: {
 }
 
 export async function revokeApiKey(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api-keys/${id}`, {
-    method: "DELETE",
-    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  await send("DELETE", `/api-keys/${id}`, { expect: "none" });
 }
 
 // --- GUI auth-provider config (2026-08-20) --------------------------------- //
@@ -3990,11 +3935,7 @@ export interface AuthTestResult {
 }
 
 export const testAuthProvider = (provider: string, body: Record<string, unknown>) =>
-  request<AuthTestResult>(`/auth-config/${provider}/test`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  send<AuthTestResult>("POST", `/auth-config/${provider}/test`, { body, timeoutMs: SLOW_TIMEOUT_MS });
 
 export interface FetchedCert {
   subject: string;

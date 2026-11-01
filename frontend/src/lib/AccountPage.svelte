@@ -7,7 +7,8 @@
     putMyPreferences,
     changeMyPassword,
     mySessionTimeouts,
-    ApiError,
+    errorMessage,
+    errorStatus,
     type AuthPrincipal,
     type MySessionTimeouts,
     type ProfilePatch,
@@ -16,24 +17,16 @@
   import { shareFormat, setShareFormat, detectedPlatform } from "./osFormat.svelte";
   import type { FormatPref } from "./osFormat";
   import SessionsPanel from "./SessionsPanel.svelte";
+  import { toast } from "./ui/toast.svelte";
 
-  let { me, onUpdated }: { me: AuthPrincipal; onUpdated: (p: AuthPrincipal) => void } = $props();
+  let {
+    me,
+    onUpdated,
+    onSignedOut,
+  }: { me: AuthPrincipal; onUpdated: (p: AuthPrincipal) => void; onSignedOut: () => void } = $props();
 
   const isLocal = $derived((me.auth_provider ?? "local") === "local");
   const providerLabel = $derived((me.auth_provider ?? "local").toUpperCase());
-
-  function errText(e: unknown): string {
-    if (e instanceof ApiError) {
-      if (e.status === 409) return "That username is already taken (or cannot be changed for this account).";
-      if (e.status === 401) return "Not authorised — the current password may be wrong.";
-      try {
-        const j = JSON.parse(e.body);
-        if (typeof j?.detail === "string") return j.detail;
-      } catch { /* not JSON */ }
-      return e.body || `Request failed (${e.status})`;
-    }
-    return String(e);
-  }
 
   // --- Profile ---------------------------------------------------------------
   let username = $state("");
@@ -77,7 +70,12 @@
           : "Profile saved.",
       };
     } catch (e) {
-      profileMsg = { ok: false, text: errText(e) };
+      profileMsg = {
+        ok: false,
+        text: errorStatus(e) === 409
+          ? "That username is already taken (or cannot be changed for this account)."
+          : errorMessage(e, { verb: "change this profile" }),
+      };
     } finally {
       profileBusy = false;
     }
@@ -104,14 +102,19 @@
     pwMsg = null;
     try {
       await changeMyPassword(curPw, newPw);
-      pwMsg = { ok: true, text: "Password changed — all sessions were signed out; sign in again." };
+      // Every session (this one included) is revoked: re-probe into the wall.
+      // The toast carries the message there, since this page unmounts.
+      const done = "Password changed. You have been signed out everywhere.";
+      pwMsg = { ok: true, text: done };
       curPw = newPw = confirmPw = "";
-      setTimeout(() => {
-        location.hash = "";
-        location.reload();
-      }, 1500);
+      toast(done, { tone: "ok" });
+      onSignedOut();
     } catch (e) {
-      pwMsg = { ok: false, text: errText(e) };
+      // 403 = wrong current password; 401 only means the session itself expired.
+      pwMsg = {
+        ok: false,
+        text: errorStatus(e) === 403 ? "The current password is incorrect." : errorMessage(e),
+      };
       pwBusy = false;
     }
   }
@@ -143,7 +146,7 @@
       onUpdated(p);
       prefMsg = { ok: true, text: "Preferences saved — they will apply wherever you sign in." };
     } catch (e) {
-      prefMsg = { ok: false, text: errText(e) };
+      prefMsg = { ok: false, text: errorMessage(e, { verb: "save preferences" }) };
     } finally {
       prefBusy = false;
     }
@@ -160,7 +163,7 @@
     try {
       timeouts = await mySessionTimeouts();
     } catch (e) {
-      timeoutsErr = errText(e);
+      timeoutsErr = errorMessage(e);
     }
   });
 

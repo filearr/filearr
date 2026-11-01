@@ -6,6 +6,7 @@
   // ``/agent-status`` until ``last_verified_at`` advances (freshness updates in
   // place — NO full transfer) or a timeout, which then messages clearly (offline
   // agents queue the check; never a bare spinner). Mirrors RetrievePanel's tone.
+  import { onDestroy } from "svelte";
   import {
     friendlyError,
     itemAgentStatus,
@@ -78,6 +79,7 @@
 
   async function runVerify(mode: "stat" | "rehash") {
     if (verifying || inFlight) return;
+    const mine = token;
     verifying = true;
     const baseline = lastVerifiedAt;
     message = mode === "stat" ? "Verification requested…" : "Full rehash requested…";
@@ -86,9 +88,10 @@
       await refresh(); // reflect verify_in_flight immediately
       await pollUntilVerified(baseline);
     } catch (e) {
-      message = friendlyError(e);
+      if (mine === token) message = friendlyError(e);
     } finally {
-      verifying = false;
+      // A newer item reset `verifying` already and may have its own run going.
+      if (mine === token) verifying = false;
     }
   }
 
@@ -99,6 +102,11 @@
     verifying = false;
     message = null;
     void refresh();
+  });
+
+  // M18: stop the verify poll loop (and drop in-flight results) on unmount.
+  onDestroy(() => {
+    token += 1;
   });
 </script>
 

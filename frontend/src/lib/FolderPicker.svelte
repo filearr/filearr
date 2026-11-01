@@ -5,7 +5,9 @@
   // root_path. Free-text entry stays available on the parent form; this is an
   // optional aid. A 422 (outside allowlist / traversal) surfaces inline rather
   // than blowing up the dialog.
-  import { browseFs, type FsBrowse } from "./api";
+  import { onDestroy } from "svelte";
+  import { browseFs, type FsBrowse, errorMessage } from "./api";
+  import { latest } from "./latest";
 
   let {
     initial = "",
@@ -17,15 +19,22 @@
   let error = $state("");
   let loading = $state(false);
 
+  // Last-request-wins: clicking through folders faster than the server answers
+  // aborts the older listing, so the view always matches the last click.
+  const browser = latest((signal, path: string) => browseFs(path, signal));
+  onDestroy(() => browser.cancel());
+
   async function go(path: string) {
     loading = true;
     error = "";
     try {
-      view = await browseFs(path);
+      const r = await browser.run(path);
+      if (r === undefined) return;
+      view = r;
+      loading = false;
     } catch (e) {
       // Keep the previous listing visible so the user can recover.
-      error = String(e);
-    } finally {
+      error = errorMessage(e, { verb: "browse this folder" });
       loading = false;
     }
   }

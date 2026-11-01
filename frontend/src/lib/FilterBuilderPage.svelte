@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import DslHelp from "./DslHelp.svelte";
-  import { copyText } from "./clipboard";
+  import { COPY_FAILED, copyText } from "./clipboard";
+  import { toast } from "./ui/toast.svelte";
   import { encodeSearchHash } from "./searchparams";
   import { setReportPrefill, takeBuilderPrefill } from "./handoff";
   import {
@@ -15,6 +16,7 @@
     type QueryPreviewResponse,
     type QueryKeys,
     type ReportValidationError,
+    errorMessage,
   } from "./api";
   import {
     newCondition,
@@ -182,13 +184,15 @@
         vErrors = errs;
         preview = null;
       } else {
-        previewError = String(e);
+        previewError = errorMessage(e);
       }
     } finally {
       if (seq === previewSeq) loading = false;
     }
   }
 
+  // Kept: formats one validation item with its parse position, which
+  // errorMessage (whole-error, msg/message only) does not render.
   function errText(e: ReportValidationError): string {
     if (e.error === "parse_error")
       return `Parse error (${e.code}) at position ${e.position}: ${e.reason}`;
@@ -201,7 +205,7 @@
   // ------------------------------------------------------------------ //
   let copied = $state(false);
   async function copyDsl() {
-    await copyText(dsl);
+    if (!(await copyText(dsl))) return toast(COPY_FAILED, { tone: "warn" });
     copied = true;
     setTimeout(() => (copied = false), 1200);
   }
@@ -273,7 +277,7 @@
         advancedBanner = false;
       }
     } catch (e) {
-      nlError = String(e);
+      nlError = errorMessage(e);
     } finally {
       nlBusy = false;
     }

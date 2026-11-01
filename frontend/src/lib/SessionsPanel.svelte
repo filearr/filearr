@@ -6,6 +6,7 @@
     getSessionSettings, patchSessionSettings,
     friendlyError, type AuthPrincipal, type AuthSession, type SessionSettings,
   } from "./api";
+  import { numOrNull } from "./numInput";
 
   // P6-T11 session management. Two views of one panel (2026-08-19 split):
   //   "mine"  — the signed-in user's OWN active sessions ("log out everywhere"),
@@ -28,15 +29,16 @@
   // admin: global session-timeout settings (runtime override of the env
   // defaults; 0 clears back to env). Per-user overrides live in UsersPanel.
   let ss = $state<SessionSettings | null>(null);
-  let ssIdle = $state("");
-  let ssTtl = $state("");
+  // type="number" bind:value — a number, or null when emptied (= unchanged).
+  let ssIdle = $state<number | null>(null);
+  let ssTtl = $state<number | null>(null);
   let ssSaved = $state(false);
 
   async function refreshSettings() {
     try {
       ss = await getSessionSettings();
-      ssIdle = String(ss.inactivity_hours);
-      ssTtl = String(ss.ttl_hours);
+      ssIdle = ss.inactivity_hours;
+      ssTtl = ss.ttl_hours;
     } catch (e) {
       error = friendlyError(e);
     }
@@ -51,17 +53,25 @@
   async function saveSettings(e: Event) {
     e.preventDefault();
     error = ""; ssSaved = false;
-    const idle = Number(ssIdle), ttl = Number(ssTtl);
-    if (!Number.isFinite(idle) || !Number.isFinite(ttl)) { error = "Timeouts must be numbers of hours."; return; }
+    // Blank (null) = leave as is; 0 clears back to env; else within range.
+    const idle = numOrNull(ssIdle), ttl = numOrNull(ssTtl);
+    const bad = (n: number | null) =>
+      n !== null && n !== 0 && (!ss || n < ss.min_hours || n > ss.max_hours);
+    if (bad(idle) || bad(ttl)) {
+      error = ss
+        ? `Timeouts must be ${fmtHours(ss.min_hours)}–${fmtHours(ss.max_hours)} hours, or 0 to clear.`
+        : "Timeouts must be numbers of hours.";
+      return;
+    }
     // Send only what changed: re-sending an untouched env value would turn it
     // into a "global" override equal to the env default (harmless but noisy).
     const patch: { inactivity_hours?: number; ttl_hours?: number } = {};
-    if (ss && idle !== ss.inactivity_hours) patch.inactivity_hours = idle;
-    if (ss && ttl !== ss.ttl_hours) patch.ttl_hours = ttl;
+    if (ss && idle !== null && idle !== ss.inactivity_hours) patch.inactivity_hours = idle;
+    if (ss && ttl !== null && ttl !== ss.ttl_hours) patch.ttl_hours = ttl;
     if (!Object.keys(patch).length) { ssSaved = true; return; }
     try {
       ss = await patchSessionSettings(patch);
-      ssIdle = String(ss.inactivity_hours); ssTtl = String(ss.ttl_hours);
+      ssIdle = ss.inactivity_hours; ssTtl = ss.ttl_hours;
       ssSaved = true;
     } catch (err) {
       error = friendlyError(err, "save");
@@ -71,7 +81,7 @@
     error = ""; ssSaved = false;
     try {
       ss = await patchSessionSettings({ [which]: 0 });
-      ssIdle = String(ss.inactivity_hours); ssTtl = String(ss.ttl_hours);
+      ssIdle = ss.inactivity_hours; ssTtl = ss.ttl_hours;
     } catch (err) {
       error = friendlyError(err, "save");
     }
@@ -205,7 +215,7 @@
           <label class="flex flex-col gap-1 text-sm">
             <span class="text-xs text-slate-500">Idle timeout (hours)</span>
             <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-              type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssIdle} />
+              type="number" step="any" min="0" max={ss.max_hours} bind:value={ssIdle} />
             <span class="text-xs text-slate-600 dark:text-slate-400">
               currently: {ss.inactivity_hours} h — {sourceLabel(ss.inactivity_source)}
               {#if ss.inactivity_source !== "env"}(env default {ss.env_inactivity_hours} h){/if}
@@ -217,7 +227,7 @@
           <label class="flex flex-col gap-1 text-sm">
             <span class="text-xs text-slate-500">Absolute lifetime (hours)</span>
             <input class="w-32 rounded border border-slate-300 px-2 py-1 dark:border-slate-700 dark:bg-slate-900"
-              type="number" step="any" min={ss.min_hours} max={ss.max_hours} bind:value={ssTtl} />
+              type="number" step="any" min="0" max={ss.max_hours} bind:value={ssTtl} />
             <span class="text-xs text-slate-600 dark:text-slate-400">
               currently: {ss.ttl_hours} h — {sourceLabel(ss.ttl_source)}
               {#if ss.ttl_source !== "env"}(env default {ss.env_ttl_hours} h){/if}

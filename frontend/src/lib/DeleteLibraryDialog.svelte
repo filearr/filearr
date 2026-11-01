@@ -2,8 +2,9 @@
   // UI-T2 (frontend) — typed-name confirmation for the product's ONE intentional
   // hard-delete. The user must type the exact library name; the delete button
   // stays disabled until it matches. Calls DELETE /libraries/{id}?confirm=<name>.
-  // 409 (scan running) and other statuses are classified into a clear message.
-  import { deleteLibrary, type Library } from "./api";
+  // 409 (scan running) and other statuses are classified into a clear message;
+  // 404 means it is already gone, which is the outcome the user asked for.
+  import { deleteLibrary, errorMessage, errorStatus, type Library } from "./api";
 
   let {
     library,
@@ -25,17 +26,19 @@
       await deleteLibrary(library.id, typed);
       onDeleted();
     } catch (e) {
-      const msg = String(e);
+      const status = errorStatus(e);
       // The frozen contract: 409 = a scan is running; 422 = confirm mismatch
       // (shouldn't happen given the client-side gate, but surfaced anyway).
-      if (msg.startsWith("Error: 409") || msg.includes("409:")) {
+      if (status === 404) {
+        onDeleted();
+      } else if (status === 409) {
         error =
           "A scan is currently running for this library. Cancel or wait for it " +
           "to finish, then delete.";
-      } else if (msg.includes("422:")) {
+      } else if (status === 422) {
         error = "Confirmation name did not match. Type the library name exactly.";
       } else {
-        error = msg;
+        error = errorMessage(e, { verb: "delete this library" });
       }
     } finally {
       busy = false;

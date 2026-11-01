@@ -8,6 +8,7 @@
   // collected under "Other" so a new HELP entry is never silently dropped.
   import { DSL_SECTIONS } from "./dslHelp";
   import { HELP, HELP_TOPICS, type HelpTopic } from "./help";
+  import { safeHref } from "./pathlinks";
 
   let { sourceUrl = "https://github.com/filearr/filearr" }: { sourceUrl?: string } =
     $props();
@@ -42,9 +43,11 @@
   // detail/dialog components).
   const SHORTCUTS: { keys: string[]; action: string }[] = [
     { keys: ["/", "Ctrl/⌘ K"], action: "Focus the search box (from anywhere on the Search tab)" },
-    { keys: ["↑", "↓"], action: "Move the result selection" },
-    { keys: ["Enter"], action: "Open the selected item's details" },
-    { keys: ["Ctrl/⌘ Enter"], action: "Copy the selected item's path" },
+    // List keys act only with the results list focused, never while typing.
+    { keys: ["↑", "↓"], action: "Move the result selection (results list focused)" },
+    { keys: ["Enter"], action: "Open the selected item's details (results list focused)" },
+    { keys: ["Ctrl/⌘ Enter"], action: "Copy the selected item's path (results list focused)" },
+    { keys: ["Space", "Shift Space"], action: "Select the highlighted result / extend the selection (results list focused)" },
     { keys: ["Esc"], action: "Close the detail panel or dialog" },
     // R8-UI: the map is keyboard-operable end to end — panning/zooming here, and
     // the numeric North/South/West/East fields for the area selection itself.
@@ -105,12 +108,17 @@
     </h3>
     <ul class="space-y-3">
       {#each RESOURCES as r (r.title)}
+        {@const href = safeHref(r.href)}
         <li>
-          <a
-            class="text-sm font-medium underline hover:text-[var(--accent)]"
-            href={r.href}
-            target="_blank"
-            rel="noopener noreferrer">{r.title}</a>
+          {#if href}
+            <a
+              class="text-sm font-medium underline hover:text-[var(--accent)]"
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer">{r.title}</a>
+          {:else}
+            <span class="text-sm font-medium">{r.title}</span>
+          {/if}
           <p class="mt-0.5 text-sm leading-snug text-slate-600 dark:text-slate-400">
             {r.desc}
           </p>

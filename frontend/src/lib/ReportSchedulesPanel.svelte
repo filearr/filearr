@@ -15,6 +15,7 @@
     type ReportDefinition,
     type AlertChannel,
     type ExportFormat,
+    errorMessage,
   } from "./api";
 
   // P11-T9 — schedule manager: list/create/toggle/delete scheduled report
@@ -45,7 +46,7 @@
       ]);
       error = "";
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -84,7 +85,7 @@
       channelId = "";
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "manage report schedules" });
     } finally {
       creating = false;
     }
@@ -95,7 +96,7 @@
       await updateReportSchedule(s.id, { enabled: !s.enabled });
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "manage report schedules" });
     }
   }
 
@@ -105,7 +106,7 @@
       await deleteReportSchedule(s.id);
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "manage report schedules" });
     }
   }
 

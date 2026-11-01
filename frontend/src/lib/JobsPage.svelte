@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { latest } from "./latest";
   import {
-    ApiError,
     clearFailedJobs,
     downloadBackup,
     failedJobs,
@@ -21,6 +21,7 @@
     type MaintenanceTask,
     type ReapResult,
     type ScanRunning,
+    errorMessage,
   } from "./api";
   import FeaturesPanel from "./FeaturesPanel.svelte";
   import LogsPanel from "./LogsPanel.svelte";
@@ -100,7 +101,7 @@
         r.updated === 0 ? "no pending jobs" : `updated ${r.updated} pending`;
       await refresh();
     } catch (e) {
-      prioMsg[q] = `failed: ${String(e)}`;
+      prioMsg[q] = `failed: ${errorMessage(e)}`;
     } finally {
       prioBusy[q] = false;
     }
@@ -243,7 +244,7 @@
       setTimeout(() => void refreshBackups(), 4000);
       await refreshMaint(true);
     } catch (e) {
-      backupMsg = apiDetail(e);
+      backupMsg = errorMessage(e, { verb: "run a backup" });
     } finally {
       backupBusy = false;
     }
@@ -254,19 +255,8 @@
     try {
       await downloadBackup(b.name);
     } catch (e) {
-      backupMsg = apiDetail(e);
+      backupMsg = errorMessage(e, { verb: "download backups" });
     }
-  }
-
-  function apiDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        return JSON.parse(e.body).detail ?? e.body;
-      } catch {
-        return e.body;
-      }
-    }
-    return String(e);
   }
 
   function flashMaint(key: string, msg: string) {
@@ -283,7 +273,7 @@
       flashMaint(t.key, r.job_id != null ? `queued (job ${r.job_id})` : "queued");
       await refreshMaint(true);
     } catch (e) {
-      flashMaint(t.key, apiDetail(e));
+      flashMaint(t.key, errorMessage(e, { verb: "run maintenance tasks" }));
     } finally {
       maintBusy[t.key] = false;
     }
@@ -309,7 +299,7 @@
       if ("cron" in body) editKey = null;
       flashMaint(t.key, "saved — applies within a minute");
     } catch (e) {
-      flashMaint(t.key, apiDetail(e));
+      flashMaint(t.key, errorMessage(e, { verb: "change maintenance settings" }));
     } finally {
       maintBusy[t.key] = false;
     }
@@ -348,7 +338,7 @@
       // and neither needs the 4s summary cadence).
       if (Date.now() - maintFetched < 1000) await refreshBackups();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -356,19 +346,23 @@
 
   // FIX-8 — pull the current failures page. Clamps the offset back into range if
   // rows aged out (retention purge) or were cleared under us between polls.
-  async function refreshFailures() {
-    const page = await failedJobs(FAILED_PAGE, failuresOffset);
-    failures = page.items;
-    failuresTotal = page.total;
-    if (failuresOffset > 0 && failuresOffset >= failuresTotal) {
-      failuresOffset = Math.max(
-        0,
-        (Math.ceil(failuresTotal / FAILED_PAGE) - 1) * FAILED_PAGE,
-      );
-      const clamped = await failedJobs(FAILED_PAGE, failuresOffset);
-      failures = clamped.items;
-      failuresTotal = clamped.total;
+  // Last-request-wins, so a pager click racing the 4s poll cannot land an
+  // older page over a newer one.
+  const failuresLoader = latest(async (signal, offset: number) => {
+    let page = await failedJobs(FAILED_PAGE, offset, signal);
+    if (offset > 0 && offset >= page.total) {
+      offset = Math.max(0, (Math.ceil(page.total / FAILED_PAGE) - 1) * FAILED_PAGE);
+      page = await failedJobs(FAILED_PAGE, offset, signal);
     }
+    return { page, offset };
+  });
+
+  async function refreshFailures() {
+    const r = await failuresLoader.run(failuresOffset);
+    if (r === undefined) return;
+    failures = r.page.items;
+    failuresTotal = r.page.total;
+    failuresOffset = r.offset;
   }
 
   async function failuresPage(delta: number) {
@@ -376,7 +370,7 @@
     try {
       await refreshFailures();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -394,7 +388,7 @@
       failuresOffset = 0;
       await refresh();
     } catch (e) {
-      error = `Clear failed: ${String(e)}`;
+      error = `Clear failed: ${errorMessage(e, { verb: "clear failed jobs" })}`;
     } finally {
       clearingFailed = false;
     }
@@ -420,7 +414,7 @@
       await setMaintenanceMode(!active, reason);
       await refresh();
     } catch (e) {
-      error = `Maintenance mode: ${String(e)}`;
+      error = `Maintenance mode: ${errorMessage(e, { verb: "change maintenance mode" })}`;
     } finally {
       modeBusy = false;
     }
@@ -438,7 +432,7 @@
           : `Reaped ${r.reaped} (retried ${r.retried}, failed ${r.failed}), pruned ${r.pruned_workers} worker${r.pruned_workers === 1 ? "" : "s"}`;
       await refresh();
     } catch (e) {
-      reapMsg = `Reap failed: ${String(e)}`;
+      reapMsg = `Reap failed: ${errorMessage(e)}`;
     } finally {
       reaping = false;
     }
@@ -680,6 +674,7 @@
   onDestroy(() => {
     poller?.stop();
     ticker?.stop();
+    failuresLoader.cancel();
   });
 </script>
 

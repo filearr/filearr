@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
   import { listAudit, friendlyError, type SecurityEvent } from "./api";
 
   // P6-T9 security audit feed (admin). Filterable by event type + time range,
@@ -27,22 +28,30 @@
     return isNaN(d.getTime()) ? undefined : d.toISOString();
   }
 
+  // Last-request-wins: a filter change (load(true)) aborts an older fetch, so a
+  // stale page never replaces — or appends to — the newer result.
+  const auditLoader = latest((signal, filters: Parameters<typeof listAudit>[0]) =>
+    listAudit(filters, signal),
+  );
+  onDestroy(() => auditLoader.cancel());
+
   async function load(reset: boolean) {
     error = "";
     loading = true;
     try {
-      const page = await listAudit({
+      const page = await auditLoader.run({
         event_type: fType || undefined,
         since: isoOrEmpty(fSince),
         until: isoOrEmpty(fUntil),
         cursor: reset ? undefined : nextCursor || undefined,
         limit: 50,
       });
+      if (page === undefined) return;
       events = reset ? page.events : [...events, ...page.events];
       nextCursor = page.next_cursor;
+      loading = false;
     } catch (e) {
       error = friendlyError(e);
-    } finally {
       loading = false;
     }
   }

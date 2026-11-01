@@ -43,7 +43,19 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
   import LoginPage from "./lib/LoginPage.svelte";
-  import { getVersion, authStatus, authMe, authLogout, type AuthMode, type AuthPrincipal } from "./lib/api";
+  import {
+    getVersion,
+    authStatus,
+    authMe,
+    authLogout,
+    errorMessage,
+    errorStatus,
+    setUnauthorizedHandler,
+    type AuthMode,
+    type AuthPrincipal,
+  } from "./lib/api";
+  import * as safeStorage from "./lib/safeStorage";
+  import { safeHref } from "./lib/pathlinks";
   import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
   import { shareFormat, setShareFormat, detectedPlatform } from "./lib/osFormat.svelte";
   import type { FormatPref } from "./lib/osFormat";
@@ -54,6 +66,7 @@
   import ToastHost from "./lib/ui/ToastHost.svelte";
   import { cancelAllConfirms, hasPendingConfirm } from "./lib/ui/confirm.svelte";
   import { toast } from "./lib/ui/toast.svelte";
+  import StateBlock from "./lib/ui/StateBlock.svelte";
 
   // UI-T15: human label for the detected OS, shown in the "Auto" option so the
   // user knows which spelling Auto resolves to.
@@ -77,6 +90,8 @@
   // (FILEARR_SOURCE_URL) so a fork can point users at its modified source without
   // a frontend rebuild; fall back to the Vite build-time default.
   let sourceUrl = $state<string>(__SOURCE_URL__);
+  // D9: /version's source_url is server data — only a safe scheme becomes a link.
+  const sourceHref = $derived(safeHref(sourceUrl));
   // P5-T1/W6-D4: the distributed-agent feature is opt-in (FILEARR_AGENTS_ENABLED);
   // gate the Agents nav entry so it only shows when the surface is live.
   let agentsEnabled = $state(false);
@@ -89,40 +104,71 @@
     .catch(() => {});
 
   // P6-T1 auth gate. `authMode` drives whether a login wall is shown; `me` is
-  // the current session principal (null when signed out). `authReady` gates the
-  // initial render so we never flash the app before knowing the mode.
+  // the current session principal (null when signed out). Nothing but the
+  // splash renders until the first probe settles, so no page fires a request
+  // the wall would have stopped. A failed probe fails CLOSED: "unreachable"
+  // shows a retry screen, never the app.
   let authMode = $state<AuthMode>("disabled");
   let oidcEnabled = $state(false);
   let me = $state<AuthPrincipal | null>(null);
-  let authReady = $state(false);
+  let authState = $state<"probing" | "ready" | "unreachable">("probing");
 
+  // Set by LoginPage before it leaves for the IdP; the OIDC callback lands on
+  // "/", so the deep link is put back once the session is confirmed.
+  const OIDC_RETURN_KEY = "oidc.returnHash";
+
+  // Only the newest probe may write: a Retry double-click or a re-probe racing
+  // the logout one must not land out of order.
+  let probeSeq = 0;
   async function probeAuth() {
+    const seq = ++probeSeq;
+    // Retry feedback; other re-probes keep the screen (LoginPage keeps its message).
+    if (authState === "unreachable") authState = "probing";
     try {
       const st = await authStatus();
+      const principal = st.mode === "disabled" ? null : await authMe();
+      if (seq !== probeSeq) return;
       authMode = st.mode;
       oidcEnabled = st.oidc_enabled;
-      me = st.mode === "disabled" ? null : await authMe();
+      me = principal;
       // Server-side preferences follow the person across browsers: they win
       // over whatever this browser's localStorage remembers.
       if (me?.preferences) applyServerPreferences(me.preferences);
+      if (me) {
+        const back = safeStorage.get(OIDC_RETURN_KEY);
+        if (back !== null) {
+          safeStorage.remove(OIDC_RETURN_KEY);
+          // Before "ready", so the default page never mounts first; replace,
+          // so Back does not return to it.
+          if (back.startsWith("#/")) {
+            history.replaceState(null, "", location.pathname + location.search + back);
+            onHashChange();
+          }
+        }
+      }
+      authState = "ready";
     } catch {
-      // If the probe fails (e.g. backend unreachable), fail OPEN to the app
-      // rather than trapping the user behind a wall we cannot verify.
-      authMode = "disabled";
-      me = null;
-    } finally {
-      authReady = true;
+      // Network error / 5xx from either call (authMe answers a 401 with null).
+      // authMode and me stay as they were: we cannot verify, so we do not open.
+      if (seq === probeSeq) authState = "unreachable";
     }
   }
   probeAuth();
 
   // The wall shows when auth is active (enabled/bootstrap) and there is no
-  // authenticated principal yet.
-  const gated = $derived(authReady && authMode !== "disabled" && me === null);
+  // authenticated principal.
+  const gated = $derived(authState === "ready" && authMode !== "disabled" && me === null);
 
   async function doLogout() {
-    await authLogout();
-    me = null;
+    try {
+      await authLogout();
+      me = null;
+    } catch (e) {
+      // A 401 means the session was already gone: signed out either way.
+      if (errorStatus(e) === 401) me = null;
+      else toast(errorMessage(e), { tone: "danger" });
+    }
+    // Either way the server decides what is shown next.
     await probeAuth();
   }
 
@@ -162,7 +208,7 @@
   // page behind it. Kept apart from the focus/announce effect below, which
   // must not re-run on login/logout.
   $effect(() => {
-    document.title = gated ? "Sign in · Filearr" : pageTitle(page);
+    document.title = gated ? "Sign in · Filearr" : authState === "ready" ? pageTitle(page) : "Filearr";
   });
   // False until the first run, so the initial render neither steals focus nor
   // announces — only later route changes do.
@@ -172,7 +218,7 @@
     // flipping `gated` is not a route change, so read the rest untracked.
     const p = page;
     untrack(() => {
-      if (routed && !gated) {
+      if (routed && authState === "ready" && !gated) {
         // Without this, a keyboard/screen-reader user stays on the nav link
         // after the content under it has been replaced.
         mainEl?.focus({ preventScroll: false });
@@ -203,12 +249,45 @@
     // Normalise a bare URL to the default route so refresh/bookmark is stable.
     if (!location.hash) location.replace("#/search");
     window.addEventListener("hashchange", onHashChange);
+    // A lapsed session mid-use: drop to the wall. Flipping `gated` unmounts
+    // <main>, so every page's pollers stop in their onDestroy.
+    setUnauthorizedHandler(() => {
+      // Only a running app can lose its session; a late 401 while probing or
+      // unreachable must not strand the splash.
+      if (authState === "ready" && authMode !== "disabled" && me) {
+        // A probe that read /auth/me just before expiry must not restore me.
+        probeSeq++;
+        me = null;
+        // The page that asked is gone; its pending confirm must not hang.
+        cancelAllConfirms();
+        toast("Your session has expired. Sign in again.", { tone: "warn" });
+      }
+    });
   });
 
-  onDestroy(() => window.removeEventListener("hashchange", onHashChange));
+  onDestroy(() => {
+    window.removeEventListener("hashchange", onHashChange);
+    setUnauthorizedHandler(null);
+  });
 </script>
 
-{#if gated}
+<!-- Outside the gate: a toast raised as the wall appears (session expired,
+     sign-out failed, password changed) must survive the flip, both the visual
+     stack and its spoken copy in the live region. -->
+<ToastHost />
+<!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
+     <main> so page swaps never unmount it mid-announcement. -->
+<div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
+{#if authState === "probing"}
+  <div class="flex min-h-screen items-center justify-center px-4">
+    <p role="status" class="text-sm text-slate-500">Connecting…</p>
+  </div>
+{:else if authState === "unreachable"}
+  <div class="flex min-h-screen flex-col items-center justify-center px-4">
+    <h1 class="text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
+    <StateBlock state="error" message="Can't reach the Filearr server." onRetry={probeAuth} />
+  </div>
+{:else if gated}
   <LoginPage mode={authMode} {oidcEnabled} onAuthed={probeAuth} />
 {:else}
 <div class="mx-auto max-w-screen-2xl px-4 py-4 sm:px-6 lg:px-8">
@@ -320,7 +399,7 @@
     {#await loadPage("kit")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "account"}
     {#if me}
-      {#await loadPage("account")}{@render pageLoading()}{:then m}<m.default {me} onUpdated={(p) => (me = p)} />{:catch}{@render pageLoadFailed()}{/await}
+      {#await loadPage("account")}{@render pageLoading()}{:then m}<m.default {me} onUpdated={(p) => (me = p)} onSignedOut={probeAuth} />{:catch}{@render pageLoadFailed()}{/await}
     {:else}
       <p class="py-8 text-sm text-slate-500">Authentication is disabled on this deployment — there is no account to manage.</p>
     {/if}
@@ -329,9 +408,6 @@
   {/if}
   </main>
 
-  <!-- The one polite live region; lib/announce.svelte.ts feeds it. Outside
-       <main> so page swaps never unmount it mid-announcement. -->
-  <div role="status" aria-live="polite" aria-atomic="true" class="sr-only">{announcement.text}</div>
   <!-- confirm() / toast() render here; both portal or position themselves
        over the page, so where they sit in the tree only matters for staying
        mounted across route changes. ConfirmHost is a lazy chunk: bits-ui
@@ -339,7 +415,6 @@
   {#if hasPendingConfirm()}
     {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{:catch}{onConfirmHostFailed()}{/await}
   {/if}
-  <ToastHost />
 
   <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
     <span title={buildStamp ?? "no build stamp (dev)"}>
@@ -368,11 +443,15 @@
       rel="noopener noreferrer">API Docs</a>
     <span class="px-1">·</span>
     <!-- AGPL-3.0 §13: offer the running instance's Corresponding Source. -->
-    <a
-      class="underline hover:text-[var(--accent)]"
-      href={sourceUrl}
-      target="_blank"
-      rel="noopener noreferrer">Source</a>
+    {#if sourceHref}
+      <a
+        class="underline hover:text-[var(--accent)]"
+        href={sourceHref}
+        target="_blank"
+        rel="noopener noreferrer">Source</a>
+    {:else}
+      <span>Source: {sourceUrl}</span>
+    {/if}
     <span class="px-1">·</span>
     <span>AGPL-3.0-or-later</span>
   </footer>

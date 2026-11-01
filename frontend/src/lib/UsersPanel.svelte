@@ -4,6 +4,7 @@
     listUsers, createUser, updateUser, deleteUser, listRoles,
     friendlyError, type AuthPrincipal, type RoleDef,
   } from "./api";
+  import { numOrNull } from "./numInput";
 
   // P6-T12 user management (admin). Lists local + federated accounts with a
   // provider + kind badge, a role selector, a disable toggle, password reset and
@@ -24,8 +25,9 @@
   let openFor = $state<string | null>(null);
   let dDisplay = $state("");
   let dPhone = $state("");
-  let dIdle = $state("");
-  let dTtl = $state("");
+  // type="number" inputs: bind:value writes a number, or null when emptied.
+  let dIdle = $state<number | null>(null);
+  let dTtl = $state<number | null>(null);
   let dSaved = $state(false);
 
   // password reset
@@ -54,16 +56,15 @@
     dSaved = false;
     dDisplay = u.display_name ?? "";
     dPhone = u.phone ?? "";
-    dIdle = u.session_inactivity_hours == null ? "" : String(u.session_inactivity_hours);
-    dTtl = u.session_ttl_hours == null ? "" : String(u.session_ttl_hours);
+    dIdle = u.session_inactivity_hours ?? null;
+    dTtl = u.session_ttl_hours ?? null;
   }
 
   /** Blank or 0 -> 0 (clears the override); otherwise the parsed hours. */
-  function hoursOrClear(v: string): number | null {
-    const t = v.trim();
-    if (t === "") return 0;
-    const n = Number(t);
-    return Number.isFinite(n) && n >= 0 ? n : null;
+  function hoursOrClear(v: number | null): number | null {
+    if (v === null) return 0;
+    const n = numOrNull(v);
+    return n !== null && n >= 0 ? n : null;
   }
 
   async function saveDetails(u: AuthPrincipal, e: Event) {
