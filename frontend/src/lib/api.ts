@@ -268,7 +268,8 @@ export type ItemRecord = Record<string, unknown> & {
 };
 
 /** Fetch one item with every stored field. Powers the Raw detail view. */
-export const getItem = (id: string) => request<ItemRecord>(`/items/${id}`);
+export const getItem = (id: string, signal?: AbortSignal) =>
+  request<ItemRecord>(`/items/${id}`, { signal });
 
 /** Newest agent-collected ACL snapshot for an item (2026-08-23). ``available``
  *  is false (with a reason) for central-scanned items — permissions are
@@ -303,8 +304,8 @@ export interface ItemPermissions {
   };
 }
 export interface PermissionTier { anonymous: boolean; authenticated: boolean; }
-export const getItemPermissions = (id: string) =>
-  request<ItemPermissions>(`/items/${id}/permissions`);
+export const getItemPermissions = (id: string, signal?: AbortSignal) =>
+  request<ItemPermissions>(`/items/${id}/permissions`, { signal });
 
 /** Principal suggestions for the Search page's permission filter (facet search
  *  over perm_principals — SIDs, DOMAIN\names and display names). */
@@ -777,7 +778,7 @@ export const reclassifyExtensions = () =>
 export const deleteTaxonomyExtension = (ext: string) =>
   request<TaxonomyVersion>(`/taxonomy/extensions/${encodeURIComponent(ext)}`, { method: "DELETE" });
 
-export const listLibraries = () => request<Library[]>("/libraries");
+export const listLibraries = (signal?: AbortSignal) => request<Library[]>("/libraries", { signal });
 
 // OPS-T7: the deploy-time network-share mount map (read scope). Credential-free;
 // ``share_url`` is a user-facing reference the library form surfaces as a hint.
@@ -789,7 +790,8 @@ export interface ShareMapEntry {
   unc?: string | null;
 }
 
-export const listShareMap = () => request<ShareMapEntry[]>("/system/share-map");
+export const listShareMap = (signal?: AbortSignal) =>
+  request<ShareMapEntry[]>("/system/share-map", { signal });
 
 /** Longest-container_prefix-wins client mirror of share_map.resolve — used to
  *  preview the auto share_prefix a library root would inherit from the deploy. */
@@ -910,7 +912,8 @@ export interface CustomField {
   created_at: string;
 }
 
-export const listCustomFields = () => request<CustomField[]>("/custom-fields");
+export const listCustomFields = (signal?: AbortSignal) =>
+  request<CustomField[]>("/custom-fields", { signal });
 
 export const createCustomField = (body: {
   name: string;
@@ -972,9 +975,9 @@ export const targetedScan = (
     body: JSON.stringify({ path: body.path, recursive: body.recursive ?? true }),
   });
 
-export const listScans = () => request<ScanRun[]>("/scans");
+export const listScans = (signal?: AbortSignal) => request<ScanRun[]>("/scans", { signal });
 
-export const stats = () => request<Record<string, unknown>>("/stats");
+export const stats = (signal?: AbortSignal) => request<Record<string, unknown>>("/stats", { signal });
 
 export const cancelScan = (id: string) =>
   request<{ status: string }>(`/scans/${id}/cancel`, { method: "POST" });
@@ -1031,8 +1034,8 @@ export interface FsBrowse {
 
 /** Browse directories under the server's allowlist. A path outside the allowlist
  *  (or a traversal attempt) yields a 422 the picker surfaces inline. */
-export const browseFs = (path = "") =>
-  request<FsBrowse>(`/fs/browse?path=${encodeURIComponent(path)}`);
+export const browseFs = (path = "", signal?: AbortSignal) =>
+  request<FsBrowse>(`/fs/browse?path=${encodeURIComponent(path)}`, { signal });
 
 // ---- T11 error surfacing ----
 export interface FailingItem {
@@ -1145,8 +1148,8 @@ export interface LibraryHashStatus {
   rehash_pending: boolean;
   hash_scheme: string;
 }
-export const libraryHashStatus = () =>
-  request<LibraryHashStatus[]>("/libraries/hash-status");
+export const libraryHashStatus = (signal?: AbortSignal) =>
+  request<LibraryHashStatus[]>("/libraries/hash-status", { signal });
 
 /** Queue the light per-library hash refresh: recomputes quick/mid/content
  *  hashes only — no metadata extraction, thumbnails or embeddings. */
@@ -1159,8 +1162,8 @@ export const rehashLibrary = (id: string) =>
 /** Paginated failed Procrastinate jobs (read scope; page capped server-side at
  *  100). Returns {items, total, limit, offset} so the caller can render a pager
  *  (FIX-8 — the list used to grow unbounded on screen). */
-export const failedJobs = (limit = 25, offset = 0) =>
-  request<FailedJobPage>(`/system/failed-jobs?limit=${limit}&offset=${offset}`);
+export const failedJobs = (limit = 25, offset = 0, signal?: AbortSignal) =>
+  request<FailedJobPage>(`/system/failed-jobs?limit=${limit}&offset=${offset}`, { signal });
 
 /** Delete failed Procrastinate rows now (FIX-8, admin scope). Optional ``queue``
  *  scopes the wipe to one queue. Returns the number deleted. */
@@ -1660,6 +1663,7 @@ export const fetchLogs = (
     limit?: number;
     before_id?: number;
   } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (opts.min_level) qs.set("min_level", opts.min_level);
@@ -1668,7 +1672,7 @@ export const fetchLogs = (
   if (opts.limit) qs.set("limit", String(opts.limit));
   if (opts.before_id) qs.set("before_id", String(opts.before_id));
   const s = qs.toString();
-  return request<LogsResponse>(`/system/logs${s ? `?${s}` : ""}`);
+  return request<LogsResponse>(`/system/logs${s ? `?${s}` : ""}`, { signal });
 };
 
 /** Re-prioritise a queue's PENDING (todo) jobs (UI-T14, admin scope). `priority`
@@ -1718,9 +1722,11 @@ export const libraryTree = (
   limit = 100,
   offset = 0,
   foldersOffset = 0,
+  signal?: AbortSignal,
 ) =>
   request<TreeResponse>(
     `/libraries/${id}/tree?path=${encodeURIComponent(path)}&limit=${limit}&offset=${offset}&folders_offset=${foldersOffset}`,
+    { signal },
   );
 
 
@@ -1830,7 +1836,8 @@ export interface AlertChannel {
   created_at: string;
 }
 
-export const listAlertChannels = () => request<AlertChannel[]>("/alert-channels");
+export const listAlertChannels = (signal?: AbortSignal) =>
+  request<AlertChannel[]>("/alert-channels", { signal });
 
 export const createAlertChannel = (body: {
   name: string;
@@ -1889,7 +1896,8 @@ export interface AlertRule {
   created_at: string;
 }
 
-export const listAlertRules = () => request<AlertRule[]>("/alert-rules");
+export const listAlertRules = (signal?: AbortSignal) =>
+  request<AlertRule[]>("/alert-rules", { signal });
 
 // 2026-08-20 mass edit: one change-set over many rules (throttle switch and/or
 // channel attachment). digest_window null + set_throttle true = immediate.
@@ -1959,13 +1967,14 @@ export interface AlertEvent {
 
 export const listAlertEvents = (
   filters: { rule_id?: string; library_id?: string; status?: AlertEventStatus; limit?: number } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (filters.rule_id) qs.set("rule_id", filters.rule_id);
   if (filters.library_id) qs.set("library_id", filters.library_id);
   if (filters.status) qs.set("status", filters.status);
   qs.set("limit", String(filters.limit ?? 100));
-  return request<AlertEvent[]>(`/alert-events?${qs}`);
+  return request<AlertEvent[]>(`/alert-events?${qs}`, { signal });
 };
 
 export interface AlertEventSummary {
@@ -1974,9 +1983,10 @@ export interface AlertEventSummary {
   pending: number;
 }
 
-export const alertEventsSummary = (library_id?: string) =>
+export const alertEventsSummary = (library_id?: string, signal?: AbortSignal) =>
   request<AlertEventSummary>(
     `/alert-events/summary${library_id ? `?library_id=${encodeURIComponent(library_id)}` : ""}`,
+    { signal },
   );
 
 // ---- P3-T10 duplicate awareness (copy counts + copy listing) ----
@@ -2003,8 +2013,8 @@ export interface CopiesResponse {
 
 /** The OTHER active copies of an item (read scope). Used by the ItemDetail
  *  Copies section; `count` is the full group size incl. self. */
-export const itemCopies = (id: string) =>
-  request<CopiesResponse>(`/items/${id}/copies`);
+export const itemCopies = (id: string, signal?: AbortSignal) =>
+  request<CopiesResponse>(`/items/${id}/copies`, { signal });
 
 /** Batch copy-count badges for a page of results (read scope). Body is up to 200
  *  ids; the response maps id -> count ONLY for groups with more than one member.
@@ -2054,10 +2064,14 @@ export interface TimelineResponse {
 
 /** Date histogram of active items by mtime (read scope). `bucket` is month|year;
  *  `library` scopes to one library. */
-export const timeline = (bucket: "month" | "year" = "month", library = "") => {
+export const timeline = (
+  bucket: "month" | "year" = "month",
+  library = "",
+  signal?: AbortSignal,
+) => {
   const qs = new URLSearchParams({ bucket });
   if (library) qs.set("library", library);
-  return request<TimelineResponse>(`/stats/timeline?${qs}`);
+  return request<TimelineResponse>(`/stats/timeline?${qs}`, { signal });
 };
 
 export interface LibraryStatsRow {
@@ -2145,8 +2159,8 @@ function reportQuery(opts: ReportRunOpts): string {
 }
 
 /** Run a canned report and return one JSON page. */
-export const runReport = (id: string, opts: ReportRunOpts = {}) =>
-  request<ReportPage>(`/reports/${id}${reportQuery(opts)}`);
+export const runReport = (id: string, opts: ReportRunOpts = {}, signal?: AbortSignal) =>
+  request<ReportPage>(`/reports/${id}${reportQuery(opts)}`, { signal });
 
 // ---- IN-T3 folder tree (treemap drill-down) ---------------------------------
 /** One direct child of the requested folder. ``name`` is the single path segment
@@ -2179,6 +2193,7 @@ export interface FolderTreeResponse {
  *  child per LIBRARY; every deeper call pins the library from the child row. */
 export const folderTree = (
   opts: { libraryId?: string; parent?: string; limit?: number } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (opts.libraryId) qs.set("library_id", opts.libraryId);
@@ -2186,6 +2201,7 @@ export const folderTree = (
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const s = qs.toString();
   return send<FolderTreeResponse>("GET", `/reports/folder-tree${s ? `?${s}` : ""}`, {
+    signal,
     timeoutMs: SLOW_TIMEOUT_MS,
   });
 };
@@ -2811,6 +2827,7 @@ export const listAudit = (
     cursor?: string;
     limit?: number;
   } = {},
+  signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
   if (filters.event_type) qs.set("event_type", filters.event_type);
@@ -2819,7 +2836,7 @@ export const listAudit = (
   if (filters.until) qs.set("until", filters.until);
   if (filters.cursor) qs.set("cursor", filters.cursor);
   qs.set("limit", String(filters.limit ?? 50));
-  return request<AuditPage>(`/audit?${qs}`);
+  return request<AuditPage>(`/audit?${qs}`, { signal });
 };
 
 // --------------------------------------------------------------------------- //

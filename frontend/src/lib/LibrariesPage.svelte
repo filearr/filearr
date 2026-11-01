@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { latest } from "./latest";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
@@ -218,15 +219,23 @@
   const RETRY_MIN = 1000;
   const RETRY_MAX = 15000;
 
+  // Last-request-wins: a pager click or the safety poll supersedes an older
+  // refresh, so a slow response cannot overwrite a newer page.
+  const snapshot = latest((signal, offset: number) =>
+    Promise.all([
+      listLibraries(signal), listScans(signal), fetchStats(signal),
+      failedJobs(FAILED_PAGE, offset, signal).catch(() => null),
+      listShareMap(signal).catch(() => [] as ShareMapEntry[]),
+      libraryHashStatus(signal).catch(() => null),
+    ]),
+  );
+
   async function refresh() {
     try {
+      const r = await snapshot.run(failedOffset);
+      if (r === undefined) return;
       error = "";
-      const [libs, scs, st, jobs, smap, hs] = await Promise.all([
-        listLibraries(), listScans(), fetchStats(),
-        failedJobs(FAILED_PAGE, failedOffset).catch(() => null),
-        listShareMap().catch(() => [] as ShareMapEntry[]),
-        libraryHashStatus().catch(() => null),
-      ]);
+      const [libs, scs, st, jobs, smap, hs] = r;
       libraries = libs;
       if (hs) hashStatus = Object.fromEntries(hs.map((r) => [r.library_id, r]));
       loaded = true;
@@ -657,6 +666,7 @@
   });
   onDestroy(() => {
     safety?.stop();
+    snapshot.cancel();
     for (const id of [...streams.keys()]) closeStream(id);
   });
 </script>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { latest } from "./latest";
   import {
     clearFailedJobs,
     downloadBackup,
@@ -345,19 +346,23 @@
 
   // FIX-8 — pull the current failures page. Clamps the offset back into range if
   // rows aged out (retention purge) or were cleared under us between polls.
-  async function refreshFailures() {
-    const page = await failedJobs(FAILED_PAGE, failuresOffset);
-    failures = page.items;
-    failuresTotal = page.total;
-    if (failuresOffset > 0 && failuresOffset >= failuresTotal) {
-      failuresOffset = Math.max(
-        0,
-        (Math.ceil(failuresTotal / FAILED_PAGE) - 1) * FAILED_PAGE,
-      );
-      const clamped = await failedJobs(FAILED_PAGE, failuresOffset);
-      failures = clamped.items;
-      failuresTotal = clamped.total;
+  // Last-request-wins, so a pager click racing the 4s poll cannot land an
+  // older page over a newer one.
+  const failuresLoader = latest(async (signal, offset: number) => {
+    let page = await failedJobs(FAILED_PAGE, offset, signal);
+    if (offset > 0 && offset >= page.total) {
+      offset = Math.max(0, (Math.ceil(page.total / FAILED_PAGE) - 1) * FAILED_PAGE);
+      page = await failedJobs(FAILED_PAGE, offset, signal);
     }
+    return { page, offset };
+  });
+
+  async function refreshFailures() {
+    const r = await failuresLoader.run(failuresOffset);
+    if (r === undefined) return;
+    failures = r.page.items;
+    failuresTotal = r.page.total;
+    failuresOffset = r.offset;
   }
 
   async function failuresPage(delta: number) {
@@ -669,6 +674,7 @@
   onDestroy(() => {
     poller?.stop();
     ticker?.stop();
+    failuresLoader.cancel();
   });
 </script>
 

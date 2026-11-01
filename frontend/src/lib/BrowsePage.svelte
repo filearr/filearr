@@ -9,7 +9,9 @@
 </script>
 
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { copyText } from "./clipboard";
+  import { latest } from "./latest";
   // UI-T12 Part 3 — in-page folder navigation. Renders the breadcrumb header
   // (shared Breadcrumbs component), a folder list (click → deeper), and the file
   // list (click → ItemDetail modal). Back/forward work because navigation is
@@ -58,39 +60,54 @@
   // folds in the deploy mount map, so open/copy work even with no manual prefix.
   // Refreshed if the library id changes.
   let resolvedFor = "";
-  async function resolveLibrary(id: string) {
-    if (resolvedFor === id) return;
-    try {
-      const libs: Library[] = await listLibraries();
-      const lib = libs.find((l) => l.id === id);
-      shareUrlRaw = lib?.share_prefix_effective ?? lib?.share_prefix ?? null;
-      shareUncRaw = lib?.share_unc_effective ?? null;
-      libName = lib?.name ?? "";
-      resolvedFor = id;
-    } catch {
-      /* name falls back to the tree payload below */
+
+  // Last-request-wins over the whole assembly (library lookup + tree + the
+  // follow-up folder pages): a fast second navigation aborts the first, and
+  // the stale route's result is dropped rather than rendered under the new one.
+  // `undefined` lib = not looked up (cached, or the lookup failed).
+  const treeLoader = latest(async (signal, lib: string, p: string, off: number) => {
+    let libInfo: Library | null | undefined;
+    if (resolvedFor !== lib) {
+      try {
+        const libs: Library[] = await listLibraries(signal);
+        libInfo = libs.find((l) => l.id === lib) ?? null;
+      } catch {
+        /* name falls back to the tree payload below */
+      }
     }
-  }
+    const res = await libraryTree(lib, p, LIMIT, off, 0, signal);
+    // Folders are server-paginated (cap 500/page). Auto-fetch the remaining
+    // pages so huge directories (e.g. >500 shows) always render completely —
+    // folder rows are tiny, so this stays cheap even at a few thousand.
+    let guard = 0;
+    while (res.folders.length < res.folders_total && guard < 20) {
+      const more = await libraryTree(lib, p, LIMIT, off, res.folders.length, signal);
+      if (more.folders.length === 0) break;
+      res.folders = [...res.folders, ...more.folders];
+      guard += 1;
+    }
+    return { res, libInfo };
+  });
+  onDestroy(() => treeLoader.cancel());
 
   async function load() {
+    // A18: snapshot the route once; every request in this run uses it, never
+    // the live props, which may already point at the next folder.
+    const lib = libraryId;
+    const p = path;
+    const off = offset;
     error = "";
     try {
-      await resolveLibrary(libraryId);
-      const res = await libraryTree(libraryId, path, LIMIT, offset);
-      // Folders are server-paginated (cap 500/page). Auto-fetch the remaining
-      // pages so huge directories (e.g. >500 shows) always render completely —
-      // folder rows are tiny, so this stays cheap even at a few thousand.
-      let guard = 0;
-      while (res.folders.length < res.folders_total && guard < 20) {
-        const more = await libraryTree(
-          libraryId, path, LIMIT, offset, res.folders.length,
-        );
-        if (more.folders.length === 0) break;
-        res.folders = [...res.folders, ...more.folders];
-        guard += 1;
+      const r = await treeLoader.run(lib, p, off);
+      if (r === undefined) return;
+      if (r.libInfo !== undefined) {
+        shareUrlRaw = r.libInfo?.share_prefix_effective ?? r.libInfo?.share_prefix ?? null;
+        shareUncRaw = r.libInfo?.share_unc_effective ?? null;
+        libName = r.libInfo?.name ?? "";
+        resolvedFor = lib;
       }
-      tree = res;
-      if (!libName) libName = res.library_name;
+      tree = r.res;
+      if (!libName) libName = r.res.library_name;
     } catch (e) {
       tree = null;
       error = errorMessage(e);

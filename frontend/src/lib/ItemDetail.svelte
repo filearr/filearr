@@ -366,15 +366,18 @@
     if (!similarOpen || similarLoaded || similarLoading) return;
     similarLoading = true;
     similarError = "";
+    const mine = itemToken;
     try {
-      similar = await similarItems(id, 10);
+      const r = await similarItems(id, 10);
+      if (mine !== itemToken) return; // another item opened; its effect reset us
+      similar = r;
     } catch (e) {
+      if (mine !== itemToken) return;
       similar = null;
       similarError = "Similar items are unavailable for this item.";
-    } finally {
-      similarLoading = false;
-      similarLoaded = true;
     }
+    similarLoading = false;
+    similarLoaded = true;
   }
 
   const hitLabel = (h: Record<string, unknown>): string => {
@@ -399,7 +402,15 @@
     }
   }
 
+  // A16: bumped per opened item; every fetch the item-change effect starts (and
+  // the lazy Similar fetch) checks it, so a fast second open cannot interleave
+  // the first item's responses into the second item's panel.
+  let itemToken = 0;
+
   $effect(() => {
+    const mine = ++itemToken;
+    const live = () => mine === itemToken;
+    const ac = new AbortController();
     error = "";
     item = null;
     copies = null;
@@ -413,27 +424,33 @@
     editError = "";
     // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
     // as KeyFactsCard; a failure just means no custom-field rows to edit.
-    listCustomFields()
-      .then((d) => (defs = d))
-      .catch(() => (defs = []));
-    getItem(id)
-      .then((r) => (item = r))
+    listCustomFields(ac.signal)
+      .then((d) => live() && (defs = d))
+      .catch(() => live() && (defs = []));
+    getItem(id, ac.signal)
+      .then((r) => live() && (item = r))
       // RBAC (P6-T4): a 403/404 shows a friendly line, never a blank/raw dump.
-      .catch((e) => (error = friendlyError(e)));
+      .catch((e) => live() && (error = friendlyError(e)));
     // Permissions (2026-08-23): newest agent-collected ACL; non-blocking, a
     // failure just hides the section.
     perms = null;
-    getItemPermissions(id)
-      .then((r) => (perms = r))
-      .catch(() => (perms = null));
+    getItemPermissions(id, ac.signal)
+      .then((r) => live() && (perms = r))
+      .catch(() => live() && (perms = null));
     // Copies are a separate, non-blocking fetch — a failure just hides the section.
-    itemCopies(id)
-      .then((r) => (copies = r))
-      .catch(() => (copies = null));
+    itemCopies(id, ac.signal)
+      .then((r) => live() && (copies = r))
+      .catch(() => live() && (copies = null));
     // Frecency (roadmap §5 P3): opening the detail view counts as one use for
     // the caller's personal ranking profile. Fire-and-forget: errors (older
-    // backend, feature off, rate budget) are deliberately invisible.
+    // backend, feature off, rate budget) are deliberately invisible. Not
+    // aborted: the open already happened, and it writes no panel state.
     touchItem(id).catch(() => {});
+    // Runs before the next item's effect and on destroy.
+    return () => {
+      itemToken++;
+      ac.abort();
+    };
   });
 
   function onKey(e: KeyboardEvent) {

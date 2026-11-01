@@ -25,16 +25,28 @@ export type PollerOpts = {
 };
 
 export function createPoller(
-  fn: () => void,
+  fn: () => unknown,
   intervalMs: number,
   deps: PollerDeps,
   opts: PollerOpts = {},
 ): Poller {
   const { immediate = false, refreshOnReturn = true } = opts;
   let lastCall = -Infinity;
+  // A thenable result marks a call in flight: ticks and return-refreshes skip
+  // until it settles, so a slow API never stacks overlapping requests.
+  let inFlight = false;
   const call = () => {
+    if (inFlight) return;
     lastCall = deps.now();
-    fn();
+    const r = fn();
+    if (r && typeof (r as PromiseLike<unknown>).then === "function") {
+      inFlight = true;
+      const done = () => {
+        inFlight = false;
+      };
+      // The site handles its own errors; here a rejection only clears the flag.
+      (r as PromiseLike<unknown>).then(done, done);
+    }
   };
   // The interval keeps running while hidden and just skips the call: cheaper
   // and simpler than tearing it down and re-arming on every visibility flip.
@@ -57,7 +69,7 @@ export function createPoller(
 
 /** Browser wrapper: `createPoller` wired to `document.visibilityState`. */
 export function usePolling(
-  fn: () => void,
+  fn: () => unknown,
   intervalMs: number,
   opts?: PollerOpts,
 ): Poller {

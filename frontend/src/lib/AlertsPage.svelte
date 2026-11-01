@@ -5,7 +5,8 @@
   // are password inputs whose decrypted value NEVER round-trips (empty on edit =
   // keep, via the "__unchanged__" sentinel). Every dynamic string renders as
   // text (Svelte auto-escapes) — a crafted path/error can't inject markup.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
   import {
     CHANNEL_TYPES,
     DISPATCH_LOCALITIES,
@@ -56,18 +57,30 @@
     id ? (libraries.find((l) => l.id === id)?.name ?? id) : "All libraries";
   const chName = (id: string) => channels.find((c) => c.id === id)?.name ?? id;
 
+  // Last-request-wins for both loaders: back-to-back mutations each refresh,
+  // and filter flips each reload events; only the newest response lands.
+  const configLoader = latest((signal) =>
+    Promise.all([listLibraries(signal), listAlertChannels(signal), listAlertRules(signal)]),
+  );
+  const eventsLoader = latest(
+    (signal, filters: { rule_id?: string; status?: AlertEventStatus; limit: number }) =>
+      Promise.all([listAlertEvents(filters, signal), alertEventsSummary(undefined, signal)]),
+  );
+  onDestroy(() => {
+    configLoader.cancel();
+    eventsLoader.cancel();
+  });
+
   async function refresh() {
     loading = true;
     try {
-      [libraries, channels, rules] = await Promise.all([
-        listLibraries(),
-        listAlertChannels(),
-        listAlertRules(),
-      ]);
+      const r = await configLoader.run();
+      if (r === undefined) return;
+      [libraries, channels, rules] = r;
       error = "";
+      loading = false;
     } catch (e) {
       error = errorMessage(e);
-    } finally {
       loading = false;
     }
   }
@@ -454,18 +467,17 @@
   async function loadEvents() {
     evLoading = true;
     try {
-      [events, summary] = await Promise.all([
-        listAlertEvents({
-          rule_id: evRule || undefined,
-          status: evStatus || undefined,
-          limit: 100,
-        }),
-        alertEventsSummary(),
-      ]);
+      const r = await eventsLoader.run({
+        rule_id: evRule || undefined,
+        status: evStatus || undefined,
+        limit: 100,
+      });
+      if (r === undefined) return;
+      [events, summary] = r;
       error = "";
+      evLoading = false;
     } catch (e) {
       error = errorMessage(e);
-    } finally {
       evLoading = false;
     }
   }

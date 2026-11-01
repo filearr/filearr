@@ -150,3 +150,70 @@ test("return-refresh after intervalMs since the last call fires", () => {
   f.setVisible(true);
   assert.equal(calls, 2);
 });
+
+test("an fn returning a pending promise is not called again until it settles", async () => {
+  const f = fakeDeps();
+  let calls = 0;
+  let settle: () => void = () => {};
+  createPoller(
+    () => {
+      calls++;
+      return new Promise<void>((r) => {
+        settle = r;
+      });
+    },
+    1000,
+    f.deps,
+    { immediate: true },
+  );
+  assert.equal(calls, 1);
+  f.tick();
+  f.advance(5000);
+  f.setVisible(false);
+  f.setVisible(true); // return-refresh is skipped too
+  assert.equal(calls, 1);
+  settle();
+  await new Promise((r) => setImmediate(r)); // let the in-flight flag clear
+  f.tick();
+  assert.equal(calls, 2);
+});
+
+test("a rejected in-flight promise clears the guard", async () => {
+  const f = fakeDeps();
+  let calls = 0;
+  let fail: () => void = () => {};
+  createPoller(
+    () => {
+      calls++;
+      return new Promise<void>((_, rej) => {
+        fail = () => rej(new Error("x"));
+      });
+    },
+    1000,
+    f.deps,
+    { immediate: true },
+  );
+  fail();
+  await new Promise((r) => setImmediate(r));
+  f.tick();
+  assert.equal(calls, 2);
+});
+
+test("stop() works while a call is in flight", () => {
+  const f = fakeDeps();
+  let calls = 0;
+  const p = createPoller(
+    () => {
+      calls++;
+      return new Promise<void>(() => {});
+    },
+    1000,
+    f.deps,
+    { immediate: true },
+  );
+  p.stop();
+  assert.equal(f.liveIntervals(), 0);
+  assert.equal(f.liveListeners(), 0);
+  f.tick();
+  assert.equal(calls, 1);
+});

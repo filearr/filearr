@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
   import {
     timeline,
     listLibraries,
@@ -28,14 +29,22 @@
     data ? Math.max(1, ...data.buckets.map((b) => b.count), data.invalid_count) : 1,
   );
 
+  // Last-request-wins: flipping bucket/library aborts the older histogram.
+  const timelineLoader = latest((signal, b: "month" | "year", lib: string) =>
+    timeline(b, lib, signal),
+  );
+  onDestroy(() => timelineLoader.cancel());
+
   async function load() {
     error = "";
     loading = true;
     try {
-      data = await timeline(bucket, library);
+      const r = await timelineLoader.run(bucket, library);
+      if (r === undefined) return;
+      data = r;
+      loading = false;
     } catch (e) {
       error = errorMessage(e);
-    } finally {
       loading = false;
     }
   }

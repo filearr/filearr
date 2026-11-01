@@ -2,9 +2,10 @@
   // Console Logs panel: tails the unified app+worker log stream (app_logs).
   // Newest first with keyset "load older" paging; level/source/text filters;
   // optional auto-refresh (re-fetches page one — a tail, not a live stream).
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { fetchLogs, friendlyError, type LogRow } from "./api";
   import { usePolling } from "./polling";
+  import { latest } from "./latest";
 
   let rows = $state<LogRow[]>([]);
   let enabled = $state(true);
@@ -21,24 +22,36 @@
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Last-request-wins: a filter flip, a debounced keystroke and the auto
+  // poll all supersede the older fetch, so stale rows never land (and a
+  // superseded "load older" never appends to a newer page one).
+  const logsLoader = latest((signal, opts: Parameters<typeof fetchLogs>[0]) =>
+    fetchLogs(opts, signal),
+  );
+  onDestroy(() => {
+    logsLoader.cancel();
+    clearTimeout(searchTimer);
+  });
+
   async function load(older = false) {
     loading = true;
     try {
-      const res = await fetchLogs({
+      const res = await logsLoader.run({
         min_level: minLevel,
         source: source || undefined,
         q: search || undefined,
         limit: 100,
         before_id: older ? (nextBeforeId ?? undefined) : undefined,
       });
+      if (res === undefined) return;
       rows = older ? [...rows, ...res.logs] : res.logs;
       enabled = res.enabled;
       nextBeforeId = res.next_before_id;
       error = "";
       loaded = true;
+      loading = false;
     } catch (e) {
       error = friendlyError(e, "load logs");
-    } finally {
       loading = false;
     }
   }
@@ -61,7 +74,8 @@
   // cleanup, so no separate onDestroy is needed here.
   $effect(() => {
     if (!auto) return;
-    const poller = usePolling(() => void load(), 10_000);
+    // Returning the promise lets the poller skip ticks while a fetch is slow.
+    const poller = usePolling(() => load(), 10_000);
     return () => poller.stop();
   });
 
