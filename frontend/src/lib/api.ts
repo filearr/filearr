@@ -87,8 +87,12 @@ export type SendOpts = {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   timeoutMs?: number;
-  expect?: "json" | "none" | "blob" | "text";
+  expect?: "json" | "none" | "blob" | "text" | "response";
 };
+
+/** What ``expect: "response"`` resolves: callers that need a status or a
+ *  header (e.g. 200 vs 202, a count header) alongside the body. */
+export type SendResponse<T> = { status: number; headers: Headers; body: T | undefined };
 
 /** Downloads and exports stream large bodies; give them ten minutes. */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
@@ -127,7 +131,19 @@ const isJsonType = (ct: string | null) => !!ct && /\bjson\b/i.test(ct);
  *  for any non-2xx (and for a non-JSON 200 when JSON was expected, so a proxy's
  *  HTML page never surfaces as a ``SyntaxError``). The session cookie is the
  *  only browser credential. */
-export async function send<T>(method: string, path: string, opts: SendOpts = {}): Promise<T> {
+export async function send<T>(
+  method: string,
+  path: string,
+  opts: SendOpts & { expect: "response" },
+): Promise<SendResponse<T>>;
+// The fallback excludes "response" so a widened `expect` cannot slip a
+// SendResponse past the first overload typed as a bare T.
+export async function send<T>(
+  method: string,
+  path: string,
+  opts?: SendOpts & { expect?: Exclude<NonNullable<SendOpts["expect"]>, "response"> },
+): Promise<T>;
+export async function send<T>(method: string, path: string, opts: SendOpts = {}): Promise<T | SendResponse<T>> {
   const { body, signal, timeoutMs, expect = "json" } = opts;
   const headers: Record<string, string> = { ...opts.headers };
   let payload: BodyInit | undefined;
@@ -168,6 +184,19 @@ export async function send<T>(method: string, path: string, opts: SendOpts = {})
   // Blob/text callers get the body as-is, even when it is empty.
   if (expect === "blob") return (await res.blob()) as T;
   if (expect === "text") return (await res.text()) as T;
+  if (expect === "response") {
+    // Status + headers are the point here, so a non-JSON body is "no body", not an error.
+    const text = await res.text();
+    let parsed: T | undefined;
+    if (text.trim() && isJsonType(res.headers.get("content-type"))) {
+      try {
+        parsed = JSON.parse(text) as T;
+      } catch {
+        throw new ApiError(res.status, text);
+      }
+    }
+    return { status: res.status, headers: res.headers, body: parsed };
+  }
   if (expect === "none" || res.status === 204 || res.status === 205 || res.headers.get("content-length") === "0") {
     return undefined as T;
   }

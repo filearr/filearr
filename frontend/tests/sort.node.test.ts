@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { compareValues, nextSort, sortRows, type SortState } from "../src/lib/ui/sort.ts";
+import { compareValues, nextSort, sortRows, toggleDir, type SortState } from "../src/lib/ui/sort.ts";
 
 test("nextSort cycles none -> asc -> desc -> none on the same key", () => {
   const a = nextSort(null, "name");
@@ -17,6 +17,15 @@ test("nextSort cycles none -> asc -> desc -> none on the same key", () => {
 test("nextSort on a different key starts at asc", () => {
   assert.deepEqual(nextSort({ key: "name", dir: "desc" }, "size"), { key: "size", dir: "asc" });
   assert.deepEqual(nextSort({ key: "name", dir: "asc" }, "size"), { key: "size", dir: "asc" });
+});
+
+test("toggleDir flips the direction and keeps the key", () => {
+  assert.deepEqual(toggleDir({ key: "name", dir: "asc" }), { key: "name", dir: "desc" });
+  assert.deepEqual(toggleDir({ key: "name", dir: "desc" }), { key: "name", dir: "asc" });
+});
+
+test("toggleDir leaves no sort as no sort", () => {
+  assert.equal(toggleDir(null), null);
 });
 
 test("compareValues orders numbers numerically", () => {

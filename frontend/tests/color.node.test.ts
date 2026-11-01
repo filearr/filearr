@@ -5,7 +5,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { relativeLuminance, onAccentColor, normalizeAccent } from "../src/lib/color.ts";
+import {
+  relativeLuminance,
+  onAccentColor,
+  normalizeAccent,
+  contrastRatio,
+  accentTextColor,
+  mixHex,
+} from "../src/lib/color.ts";
 
 test("relativeLuminance spans 0 (black) to 1 (white)", () => {
   assert.equal(relativeLuminance("#ffffff"), 1);
@@ -35,4 +42,107 @@ test("normalizeAccent keeps a valid #rrggbb as given", () => {
 test("normalizeAccent rejects anything that is not #rrggbb", () => {
   assert.equal(normalizeAccent("red"), null);
   assert.equal(normalizeAccent(null), null);
+});
+
+const HEX7 = /^#[0-9a-f]{6}$/;
+
+test("contrastRatio is 21 for black/white, 1 for equal colours, and symmetric", () => {
+  assert.equal(contrastRatio("#000000", "#ffffff"), 21);
+  assert.equal(contrastRatio("#4f46e5", "#4f46e5"), 1);
+  assert.equal(contrastRatio("#ffffff", "#4f46e5"), contrastRatio("#4f46e5", "#ffffff"));
+});
+
+test("mixHex blends channel-wise and returns lowercase #rrggbb", () => {
+  assert.equal(mixHex("#000000", "#ffffff", 0), "#000000");
+  assert.equal(mixHex("#000000", "#ffffff", 1), "#ffffff");
+  assert.equal(mixHex("#000000", "#FFFFFF", 0.5), "#808080");
+  assert.match(mixHex("#4F46E5", "#ffffff", 0.35), HEX7);
+});
+
+test("accentTextColor keeps an accent that already meets 4.5:1", () => {
+  assert.equal(accentTextColor("#4f46e5", "#ffffff"), "#4f46e5");
+});
+
+test("accentTextColor lightens the default accent on dark surface-3 (slate-800)", () => {
+  // applyTheme's dark target: the lightest dark surface, where accent chips sit.
+  const out = accentTextColor("#4f46e5", "#1e293b");
+  assert.notEqual(out, "#4f46e5");
+  assert.ok(relativeLuminance(out) > relativeLuminance("#4f46e5"));
+  assert.ok(contrastRatio(out, "#1e293b") >= 4.5);
+  // The darker surfaces then clear 4.5:1 too.
+  assert.ok(contrastRatio(out, "#0f172a") >= 4.5);
+  assert.ok(contrastRatio(out, "#020617") >= 4.5);
+});
+
+test("accentTextColor darkens a pale accent on white", () => {
+  const out = accentTextColor("#facc15", "#ffffff");
+  assert.ok(relativeLuminance(out) < relativeLuminance("#facc15"));
+  assert.ok(contrastRatio(out, "#ffffff") >= 4.5);
+});
+
+test("accentTextColor takes the smallest step that meets the minimum", () => {
+  // One 5 % step less than the answer must still fall short.
+  const out = accentTextColor("#4f46e5", "#1e293b");
+  let i = 0;
+  while (mixHex("#4f46e5", "#ffffff", i / 20) !== out) i++;
+  assert.ok(i > 0);
+  assert.ok(contrastRatio(mixHex("#4f46e5", "#ffffff", (i - 1) / 20), "#1e293b") < 4.5);
+});
+
+test("accentTextColor is monotone: a stricter minimum never yields less contrast", () => {
+  for (const [accent, surface] of [
+    ["#4f46e5", "#0f172a"],
+    ["#facc15", "#ffffff"],
+    ["#22c55e", "#ffffff"],
+    ["#1e3a8a", "#020617"],
+  ]) {
+    let prev = 0;
+    for (const min of [1, 3, 4.5, 7, 12]) {
+      const r = contrastRatio(accentTextColor(accent, surface, min), surface);
+      assert.ok(r >= prev, `${accent} on ${surface} at ${min}: ${r} < ${prev}`);
+      prev = r;
+    }
+  }
+});
+
+test("accentTextColor caps at the 100 % endpoint when the minimum is unreachable", () => {
+  assert.equal(accentTextColor("#808080", "#ffffff", 22), "#000000");
+  assert.equal(accentTextColor("#808080", "#000000", 22), "#ffffff");
+});
+
+test("accentTextColor always returns 7-char lowercase hex", () => {
+  for (const accent of ["#4F46E5", "#facc15", "#000000", "#ffffff", "#ff00aa"]) {
+    for (const surface of ["#ffffff", "#1e293b", "#0f172a", "#020617"]) {
+      assert.match(accentTextColor(accent.toLowerCase(), surface), HEX7);
+    }
+  }
+});
+
+// applyTheme's targets: each theme's strictest surface (surface-3). Every
+// surface of that theme must then clear 4.5:1.
+const SAMPLE_ACCENTS = ["#4f46e5", "#326fd1", "#0b7caf", "#d73d3d", "#facc15"];
+
+test("accentTextColor on the light target clears 4.5:1 on every light surface", () => {
+  for (const a of SAMPLE_ACCENTS) {
+    const out = accentTextColor(a, "#f1f5f9");
+    for (const s of ["#ffffff", "#f8fafc", "#f1f5f9"]) {
+      const r = contrastRatio(out, s);
+      assert.ok(r >= 4.5, `${a} -> ${out} on ${s}: ${r.toFixed(2)}`);
+    }
+  }
+});
+
+test("accentTextColor on the dark target clears 4.5:1 on every dark surface", () => {
+  for (const a of SAMPLE_ACCENTS) {
+    const out = accentTextColor(a, "#1e293b");
+    for (const s of ["#020617", "#0f172a", "#1e293b"]) {
+      const r = contrastRatio(out, s);
+      assert.ok(r >= 4.5, `${a} -> ${out} on ${s}: ${r.toFixed(2)}`);
+    }
+  }
+});
+
+test("border-strong tokens meet 3:1 (WCAG 1.4.11) on their surfaces", () => {
+  assert.ok(contrastRatio("#7c8ba1", "#ffffff") >= 3);
+  assert.ok(contrastRatio("#64748b", "#020617") >= 3);
 });

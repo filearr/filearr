@@ -145,8 +145,17 @@
   let hashCeiling = $state<number | null>(seed.hashCeiling);
   // Blank = global default; anything else must be a positive integer byte count.
   const hashCeilingValue = $derived(intOrNull(hashCeiling, { min: 1 }));
+  // An unparseable entry ("1e") binds null, which reads as blank and would save
+  // the global default; validity.badInput is the only way to tell them apart.
+  let hashCeilingEl = $state<HTMLInputElement | null>(null);
+  let hashCeilingBad = $state(false);
+  const readHashCeilingValidity = () => (hashCeilingBad = hashCeilingEl?.validity.badInput ?? false);
   const hashCeilingError = $derived(
-    hashCeiling !== null && hashCeilingValue === null ? "Enter a whole number of bytes (1 or more), or leave blank." : "",
+    hashCeilingBad
+      ? "Enter a whole number of bytes."
+      : hashCeiling !== null && hashCeilingValue === null
+        ? "Enter a whole number of bytes (1 or more), or leave blank."
+        : "",
   );
   let presets = $state<string[]>(seed.presets);
   let groups = $state<string[]>(seed.groups);
@@ -465,7 +474,8 @@
           </label>
           <input class="w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs dark:border-slate-700"
             type="number" min="1" step="1" placeholder="bytes (blank = global default)"
-            aria-invalid={hashCeilingError ? "true" : undefined} bind:value={hashCeiling} />
+            aria-invalid={hashCeilingError ? "true" : undefined} bind:value={hashCeiling} bind:this={hashCeilingEl}
+            oninput={readHashCeilingValidity} onchange={readHashCeilingValidity} />
           {#if hashCeilingError}
             <p class="text-2xs text-danger sm:col-start-2" role="alert">{hashCeilingError}</p>
           {/if}

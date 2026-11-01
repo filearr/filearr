@@ -1,7 +1,7 @@
 // Svelte 5 runes-based theme store: dark/light/system + custom accent.
 import { setShareFormat } from "./osFormat.svelte";
 import type { FormatPref } from "./osFormat";
-import { DEFAULT_ACCENT, normalizeAccent, onAccentColor } from "./color";
+import { DEFAULT_ACCENT, accentTextColor, normalizeAccent, onAccentColor } from "./color";
 import * as safeStorage from "./safeStorage";
 
 export type Mode = "light" | "dark" | "system";
@@ -23,6 +23,13 @@ export function applyTheme() {
   document.documentElement.style.setProperty("--accent", theme.accent);
   // Text on the accent flips to dark when the chosen accent is too pale for white.
   document.documentElement.style.setProperty("--accent-fg", onAccentColor(theme.accent));
+  // Accent-as-text, nudged just far enough for 4.5:1 per theme. Dark targets
+  // surface-3 (#1e293b), where accent chips sit and the lightest — so
+  // strictest — dark surface; surface/surface-2 then clear it with margin.
+  // Light mirrors that rule: surface-3 (#f1f5f9) is the darkest, so
+  // strictest, light surface; the strictest surface wins.
+  document.documentElement.style.setProperty("--accent-text-light", accentTextColor(theme.accent, "#f1f5f9"));
+  document.documentElement.style.setProperty("--accent-text-dark", accentTextColor(theme.accent, "#1e293b"));
   safeStorage.set("theme", theme.mode);
   safeStorage.set("accent", theme.accent);
 }

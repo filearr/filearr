@@ -22,7 +22,9 @@
     help: () => import("./lib/HelpPage.svelte"),
     about: () => import("./lib/AboutPage.svelte"),
     account: () => import("./lib/AccountPage.svelte"),
-    kit: () => import("./lib/KitPage.svelte"),
+    // Dev-only gallery: Vite folds import.meta.env.DEV to a literal, so the
+    // production build drops the KitPage branch and never emits its chunk.
+    kit: () => (import.meta.env.DEV ? import("./lib/KitPage.svelte") : import("./lib/KitUnavailable.svelte")),
   } satisfies Record<Page, () => Promise<unknown>>;
 
   // One promise per page for the app's lifetime: `{#await}` gets the same

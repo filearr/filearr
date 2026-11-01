@@ -5,6 +5,8 @@
 export type ConfirmOptions = {
   title: string;
   message?: string;
+  /** Consequences, rendered as a bullet list under the message. */
+  details?: string[];
   confirmLabel?: string;
   cancelLabel?: string;
   tone?: "default" | "danger";
