@@ -42,9 +42,13 @@ export function parseSearchHash(hash: string): Record<string, string> {
   if (!isSearchHash(hash)) return {};
   const qi = hash.indexOf("?");
   if (qi === -1) return {};
-  const out: Record<string, string> = {};
+  // A Map, not an object literal: URL keys such as `toString`, `constructor` or
+  // `__proto__` must be plain keys, never Object.prototype members.
+  // Object.fromEntries defines each as an own property (even `__proto__`).
+  const out = new Map<string, string>();
   for (const [k, v] of new URLSearchParams(hash.slice(qi + 1))) {
-    out[k] = k in out ? `${out[k]},${v}` : v;
+    const prev = out.get(k);
+    out.set(k, prev === undefined ? v : `${prev},${v}`);
   }
-  return out;
+  return Object.fromEntries(out);
 }

@@ -651,6 +651,7 @@
   // Roadmap §20 empty start, also what a non-searchable apply returns to (A6).
   function blankSlate() {
     clearTimeout(debounce);
+    inputPending = false; // the next Enter must not re-run a cancelled edit
     controller?.abort(); // a late response must not repopulate the slate
     controller = null;
     loading = false;
@@ -661,6 +662,13 @@
     searched = false;
     clearSelection();
     error = "";
+    bulkSummary = null;
+    bulkError = "";
+    mapController?.abort();
+    mapController = null;
+    mapLoading = false;
+    mapPoints = [];
+    geoTotal = 0;
   }
 
   function onHashChange() {

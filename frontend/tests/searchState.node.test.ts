@@ -222,3 +222,16 @@ test("clearRangePair: removes only that pair's two keys", () => {
 test("UI_ONLY_PARAMS: view is the only hash-only key", () => {
   assert.deepEqual([...UI_ONLY_PARAMS], ["view"]);
 });
+
+test("applyParamsPure: Object.prototype names are unknown keys, never thrown on", () => {
+  for (const k of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const p = Object.fromEntries([[k, "1"]]);
+    const r = applyParamsPure(p, NO_BOUNDS);
+    assert.deepEqual(r.invalid, [k], k);
+    assert.equal(r.searchable, false, k);
+    const withQ = applyParamsPure(Object.fromEntries([["q", "x"], [k, "y"]]), NO_BOUNDS);
+    assert.deepEqual(withQ.invalid, [k], `${k} + q`);
+    assert.equal(withQ.searchable, true, `${k} + q`);
+    assert.equal(withQ.state.q, "x");
+  }
+});

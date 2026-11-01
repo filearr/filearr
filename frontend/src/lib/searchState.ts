@@ -113,7 +113,8 @@ export function applyParamsPure(
   const bad = new Set<string>();
   for (const [k, v] of Object.entries(p)) {
     if (v === "" || v == null) continue;
-    if (k in ENUMS) {
+    // Object.hasOwn: `in` would match Object.prototype names (`constructor`).
+    if (Object.hasOwn(ENUMS, k)) {
       if (!ENUMS[k].includes(v)) bad.add(k);
     } else if (k === "semantic") {
       const n = Number(v);

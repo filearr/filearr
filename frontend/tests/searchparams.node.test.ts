@@ -24,3 +24,12 @@ test("encodeSearchHash: sorted, empties dropped, round-trips through parse", () 
   assert.equal(encodeSearchHash({}), "#/search");
   assert.ok(isSearchHash(h));
 });
+
+test("parseSearchHash: Object.prototype names are ordinary keys", () => {
+  assert.deepEqual(parseSearchHash("#/search?toString=x&toString=y"), { toString: "x,y" });
+  assert.deepEqual(parseSearchHash("#/search?constructor=1"), { constructor: "1" });
+  const r = parseSearchHash("#/search?__proto__=a&__proto__=b&q=z");
+  assert.equal(Object.getPrototypeOf(r), Object.prototype, "prototype untouched");
+  assert.ok(Object.hasOwn(r, "__proto__"));
+  assert.deepEqual(Object.entries(r), [["__proto__", "a,b"], ["q", "z"]]);
+});
