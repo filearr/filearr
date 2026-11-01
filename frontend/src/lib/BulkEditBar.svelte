@@ -15,7 +15,8 @@
   import { onMount } from "svelte";
   import CustomFieldInput from "./CustomFieldInput.svelte";
   import { Alert, Button, Field, Input, Select } from "./ui";
-  import { listCustomFields, type CustomField } from "./api";
+  import type { CustomField } from "./api";
+  import { cachedCustomFields } from "./configCache";
   import {
     applicableFields,
     coerceCustomValue,
@@ -91,7 +92,7 @@
 
   onMount(async () => {
     try {
-      defs = await listCustomFields();
+      defs = await cachedCustomFields();
     } catch {
       // Non-fatal: tags + year still work; the custom-field row explains itself.
       defsError = "Custom-field definitions are unavailable (read scope?).";

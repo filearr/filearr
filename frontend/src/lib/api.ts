@@ -2074,16 +2074,17 @@ export interface TagSuggestion {
 }
 
 /** Typo-tolerant, count-ordered tag suggestions from Meili facet-search (read
- *  scope). `q` is the partial tag; the optional scope narrows the counts. */
+ *  scope). `q` is the partial tag; the optional scope narrows the counts. The
+ *  backend (`GET /search/tags`) reads a repeatable `file_category` and ONE
+ *  `library` (A31: the old `type` param was ignored). */
 export function searchTags(
   q: string,
-  scope: { type?: string; library?: string } = {},
+  scope: { file_category?: string[]; library?: string } = {},
   signal?: AbortSignal,
 ): Promise<{ tags: TagSuggestion[] }> {
-  const params: Record<string, string> = { q };
-  if (scope.type) params.type = scope.type;
-  if (scope.library) params.library = scope.library;
-  const qs = new URLSearchParams(params);
+  const qs = new URLSearchParams({ q });
+  for (const c of scope.file_category ?? []) if (c) qs.append("file_category", c);
+  if (scope.library) qs.set("library", scope.library);
   return request(`/search/tags?${qs}`, { signal });
 }
 

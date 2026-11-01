@@ -36,7 +36,6 @@
     copyCounts as apiCopyCounts,
     searchTags,
     searchPrincipals,
-    semanticStats,
     fileGroups as apiFileGroups,
     getTaxonomy,
     type SearchResponse,
@@ -73,6 +72,8 @@
     type RangePair,
   } from "./searchState";
   import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
+  import { boundsProbePairs, boundsProbeParams, createPageSession, mergeHits } from "./searchResults";
+  import { semanticEnabled as probeSemantic } from "./semanticProbe";
   import {
     MAP_POINT_CAP,
     boxParams,
@@ -185,6 +186,9 @@
   let mapPoints = $state<MapPoint[]>([]);
   let geoTotal = $state(0);
   let mapLoading = $state(false);
+  // A12/A10: a failed map fetch says so (with Retry) instead of an empty map
+  // that reads as "no result carries coordinates".
+  let mapError = $state(false);
   let mapController: AbortController | null = null;
   // One page of the map fetch. 200 is the API's own per-request ceiling.
   const MAP_PAGE = 200;
@@ -209,6 +213,11 @@
   // P3-T10 duplicate badges: id -> group size (>1 only). Batched after results
   // land in ONE /items/copy-counts call — never a per-row query.
   let copyCountMap = $state<Record<string, number>>({});
+  // A failed copy-count batch: a warning with Retry above the list (badges are
+  // decoration, so the results stay). Bumped per fresh search so a stale
+  // batch's failure never lands on a newer result set.
+  let copyCountsError = $state("");
+  let copyCountsGen = 0;
 
   // P3-T7 saved searches (named, persisted param bundles).
   let saved = $state<SavedSearch[]>([]);
@@ -249,6 +258,17 @@
   let nextCursor = $state<string | null>(null);
   let error = $state("");
   let loading = $state(false);
+  // A12: the params the last fresh search was sent with; loadMore pages with
+  // these (plus the cursor), never the live form.
+  const pages = createPageSession();
+  // A12: a failed next page keeps the pages already shown and puts a compact
+  // error + Retry under the list; scroll/keyboard paging stays off until a
+  // Retry succeeds (no re-fire on every scroll event).
+  let loadMoreError = $state("");
+  let loadMoreBlocked = $state(false);
+  // A8: set by the first keystroke in the query box, so a deep link applied on
+  // mount never overwrites what the user already typed.
+  let userTyped = false;
 
   // Roving LOGICAL selection (P3-T3): NOT DOM focus — rows unmount under
   // virtualization, so we track an index + drive aria-activedescendant instead.
@@ -659,6 +679,11 @@
     total = 0;
     facets = {};
     nextCursor = null;
+    pages.clear();
+    loadMoreError = "";
+    loadMoreBlocked = false;
+    copyCountsGen++;
+    copyCountsError = "";
     searched = false;
     clearSelection();
     error = "";
@@ -667,6 +692,7 @@
     mapController?.abort();
     mapController = null;
     mapLoading = false;
+    mapError = false;
     mapPoints = [];
     geoTotal = 0;
   }
@@ -778,18 +804,21 @@
     }
   }
 
-  function applyStats(r: SearchResponse) {
+  const BOTH_PAIRS: readonly RangePair[] = ["size", "date"];
+
+  function applyStats(r: SearchResponse, pairs: readonly RangePair[] = BOTH_PAIRS) {
     // Update slider bounds from facetStats ONLY while that facet isn't being
     // narrowed — otherwise an active filter would shrink its own track. A
-    // pending (URL / saved-search) range narrows it too: keep the bounds we had,
-    // and take the filtered stats only when there are none yet (A7).
-    const ss = r.facet_stats?.size;
+    // pending (URL / saved-search) range narrows it too: keep the bounds we had.
+    // With none yet, runFresh's bounds probe supplies the unfiltered stats
+    // (`pairs` limits which pairs a response may set).
+    const ss = pairs.includes("size") ? r.facet_stats?.size : undefined;
     if (ss && !sizeActive && !(sizeBounds && pairPending(pendingRange, "size"))) {
       sizeBounds = { min: ss.min, max: ss.max };
       sizeLo = ss.min;
       sizeHi = ss.max;
     }
-    const ms = r.facet_stats?.mtime;
+    const ms = pairs.includes("date") ? r.facet_stats?.mtime : undefined;
     if (ms && !mtimeActive && !(mtimeBounds && pairPending(pendingRange, "date"))) {
       mtimeBounds = { min: ms.min, max: ms.max };
       mtimeLo = ms.min;
@@ -807,6 +836,10 @@
     searched = true;
     error = "";
     loading = true;
+    loadMoreError = "";
+    loadMoreBlocked = false;
+    copyCountsGen++;
+    copyCountsError = "";
     // IN-T4: a NEW query means a new result set — carrying a selection across it
     // would let an invisible, unrelated item ride along into the next bulk edit.
     // (Paging the SAME query via loadMore() deliberately keeps the selection.)
@@ -814,17 +847,33 @@
     bulkSummary = null;
     bulkError = "";
     reflectHash(mode); // keep the URL in sync with the query being run (deep-linkable)
+    const params = buildParams();
+    pages.start(params); // A12: loadMore pages THIS query
+    // A filtered deep link has no slider bounds yet: one extra, hit-less request
+    // without the range keys reads the unfiltered facet_stats for those pairs,
+    // so the sliders show the whole range (ruling, P6 Task 3). Same controller:
+    // a newer search aborts it too. A failed probe falls back to the main stats.
+    const probePairs = boundsProbePairs(pendingRange, { size: sizeBounds, mtime: mtimeBounds });
+    const probe = probePairs.length
+      ? search(boundsProbeParams(params), ctrl.signal).catch(() => null)
+      : null;
     try {
-      const r = await search(buildParams(), ctrl.signal);
+      const r = await search(params, ctrl.signal);
       if (ctrl.signal.aborted) return;
-      hits = r.hits;
+      hits = mergeHits<Hit>([], r.hits, hitId).hits;
       total = r.total;
       facets = r.facets;
       nextCursor = r.next_cursor;
       selectedIndex = 0;
-      applyStats(r);
+      applyStats(r, BOTH_PAIRS.filter((pr) => !probePairs.includes(pr)));
+      if (probe) {
+        void probe.then((pr) => {
+          if (ctrl.signal.aborted || controller !== ctrl) return;
+          applyStats(pr ?? r, probePairs);
+        });
+      }
       copyCountMap = {};
-      refreshCopyCounts(r.hits); // P3-T10 batch badge counts
+      refreshCopyCounts(hits); // P3-T10 batch badge counts
       vlist?.scrollTo(0);
       if (view === "map") loadMapPoints(); // keep the map on the same query
     } catch (e) {
@@ -835,21 +884,28 @@
     }
   }
 
-  async function loadMore() {
-    if (loading || !nextCursor || !controller) return;
+  // Next page of the last fresh search. `retry` is the error block's Retry:
+  // the only way past loadMoreBlocked.
+  async function loadMore(retry = false) {
+    if (loading || !controller || (loadMoreBlocked && !retry)) return;
+    const params = pages.pageParams(nextCursor);
+    if (!params) return;
     const ctrl = controller; // reuse the session controller: a new search aborts
     loading = true;
+    loadMoreError = "";
     try {
-      const params = buildParams();
-      params.cursor = nextCursor;
       const r = await search(params, ctrl.signal);
       if (ctrl.signal.aborted || controller !== ctrl) return;
-      hits = [...hits, ...r.hits];
+      // The offset cursor repeats a row when the index shifted between pages.
+      const before = hits.length;
+      hits = mergeHits(hits, r.hits, hitId).hits;
       nextCursor = r.next_cursor;
-      refreshCopyCounts(r.hits); // badge the newly-appended rows too
+      loadMoreBlocked = false;
+      refreshCopyCounts(hits.slice(before)); // badge the newly-appended rows too
     } catch (e) {
-      if ((e as Error)?.name === "AbortError") return;
-      error = errorMessage(e);
+      if ((e as Error)?.name === "AbortError" || controller !== ctrl) return;
+      loadMoreError = errorMessage(e, { verb: "load more results" });
+      loadMoreBlocked = true;
     } finally {
       if (controller === ctrl) loading = false;
     }
@@ -873,6 +929,7 @@
     const ctrl = new AbortController();
     mapController = ctrl;
     mapLoading = true;
+    mapError = false;
     try {
       const base = buildParams();
       base.limit = String(MAP_PAGE);
@@ -882,33 +939,38 @@
         base.geo_left_lng = "-180";
         base.geo_right_lng = "180";
       }
-      const acc: MapPoint[] = [];
+      let acc: MapPoint[] = [];
       let cursor: string | null = null;
       let seen = 0;
       do {
         const r = await search(cursor ? { ...base, cursor } : base, ctrl.signal);
         if (ctrl.signal.aborted || mapController !== ctrl) return;
         geoTotal = r.total;
+        const page: MapPoint[] = [];
         for (const h of r.hits) {
           const g = geoOf(h);
           const id = str(h, "id");
           if (!g || !id) continue;
-          acc.push({
+          page.push({
             id,
             lat: g.lat,
             lng: g.lng,
             label: str(h, "title") || str(h, "filename") || str(h, "rel_path") || id,
           });
         }
+        // A12: the same offset cursor, so the same de-dupe (the cluster list
+        // is keyed by id).
+        acc = mergeHits(acc, page, (pt) => pt.id).hits;
         seen += r.hits.length;
         cursor = r.next_cursor;
       } while (cursor && seen < MAP_POINT_CAP);
       mapPoints = acc.slice(0, MAP_POINT_CAP);
     } catch (e) {
-      if ((e as Error)?.name === "AbortError") return; // superseded — ignore
-      // Non-fatal: the map shows its empty state rather than replacing the
-      // results list with an error.
+      if ((e as Error)?.name === "AbortError" || mapController !== ctrl) return; // superseded — ignore
+      // The map panel shows an error with Retry — never an empty map, which
+      // would read as "no result carries coordinates". The results list stays.
       mapPoints = [];
+      mapError = true;
     } finally {
       if (mapController === ctrl) mapLoading = false;
     }
@@ -921,18 +983,28 @@
     runFresh();
   }
 
-  // P3-T10: fetch copy counts for a batch of hits (ids only, cap 200) and merge
-  // into the badge map. One /items/copy-counts call — only groups with count > 1
-  // come back, so a badge appears only for genuine duplicates. Best-effort.
+  // P3-T10: fetch copy counts for a batch of hits (ids only, cap 200 per call)
+  // and merge into the badge map. Only groups with count > 1 come back, so a
+  // badge appears only for genuine duplicates. A failure keeps the results and
+  // shows a warning with Retry (A10); a stale batch's outcome is dropped.
   async function refreshCopyCounts(batch: Hit[]) {
-    const ids = batch.map((h) => hitId(h)).filter(Boolean).slice(0, 200);
+    const ids = batch.map((h) => hitId(h)).filter(Boolean);
     if (!ids.length) return;
+    const gen = copyCountsGen;
     try {
-      const counts = await apiCopyCounts(ids);
-      copyCountMap = { ...copyCountMap, ...counts };
-    } catch {
-      // Non-fatal: no badges rather than a broken results list.
+      for (const group of chunk(ids, 200)) {
+        const counts = await apiCopyCounts(group);
+        if (gen !== copyCountsGen) return;
+        copyCountMap = { ...copyCountMap, ...counts };
+      }
+    } catch (e) {
+      if (gen === copyCountsGen) copyCountsError = errorMessage(e, { verb: "load duplicate counts" });
     }
+  }
+
+  function retryCopyCounts() {
+    copyCountsError = "";
+    refreshCopyCounts(hits);
   }
 
   // ---- P3-T12 tag type-ahead -------------------------------------------
@@ -961,10 +1033,19 @@
     const ctrl = new AbortController();
     tagController = ctrl;
     try {
-      // Scope tag suggestions to the first selected category when present (the
-      // backend's tag facet scope accepts a single coarse type).
-      const scope = selectedCategories.length ? { type: selectedCategories[0] } : {};
-      const res = await searchTags(tagQuery, scope, ctrl.signal);
+      // A31: scope the suggestion counts like the results — every category
+      // (chips plus a `kind:` in the query; /search/tags takes a repeatable
+      // file_category) and the library when exactly one is chosen (the
+      // endpoint takes a single `library`).
+      const p = buildParams();
+      const res = await searchTags(
+        tagQuery,
+        {
+          file_category: p.file_category ? p.file_category.split(",") : undefined,
+          library: selectedLibraries.length === 1 ? selectedLibraries[0] : undefined,
+        },
+        ctrl.signal,
+      );
       if (ctrl.signal.aborted) return;
       // Hide already-selected tags from the suggestion list.
       tagSuggestions = res.tags.filter((t) => !selectedTags.includes(t.value));
@@ -1003,6 +1084,7 @@
   let inputPending = false;
   function onInput(e: Event) {
     if ((e as InputEvent).isComposing) return;
+    userTyped = true;
     clearTimeout(debounce);
     inputPending = true;
     debounce = setTimeout(() => {
@@ -1240,7 +1322,7 @@
     selectedIndex = Math.max(0, Math.min(n - 1, selectedIndex + delta));
     vlist?.scrollToIndex(selectedIndex, { align: "nearest" });
     // Keyboard nav can outrun the scroll-driven loader; prefetch near the end.
-    if (selectedIndex >= n - 8) loadMore();
+    if (selectedIndex >= n - 8 && !loadMoreBlocked) loadMore();
   }
 
   function openItem(h: Hit | undefined) {
@@ -1324,7 +1406,7 @@
   }
 
   function onScroll() {
-    if (!vlist || !nextCursor || loading) return;
+    if (!vlist || !nextCursor || loading || loadMoreBlocked) return;
     const end = vlist.getScrollOffset() + vlist.getViewportSize();
     if (end >= vlist.getScrollSize() - 400) loadMore();
   }
@@ -1332,7 +1414,7 @@
   // Grid infinite-scroll: the grid is a plain scroll container (not virtua), so
   // near-bottom drives the same cursor-based loadMore the list uses.
   function onGridScroll(e: Event) {
-    if (!nextCursor || loading) return;
+    if (!nextCursor || loading || loadMoreBlocked) return;
     const el = e.currentTarget as HTMLElement;
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) loadMore();
   }
@@ -1346,24 +1428,21 @@
   const totalLabel = $derived(total >= 1000 ? `about ${total.toLocaleString("en-US")} results` : `${total} results`);
 
   // ---- lifecycle ----------------------------------------------------------
-  onMount(async () => {
-    // Listener registration MUST precede the awaits below. It used to sit
-    // after them, so switching tabs during the fetch window destroyed the
-    // component before registration — onDestroy's removeEventListener was a
-    // no-op and the continuation then LEAKED a listener on a dead component,
-    // which re-wrote "#/search" over every later navigation until a hard
-    // refresh (live 2026-08-04: tabs "snapped back" intermittently).
-    window.addEventListener("hashchange", onHashChange);
+  // Vocabularies and flags the page decorates results with. Each loader
+  // swallows its own failure (fallbacks below), so Promise.all never rejects.
+  async function loadLibraries() {
     try {
       const list = await listLibraries();
       libs = new Map(list.map((l) => [l.id, l]));
     } catch {
       // Non-fatal: copy-path just falls back to the container path.
     }
-    loadSaved();
-    // W8: category + group vocabularies come from the taxonomy tree (source of
-    // truth). Prefer it; if it's offline, fall back to /system/file-groups for the
-    // groups and a small static category list so the filters still render.
+  }
+
+  // W8: category + group vocabularies come from the taxonomy tree (source of
+  // truth). Prefer it; if it's offline, fall back to /system/file-groups for the
+  // groups and a small static category list so the filters still render.
+  async function loadTaxonomy() {
     try {
       const tax = await getTaxonomy();
       categoryOptions = tax.tree.map((n) => ({
@@ -1387,21 +1466,37 @@
         fileGroupOptions = FILE_GROUP_FALLBACK;
       }
     }
-    // P3-T8: learn whether semantic search is enabled so the slider can show.
-    try {
-      const sem = await semanticStats();
-      semanticEnabled = !!sem?.enabled;
-    } catch {
-      semanticEnabled = false;
-    }
-    // Deep-link entry: restore state from #/search?... then query. A BARE visit
-    // stays empty (roadmap §20) — no match-all preload; results render only
-    // once a search actually starts. Skipped entirely if the user has already
-    // navigated away while the fetches above were in flight (destroyed) or the
-    // hash is no longer a search route.
-    if (destroyed || !isSearchHash(location.hash)) return;
-    const initial = parseSearchHash(location.hash);
-    if (Object.keys(initial).length) applyParams(initial, "replace");
+  }
+
+  // P3-T8: learn whether semantic search is enabled so the slider can show
+  // (one cached /stats probe per page load, shared with ItemDetail — ruling 4).
+  // A deep link's `semantic` ratio is only sent once the flag is known, so a
+  // search that already ran without it re-runs with it.
+  async function loadSemantic() {
+    const on = await probeSemantic();
+    if (destroyed) return;
+    semanticEnabled = on;
+    if (on && semantic > 0 && searched && isSearchHash(location.hash)) runFresh("replace");
+  }
+
+  // ---- lifecycle ----------------------------------------------------------
+  onMount(async () => {
+    // Listener registration MUST precede everything else. It used to sit
+    // after the awaits, so switching tabs during the fetch window destroyed the
+    // component before registration — onDestroy's removeEventListener was a
+    // no-op and the continuation then LEAKED a listener on a dead component,
+    // which re-wrote "#/search" over every later navigation until a hard
+    // refresh (live 2026-08-04: tabs "snapped back" intermittently).
+    window.addEventListener("hashchange", onHashChange);
+    // A8 deep-link entry: restore state from #/search?... and query BEFORE any
+    // vocabulary fetch — a bookmarked search no longer waits behind libraries,
+    // taxonomy and the heavy /stats probe. Chips show their raw keys until the
+    // labels land; nothing below resets the applied state. A BARE visit stays
+    // empty (roadmap §20) — no match-all preload.
+    const initial = isSearchHash(location.hash) ? parseSearchHash(location.hash) : {};
+    if (!userTyped && Object.keys(initial).length) applyParams(initial, "replace");
+    loadSaved();
+    await Promise.all([loadLibraries(), loadTaxonomy(), loadSemantic()]);
   });
 
   let destroyed = false;
@@ -1849,6 +1944,16 @@
     {#await loadMapPanel()}
       <StateBlock state="loading" />
     {:then m}
+      {#if mapError}
+        <!-- Never an empty map on a failed fetch: it would read as "no result
+             carries coordinates". -->
+        <Alert tone="danger" class="mt-4">
+          <span class="flex flex-wrap items-center gap-2">
+            Could not load map points.
+            <Button size="sm" onclick={() => loadMapPoints()}>Retry</Button>
+          </span>
+        </Alert>
+      {:else}
       <m.default
         points={mapPoints}
         {geoTotal}
@@ -1860,6 +1965,7 @@
         onBoxChange={onMapBox}
         onOpenItem={(id) => (selected = id)}
       />
+      {/if}
     {:catch}
       <div role="alert" class="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted">
         <p>The map failed to load — Filearr may have been updated since this tab was opened.</p>
@@ -1913,6 +2019,16 @@
         busy={bulkBusy}
         onApply={applyBulk}
         onClear={clearSelection} />
+    {/if}
+
+    <!-- Duplicate badges failed to load: the results stand, the badges retry. -->
+    {#if copyCountsError}
+      <Alert tone="warn" class="mt-2" onDismiss={() => (copyCountsError = "")}>
+        <span class="flex flex-wrap items-center gap-2">
+          {copyCountsError}
+          <Button size="sm" onclick={retryCopyCounts}>Retry</Button>
+        </span>
+      </Alert>
     {/if}
 
     <!-- A request-level failure of the bar's Apply, right below the bar. -->
@@ -2141,7 +2257,10 @@
     </VList>
     {/if}
 
-    {#if loading}
+    {#if loadMoreError}
+      <!-- A12: the next page failed; the pages above stay, paging resumes on Retry. -->
+      <StateBlock state="error" compact message={loadMoreError} onRetry={() => loadMore(true)} />
+    {:else if loading}
       <StateBlock state="loading" compact />
     {/if}
   {/if}

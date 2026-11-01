@@ -1,24 +1,11 @@
-<script module lang="ts">
-  import { semanticStats } from "./api";
-
-  // One semantic-enabled probe per page load, shared by every ItemDetail
-  // instance: the flag can't change without a server restart, so a cached
-  // promise avoids a /stats round-trip on every detail open.
-  let semanticProbe: Promise<boolean> | null = null;
-  function semanticEnabled(): Promise<boolean> {
-    semanticProbe ??= semanticStats()
-      .then((s) => !!s?.enabled)
-      .catch(() => false);
-    return semanticProbe;
-  }
-</script>
-
 <script lang="ts">
   import { fmtBytes, fmtDate } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
   import * as safeStorage from "./safeStorage";
   import { safeHref } from "./pathlinks";
+  import { semanticEnabled } from "./semanticProbe";
+  import { cachedCustomFields } from "./configCache";
   import {
     type ItemPermissions,
     type PermissionAce,
@@ -28,7 +15,6 @@
     getItem,
     getItemPermissions,
     itemCopies,
-    listCustomFields,
     patchItem,
     touchItem,
     similarItems,
@@ -455,7 +441,7 @@
     saving = false; // a save for the previous item must not leave the spinner stuck
     // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
     // as KeyFactsCard; a failure just means no custom-field rows to edit.
-    listCustomFields(ac.signal)
+    cachedCustomFields(ac.signal)
       .then((d) => live() && (defs = d))
       .catch(() => live() && (defs = []));
     getItem(id, ac.signal)

@@ -3,7 +3,9 @@
   // "more details" section every per-type card embeds. Orders/labels fields by
   // profile (P4-T1) -> applicable custom fields (P4-T3) -> ad-hoc keys
   // (alphabetical), rendering text-only values (see keyfacts.ts).
-  import { getMetadataProfile, listCustomFields } from "../api";
+  // A44: both definitions are fetched once per page load and shared by every
+  // card mount, ItemDetail and BulkEditBar (configCache.ts).
+  import { cachedCustomFields, cachedProfile } from "../configCache";
   import {
     effectiveMeta,
     orderKeyFacts,
@@ -33,9 +35,13 @@
       profileLabels = [];
       return;
     }
-    getMetadataProfile(mt)
-      .then((p) => (profileLabels = profileFieldLabels(p.fields)))
-      .catch(() => (profileLabels = []));
+    const ac = new AbortController();
+    cachedProfile(mt, ac.signal)
+      .then((p) => (profileLabels = p ? profileFieldLabels(p.fields) : []))
+      .catch(() => {
+        if (!ac.signal.aborted) profileLabels = [];
+      });
+    return () => ac.abort();
   });
 
   // Applicable custom fields, narrowed by media_type + library (empty
@@ -43,7 +49,8 @@
   $effect(() => {
     const mt = mediaType;
     const lib = libraryId;
-    listCustomFields()
+    const ac = new AbortController();
+    cachedCustomFields(ac.signal)
       .then((defs) => {
         const applicable = defs.filter(
           (d) =>
@@ -52,7 +59,10 @@
         );
         cfLabels = customFieldLabels(applicable);
       })
-      .catch(() => (cfLabels = []));
+      .catch(() => {
+        if (!ac.signal.aborted) cfLabels = [];
+      });
+    return () => ac.abort();
   });
 
   const facts = $derived(orderKeyFacts(meta, profileLabels, cfLabels, { exclude }));
