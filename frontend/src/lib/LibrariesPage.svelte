@@ -10,6 +10,7 @@
     libraryStats,
     type FailedJob, type FailingItem, type Library, type LibraryHashStatus, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
+    errorMessage,
   } from "./api";
   import LibraryEditModal from "./LibraryEditModal.svelte";
   import DeleteLibraryDialog from "./DeleteLibraryDialog.svelte";
@@ -55,7 +56,7 @@
       await rehashLibrary(id);
       if (hashStatus[id]) hashStatus[id] = { ...hashStatus[id], rehash_pending: true };
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "re-hash this library" });
     } finally {
       rehashing[id] = false;
     }
@@ -181,7 +182,7 @@
       }
       await refresh();
     } catch (err) {
-      tgtMsg = { ok: false, text: String(err) };
+      tgtMsg = { ok: false, text: errorMessage(err, { verb: "scan these paths" }) };
     } finally {
       tgtBusy = false;
     }
@@ -248,7 +249,7 @@
       for (const id of Object.keys(expanded)) if (expanded[id]) await loadFailing(id);
       syncStreams();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -384,7 +385,7 @@
       failing = { ...failing, [libId]: res.items };
       errorCounts = { ...errorCounts, [libId]: res.count };
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -410,7 +411,7 @@
       failedOffset = 0;
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "clear failed items" });
     } finally {
       clearingFailed = false;
     }
@@ -428,7 +429,7 @@
       failing = {};
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "retry failed items" });
     } finally {
       retryingAll = false;
     }
@@ -440,7 +441,7 @@
       await retryExtracts(libId);
       await loadFailing(libId);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "retry failed items" });
     } finally {
       retrying[libId] = false;
     }
@@ -490,7 +491,7 @@
       await scanLibrary(lib.id);
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "scan this library" });
       // The enqueue itself failed, so nothing is pending — drop the marker
       // rather than leaving a "queued" row that will never start.
       const { [lib.id]: _failed, ...rest } = queued;
@@ -645,7 +646,7 @@
     loadLibStats();
     listPresets()
       .then((m) => (presetsMeta = m))
-      .catch((e) => (error = String(e)));
+      .catch((e) => (error = errorMessage(e)));
     // W8: taxonomy for the type-gating selectors. Non-fatal — an empty tree just
     // means the selector shows "all types" and libraries can still be created.
     getTaxonomy()

@@ -21,7 +21,6 @@
   import DslHelp from "./DslHelp.svelte";
   import BulkEditBar from "./BulkEditBar.svelte";
   import {
-    ApiError,
     batchPatchItems,
     getItem,
     search,
@@ -41,6 +40,7 @@
     type SavedSearch,
     type TagSuggestion,
     type ItemPatchBody,
+    errorMessage,
   } from "./api";
   import {
     buildPatches,
@@ -367,18 +367,6 @@
 
   // Local mirror of AgentsPage/TaxonomyPage's helper: pull FastAPI's ``detail``
   // out of a 4xx body instead of dumping "<status>: <raw json>" at the user.
-  function errDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
 
   /** Resolve each selected item's CURRENT tag list — the input the per-item tag
    *  arithmetic needs, because `tags` replaces the whole list on the wire.
@@ -488,7 +476,7 @@
     } catch (e) {
       // A request-level failure (auth, 413, network). Per-ITEM failures never
       // land here — they come back inside a 200 and are shown in the list.
-      bulkError = errDetail(e);
+      bulkError = errorMessage(e, { verb: "edit these items" });
     } finally {
       bulkBusy = false;
     }
@@ -658,7 +646,7 @@
       await createSavedSearch({ name: name.trim(), params: currentParams() });
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -674,7 +662,7 @@
       await updateSavedSearch(ss.id, { name: name.trim() });
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -685,7 +673,7 @@
       await deleteSavedSearch(ss.id);
       await loadSaved();
     } catch (e) {
-      savedError = String(e);
+      savedError = errorMessage(e);
     }
   }
 
@@ -738,7 +726,7 @@
       if (view === "map") loadMapPoints(); // keep the map on the same query
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return; // superseded — ignore
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       if (controller === ctrl) loading = false;
     }
@@ -758,7 +746,7 @@
       refreshCopyCounts(r.hits); // badge the newly-appended rows too
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       if (controller === ctrl) loading = false;
     }

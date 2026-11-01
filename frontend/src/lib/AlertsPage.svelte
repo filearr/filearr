@@ -38,6 +38,7 @@
     type WebhookFormat,
     type Library,
     type TestFireResult,
+    errorMessage,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -65,7 +66,7 @@
       ]);
       error = "";
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -209,7 +210,7 @@
       resetChannelForm();
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     } finally {
       chBusy = false;
     }
@@ -221,7 +222,7 @@
       await deleteAlertChannel(c.id);
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -230,7 +231,7 @@
       await updateAlertChannel(c.id, { enabled: !c.enabled });
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -239,7 +240,7 @@
     try {
       testResults = { ...testResults, [c.id]: await testAlertChannel(c.id) };
     } catch (err) {
-      testResults = { ...testResults, [c.id]: { error: String(err) } };
+      testResults = { ...testResults, [c.id]: { error: errorMessage(err) } };
     }
   }
 
@@ -295,7 +296,7 @@
       bulkTouchChannels = false;
       await refresh();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       bulkBusy = false;
     }
@@ -408,7 +409,7 @@
       resetRuleForm();
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     } finally {
       rlBusy = false;
     }
@@ -420,7 +421,7 @@
       await deleteAlertRule(r.id);
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -429,7 +430,7 @@
       await updateAlertRule(r.id, { enabled: !r.enabled });
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage alerts" });
     }
   }
 
@@ -463,7 +464,7 @@
       ]);
       error = "";
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       evLoading = false;
     }

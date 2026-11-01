@@ -16,6 +16,7 @@
     createLibrary, resolveShareHint, updateLibrary,
     type ExtensionGroup, type HashPolicy, type Library, type Preset, type PresetsResponse,
     type ShareMapEntry, type TaxonomyNode,
+    errorMessage,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -290,7 +291,7 @@
     } catch (e) {
       // 422s (invalid cron, network watch path, unknown preset/group, non-positive
       // ceiling, …) arrive as "422: <detail>" and are shown inline.
-      error = String(e);
+      error = errorMessage(e, { verb: "edit this library" });
     } finally {
       busy = false;
     }

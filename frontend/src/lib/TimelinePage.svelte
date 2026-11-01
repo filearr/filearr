@@ -6,6 +6,7 @@
     type TimelineResponse,
     type TimelineBucket,
     type Library,
+    errorMessage,
   } from "./api";
   import { encodeSearchHash } from "./searchparams";
 
@@ -33,7 +34,7 @@
     try {
       data = await timeline(bucket, library);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }

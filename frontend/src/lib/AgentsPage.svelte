@@ -112,6 +112,7 @@
     type PermissionsConfig,
     type AuditConfig,
     type InstallerConfigOut,
+    errorMessage,
   } from "./api";
 
   // W6-D4 — the agent management page: fleet status header, the agents table,
@@ -151,18 +152,6 @@
   // this dot mirrors the default 5-minute window for an at-a-glance row hint.
   const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
-  function errDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
 
   async function refreshSummary() {
     try {
@@ -195,7 +184,7 @@
       groups = grps;
       await Promise.all([refreshSummary(), refreshSweeps()]);
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     }
   }
 
@@ -436,7 +425,7 @@
       relStartsAt = "";
       await reloadRollouts();
     } catch (e) {
-      error = `release rollout: ${errDetail(e)}`;
+      error = `release rollout: ${errorMessage(e)}`;
     } finally {
       relBusy = false;
     }
@@ -448,7 +437,7 @@
       await promoteReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `promote: ${errDetail(e)}`;
+      error = `promote: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
@@ -469,7 +458,7 @@
       await cancelReleaseRollout(r.id);
       await reloadRollouts();
     } catch (e) {
-      error = `cancel: ${errDetail(e)}`;
+      error = `cancel: ${errorMessage(e)}`;
     } finally {
       rolloutBusy[r.id] = false;
     }
@@ -526,7 +515,7 @@
       delete effective[a.id];
       await Promise.all([reloadGroups(), refreshSummary()]);
     } catch (e) {
-      error = `configuration groups for ${a.name}: ${errDetail(e)}`;
+      error = `configuration groups for ${a.name}: ${errorMessage(e)}`;
       delete memberDraft[a.id];
       await refresh(); // resync the checkboxes to server truth
     } finally {
@@ -545,7 +534,7 @@
       await triggerAgentUpdate(id);
       await refresh();
     } catch (e) {
-      error = `update ${name}: ${errDetail(e)}`;
+      error = `update ${name}: ${errorMessage(e)}`;
       await refresh();
     } finally {
       updating[id] = false;
@@ -570,7 +559,7 @@
       await suspendAgent(a.id, want);
       await refresh();
     } catch (e) {
-      error = `suspend ${a.name}: ${errDetail(e)}`;
+      error = `suspend ${a.name}: ${errorMessage(e)}`;
     } finally {
       suspending[a.id] = false;
     }
@@ -583,7 +572,7 @@
       await runAgentMaintenance(a.id);
       await refresh();
     } catch (e) {
-      error = `maintenance ${a.name}: ${errDetail(e)}`;
+      error = `maintenance ${a.name}: ${errorMessage(e)}`;
     } finally {
       maintaining[a.id] = false;
     }
@@ -631,7 +620,7 @@
       error =
         e instanceof ApiError && e.status === 409
           ? `A reconcile is already queued or running on "${a.name}".`
-          : String(e);
+          : errorMessage(e);
     } finally {
       reconciling[a.id] = false;
     }
@@ -653,7 +642,7 @@
       } else if (e instanceof ApiError && e.status === 422) {
         error = `"${a.name}": ${e.message} — see the agent's group settings, Inventory section.`;
       } else {
-        error = String(e);
+        error = errorMessage(e);
       }
     } finally {
       inventorying[a.id] = false;
@@ -680,7 +669,7 @@
       error =
         e instanceof ApiError && e.status === 409
           ? `re-extract ${a.name}: a sweep is already running on this agent`
-          : `re-extract ${a.name}: ${errDetail(e)}`;
+          : `re-extract ${a.name}: ${errorMessage(e)}`;
       await refreshSweeps(); // resync the badge — a 409 means one IS in flight
     } finally {
       reextracting[a.id] = false;
@@ -740,7 +729,7 @@
       error =
         e instanceof ApiError && e.status === 409
           ? `re-hash ${a.name}: a hash migration is already running on this agent`
-          : `re-hash ${a.name}: ${errDetail(e)}`;
+          : `re-hash ${a.name}: ${errorMessage(e)}`;
       await refreshSweeps(); // resync the badge — a 409 means one IS in flight
     } finally {
       rehashingNow[a.id] = false;
@@ -802,7 +791,7 @@
     try {
       effective[id] = await getEffectiveConfig(id);
     } catch (e) {
-      effError[id] = errDetail(e);
+      effError[id] = errorMessage(e);
     } finally {
       effLoading[id] = false;
     }
@@ -855,7 +844,7 @@
     try {
       about[a.id] = await agentAbout(a.id);
     } catch (e) {
-      aboutError[a.id] = errDetail(e);
+      aboutError[a.id] = errorMessage(e);
     } finally {
       aboutLoading[a.id] = false;
     }
@@ -913,7 +902,7 @@
       await revokeAgent(id);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     }
   }
   // Hard delete: 409 while the agent still owns libraries/items — that message
@@ -924,7 +913,7 @@
       await deleteAgent(id);
       await refresh();
     } catch (e) {
-      const detail = errDetail(e);
+      const detail = errorMessage(e);
       // The agent owns libraries/items: offer the one-action cascade instead
       // of sending the operator off to delete each library by hand first.
       if (e instanceof ApiError && e.status === 409 && detail.includes("replicated data")) {
@@ -943,7 +932,7 @@ ${detail}
             await refresh();
             return;
           } catch (e2) {
-            error = errDetail(e2);
+            error = errorMessage(e2);
             return;
           }
         }
@@ -979,7 +968,7 @@ ${detail}
       minted = { token: r.token, expires_at: r.expires_at };
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     } finally {
       minting = false;
     }
@@ -993,7 +982,7 @@ ${detail}
       await revokeEnrollmentToken(hash, force);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     }
   }
 
@@ -1027,7 +1016,7 @@ ${detail}
       });
       await refresh(); // the mint created a new token row
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     } finally {
       issuing = false;
     }
@@ -1277,7 +1266,7 @@ ${detail}
     try {
       parsed = JSON.parse(rawText);
     } catch (e) {
-      rawError = `Not valid JSON: ${String(e)}`;
+      rawError = `Not valid JSON: ${errorMessage(e)}`;
       return;
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -1335,7 +1324,7 @@ ${detail}
     try {
       historyRows = await listConfigGroupHistory(dialog.id, 20);
     } catch (e) {
-      historyError = errDetail(e);
+      historyError = errorMessage(e);
     } finally {
       historyLoading = false;
     }
@@ -1362,7 +1351,7 @@ ${detail}
       openEdit(g); // re-seed the form from what is now stored
       await refresh();
     } catch (e) {
-      dialogError = errDetail(e);
+      dialogError = errorMessage(e);
     } finally {
       dialogBusy = false;
     }
@@ -1398,7 +1387,7 @@ ${detail}
       if (req !== collectorReq) return;
       collectorEditor = collectorEditorFromFetch(stored, {
         ok: false,
-        error: errDetail(e),
+        error: errorMessage(e),
       });
     }
   }
@@ -1753,7 +1742,7 @@ ${detail}
       // Surface the backend's detail inline: 422 (unknown key / bad regex / bad
       // cron / bad preset / bad tiers / a rollout with no document change), 409
       // (duplicate name, Global's fixed fields, a second live rollout) or 413.
-      dialogError = errDetail(e);
+      dialogError = errorMessage(e);
     } finally {
       dialogBusy = false;
     }
@@ -1773,7 +1762,7 @@ ${detail}
       await deleteConfigGroup(g.id);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     }
   }
 
@@ -1822,7 +1811,7 @@ ${detail}
         await updateConfigGroup(other.id, { priority: theirs });
       await reloadGroups();
     } catch (e) {
-      error = `reorder ${g.name}: ${errDetail(e)}`;
+      error = `reorder ${g.name}: ${errorMessage(e)}`;
       await reloadGroups(); // a half-applied swap must not linger on screen
     } finally {
       reordering = false;
@@ -1848,7 +1837,7 @@ ${detail}
       await promoteConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `promote ${r.group_name}: ${errDetail(e)}`;
+      error = `promote ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;
@@ -1872,7 +1861,7 @@ ${detail}
       await cancelConfigRollout(r.id);
       await Promise.all([reloadRollouts(), reloadGroups()]);
     } catch (e) {
-      error = `cancel ${r.group_name}: ${errDetail(e)}`;
+      error = `cancel ${r.group_name}: ${errorMessage(e)}`;
       await reloadRollouts();
     } finally {
       rolloutBusy[r.id] = false;

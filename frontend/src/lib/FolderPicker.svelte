@@ -5,7 +5,7 @@
   // root_path. Free-text entry stays available on the parent form; this is an
   // optional aid. A 422 (outside allowlist / traversal) surfaces inline rather
   // than blowing up the dialog.
-  import { browseFs, type FsBrowse } from "./api";
+  import { browseFs, type FsBrowse, errorMessage } from "./api";
 
   let {
     initial = "",
@@ -24,7 +24,7 @@
       view = await browseFs(path);
     } catch (e) {
       // Keep the previous listing visible so the user can recover.
-      error = String(e);
+      error = errorMessage(e, { verb: "browse this folder" });
     } finally {
       loading = false;
     }

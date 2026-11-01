@@ -21,6 +21,7 @@
     targetedScan,
     type Library,
     type TreeResponse,
+    errorMessage,
   } from "./api";
   import { buildDisplayPath, buildOpenUrl } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
@@ -92,7 +93,7 @@
       if (!libName) libName = res.library_name;
     } catch (e) {
       tree = null;
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -157,7 +158,7 @@
         true,
       );
     } catch (e) {
-      flashToast(`Could not scan ${label}: ${String(e)}`, false);
+      flashToast(`Could not scan ${label}: ${errorMessage(e, { verb: "scan this folder" })}`, false);
     }
   }
 
@@ -183,7 +184,7 @@
       showScanForm = false;
       scanPath = "";
     } catch (e2) {
-      flashToast(`Could not scan "${target}": ${String(e2)}`, false);
+      flashToast(`Could not scan "${target}": ${errorMessage(e2, { verb: "scan this folder" })}`, false);
     } finally {
       scanBusy = false;
     }

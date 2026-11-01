@@ -18,6 +18,7 @@
     type ReportMeta,
     type ReportPage,
     type Library,
+    errorMessage,
   } from "./api";
 
   // ------------------------------------------------------------------ //
@@ -160,7 +161,7 @@
         thresholdDays: thresholdParam,
       });
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
       page = null;
     } finally {
       loading = false;
@@ -190,7 +191,7 @@
         thresholdDays: thresholdParam,
       });
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       downloading = false;
     }
@@ -208,7 +209,7 @@
       });
       queued = `Queued a background ${format.toUpperCase()} export — see the Exports panel below.`;
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -216,7 +217,7 @@
     try {
       [reports, libs] = await Promise.all([listReports(), listLibraries()]);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   });
 </script>

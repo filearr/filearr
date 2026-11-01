@@ -1,13 +1,14 @@
 <script lang="ts">
   // Self-service account page (#/account): profile, password, appearance
   // defaults (persisted server-side so they follow the person), session info.
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import {
     patchMyProfile,
     putMyPreferences,
     changeMyPassword,
     mySessionTimeouts,
-    ApiError,
+    errorMessage,
+    errorStatus,
     type AuthPrincipal,
     type MySessionTimeouts,
     type ProfilePatch,
@@ -21,19 +22,6 @@
 
   const isLocal = $derived((me.auth_provider ?? "local") === "local");
   const providerLabel = $derived((me.auth_provider ?? "local").toUpperCase());
-
-  function errText(e: unknown): string {
-    if (e instanceof ApiError) {
-      if (e.status === 409) return "That username is already taken (or cannot be changed for this account).";
-      if (e.status === 401) return "Not authorised — the current password may be wrong.";
-      try {
-        const j = JSON.parse(e.body);
-        if (typeof j?.detail === "string") return j.detail;
-      } catch { /* not JSON */ }
-      return e.body || `Request failed (${e.status})`;
-    }
-    return String(e);
-  }
 
   // --- Profile ---------------------------------------------------------------
   let username = $state("");
@@ -77,7 +65,12 @@
           : "Profile saved.",
       };
     } catch (e) {
-      profileMsg = { ok: false, text: errText(e) };
+      profileMsg = {
+        ok: false,
+        text: errorStatus(e) === 409
+          ? "That username is already taken (or cannot be changed for this account)."
+          : errorMessage(e, { verb: "change this profile" }),
+      };
     } finally {
       profileBusy = false;
     }
@@ -98,20 +91,29 @@
   );
   const pwReady = $derived(curPw.length > 0 && newPw.length >= 8 && confirmPw === newPw);
 
+  // Every session (this one included) is revoked on success; reload into the
+  // login wall. Task 3 replaces the reload with the app's sign-out path.
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(reloadTimer));
+
   async function savePassword() {
     if (!pwReady) return;
     pwBusy = true;
     pwMsg = null;
     try {
       await changeMyPassword(curPw, newPw);
-      pwMsg = { ok: true, text: "Password changed — all sessions were signed out; sign in again." };
+      pwMsg = { ok: true, text: "Password changed. You have been signed out everywhere." };
       curPw = newPw = confirmPw = "";
-      setTimeout(() => {
+      reloadTimer = setTimeout(() => {
         location.hash = "";
         location.reload();
       }, 1500);
     } catch (e) {
-      pwMsg = { ok: false, text: errText(e) };
+      // 403 = wrong current password; 401 only means the session itself expired.
+      pwMsg = {
+        ok: false,
+        text: errorStatus(e) === 403 ? "The current password is incorrect." : errorMessage(e),
+      };
       pwBusy = false;
     }
   }
@@ -143,7 +145,7 @@
       onUpdated(p);
       prefMsg = { ok: true, text: "Preferences saved — they will apply wherever you sign in." };
     } catch (e) {
-      prefMsg = { ok: false, text: errText(e) };
+      prefMsg = { ok: false, text: errorMessage(e, { verb: "save preferences" }) };
     } finally {
       prefBusy = false;
     }
@@ -160,7 +162,7 @@
     try {
       timeouts = await mySessionTimeouts();
     } catch (e) {
-      timeoutsErr = errText(e);
+      timeoutsErr = errorMessage(e);
     }
   });
 

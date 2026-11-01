@@ -19,6 +19,7 @@
     type ColumnRegistry,
     type ReportValidationError,
     type CustomRunPage,
+    errorMessage,
   } from "./api";
 
   // ------------------------------------------------------------------ //
@@ -117,10 +118,12 @@
       vErrors = res.errors;
     } catch (e) {
       vOk = false;
-      vErrors = [{ error: "request_error", message: String(e) }];
+      vErrors = [{ error: "request_error", message: errorMessage(e) }];
     }
   }
 
+  // Kept: formats one validation item with its parse position, which
+  // errorMessage (whole-error, msg/message only) does not render.
   function errText(e: ReportValidationError): string {
     if (e.error === "parse_error")
       return `Parse error (${e.code}) at position ${e.position}: ${e.reason}`;
@@ -168,7 +171,7 @@
       defs = await listCustomReports();
       openEdit(copy); // land straight in the edit form: copy-and-edit in one click
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -193,7 +196,7 @@
       editingId = null;
       defs = await listCustomReports();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "save this report" });
     } finally {
       saving = false;
     }
@@ -210,7 +213,7 @@
       }
       defs = await listCustomReports();
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "delete this report" });
     }
   }
 
@@ -223,7 +226,7 @@
     try {
       runPage = await runCustomReport(d.id, { limit: RUN_LIMIT, offset });
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
       runPage = null;
     } finally {
       running = false;
@@ -236,7 +239,7 @@
     try {
       await downloadCustomReport(d.id, d.name, format);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
   }
 
@@ -247,7 +250,7 @@
         getColumnRegistry(),
       ]);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     }
     // Handoff from the filter builder ("Save as custom report"): open the create
     // form pre-filled with the compiled DSL + a sensible column projection.

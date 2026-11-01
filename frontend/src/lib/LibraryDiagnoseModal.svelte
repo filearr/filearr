@@ -7,7 +7,7 @@
   // the operator can paste it into an issue. All dynamic strings render as
   // text (no {@html}).
   import { onMount } from "svelte";
-  import { diagnoseLibrary, type Library, type LibraryDiagnosis, type LibraryVerdict } from "./api";
+  import { diagnoseLibrary, type Library, type LibraryDiagnosis, type LibraryVerdict, errorMessage } from "./api";
   import { copyText } from "./clipboard";
   import DiagnoseSection from "./DiagnoseSection.svelte";
 
@@ -26,7 +26,7 @@
     try {
       report = await diagnoseLibrary(library.id);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }

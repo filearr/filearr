@@ -17,10 +17,10 @@
   import { copyText } from "./clipboard";
   import * as safeStorage from "./safeStorage";
   import {
-    ApiError,
     type ItemPermissions,
     type PermissionAce,
     type PermissionPrincipal,
+    errorMessage,
     friendlyError,
     getItem,
     getItemPermissions,
@@ -203,18 +203,6 @@
     commitTagDraft();
   }
 
-  function editErrDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
 
   async function saveEdit() {
     if (!item) return;
@@ -281,7 +269,7 @@
       item = await patchItem(id, patch);
       active = "card";
     } catch (e) {
-      editError = editErrDetail(e);
+      editError = errorMessage(e, { verb: "edit this item" });
     } finally {
       saving = false;
     }

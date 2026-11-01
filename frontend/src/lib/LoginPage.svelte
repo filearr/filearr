@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { authLogin, authBootstrap, oidcLoginUrl, ApiError, type AuthMode } from "./api";
+  import { authLogin, authBootstrap, oidcLoginUrl, errorMessage, errorStatus, type AuthMode } from "./api";
 
   // `mode` is "bootstrap" (no users yet → create the first admin) or "enabled"
   // (normal login). `onAuthed` is called after a successful login/bootstrap so
@@ -35,6 +35,14 @@
 
   const isBootstrap = $derived(mode === "bootstrap");
 
+  function loginError(err: unknown): string {
+    // P6-T8: generic messages — never reveal whether the username exists.
+    const status = errorStatus(err);
+    if (status === 401) return "Invalid username or password.";
+    if (status === 429) return "Too many attempts. Try again in a minute.";
+    return errorMessage(err);
+  }
+
   async function submit(e: Event) {
     e.preventDefault();
     error = null;
@@ -42,25 +50,29 @@
     busy = true;
     try {
       if (isBootstrap) {
-        await authBootstrap(username.trim(), password);
+        try {
+          await authBootstrap(username.trim(), password);
+        } catch (err) {
+          error = errorMessage(err);
+          return;
+        }
         // First admin created — log straight in to establish the session.
-        await authLogin(username.trim(), password);
+        try {
+          await authLogin(username.trim(), password);
+        } catch (err) {
+          // The admin exists now: re-probe so the page leaves bootstrap mode
+          // (a retry must sign in, not try to create the admin again).
+          error = loginError(err);
+          onAuthed();
+          return;
+        }
       } else {
         const res = await authLogin(username.trim(), password);
         warning = res.warning;
       }
       onAuthed();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof ApiError && err.status === 429) {
-        // P6-T8: generic lockout message (never reveals whether the username
-        // exists, nor the exact remaining time beyond the server's Retry-After).
-        error = "Too many failed attempts. Please wait a few minutes and try again.";
-      } else if (isBootstrap) {
-        error = `Could not create the first admin: ${msg}`;
-      } else {
-        error = "Invalid username or password.";
-      }
+      error = loginError(err);
     } finally {
       busy = false;
     }
@@ -118,6 +130,7 @@
         type="password"
         bind:value={password}
         autocomplete={isBootstrap ? "new-password" : "current-password"}
+        minlength={isBootstrap ? 8 : undefined}
         required />
     </label>
 

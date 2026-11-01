@@ -11,7 +11,6 @@
   // (delete category with groups) and 422 (bad ext charset) surface inline.
   import { onMount } from "svelte";
   import {
-    ApiError,
     isAdminPrincipal,
     getTaxonomy,
     createTaxonomyCategory,
@@ -27,6 +26,7 @@
     TAXONOMY_EXTRACTORS,
     type TaxonomyNode,
     type AuthPrincipal,
+    errorMessage,
   } from "./api";
 
   let { me = null, authDisabled = false }: { me?: AuthPrincipal | null; authDisabled?: boolean } =
@@ -62,7 +62,7 @@
         : "Seed sync: nothing new — this taxonomy already covers the shipped defaults.";
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e, { verb: "edit the taxonomy" });
     } finally {
       seedBusy = false;
     }
@@ -77,24 +77,12 @@
         ? `Reclassified ${r.changed.toLocaleString()} item(s); their search docs are re-syncing.`
         : "Reclassify: every item already matches the current taxonomy.";
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e, { verb: "edit the taxonomy" });
     } finally {
       reclassBusy = false;
     }
   }
 
-  function errDetail(e: unknown): string {
-    if (e instanceof ApiError) {
-      try {
-        const j = JSON.parse(e.body);
-        if (j?.detail) return typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-      } catch {
-        /* body not JSON */
-      }
-      return e.body || String(e);
-    }
-    return String(e);
-  }
 
   async function refresh() {
     error = "";
@@ -103,7 +91,7 @@
       tree = t.tree;
       version = t.version;
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -206,7 +194,7 @@
       await refresh();
     } catch (e) {
       // 409 (dup key / delete-blocked) or 422 (bad key/extractor) inline.
-      dialogError = errDetail(e);
+      dialogError = errorMessage(e, { verb: "edit the taxonomy" });
     } finally {
       dialogBusy = false;
     }
@@ -220,7 +208,7 @@
       await refresh();
     } catch (e) {
       // 409 when the category still has groups — surface the server's message.
-      error = errDetail(e);
+      error = errorMessage(e, { verb: "edit the taxonomy" });
     }
   }
 
@@ -231,7 +219,7 @@
       await deleteTaxonomyGroup(g.key);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e, { verb: "edit the taxonomy" });
     }
   }
 
@@ -251,7 +239,7 @@
       await refresh();
     } catch (e) {
       // 422 on a bad ext (must match ^[a-z0-9_+-]{1,32}$) surfaces here.
-      extError = { ...extError, [groupKey]: errDetail(e) };
+      extError = { ...extError, [groupKey]: errorMessage(e, { verb: "edit the taxonomy" }) };
     }
   }
 
@@ -261,7 +249,7 @@
       await deleteTaxonomyExtension(ext);
       await refresh();
     } catch (e) {
-      error = errDetail(e);
+      error = errorMessage(e, { verb: "edit the taxonomy" });
     }
   }
 

@@ -5,6 +5,7 @@
     listExports,
     downloadExport,
     type ReportExport,
+    errorMessage,
   } from "./api";
 
   // P11-T5/T11 — background export jobs: a status list + download. Populated by
@@ -33,7 +34,7 @@
       exports = await listExports();
       error = "";
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -43,7 +44,7 @@
     try {
       await downloadExport(ex);
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e, { verb: "download this export" });
     }
   }
 

@@ -15,6 +15,7 @@
     type QueryPreviewResponse,
     type QueryKeys,
     type ReportValidationError,
+    errorMessage,
   } from "./api";
   import {
     newCondition,
@@ -182,13 +183,15 @@
         vErrors = errs;
         preview = null;
       } else {
-        previewError = String(e);
+        previewError = errorMessage(e);
       }
     } finally {
       if (seq === previewSeq) loading = false;
     }
   }
 
+  // Kept: formats one validation item with its parse position, which
+  // errorMessage (whole-error, msg/message only) does not render.
   function errText(e: ReportValidationError): string {
     if (e.error === "parse_error")
       return `Parse error (${e.code}) at position ${e.position}: ${e.reason}`;
@@ -273,7 +276,7 @@
         advancedBanner = false;
       }
     } catch (e) {
-      nlError = String(e);
+      nlError = errorMessage(e);
     } finally {
       nlBusy = false;
     }

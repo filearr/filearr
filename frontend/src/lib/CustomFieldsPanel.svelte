@@ -17,6 +17,7 @@
     type CustomField,
     type CustomFieldType,
     type Library,
+    errorMessage,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -56,7 +57,7 @@
       fields = await listCustomFields();
       error = "";
     } catch (e) {
-      error = String(e);
+      error = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -94,7 +95,7 @@
       cSelectOptions = "";
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage custom fields" });
     } finally {
       creating = false;
     }
@@ -129,7 +130,7 @@
       editing = null;
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage custom fields" });
     } finally {
       saving = false;
     }
@@ -149,7 +150,7 @@
       await deleteCustomField(f.id);
       await refresh();
     } catch (err) {
-      error = String(err);
+      error = errorMessage(err, { verb: "manage custom fields" });
     }
   }
 </script>
