@@ -236,8 +236,10 @@
     <span class="text-sm font-medium text-muted">Retrieve file</span>
     <span class="grow"></span>
     {#if !active}
+      <!-- One primary action at a time: once a download is ready it is the
+           primary, and Retrieve again steps back to secondary. -->
       <Button
-        variant="primary"
+        variant={canDownload ? "secondary" : "primary"}
         size="sm"
         onclick={retrieve}
         title="Pull this file from the hosting agent to the server, then download it"

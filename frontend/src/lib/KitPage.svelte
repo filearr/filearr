@@ -118,6 +118,9 @@
   // moves the baseline.
   const savedEdit = $state({ name: "Movies", path: "/mnt/media/movies" });
   let editOpen = $state(false);
+  // Off: dismissible={false} — Escape and outside clicks do nothing; × and
+  // Cancel still close (through the dirty check).
+  let editDismissible = $state(true);
   let editName = $state(savedEdit.name);
   let editPath = $state(savedEdit.path);
   const dirty = $derived(editName !== savedEdit.name || editPath !== savedEdit.path);
@@ -428,14 +431,19 @@
     <h3 class="mt-4 mb-2 text-sm font-medium">Unsaved changes</h3>
     <p class="mb-3 text-sm text-muted">
       <code>dirty=&#123;() =&gt; dirty&#125;</code>: edit a field, then press Escape, click outside, Close or Cancel to
-      get the discard prompt; Save closes without asking. Focus starts on the second input.
+      get the discard prompt; Save closes without asking. Focus starts on the second input. Switch off
+      <code>dismissible</code> and Escape and outside clicks do nothing at all.
     </p>
-    <Button variant="secondary" onclick={openEdit}>Edit with unsaved changes</Button>
+    <div class="flex flex-wrap items-center gap-4">
+      <Button variant="secondary" onclick={openEdit}>Edit with unsaved changes</Button>
+      <Switch label="Dismissible (Escape, outside click)" bind:checked={editDismissible} />
+    </div>
     <Modal
       bind:open={editOpen}
       title="Edit library"
       description="Leaving with unsaved edits asks first."
       dirty={() => dirty}
+      dismissible={editDismissible}
       initialFocus={() => editPathInput}
     >
       <div class="flex flex-col gap-3">

@@ -43,6 +43,7 @@
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import { Alert, Badge, Button, Checkbox, DataTable, Field, Input, Select, StateBlock, confirm, type SortState, type Tone } from "./ui";
 
   type Tab = "channels" | "rules" | "events";
@@ -286,8 +287,20 @@
     }
   }
 
+  // A channel's test progress/result renders below the table (rowPanel.ts):
+  // firing focuses it, dismissing returns focus to the row's test button.
+  const uid = $props.id();
+  const testPanelId = (channelId: string) => `${uid}-test-${channelId}`;
+
+  function dismissTest(c: AlertChannel) {
+    const { [c.id]: _, ...rest } = testResults;
+    testResults = rest;
+    void focusRowButton("data-test-for", c.id);
+  }
+
   async function fireTest(c: AlertChannel) {
     testResults = { ...testResults, [c.id]: { error: "…" } as unknown as TestFireResult };
+    void focusPanel(testPanelId(c.id));
     try {
       testResults = { ...testResults, [c.id]: await testAlertChannel(c.id) };
     } catch (err) {
@@ -585,7 +598,8 @@
 {/snippet}
 {#snippet chActionsCell(c: AlertChannel)}
   <div class="flex justify-end gap-1">
-    <Button size="sm" onclick={() => fireTest(c)}>test</Button>
+    <Button size="sm" aria-controls={testResults[c.id] ? testPanelId(c.id) : undefined} data-test-for={c.id}
+      onclick={() => fireTest(c)}>test</Button>
     <Button size="sm" onclick={() => startEditChannel(c)}>edit</Button>
     <Button size="sm" variant="danger" onclick={() => removeChannel(c)}>delete</Button>
   </div>
@@ -698,19 +712,21 @@
     {#each channels as c (c.id)}
       {#if testResults[c.id]}
         {@const t = testResults[c.id]}
-        {#if "error" in t && t.error === "…"}
-          <p class="text-xs text-muted" role="status">{c.name}: testing…</p>
-        {:else if "error" in t}
-          <Alert tone="danger" onDismiss={() => { const { [c.id]: _, ...rest } = testResults; testResults = rest; }}>
-            {c.name}: {t.error}
-          </Alert>
-        {:else}
-          {@const r = t as TestFireResult}
-          <Alert tone={r.ok ? "ok" : "danger"} onDismiss={() => { const { [c.id]: _, ...rest } = testResults; testResults = rest; }}>
-            {c.name}: {r.ok ? "delivered ✓" : `failed: ${r.detail}`}
-            {#if r.status_code}(HTTP {r.status_code}){/if}
-          </Alert>
-        {/if}
+        <div id={testPanelId(c.id)} tabindex="-1" aria-label="Test of {c.name}" role="group">
+          {#if "error" in t && t.error === "…"}
+            <p class="text-xs text-muted" role="status">{c.name}: testing…</p>
+          {:else if "error" in t}
+            <Alert tone="danger" onDismiss={() => dismissTest(c)}>
+              {c.name}: {t.error}
+            </Alert>
+          {:else}
+            {@const r = t as TestFireResult}
+            <Alert tone={r.ok ? "ok" : "danger"} onDismiss={() => dismissTest(c)}>
+              {c.name}: {r.ok ? "delivered ✓" : `failed: ${r.detail}`}
+              {#if r.status_code}(HTTP {r.status_code}){/if}
+            </Alert>
+          {/if}
+        </div>
       {/if}
       {#if chRowErr[c.id]}
         <Alert tone="danger" onDismiss={() => (chRowErr[c.id] = "")}>{c.name}: {chRowErr[c.id]}</Alert>
@@ -950,7 +966,7 @@
           <div class="mt-1 space-y-2">
             <div class="flex flex-wrap items-center gap-2">
               <label class="flex items-center gap-2">
-                <input type="radio" class="size-4 accent-accent" value="immediate" bind:group={rThrottle} />
+                <input type="radio" name="rule-throttle" class="size-4 accent-accent" value="immediate" bind:group={rThrottle} />
                 Immediate — group matches for
               </label>
               <div class="w-20">
@@ -960,7 +976,7 @@
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <label class="flex items-center gap-2">
-                <input type="radio" class="size-4 accent-accent" value="digest" bind:group={rThrottle} />
+                <input type="radio" name="rule-throttle" class="size-4 accent-accent" value="digest" bind:group={rThrottle} />
                 Digest —
               </label>
               <div>

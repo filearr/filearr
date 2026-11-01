@@ -306,12 +306,9 @@
           {/each}
         </div>
         {#if fieldMode === "set" && chosen}
-          <!-- CustomFieldInput is not a kit control, so it takes the Field's id
-               from the snippet (the label names it). -->
+          <!-- CustomFieldInput's kit controls read this Field's context. -->
           <Field label={`${chosen.label} value`}>
-            {#snippet children({ id })}
-              <CustomFieldInput def={chosen} bind:value={fieldRaw} {id} />
-            {/snippet}
+            <CustomFieldInput def={chosen} bind:value={fieldRaw} />
           </Field>
         {:else if fieldMode === "clear"}
           <span>Removes this key from every selected item.</span>

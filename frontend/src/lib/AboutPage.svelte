@@ -13,6 +13,7 @@
   // The render helpers and the Markdown dump are in ./about (DOM-free, unit
   // tested) — this component is layout only.
   import { systemAbout, friendlyError } from "./api";
+  import { Alert, Button, StateBlock } from "./ui";
   import { copyText } from "./clipboard";
   import { safeHref } from "./pathlinks";
   import {
@@ -55,16 +56,20 @@
   const frontend: FrontendStack | null =
     typeof __FRONTEND_STACK__ === "undefined" ? null : __FRONTEND_STACK__;
 
+  async function load() {
+    error = "";
+    loaded = false;
+    try {
+      about = await systemAbout();
+    } catch (e) {
+      error = friendlyError(e, "view the build information for");
+    } finally {
+      loaded = true;
+    }
+  }
+
   $effect(() => {
-    void (async () => {
-      try {
-        about = await systemAbout();
-      } catch (e) {
-        error = friendlyError(e, "view the build information for");
-      } finally {
-        loaded = true;
-      }
-    })();
+    void load();
   });
 
   async function copyMarkdown() {
@@ -76,7 +81,7 @@
 
   const TONE: Record<Cell["tone"], string> = {
     ok: "text-slate-800 dark:text-slate-100",
-    bad: "text-red-600 dark:text-red-400",
+    bad: "text-danger",
     // A host tool below its recommended minimum: working, but not doing what
     // you think. Amber, matching the outdated chips on the Agents page — the
     // two surfaces report the same tools and must look the same doing it.
@@ -90,7 +95,7 @@
 {#snippet ext(url: unknown, label: string | null, cls = "", title?: string | null)}
   {@const href = safeHref(url, WEB)}
   {#if href}
-    <a class="{cls} underline hover:text-[var(--accent)]" href={href} target="_blank" rel="noopener noreferrer" {title}>{label}</a>
+    <a class="{cls} underline hover:text-accent-text" href={href} target="_blank" rel="noopener noreferrer" {title}>{label}</a>
   {:else}
     <span class={cls} {title}>{label}</span>
   {/if}
@@ -104,22 +109,22 @@
       not from a configuration file. This page makes no outbound network
       requests; the links open upstream documentation in a new tab.
     </p>
-    <button
-      class="rounded-lg border border-slate-300 px-3 py-1 text-sm hover:border-[var(--accent)] disabled:opacity-50 dark:border-slate-700"
+    <Button
+      size="sm"
       disabled={!about}
       onclick={copyMarkdown}
       title="Copy the whole stack as a Markdown table — paste it straight into a bug report.">
       Copy as Markdown
-    </button>
+    </Button>
   </header>
   {#if copied}
-    <p class="text-xs text-[var(--accent)]">{copied}</p>
+    <p class="text-xs text-accent-text">{copied}</p>
   {/if}
 
   {#if error}
-    <p class="text-sm text-red-600 dark:text-red-400">{error}</p>
+    <StateBlock state="error" message={error} onRetry={load} />
   {:else if !loaded}
-    <p class="text-sm text-slate-500">Loading…</p>
+    <StateBlock state="loading" />
   {:else if about}
     {@const app = about.application}
 
@@ -175,7 +180,7 @@
               <dt class="w-36 shrink-0 text-slate-500" title={KEY_FP_TITLES[name] ?? ""}>
                 {KEY_FP_LABELS[name] ?? name}
               </dt>
-              <dd class="font-mono break-all {bad ? 'text-red-600 dark:text-red-400' : 'text-slate-800 dark:text-slate-100'}">
+              <dd class="font-mono break-all {bad ? 'text-danger' : 'text-slate-800 dark:text-slate-100'}">
                 {keyFingerprintLabel(k)}
               </dd>
             </div>
@@ -187,15 +192,13 @@
            dashboard banner and this page cannot drift apart. -->
       {#each Object.entries(app.key_fingerprints ?? {}) as [name, k] (name)}
         {#if keyFingerprintBad(k) && k.reason}
-          <p
-            class="mt-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
-            role="alert">
+          <Alert tone="danger" class="mt-3">
             <span class="font-semibold">{KEY_FP_LABELS[name] ?? name} mismatch.</span>
             {k.reason}
             {#if k.recorded_at}
               <span class="block mt-1 opacity-80">Recorded {formatWhen(k.recorded_at)}.</span>
             {/if}
-          </p>
+          </Alert>
         {/if}
       {/each}
     </section>
@@ -209,8 +212,9 @@
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[32rem] text-left text-xs">
+          <caption class="sr-only">Services</caption>
           <thead class="text-slate-500">
-            <tr><th class="py-1 pr-4 font-medium">Service</th><th class="py-1 pr-4 font-medium">Running version</th><th class="py-1 font-medium">Notes</th></tr>
+            <tr><th scope="col" class="py-1 pr-4 font-medium">Service</th><th scope="col" class="py-1 pr-4 font-medium">Running version</th><th scope="col" class="py-1 font-medium">Notes</th></tr>
           </thead>
           <tbody>
             {#each about.services as s (s.name)}
@@ -239,8 +243,9 @@
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[32rem] text-left text-xs">
+          <caption class="sr-only">Backend dependencies (Python)</caption>
           <thead class="text-slate-500">
-            <tr><th class="py-1 pr-4 font-medium">Package</th><th class="py-1 pr-4 font-medium">Running version</th><th class="py-1 font-medium">Documentation</th></tr>
+            <tr><th scope="col" class="py-1 pr-4 font-medium">Package</th><th scope="col" class="py-1 pr-4 font-medium">Running version</th><th scope="col" class="py-1 font-medium">Documentation</th></tr>
           </thead>
           <tbody>
             {#each about.python_packages as p (p.name)}
@@ -275,8 +280,9 @@
         </p>
         <div class="overflow-x-auto">
           <table class="w-full min-w-[32rem] text-left text-xs">
+            <caption class="sr-only">Frontend bundle packages</caption>
             <thead class="text-slate-500">
-              <tr><th class="py-1 pr-4 font-medium">Package</th><th class="py-1 pr-4 font-medium">Built version</th><th class="py-1 pr-4 font-medium">Role</th><th class="py-1 font-medium">Documentation</th></tr>
+              <tr><th scope="col" class="py-1 pr-4 font-medium">Package</th><th scope="col" class="py-1 pr-4 font-medium">Built version</th><th scope="col" class="py-1 pr-4 font-medium">Role</th><th scope="col" class="py-1 font-medium">Documentation</th></tr>
             </thead>
             <tbody>
               {#each frontend.packages as p (p.name)}
@@ -314,8 +320,9 @@
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[36rem] text-left text-xs">
+          <caption class="sr-only">Extraction tools on this server</caption>
           <thead class="text-slate-500">
-            <tr><th class="py-1 pr-4 font-medium">Tool</th><th class="py-1 pr-4 font-medium">Used for</th><th class="py-1 pr-4 font-medium">Version</th><th class="py-1 font-medium">Path</th></tr>
+            <tr><th scope="col" class="py-1 pr-4 font-medium">Tool</th><th scope="col" class="py-1 pr-4 font-medium">Used for</th><th scope="col" class="py-1 pr-4 font-medium">Version</th><th scope="col" class="py-1 font-medium">Path</th></tr>
           </thead>
           <tbody>
             {#each about.host_tools as t (t.name)}
@@ -345,14 +352,15 @@
           not finished shows as more than one row.
         </p>
         {#if about.agents.error}
-          <p class="text-xs text-red-600 dark:text-red-400">{about.agents.error}</p>
+          <p class="text-xs text-danger">{about.agents.error}</p>
         {:else if about.agents.versions.length === 0}
           <p class="text-xs text-slate-600 dark:text-slate-400">No agents enrolled.</p>
         {:else}
           <div class="overflow-x-auto">
             <table class="w-full min-w-[20rem] text-left text-xs">
+              <caption class="sr-only">Agent versions</caption>
               <thead class="text-slate-500">
-                <tr><th class="py-1 pr-4 font-medium">Agent version</th><th class="py-1 font-medium">Agents</th></tr>
+                <tr><th scope="col" class="py-1 pr-4 font-medium">Agent version</th><th scope="col" class="py-1 font-medium">Agents</th></tr>
               </thead>
               <tbody>
                 {#each about.agents.versions as v (v.version ?? "unknown")}
@@ -381,20 +389,21 @@
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[32rem] text-left text-xs">
+          <caption class="sr-only">Embedding model details</caption>
           <tbody>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="w-48 py-1.5 pr-4 text-slate-500">Model</td>
+              <th scope="row" class="font-normal w-48 py-1.5 pr-4 text-slate-500">Model</th>
               <td class="py-1.5 text-slate-800 dark:text-slate-100">{e.name} · {e.dimensions} dimensions</td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="py-1.5 pr-4 text-slate-500">Hugging Face repository</td>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Hugging Face repository</th>
               <td class="py-1.5 break-all">
                 {@render ext(e.model_url, e.repo)}
                 <span class="text-slate-600 dark:text-slate-400"> · {e.file}</span>
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="py-1.5 pr-4 text-slate-500">Cached revision</td>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Cached revision</th>
               <td class="py-1.5 break-all">
                 {#if e.revision}
                   {@render ext(e.revision_url, shortSha(e.revision), "font-mono", e.revision)}
@@ -405,7 +414,7 @@
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="py-1.5 pr-4 text-slate-500">Cached file</td>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Cached file</th>
               <td class="py-1.5 break-all">
                 {#if e.downloaded}
                   <span class="text-slate-800 dark:text-slate-100">{formatBytes(e.size)}</span>
@@ -416,13 +425,13 @@
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <td class="py-1.5 pr-4 text-slate-500">
+              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">
                 <span
                   class="cursor-help underline decoration-dotted decoration-slate-400 underline-offset-2"
                   title="When THIS machine downloaded the file. The model's publication date is not shown because determining it would mean calling Hugging Face, and this page makes no outbound requests. Use the revision link for exact provenance.">
                   Downloaded here
                 </span>
-              </td>
+              </th>
               <td class="py-1.5 {e.downloaded_at ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
                 {e.downloaded_at ? formatWhen(e.downloaded_at) : "never"}
               </td>

@@ -24,7 +24,7 @@
   <button
     type="button"
     class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 text-[10px]
-           leading-none text-slate-500 hover:border-[var(--accent)] hover:text-[var(--accent)]
+           leading-none text-slate-500 hover:border-accent hover:text-accent-text
            dark:border-slate-600 dark:text-slate-400"
     aria-label={`Help: ${label}`}
     aria-expanded={open}

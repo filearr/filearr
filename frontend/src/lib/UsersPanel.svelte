@@ -5,6 +5,7 @@
     friendlyError, type AuthPrincipal, type RoleDef,
   } from "./api";
   import { numOrNull } from "./numInput";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import { Alert, Badge, Button, DataTable, Field, Input, Select, confirm, toneForStatus } from "./ui";
 
   // P6-T12 user management (admin). Lists local + federated accounts with a
@@ -43,6 +44,11 @@
   let resetFor = $state<string | null>(null);
   let resetPass = $state("");
 
+  // Below-table panels: ids for aria-controls and focus (see rowPanel.ts).
+  const uid = $props.id();
+  const detailsPanelId = (userId: string) => `${uid}-details-${userId}`;
+  const resetPanelId = (userId: string) => `${uid}-reset-${userId}`;
+
   const detailsUser = $derived(openFor ? users.find((u) => u.id === openFor) ?? null : null);
   const resetUser = $derived(resetFor ? users.find((u) => u.id === resetFor) ?? null : null);
 
@@ -73,12 +79,22 @@
     dPhone = u.phone ?? "";
     dIdle = u.session_inactivity_hours ?? null;
     dTtl = u.session_ttl_hours ?? null;
+    void focusPanel(detailsPanelId(u.id));
   }
 
   function toggleReset(u: AuthPrincipal) {
     resetFor = resetFor === u.id ? null : u.id;
     resetPass = "";
     resetError = "";
+    if (resetFor) void focusPanel(resetPanelId(u.id));
+  }
+
+  /** Close the reset editor from inside it; focus goes back to its row button. */
+  function closeReset(u: AuthPrincipal) {
+    resetFor = null;
+    resetPass = "";
+    resetError = "";
+    void focusRowButton("data-reset-for", u.id);
   }
 
   /** Blank or 0 -> 0 (clears the override); otherwise the parsed hours. */
@@ -151,7 +167,7 @@
     resetError = "";
     try {
       await updateUser(u.id, { password: resetPass });
-      resetFor = null; resetPass = "";
+      closeReset(u);
     } catch (e) {
       resetError = friendlyError(e);
     }
@@ -217,12 +233,17 @@
     <Button size="sm" variant="ghost" title="Profile and session-timeout overrides"
       aria-label="Profile and session-timeout overrides for {u.username}"
       aria-expanded={openFor === u.id}
+      aria-controls={openFor === u.id ? detailsPanelId(u.id) : undefined}
+      data-details-for={u.id}
       onclick={() => openDetails(u)}>{openFor === u.id ? "close" : "…"}</Button>
     <Button size="sm" variant="ghost" onclick={() => toggleDisabled(u)}>
       {u.disabled ? "enable" : "disable"}
     </Button>
     {#if isLocal(u)}
-      <Button size="sm" variant="ghost" aria-expanded={resetFor === u.id} onclick={() => toggleReset(u)}>
+      <Button size="sm" variant="ghost" aria-expanded={resetFor === u.id}
+        aria-controls={resetFor === u.id ? resetPanelId(u.id) : undefined}
+        data-reset-for={u.id}
+        onclick={() => toggleReset(u)}>
         reset password
       </Button>
     {/if}
@@ -263,14 +284,15 @@
   {#if resetUser}
     {#key resetUser.id}
       <form onsubmit={(e) => doReset(resetUser, e)}
+        id={resetPanelId(resetUser.id)} tabindex="-1" aria-labelledby="{resetPanelId(resetUser.id)}-heading"
         class="mt-3 rounded-control border border-border bg-surface-2 p-3">
-        <h3 class="text-sm font-semibold">Reset password: {resetUser.username}</h3>
+        <h3 id="{resetPanelId(resetUser.id)}-heading" class="text-sm font-semibold">Reset password: {resetUser.username}</h3>
         <div class="mt-2 flex flex-wrap items-end gap-2">
           <Field label="New password (min 8)" class="w-64">
             <Input type="password" autocomplete="new-password" bind:value={resetPass} />
           </Field>
           <Button type="submit" variant="primary" disabled={resetPass.length < 8}>save</Button>
-          <Button variant="secondary" onclick={() => toggleReset(resetUser)}>cancel</Button>
+          <Button variant="secondary" onclick={() => closeReset(resetUser)}>cancel</Button>
         </div>
         {#if resetError}
           <Alert tone="danger" class="mt-2" onDismiss={() => (resetError = "")}>{resetError}</Alert>
@@ -282,8 +304,9 @@
   {#if detailsUser}
     {#key detailsUser.id}
       {@const u = detailsUser}
-      <div class="mt-3 rounded-control border border-border bg-surface-2 p-3">
-        <h3 class="text-sm font-semibold">Details: {u.display_name || u.username}</h3>
+      <section id={detailsPanelId(u.id)} tabindex="-1" aria-labelledby="{detailsPanelId(u.id)}-heading"
+        class="mt-3 rounded-control border border-border bg-surface-2 p-3">
+        <h3 id="{detailsPanelId(u.id)}-heading" class="text-sm font-semibold">Details: {u.display_name || u.username}</h3>
         <form onsubmit={(e) => saveDetails(u, e)} class="mt-2 flex flex-wrap items-end gap-2">
           <Field label="Display name"><Input bind:value={dDisplay} /></Field>
           <Field label="Phone"><Input bind:value={dPhone} /></Field>
@@ -330,7 +353,7 @@
             </dl>
           </div>
         {/if}
-      </div>
+      </section>
     {/key}
   {/if}
 

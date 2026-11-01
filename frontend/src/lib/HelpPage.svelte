@@ -9,6 +9,7 @@
   import { DSL_SECTIONS } from "./dslHelp";
   import { HELP, HELP_TOPICS, type HelpTopic } from "./help";
   import { safeHref } from "./pathlinks";
+  import { Input, StateBlock } from "./ui";
 
   let { sourceUrl = "https://github.com/filearr/filearr" }: { sourceUrl?: string } =
     $props();
@@ -103,7 +104,7 @@
   <!-- Resources -->
   <div class="mb-8">
     <h3 class="mb-3 border-b border-slate-200 pb-1 text-sm font-semibold uppercase
-               tracking-wide text-[var(--accent)] dark:border-slate-800">
+               tracking-wide text-accent-text dark:border-slate-800">
       Resources
     </h3>
     <ul class="space-y-3">
@@ -112,7 +113,7 @@
         <li>
           {#if href}
             <a
-              class="text-sm font-medium underline hover:text-[var(--accent)]"
+              class="text-sm font-medium underline hover:text-accent-text"
               href={href}
               target="_blank"
               rel="noopener noreferrer">{r.title}</a>
@@ -130,7 +131,7 @@
   <!-- Keyboard shortcuts -->
   <div class="mb-8">
     <h3 class="mb-3 border-b border-slate-200 pb-1 text-sm font-semibold uppercase
-               tracking-wide text-[var(--accent)] dark:border-slate-800">
+               tracking-wide text-accent-text dark:border-slate-800">
       Keyboard shortcuts
     </h3>
     <dl class="space-y-2">
@@ -157,7 +158,7 @@
   <!-- Query syntax (shared data with the query-box popover) -->
   <div class="mb-8">
     <h3 class="mb-3 border-b border-slate-200 pb-1 text-sm font-semibold uppercase
-               tracking-wide text-[var(--accent)] dark:border-slate-800">
+               tracking-wide text-accent-text dark:border-slate-800">
       Search query syntax
     </h3>
     <p class="mb-3 text-sm text-slate-500 dark:text-slate-400">
@@ -192,7 +193,7 @@
 
   <!-- Settings field reference -->
   <h3 class="mb-1 border-b border-slate-200 pb-1 text-sm font-semibold uppercase
-             tracking-wide text-[var(--accent)] dark:border-slate-800">
+             tracking-wide text-accent-text dark:border-slate-800">
     Settings field reference
   </h3>
   <p class="mb-4 mt-2 text-sm text-slate-500 dark:text-slate-400">
@@ -200,17 +201,16 @@
     appears behind the small “?” buttons next to each field.
   </p>
 
-  <input
+  <Input
     type="search"
     bind:value={query}
     placeholder="Filter field reference…"
     aria-label="Filter field reference"
-    class="mb-6 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm
-           dark:border-slate-700 dark:bg-slate-900"
+    class="mb-6"
   />
 
   {#if visible.length === 0}
-    <p class="text-sm text-slate-500 dark:text-slate-400">No help entries match “{query}”.</p>
+    <StateBlock state="empty" message="No help entries match “{query}”. Clear the filter to see every setting." />
   {/if}
 
   {#each visible as topic (topic.title)}

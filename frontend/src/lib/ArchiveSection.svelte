@@ -70,7 +70,7 @@
       {#if members.length > PREVIEW}
         <button
           type="button"
-          class="mt-2 text-xs text-[var(--accent)]"
+          class="mt-2 text-xs text-accent-text"
           onclick={() => (expanded = !expanded)}
         >
           {expanded ? "Show fewer" : `Show ${hiddenCount} more`}

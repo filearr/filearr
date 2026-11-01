@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { COPY_FAILED, copyText } from "./clipboard";
   import {
@@ -21,6 +21,7 @@
     type Tone,
   } from "./ui";
   import { intOrNull } from "./numInput";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import ScheduleField from "./ScheduleField.svelte";
   import {
     CAPABILITY_TOOLS,
@@ -867,26 +868,13 @@
   const detailsId = (agentId: string) => `${uid}-details-${agentId}`;
   const historyJsonId = (seq: number) => `${uid}-history-json-${seq}`;
 
-  async function focusPanel(id: string) {
-    await tick();
-    const heading = document.getElementById(`${id}-heading`);
-    heading?.scrollIntoView({ block: "nearest" });
-    heading?.focus({ preventScroll: true });
-  }
-
-  async function focusRowButton(attr: string, key: string) {
-    await tick();
-    const buttons = document.querySelectorAll<HTMLElement>(`[${attr}="${CSS.escape(key)}"]`);
-    Array.from(buttons).find((b) => b.offsetParent !== null)?.focus();
-  }
-
   async function toggleDetail(a: AgentOut) {
     if (expanded === a.id) {
       expanded = null;
       return;
     }
     expanded = a.id;
-    void focusPanel(detailsId(a.id));
+    void focusPanel(`${detailsId(a.id)}-heading`);
     await loadEffective(a.id);
   }
 
@@ -901,7 +889,7 @@
       return;
     }
     historyOpenSeq = h.seq;
-    void focusPanel(historyJsonId(h.seq));
+    void focusPanel(`${historyJsonId(h.seq)}-heading`);
   }
 
   function hideHistoryJson(h: ConfigVersionOut) {

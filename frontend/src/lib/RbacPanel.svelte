@@ -10,6 +10,7 @@
     errorMessage,
   } from "./api";
   import { Alert, Badge, Button, DataTable, Field, Input, Select, StateBlock, confirm } from "./ui";
+  import { focusPanel } from "./rowPanel";
 
   // P6-T2 RBAC admin panel: groups + members, path grants, and a decision
   // preview. Functional, not fancy. Enforcement lives in security.require_permission
@@ -92,9 +93,14 @@
     try { await deleteGroup(g.id); if (openGroup === g.id) openGroup = null; await refresh(); }
     catch (e) { fail("groups", e); }
   }
+  // The members editor renders below the table (see rowPanel.ts).
+  const uid = $props.id();
+  const membersPanelId = (groupId: string) => `${uid}-members-${groupId}`;
+
   async function toggleMembers(id: string) {
     if (openGroup === id) { openGroup = null; return; }
     openGroup = id;
+    void focusPanel(membersPanelId(id));
     errors.groups = undefined;
     errors.members = undefined;
     try { members = await listMembers(id); } catch (e) { fail("groups", e); }
@@ -166,7 +172,10 @@
 
 {#snippet groupActionsCell(g: RbacGroup)}
   <div class="flex justify-end gap-1">
-    <Button size="sm" variant="ghost" aria-expanded={openGroup === g.id} onclick={() => toggleMembers(g.id)}>
+    <Button size="sm" variant="ghost" aria-expanded={openGroup === g.id}
+      aria-controls={openGroup === g.id ? membersPanelId(g.id) : undefined}
+      data-members-for={g.id}
+      onclick={() => toggleMembers(g.id)}>
       {openGroup === g.id ? "hide" : "members"}
     </Button>
     {#if g.source === "local"}
@@ -226,8 +235,9 @@
   {@render errorFor("groups")}
   {#if openGroupRow}
     {#key openGroupRow.id}
-      <div class="mt-2 rounded-control border border-border bg-surface-2 p-3 text-sm">
-        <h4 class="font-medium">Members of {openGroupRow.name}</h4>
+      <section id={membersPanelId(openGroupRow.id)} tabindex="-1" aria-labelledby="{membersPanelId(openGroupRow.id)}-heading"
+        class="mt-2 rounded-control border border-border bg-surface-2 p-3 text-sm">
+        <h4 id="{membersPanelId(openGroupRow.id)}-heading" class="font-medium">Members of {openGroupRow.name}</h4>
         <div class="mt-2 flex flex-wrap items-end gap-2">
           <Field label="Add member">
             <Select bind:value={addMemberId}>
@@ -248,7 +258,7 @@
             <li><StateBlock state="empty" compact message="No members yet. Add one above." /></li>
           {/each}
         </ul>
-      </div>
+      </section>
     {/key}
   {/if}
 

@@ -48,13 +48,14 @@
 </script>
 
 <table class="w-full border-collapse text-sm">
+  <caption class="sr-only">Raw item fields</caption>
   <tbody>
     {#each entries as [key, value] (key)}
       {@const text = pretty(value)}
       {@const long = text.length > CLAMP_CHARS}
       {@const open = !long || !!expanded[key]}
       <tr class="border-b border-slate-200 align-top dark:border-slate-800">
-        <th class="w-56 py-2 pr-4 text-left align-top font-mono text-xs font-medium text-slate-500">
+        <th scope="row" class="w-56 py-2 pr-4 text-left align-top font-mono text-xs font-medium text-slate-500">
           {key}
         </th>
         <td class="py-2">
@@ -65,7 +66,7 @@
             {#if long}
               <button
                 type="button"
-                class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700"
+                class="mt-1 rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-500 hover:border-accent hover:text-accent-text dark:border-slate-700"
                 aria-expanded={open}
                 onclick={() => (expanded[key] = !expanded[key])}
               >{open ? "Show less" : `Show all (${lineCount(text)} lines, ${fmtSize(text.length)})`}</button>
@@ -77,7 +78,7 @@
         <td class="w-10 py-2 pl-2 text-right align-top">
           <button
             type="button"
-            class="text-xs text-slate-600 dark:text-slate-400 hover:text-[var(--accent)]"
+            class="text-xs text-slate-600 dark:text-slate-400 hover:text-accent-text"
             title="Copy value (full value, even when collapsed)"
             onclick={() => copy(key, value)}>{copied === key ? "✓" : "⧉"}</button>
         </td>

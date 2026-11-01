@@ -109,7 +109,7 @@
         {#if c.isDir}
           <button
             type="button"
-            class="max-w-[16rem] truncate rounded px-1 py-0.5 text-[var(--accent)] hover:bg-slate-100 hover:underline dark:hover:bg-slate-800"
+            class="max-w-[16rem] truncate rounded px-1 py-0.5 text-accent-text hover:bg-slate-100 hover:underline dark:hover:bg-slate-800"
             title="Browse {c.label}"
             onclick={() => onNavigate(c.relTo)}>{c.label}</button>
         {:else}
@@ -151,7 +151,7 @@
     <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
       {#if canOpen}
         <a
-          class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+          class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-accent hover:text-accent-text dark:border-slate-700 dark:text-slate-300"
           href={buildOpenUrl(sharePrefix, relPath)}
           target="_blank"
           rel="noopener noreferrer"
@@ -159,7 +159,7 @@
           Open file
         </a>
         <a
-          class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+          class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-accent hover:text-accent-text dark:border-slate-700 dark:text-slate-300"
           href={buildOpenUrl(sharePrefix, fileDir)}
           target="_blank"
           rel="noopener noreferrer"
@@ -169,7 +169,7 @@
       {/if}
       <button
         type="button"
-        class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-[var(--accent)] hover:text-[var(--accent)] dark:border-slate-700 dark:text-slate-300"
+        class="rounded border border-slate-300 px-2 py-1 text-slate-600 hover:border-accent hover:text-accent-text dark:border-slate-700 dark:text-slate-300"
         onclick={() => copy("file", fileCopyText())}>
         {copied === "file" ? "Copied!" : "Copy path"}
       </button>

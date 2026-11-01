@@ -7,6 +7,7 @@
   // Empty both = "all file types". Selecting a category visually implies (and
   // disables) its groups; expand a category to drill in and pick single groups.
   import type { TaxonomyNode } from "./api";
+  import { Checkbox } from "./ui";
 
   let {
     tree,
@@ -61,12 +62,11 @@
       {@const picked = pickedIn(node)}
       <div class="rounded-lg border border-slate-200 dark:border-slate-800">
         <div class="flex items-center gap-2 px-2 py-1.5">
-          <label class="inline-flex items-center gap-2 text-sm" title={cat.description}>
-            <input type="checkbox" checked={on} onchange={() => toggleCategory(node)} />
-            <span class="font-medium">{cat.label}</span>
-          </label>
+          <span title={cat.description}>
+            <Checkbox label={cat.label} checked={on} onchange={() => toggleCategory(node)} />
+          </span>
           {#if on}
-            <span class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">all groups</span>
+            <span class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent-text">all groups</span>
           {:else if picked > 0}
             <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800">{picked} group{picked === 1 ? "" : "s"}</span>
           {/if}
@@ -74,7 +74,7 @@
           {#if node.groups.length}
             <button
               type="button"
-              class="text-xs text-[var(--accent)]"
+              class="text-xs text-accent-text"
               onclick={() => (open = { ...open, [cat.key]: !open[cat.key] })}>
               {open[cat.key] ? "hide groups" : `groups (${node.groups.length})`}
             </button>
@@ -85,9 +85,9 @@
             {#each node.groups as g (g.key)}
               <label
                 class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs {on
-                  ? 'border-transparent bg-[var(--accent)]/10 text-[var(--accent)]'
+                  ? 'border-transparent bg-accent/10 text-accent-text'
                   : groups.includes(g.key)
-                    ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]'
+                    ? 'border-transparent bg-accent text-accent-fg'
                     : 'border-slate-300 dark:border-slate-700'}"
                 title={on ? "Included via the whole category" : g.description || g.label}>
                 <input

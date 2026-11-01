@@ -19,6 +19,7 @@
   import LibraryDiagnoseModal from "./LibraryDiagnoseModal.svelte";
   import PresetsPanel from "./PresetsPanel.svelte";
   import { gotoBrowse } from "./routes";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import { isAdminPrincipal, type AuthPrincipal } from "./api";
   import { Alert, Badge, Button, Checkbox, DataTable, Field, Input, Modal, StateBlock, confirm, toneForStatus, type Tone } from "./ui";
 
@@ -421,10 +422,18 @@
     }
   }
 
+  // The failing-items and last-scan panels render below the tables; opening
+  // one focuses it, its Hide button returns focus to the row (rowPanel.ts).
   async function toggleErrors(libId: string) {
     const open = !expanded[libId];
     expanded = { ...expanded, [libId]: open };
+    if (open) void focusPanel(`failing-${libId}`);
     if (open && !failing[libId]) await loadFailing(libId);
+  }
+
+  function hideErrors(libId: string) {
+    expanded = { ...expanded, [libId]: false };
+    void focusRowButton("data-failing-for", libId);
   }
 
   // FIX-8: failed-jobs pager + manual clear.
@@ -604,15 +613,6 @@
     return `${Math.round(months / 12)}y ago`;
   }
 
-  // FIX-10: status-badge tone for a persisted last-scan status. Local rather
-  // than toneForStatus: "finished" is ok and stopped/cancelled a warning here.
-  function lastScanTone(status: string): Tone {
-    if (status === "finished") return "ok";
-    if (status === "failed") return "danger";
-    if (status === "stopped" || status === "cancelled") return "warn";
-    return "neutral";
-  }
-
   // §17: "slower than usual" verdict from real history — this run's walk rate
   // vs the library's rolling median over recent finished full scans. Only
   // speaks with >=3 runs behind the median (less is noise) and only when the
@@ -643,6 +643,12 @@
 
   function toggleExcluded(libId: string) {
     excludedOpen = { ...excludedOpen, [libId]: !excludedOpen[libId] };
+    if (excludedOpen[libId]) void focusPanel(`scan-details-${libId}`);
+  }
+
+  function hideExcluded(libId: string) {
+    excludedOpen = { ...excludedOpen, [libId]: false };
+    void focusRowButton("data-scan-details-for", libId);
   }
 
   // Failing-item kinds: chip tone and the explanation shown once per panel.
@@ -801,6 +807,7 @@
       class="rounded-full"
       aria-expanded={!!expanded[lib.id]}
       aria-controls={expanded[lib.id] ? `failing-${lib.id}` : undefined}
+      data-failing-for={lib.id}
       aria-label="{ec} extraction error{ec === 1 ? '' : 's'}: {expanded[lib.id] ? 'hide' : 'show'} failing items"
       title={ec > 0 ? "Show failing items" : "No extraction errors"}
       onclick={() => toggleErrors(lib.id)}>
@@ -899,7 +906,7 @@
     {:else if lib.last_scan}
       {@const ls = lib.last_scan}
       {@const slow = slowScan(ls)}
-      <Badge tone={lastScanTone(ls.status)}>{ls.status}</Badge>
+      <Badge tone={toneForStatus(ls.status)}>{ls.status}</Badge>
       <span title={new Date(ls.finished_at ?? ls.started_at).toLocaleString()}>{relTime(ls.finished_at ?? ls.started_at)}</span>
       {#if lastScanCounts(ls)}<span>— {lastScanCounts(ls)}</span>{/if}
       <!-- The slow verdict and the exclusion breakdown open the same details
@@ -910,6 +917,8 @@
           class="rounded-full"
           title={slow}
           aria-expanded={!!excludedOpen[lib.id]}
+          aria-controls={excludedOpen[lib.id] ? `scan-details-${lib.id}` : undefined}
+          data-scan-details-for={lib.id}
           onclick={() => toggleExcluded(lib.id)}>
           <Badge tone="warn">slower than usual</Badge>
         </button>
@@ -925,6 +934,8 @@
           class="cursor-pointer text-warn underline decoration-dotted underline-offset-2 hover:decoration-solid"
           title={excludedDetail(ls)}
           aria-expanded={!!excludedOpen[lib.id]}
+          aria-controls={excludedOpen[lib.id] ? `scan-details-${lib.id}` : undefined}
+          data-scan-details-for={lib.id}
           onclick={() => toggleExcluded(lib.id)}
         >excluded {(ls.excluded ?? 0).toLocaleString()}{lowerBound
             ? "+"
@@ -1035,13 +1046,14 @@
   {@const items = failing[lib.id] ?? []}
   <section
     id="failing-{lib.id}"
+    tabindex="-1"
     aria-label="Failing items — {lib.name}"
     class="mt-2 rounded-control border border-border bg-surface-2 px-3 py-2 text-xs"
   >
     <div class="flex items-center gap-2">
       <h3 class="text-sm font-semibold">Failing items — {lib.name}</h3>
       <span class="grow"></span>
-      <Button size="sm" variant="ghost" onclick={() => toggleErrors(lib.id)}>Hide</Button>
+      <Button size="sm" variant="ghost" onclick={() => hideErrors(lib.id)}>Hide</Button>
     </div>
     {#if failingError[lib.id]}
       <StateBlock state="error" compact message={failingError[lib.id]} onRetry={() => loadFailing(lib.id)} />
@@ -1197,13 +1209,15 @@
       {@const ls = lib.last_scan}
       {@const slow = slowScan(ls)}
       <section
+        id="scan-details-{lib.id}"
+        tabindex="-1"
         aria-label="Last scan details — {lib.name}"
         class="mt-2 rounded-control border border-warn/40 bg-warn-bg px-3 py-2 text-xs"
       >
         <div class="flex items-center gap-2">
           <h3 class="text-sm font-semibold">Last scan details — {lib.name}</h3>
           <span class="grow"></span>
-          <Button size="sm" variant="ghost" onclick={() => toggleExcluded(lib.id)}>Hide</Button>
+          <Button size="sm" variant="ghost" onclick={() => hideExcluded(lib.id)}>Hide</Button>
         </div>
         <ul class="mt-1 max-w-3xl list-disc space-y-1 pl-5 leading-snug">
           {#if slow}<li>{slow}</li>{/if}

@@ -48,7 +48,7 @@
               {#each sec.examples as ex (ex.q)}
                 <button
                   type="button"
-                  class="rounded-full border border-slate-300 px-2 py-0.5 font-mono text-xs hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700"
+                  class="rounded-full border border-slate-300 px-2 py-0.5 font-mono text-xs hover:border-accent hover:text-accent-text disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700"
                   title={blocked
                     ? "Fuzzy terms are not supported in reports"
                     : (ex.note ?? `Insert ${ex.q}`)}

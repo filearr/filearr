@@ -385,6 +385,10 @@
   async function toggleSimilar() {
     similarOpen = !similarOpen;
     if (!similarOpen || similarLoaded || similarLoading) return;
+    await loadSimilar();
+  }
+
+  async function loadSimilar() {
     similarLoading = true;
     similarError = "";
     const mine = itemToken;
@@ -421,8 +425,12 @@
   // the lazy Similar fetch) checks it, so a fast second open cannot interleave
   // the first item's responses into the second item's panel.
   let itemToken = 0;
+  // Bumped by the load error's Retry; read inside the effect so it re-runs.
+  let reloadKey = $state(0);
+  let touchedId: typeof id | null = null;
 
   $effect(() => {
+    void reloadKey;
     const mine = ++itemToken;
     const live = () => mine === itemToken;
     const ac = new AbortController();
@@ -461,7 +469,11 @@
     // the caller's personal ranking profile. Fire-and-forget: errors (older
     // backend, feature off, rate budget) are deliberately invisible. Not
     // aborted: the open already happened, and it writes no panel state.
-    touchItem(id).catch(() => {});
+    // A Retry re-runs this effect for the same id; that is not another open.
+    if (touchedId !== id) {
+      touchedId = id;
+      touchItem(id).catch(() => {});
+    }
     // Runs before the next item's effect and on destroy.
     return () => {
       itemToken++;
@@ -568,7 +580,7 @@
 
     <div class="mt-4">
       {#if error}
-        <StateBlock state="error" message={error} />
+        <StateBlock state="error" message={error} onRetry={() => reloadKey++} />
       {:else if !item}
         <StateBlock state="loading" />
       {:else if active === "raw"}
@@ -628,12 +640,9 @@
               </p>
               <div class="flex flex-col gap-2">
                 {#each editableFields as d (d.id)}
-                  <!-- CustomFieldInput is not a kit control, so it takes the
-                       Field's id from the snippet. -->
+                  <!-- CustomFieldInput's kit controls read this Field's context. -->
                   <Field label={d.label}>
-                    {#snippet children({ id: fieldId })}
-                      <CustomFieldInput def={d} id={fieldId} bind:value={eFields[d.name]} />
-                    {/snippet}
+                    <CustomFieldInput def={d} bind:value={eFields[d.name]} />
                   </Field>
                 {/each}
               </div>
@@ -841,7 +850,7 @@
             {#if similarLoading}
               <StateBlock state="loading" compact />
             {:else if similarError}
-              <p class="text-xs text-muted">{similarError}</p>
+              <StateBlock state="error" compact message={similarError} onRetry={loadSimilar} />
             {:else if similar && similar.hits.length && similarView === "table"}
               <!-- Wide and free of focusable cells, so the scroll container takes
                    focus itself (ScrollRegion) to stay keyboard-scrollable. -->

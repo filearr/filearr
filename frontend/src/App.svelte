@@ -286,7 +286,7 @@
   </div>
 {:else if authState === "unreachable"}
   <div class="flex min-h-screen flex-col items-center justify-center px-4">
-    <h1 class="text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
+    <h1 class="text-2xl font-bold text-accent-text">Filearr</h1>
     <StateBlock state="error" message="Can't reach the Filearr server." onRetry={probeAuth} />
   </div>
 {:else if gated}
@@ -302,7 +302,7 @@
        and every page panned sideways. Wrap instead: the nav flows onto extra
        lines and the utility controls sit on their own line under it. -->
   <header class="flex flex-wrap items-center gap-x-3 gap-y-2 py-4">
-    <h1 class="text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
+    <h1 class="text-2xl font-bold text-accent-text">Filearr</h1>
     <!-- Real links (not buttons) so they can be opened in a new tab and the
          hash router does the navigation. aria-current + font weight mark the
          active page without relying on colour alone. -->
@@ -310,7 +310,7 @@
       <a
         href="#/{p}"
         aria-current={page === p ? "page" : undefined}
-        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-[var(--accent)] font-semibold text-[var(--accent-fg)]' : 'text-slate-500'}">{label}</a>
+        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-accent font-semibold text-accent-fg' : 'text-slate-500'}">{label}</a>
     {/snippet}
     <nav aria-label="Primary" class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
       {@render navLink("search", "Search")}
@@ -328,19 +328,18 @@
     <div class="grow"></div>
     <div class="flex flex-wrap items-center gap-2">
     {#if me}
-      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-[var(--accent)] text-[var(--accent-fg)]' : 'bg-slate-100 text-slate-600 hover:text-[var(--accent)] dark:bg-slate-800 dark:text-slate-300'}"
+      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-accent text-accent-fg' : 'bg-slate-100 text-slate-600 hover:text-accent-text dark:bg-slate-800 dark:text-slate-300'}"
         href="#/account"
         title={`${me.username} · ${me.global_role} — account settings`}>
-        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-[var(--accent-fg)]' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
+        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-accent-fg' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
       </a>
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
         onclick={doLogout}>Sign out</button>
     {/if}
     <label class="flex items-center gap-1 text-xs text-slate-500" title="Which network-path spelling to show for Open/Copy actions. smb:// suits Linux/macOS; \\host\share (UNC) suits Windows.">
       <span class="hidden sm:inline">Paths</span>
-      <select
-        class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-800"
-        aria-label="Network path format"
+      <select aria-label="Network path format"
+        class="rounded-control border border-border-strong bg-surface px-2 py-1 text-sm text-fg"
         value={shareFormat.pref}
         onchange={(e) => setShareFormat((e.currentTarget as HTMLSelectElement).value as FormatPref)}>
         <option value="auto">Auto ({platformLabel})</option>
@@ -425,21 +424,21 @@
       {/if}
     </span>
     <span class="px-1">·</span>
-    <a class="underline hover:text-[var(--accent)]" href="#/help">Help</a>
+    <a class="underline hover:text-accent-text" href="#/help">Help</a>
     <span class="px-1">·</span>
     <!-- The running build stack: every dependency version this deployment is
          actually running, for pasting into a bug report. -->
-    <a class="underline hover:text-[var(--accent)]" href="#/about">About</a>
+    <a class="underline hover:text-accent-text" href="#/about">About</a>
     <span class="px-1">·</span>
     <!-- Bundled mkdocs manual served by this instance (main.py /docs mount). -->
     <a
-      class="underline hover:text-[var(--accent)]"
+      class="underline hover:text-accent-text"
       href="/docs/"
       target="_blank"
       rel="noopener noreferrer">Docs</a>
     <span class="px-1">·</span>
     <a
-      class="underline hover:text-[var(--accent)]"
+      class="underline hover:text-accent-text"
       href="/api/docs"
       target="_blank"
       rel="noopener noreferrer">API Docs</a>
@@ -447,7 +446,7 @@
     <!-- AGPL-3.0 §13: offer the running instance's Corresponding Source. -->
     {#if sourceHref}
       <a
-        class="underline hover:text-[var(--accent)]"
+        class="underline hover:text-accent-text"
         href={sourceHref}
         target="_blank"
         rel="noopener noreferrer">Source</a>

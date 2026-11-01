@@ -29,6 +29,7 @@
   import LogsPanel from "./LogsPanel.svelte";
   import UpdatesPanel from "./UpdatesPanel.svelte";
   import { help } from "./help";
+  import { focusPanel, focusRowButton } from "./rowPanel";
   import { Alert, Badge, Button, DataTable, Field, Input, StateBlock, confirm, promptText, type Tone } from "./ui";
 
   // UI-T10 — live job-system dashboard. Polls ONE composite endpoint
@@ -294,6 +295,11 @@
     }
   }
 
+  // The cron editor renders below the table (rowPanel.ts): opening focuses it,
+  // a save that closes it returns focus to the row's Edit button.
+  const uid = $props.id();
+  const cronPanelId = (key: string) => `${uid}-cron-${key}`;
+
   function maintEditToggle(t: MaintenanceTask) {
     if (editKey === t.key) {
       editKey = null;
@@ -301,6 +307,7 @@
     }
     editKey = t.key;
     editCron = t.cron ?? "";
+    void focusPanel(cronPanelId(t.key));
   }
 
   async function maintSave(
@@ -312,7 +319,10 @@
     try {
       const updated = await updateMaintenance(t.key, body);
       maint = maint.map((x) => (x.key === t.key ? updated : x));
-      if ("cron" in body) editKey = null;
+      if ("cron" in body) {
+        editKey = null;
+        void focusRowButton("data-cron-for", t.key);
+      }
       flashMaint(t.key, "saved — applies within a minute");
     } catch (e) {
       maintErr[t.key] = errorMessage(e, { verb: "change maintenance settings" });
@@ -859,6 +869,8 @@
       <Button
         size="sm"
         aria-expanded={editKey === t.key}
+        aria-controls={editKey === t.key ? cronPanelId(t.key) : undefined}
+        data-cron-for={t.key}
         onclick={() => maintEditToggle(t)}
         disabled={maintBusy[t.key]}
         title="Change this task's cron schedule or disable it.">
@@ -1591,6 +1603,8 @@
         {#each rows as t (t.key)}
           {#if editKey === t.key}
             <section
+              id={cronPanelId(t.key)}
+              tabindex="-1"
               aria-label="Edit schedule — {t.title}"
               class="mt-2 rounded-control border border-border bg-surface-2 px-3 py-2">
               <div class="flex flex-wrap items-end gap-2">

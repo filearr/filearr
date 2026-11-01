@@ -6,7 +6,7 @@
   import { fetchLogs, friendlyError, type LogRow } from "./api";
   import { usePolling } from "./polling";
   import { latest } from "./latest";
-  import { Alert, Badge, Button, Checkbox, DataTable, Input, Select, StateBlock, type Tone } from "./ui";
+  import { Alert, Badge, Button, Checkbox, DataTable, Input, ScrollRegion, Select, StateBlock, type Tone } from "./ui";
 
   let rows = $state<LogRow[]>([]);
   let enabled = $state(true);
@@ -87,12 +87,6 @@
     if (level === "WARNING") return "warn";
     return "neutral";
   }
-
-  // The log pane scrolls, so it must take focus for keyboard users (axe
-  // scrollable-region-focusable): a named region with tabindex="0". Spread
-  // because Svelte's a11y_no_noninteractive_tabindex lint has no exception
-  // for scroll containers, and this repo adds no lint suppressions.
-  const scrollRegion = { role: "region", "aria-label": "Log records", tabindex: 0 } as const;
 
   function fmtTs(iso: string): string {
     const d = new Date(iso);
@@ -185,7 +179,7 @@
         message="No log records match. The stream fills as the app and worker run{minLevel !== 'info' ? ' — try the info+ level' : ''}." />
     {:else}
       <!-- Scrollable region: focusable so keyboard users can scroll it. -->
-      <div class="max-h-96 overflow-y-auto font-mono text-xs" {...scrollRegion}>
+      <ScrollRegion label="Log records" class="max-h-96 font-mono text-xs">
         <DataTable
           caption="Log records, newest first"
           captionHidden
@@ -200,7 +194,7 @@
           rowKey={(r) => r.id}
           {loading}
         />
-      </div>
+      </ScrollRegion>
       {#if nextBeforeId !== null}
         <Button size="sm" class="mt-2" onclick={() => void load(true)} disabled={loading}>
           {loading ? "…" : "Load older"}</Button>

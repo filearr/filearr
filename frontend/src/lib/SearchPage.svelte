@@ -1328,6 +1328,7 @@
 <div>
   <Input
     bind:ref={searchInput}
+    size="lg"
     aria-label="Search your library"
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
@@ -1359,13 +1360,12 @@
       <span class="flex items-center gap-1 text-sm text-muted" title="Blend keyword and meaning-based (semantic) matching">
         Semantic
         <span class="w-24">
-          <Input
+          <input
             type="range"
-            size="sm"
             min="0"
             max="1"
             step="0.1"
-            class="accent-accent"
+            class="w-full accent-accent"
             bind:value={semantic}
             onchange={reset}
             aria-label="Semantic blend ratio" />
@@ -1679,15 +1679,15 @@
         <div class="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Size</span>
           <span class="w-40">
-            <Input
-              type="range" size="sm" class="accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
+            <input
+              type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeLo}
               oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; }}
               onchange={onRangeChange} aria-label="Minimum file size" />
           </span>
           <span class="w-40">
-            <Input
-              type="range" size="sm" class="accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
+            <input
+              type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeHi}
               oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; }}
               onchange={onRangeChange} aria-label="Maximum file size" />
@@ -1704,15 +1704,15 @@
         <div class="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
           <span class="w-10 font-medium">Date</span>
           <span class="w-40">
-            <Input
-              type="range" size="sm" class="accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
+            <input
+              type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeLo}
               oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; }}
               onchange={onRangeChange} aria-label="Earliest modified date" />
           </span>
           <span class="w-40">
-            <Input
-              type="range" size="sm" class="accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
+            <input
+              type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeHi}
               oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; }}
               onchange={onRangeChange} aria-label="Latest modified date" />
