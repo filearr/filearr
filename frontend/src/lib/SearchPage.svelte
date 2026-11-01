@@ -365,9 +365,6 @@
     lastToggledIndex = -1;
   }
 
-  // Local mirror of AgentsPage/TaxonomyPage's helper: pull FastAPI's ``detail``
-  // out of a 4xx body instead of dumping "<status>: <raw json>" at the user.
-
   /** Resolve each selected item's CURRENT tag list — the input the per-item tag
    *  arithmetic needs, because `tags` replaces the whole list on the wire.
    *

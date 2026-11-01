@@ -290,8 +290,8 @@
       onSaved();
     } catch (e) {
       // 422s (invalid cron, network watch path, unknown preset/group, non-positive
-      // ceiling, …) arrive as "422: <detail>" and are shown inline.
-      error = errorMessage(e, { verb: "edit this library" });
+      // ceiling, …) are shown inline as the server's detail text.
+      error = errorMessage(e, { verb: "save this library" });
     } finally {
       busy = false;
     }

@@ -36,9 +36,9 @@
   const isBootstrap = $derived(mode === "bootstrap");
 
   function loginError(err: unknown): string {
-    // P6-T8: generic messages — never reveal whether the username exists.
+    // Generic on purpose: the backend raises 401/429, LDAP paths may surface 403; no account enumeration.
     const status = errorStatus(err);
-    if (status === 401) return "Invalid username or password.";
+    if (status === 400 || status === 401 || status === 403) return "Invalid username or password.";
     if (status === 429) return "Too many attempts. Try again in a minute.";
     return errorMessage(err);
   }
@@ -53,7 +53,13 @@
         try {
           await authBootstrap(username.trim(), password);
         } catch (err) {
-          error = errorMessage(err);
+          if (errorStatus(err) === 409) {
+            // Someone else created the admin first: re-probe out of bootstrap mode.
+            error = "An administrator account already exists. Sign in instead.";
+            onAuthed();
+          } else {
+            error = errorMessage(err);
+          }
           return;
         }
         // First admin created — log straight in to establish the session.

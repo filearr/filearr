@@ -83,7 +83,6 @@
     }
   }
 
-
   async function refresh() {
     error = "";
     try {

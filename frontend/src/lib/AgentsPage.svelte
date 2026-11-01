@@ -152,7 +152,6 @@
   // this dot mirrors the default 5-minute window for an at-a-glance row hint.
   const ONLINE_WINDOW_MS = 5 * 60 * 1000;
 
-
   async function refreshSummary() {
     try {
       summary = await getAgentSummary();
