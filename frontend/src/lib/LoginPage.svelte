@@ -1,6 +1,11 @@
 <script lang="ts">
   import { authLogin, authBootstrap, oidcLoginUrl, errorMessage, errorStatus, type AuthMode } from "./api";
   import * as safeStorage from "./safeStorage";
+  // Direct paths, not the ./ui barrel: this page is in the entry chunk, and the
+  // barrel would pull bits-ui in with it (see ui/index.ts, rule 2).
+  import Button from "./ui/Button.svelte";
+  import Field from "./ui/Field.svelte";
+  import Input from "./ui/Input.svelte";
 
   // `mode` is "bootstrap" (no users yet → create the first admin) or "enabled"
   // (normal login). `onAuthed` is called after a successful login/bootstrap so
@@ -97,14 +102,14 @@
   }
 </script>
 
-<div class="mx-auto mt-24 max-w-sm rounded-2xl border border-slate-200 p-6 shadow-sm dark:border-slate-800">
-  <h1 class="mb-1 text-2xl font-bold" style="color: var(--accent)">Filearr</h1>
-  <p class="mb-4 text-sm text-slate-500">
+<div class="mx-auto mt-24 max-w-sm rounded-panel border border-border p-6 shadow-sm">
+  <h1 class="mb-1 text-2xl font-bold text-accent-text">Filearr</h1>
+  <p class="mb-4 text-sm text-muted">
     {isBootstrap ? "First run — create the administrator account." : "Sign in to continue."}
   </p>
 
   {#if insecure}
-    <div class="mb-4 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+    <div class="mb-4 rounded-control bg-warn-bg px-3 py-2 text-xs text-warn">
       You are on plain <strong>http</strong>. Credentials and the session cookie
       are not protected in transit — use the TLS endpoint
       (<span class="font-mono">https://&lt;host&gt;:8443</span>) once available.
@@ -112,62 +117,42 @@
   {/if}
 
   {#if ssoError}
-    <div class="mb-4 rounded-lg bg-red-100 px-3 py-2 text-xs text-red-800 dark:bg-red-900/40 dark:text-red-200">
+    <div class="mb-4 rounded-control bg-danger-bg px-3 py-2 text-xs text-danger" role="alert">
       Single sign-on did not complete. Please try again or use a local account.
     </div>
   {/if}
 
   {#if oidcEnabled}
-    <button
-      type="button"
-      onclick={startSso}
-      class="mb-3 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">
-      Sign in with SSO
-    </button>
-    <div class="mb-3 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
-      <span class="h-px flex-1 bg-slate-200 dark:bg-slate-700"></span>
+    <Button class="mb-3 w-full justify-center" onclick={startSso}>Sign in with SSO</Button>
+    <div class="mb-3 flex items-center gap-2 text-xs text-muted">
+      <span class="h-px flex-1 bg-border"></span>
       or
-      <span class="h-px flex-1 bg-slate-200 dark:bg-slate-700"></span>
+      <span class="h-px flex-1 bg-border"></span>
     </div>
   {/if}
 
   <form onsubmit={submit} class="flex flex-col gap-3">
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="text-slate-500">Username</span>
-      <input
-        class="rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
-        bind:value={username}
-        autocomplete="username"
-        title={"With directory (AD/LDAP) login, DOMAIN\\user, user@domain and the bare account name are all accepted."}
-        required />
-    </label>
-    <label class="flex flex-col gap-1 text-sm">
-      <span class="text-slate-500">Password</span>
-      <input
-        class="rounded-lg border border-slate-300 px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
+    <Field label="Username" required
+      hint={"With directory (AD/LDAP) login, DOMAIN\\user, user@domain and the bare account name are all accepted."}>
+      <Input bind:value={username} autocomplete="username" />
+    </Field>
+    <Field label="Password" required hint={isBootstrap ? "Minimum 8 characters." : undefined}>
+      <Input
         type="password"
         bind:value={password}
         autocomplete={isBootstrap ? "new-password" : "current-password"}
-        minlength={isBootstrap ? 8 : undefined}
-        required />
-    </label>
-
-    {#if isBootstrap}
-      <p class="text-xs text-slate-600 dark:text-slate-400">Minimum 8 characters.</p>
-    {/if}
+        minlength={isBootstrap ? 8 : undefined} />
+    </Field>
 
     {#if error}
-      <p class="text-sm text-red-600">{error}</p>
+      <p class="text-sm text-danger" role="alert">{error}</p>
     {/if}
     {#if warning}
-      <p class="text-sm text-amber-600">{warning}</p>
+      <p class="text-sm text-warn" role="status">{warning}</p>
     {/if}
 
-    <button
-      class="mt-1 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent-fg)] disabled:opacity-50"
-      type="submit"
-      disabled={busy}>
+    <Button class="mt-1 justify-center" type="submit" variant="primary" disabled={busy}>
       {busy ? "Please wait…" : isBootstrap ? "Create admin & sign in" : "Sign in"}
-    </button>
+    </Button>
   </form>
 </div>

@@ -21,11 +21,15 @@
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
+  import { Alert, Button, Checkbox, DataTable, Field, Input, Modal, Select, Textarea, confirm } from "./ui";
 
   let { libraries = [] }: { libraries?: Library[] } = $props();
 
   let fields = $state<CustomField[]>([]);
-  let error = $state("");
+  let loadError = $state("");
+  let createError = $state("");
+  let editError = $state(""); // the edit dialog's Save
+  let deleteError = $state(""); // row delete
   let loading = $state(true);
 
   // create form
@@ -55,9 +59,9 @@
     loading = true;
     try {
       fields = await listCustomFields();
-      error = "";
+      loadError = "";
     } catch (e) {
-      error = errorMessage(e);
+      loadError = errorMessage(e);
     } finally {
       loading = false;
     }
@@ -72,7 +76,7 @@
   async function create(e: Event) {
     e.preventDefault();
     creating = true;
-    error = "";
+    createError = "";
     try {
       await createCustomField({
         name: cName,
@@ -95,13 +99,14 @@
       cSelectOptions = "";
       await refresh();
     } catch (err) {
-      error = errorMessage(err, { verb: "manage custom fields" });
+      createError = errorMessage(err, { verb: "manage custom fields" });
     } finally {
       creating = false;
     }
   }
 
   function startEdit(f: CustomField) {
+    editError = "";
     editing = f;
     eLabel = f.label;
     eLibraryIds = [...f.library_ids];
@@ -111,10 +116,22 @@
     eSelectOptions = (f.select_options ?? []).join("\n");
   }
 
+  const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+  // Unsaved edits in the dialog, for its "Discard changes?" check.
+  const editDirty = $derived(
+    !!editing &&
+      (eLabel !== editing.label ||
+        !sameIds(eLibraryIds, editing.library_ids) ||
+        eFacetable !== editing.facetable ||
+        eSortable !== editing.sortable ||
+        eRequired !== editing.required ||
+        eSelectOptions !== (editing.select_options ?? []).join("\n")),
+  );
+
   async function saveEdit() {
     if (!editing) return;
     saving = true;
-    error = "";
+    editError = "";
     try {
       await updateCustomField(editing.id, {
         label: eLabel,
@@ -130,30 +147,59 @@
       editing = null;
       await refresh();
     } catch (err) {
-      error = errorMessage(err, { verb: "manage custom fields" });
+      editError = errorMessage(err, { verb: "manage custom fields" });
     } finally {
       saving = false;
     }
   }
 
   async function remove(f: CustomField) {
-    if (
-      !confirm(
-        `Delete custom field "${f.label}" (${f.name})?\n\n` +
-          "The definition is removed but existing values already saved under this " +
-          "key on any item are kept untouched.",
-      )
-    )
-      return;
-    error = "";
+    const ok = await confirm({
+      title: `Delete custom field "${f.label}" (${f.name})?`,
+      message:
+        "The definition is removed but existing values already saved under this " +
+        "key on any item are kept untouched.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
+    deleteError = "";
     try {
       await deleteCustomField(f.id);
       await refresh();
     } catch (err) {
-      error = errorMessage(err, { verb: "manage custom fields" });
+      deleteError = errorMessage(err, { verb: "manage custom fields" });
     }
   }
 </script>
+
+{#snippet nameCell(f: CustomField)}<span class="font-mono text-xs">{f.name}</span>{/snippet}
+{#snippet typeCell(f: CustomField)}<span class="text-xs text-muted">{f.data_type}</span>{/snippet}
+{#snippet librariesCell(f: CustomField)}
+  <span class="text-xs text-muted">{f.library_ids.length === 0 ? "all" : f.library_ids.map(libName).join(", ")}</span>
+{/snippet}
+{#snippet facetCell(f: CustomField)}{f.facetable ? "✓" : "—"}{/snippet}
+{#snippet sortCell(f: CustomField)}{f.sortable ? "✓" : "—"}{/snippet}
+{#snippet reqCell(f: CustomField)}{f.required ? "✓" : "—"}{/snippet}
+{#snippet actionsCell(f: CustomField)}
+  <div class="flex justify-end gap-1">
+    <Button size="sm" onclick={() => startEdit(f)}>Edit</Button>
+    <Button size="sm" variant="danger" onclick={() => remove(f)}>Delete</Button>
+  </div>
+{/snippet}
+
+<!-- Library toggle chips (create form and edit dialog): bespoke toggles, not
+     a kit control; aria-pressed carries the state the colour shows. -->
+{#snippet libraryChips(selected: string[], onToggle: (id: string) => void)}
+  <div class="flex flex-wrap gap-2">
+    {#each libraries as l (l.id)}
+      <button type="button" aria-pressed={selected.includes(l.id)}
+        class="rounded-full border px-3 py-1 text-sm {selected.includes(l.id) ? 'border-transparent bg-accent text-accent-fg' : 'border-border-strong text-fg'}"
+        onclick={() => onToggle(l.id)}>{l.name}</button>
+    {/each}
+    <span class="self-center text-xs text-muted">(none = all libraries)</span>
+  </div>
+{/snippet}
 
 <section class="mt-8">
   <h2 class="text-lg font-semibold">Custom fields</h2>
@@ -163,189 +209,141 @@
     existing values.
   </p>
 
-  {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
-
-  <div class="mt-3 overflow-x-auto">
-    <table class="w-full min-w-[52rem] text-sm">
-      <thead>
-        <tr class="border-b border-slate-200 text-left text-slate-500 dark:border-slate-800">
-          <th class="py-2 pr-3 font-medium">Name</th>
-          <th class="py-2 pr-3 font-medium">Label</th>
-          <th class="py-2 pr-3 font-medium">Type</th>
-          <th class="py-2 pr-3 font-medium">Libraries</th>
-          <th class="py-2 pr-3 font-medium">Facet</th>
-          <th class="py-2 pr-3 font-medium">Sort</th>
-          <th class="py-2 pr-3 font-medium">Req</th>
-          <th class="py-2 text-right font-medium">Actions</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
-        {#each fields as f (f.id)}
-          <tr class="align-top">
-            <td class="py-2 pr-3 font-mono text-xs">{f.name}</td>
-            <td class="py-2 pr-3">{f.label}</td>
-            <td class="py-2 pr-3 text-xs text-slate-500">{f.data_type}</td>
-            <td class="py-2 pr-3 text-xs text-slate-500">
-              {#if f.library_ids.length === 0}
-                <span class="text-slate-600 dark:text-slate-400">all</span>
-              {:else}
-                {f.library_ids.map(libName).join(", ")}
-              {/if}
-            </td>
-            <td class="py-2 pr-3">{f.facetable ? "✓" : "—"}</td>
-            <td class="py-2 pr-3">{f.sortable ? "✓" : "—"}</td>
-            <td class="py-2 pr-3">{f.required ? "✓" : "—"}</td>
-            <td class="py-2">
-              <div class="flex justify-end gap-1">
-                <button
-                  class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
-                  onclick={() => startEdit(f)}>Edit</button>
-                <button
-                  class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
-                  onclick={() => remove(f)}>Delete</button>
-              </div>
-            </td>
-          </tr>
-        {:else}
-          <tr>
-            <td colspan="8" class="py-4 text-slate-500">
-              {loading ? "Loading…" : "No custom fields yet — add one below."}
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+  <DataTable
+    class="mt-3"
+    caption="Custom fields"
+    captionHidden
+    columns={[
+      { key: "name", label: "Name", cell: nameCell },
+      { key: "label", label: "Label" },
+      { key: "data_type", label: "Type", cell: typeCell },
+      { key: "library_ids", label: "Libraries", cell: librariesCell },
+      { key: "facetable", label: "Facet", cell: facetCell },
+      { key: "sortable", label: "Sort", cell: sortCell },
+      { key: "required", label: "Req", cell: reqCell },
+      { key: "actions", label: "Actions", align: "right", cell: actionsCell },
+    ]}
+    rows={fields}
+    rowKey={(f) => f.id}
+    {loading}
+    error={loadError || null}
+    onRetry={refresh}
+    emptyMessage="No custom fields yet — add one below."
+  />
+  {#if deleteError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (deleteError = "")}>{deleteError}</Alert>
+  {/if}
 
   <h3 class="mt-6 text-sm font-semibold">Add custom field</h3>
+  <!-- Help sits beside each Field/Checkbox, not inside its label, so the
+       labels stay plain strings and the "?" button is not nested in a label. -->
   <form class="mt-3 flex max-w-xl flex-col gap-3" onsubmit={create}>
-    <label class="flex items-center gap-1 text-xs text-slate-500">
-      Name <Help text={HELP.cf_name} label="custom field name" />
-    </label>
-    <input
-      class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono dark:border-slate-700"
-      placeholder="e.g. shelf_location" bind:value={cName} required />
+    <div class="flex items-start gap-2">
+      <Field label="Name" required class="flex-1">
+        <Input class="font-mono" placeholder="e.g. shelf_location" bind:value={cName} />
+      </Field>
+      <span class="pt-0.5"><Help text={HELP.cf_name} label="custom field name" /></span>
+    </div>
 
-    <span class="flex items-center gap-1 text-xs text-slate-500">Label</span>
-    <input
-      class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-      placeholder="Human-readable label" bind:value={cLabel} />
+    <Field label="Label">
+      <Input placeholder="Human-readable label" bind:value={cLabel} />
+    </Field>
 
-    <label class="flex items-center gap-1 text-xs text-slate-500">
-      Type <Help text={HELP.cf_data_type} label="custom field type" />
-    </label>
-    <select
-      class="-mt-2 w-48 rounded-lg border border-slate-300 bg-transparent px-2 py-2 dark:border-slate-700"
-      bind:value={cType}>
-      {#each CUSTOM_FIELD_TYPES as t}<option value={t}>{t}</option>{/each}
-    </select>
+    <div class="flex items-start gap-2">
+      <Field label="Type" class="w-48">
+        <Select bind:value={cType}>
+          {#each CUSTOM_FIELD_TYPES as t}<option value={t}>{t}</option>{/each}
+        </Select>
+      </Field>
+      <span class="pt-0.5"><Help text={HELP.cf_data_type} label="custom field type" /></span>
+    </div>
 
     {#if cType === "select"}
-      <span class="flex items-center gap-1 text-xs text-slate-500">Options (one per line)</span>
-      <textarea
-        class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-        rows="3" bind:value={cSelectOptions}></textarea>
+      <Field label="Options (one per line)">
+        <Textarea rows={3} bind:value={cSelectOptions} />
+      </Field>
     {/if}
 
-    <label class="flex items-center gap-1 text-xs text-slate-500">
-      Libraries <Help text={HELP.cf_libraries} label="custom field libraries" />
-    </label>
-    <div class="-mt-2 flex flex-wrap gap-2">
-      {#each libraries as l (l.id)}
-        <button type="button"
-          class="rounded-full border px-3 py-1 text-sm {cLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]' : 'border-slate-300 dark:border-slate-700'}"
-          onclick={() => (cLibraryIds = toggle(cLibraryIds, l.id))}>{l.name}</button>
-      {/each}
-      <span class="self-center text-xs text-slate-500">(none = all libraries)</span>
+    <div class="flex flex-col gap-1">
+      <span class="flex items-center gap-1 text-xs font-medium text-fg">
+        Libraries <Help text={HELP.cf_libraries} label="custom field libraries" />
+      </span>
+      {@render libraryChips(cLibraryIds, (id) => (cLibraryIds = toggle(cLibraryIds, id)))}
     </div>
 
     <div class="flex flex-wrap items-center gap-4">
-      <label class="inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={cFacetable} /> facetable
-      </label>
-      <label class="inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={cSortable} /> sortable
+      <Checkbox label="facetable" bind:checked={cFacetable} />
+      <span class="inline-flex items-center gap-2">
+        <Checkbox label="sortable" bind:checked={cSortable} />
         <Help text={HELP.cf_facet_sort} label="facet/sort" />
-      </label>
-      <label class="inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" bind:checked={cRequired} /> required
+      </span>
+      <span class="inline-flex items-center gap-2">
+        <Checkbox label="required" bind:checked={cRequired} />
         <Help text={HELP.cf_required} label="required" />
-      </label>
+      </span>
     </div>
     {#if cFacetable || cSortable}
-      <p class="-mt-1 text-xs text-amber-600">
+      <p class="-mt-1 text-xs text-warn">
         Faceting/sorting takes effect after an index rebuild (P4-T6).
       </p>
     {/if}
 
-    <button
-      class="self-start rounded-lg bg-[var(--accent)] px-4 py-2 text-[var(--accent-fg)] disabled:opacity-50"
-      disabled={creating}>{creating ? "Adding…" : "Add custom field"}</button>
+    <Button type="submit" variant="primary" class="self-start" disabled={creating}>
+      {creating ? "Adding…" : "Add custom field"}
+    </Button>
+    {#if createError}
+      <Alert tone="danger" onDismiss={() => (createError = "")}>{createError}</Alert>
+    {/if}
   </form>
 </section>
 
-{#if editing}
-  <div class="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-    <div class="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl dark:bg-slate-900">
-      <h3 class="text-base font-semibold">
-        Edit custom field <span class="font-mono text-sm text-slate-500">{editing.name}</span>
-      </h3>
-      <p class="mt-1 text-xs text-slate-500">
-        Name (<code>{editing.name}</code>) and type (<code>{editing.data_type}</code>) are
-        immutable — create a new field to change them.
-      </p>
+<Modal
+  open={!!editing}
+  onClose={() => (editing = null)}
+  title={`Edit custom field ${editing?.name ?? ""}`}
+  dirty={() => editDirty}
+>
+  {#if editing}
+    <p class="text-xs text-muted">
+      Name (<code>{editing.name}</code>) and type (<code>{editing.data_type}</code>) are
+      immutable — create a new field to change them.
+    </p>
 
-      <div class="mt-4 flex flex-col gap-3">
-        <span class="text-xs text-slate-500">Label</span>
-        <input
-          class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-          bind:value={eLabel} />
+    <div class="mt-4 flex flex-col gap-3">
+      <Field label="Label">
+        <Input bind:value={eLabel} />
+      </Field>
 
-        {#if editing.data_type === "select"}
-          <span class="text-xs text-slate-500">Options (one per line)</span>
-          <textarea
-            class="-mt-2 rounded-lg border border-slate-300 bg-transparent px-3 py-2 dark:border-slate-700"
-            rows="3" bind:value={eSelectOptions}></textarea>
-        {/if}
+      {#if editing.data_type === "select"}
+        <Field label="Options (one per line)">
+          <Textarea rows={3} bind:value={eSelectOptions} />
+        </Field>
+      {/if}
 
-        <label class="flex items-center gap-1 text-xs text-slate-500">
+      <div class="flex flex-col gap-1">
+        <span class="flex items-center gap-1 text-xs font-medium text-fg">
           Libraries <Help text={HELP.cf_libraries} label="custom field libraries" />
-        </label>
-        <div class="-mt-2 flex flex-wrap gap-2">
-          {#each libraries as l (l.id)}
-            <button type="button"
-              class="rounded-full border px-3 py-1 text-sm {eLibraryIds.includes(l.id) ? 'border-transparent bg-[var(--accent)] text-[var(--accent-fg)]' : 'border-slate-300 dark:border-slate-700'}"
-              onclick={() => (eLibraryIds = toggle(eLibraryIds, l.id))}>{l.name}</button>
-          {/each}
-          <span class="self-center text-xs text-slate-500">(none = all libraries)</span>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-4">
-          <label class="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" bind:checked={eFacetable} /> facetable
-          </label>
-          <label class="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" bind:checked={eSortable} /> sortable
-          </label>
-          <label class="inline-flex items-center gap-2 text-sm">
-            <input type="checkbox" bind:checked={eRequired} /> required
-          </label>
-        </div>
-        {#if eFacetable || eSortable}
-          <p class="-mt-1 text-xs text-amber-600">
-            Faceting/sorting takes effect after an index rebuild (P4-T6).
-          </p>
-        {/if}
+        </span>
+        {@render libraryChips(eLibraryIds, (id) => (eLibraryIds = toggle(eLibraryIds, id)))}
       </div>
 
-      <div class="mt-5 flex justify-end gap-2">
-        <button
-          class="rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
-          onclick={() => (editing = null)}>Cancel</button>
-        <button
-          class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-          disabled={saving} onclick={saveEdit}>{saving ? "Saving…" : "Save"}</button>
+      <div class="flex flex-wrap items-center gap-4">
+        <Checkbox label="facetable" bind:checked={eFacetable} />
+        <Checkbox label="sortable" bind:checked={eSortable} />
+        <Checkbox label="required" bind:checked={eRequired} />
       </div>
+      {#if eFacetable || eSortable}
+        <p class="-mt-1 text-xs text-warn">
+          Faceting/sorting takes effect after an index rebuild (P4-T6).
+        </p>
+      {/if}
+      {#if editError}
+        <Alert tone="danger" onDismiss={() => (editError = "")}>{editError}</Alert>
+      {/if}
     </div>
-  </div>
-{/if}
+  {/if}
+  {#snippet footer({ close })}
+    <Button onclick={close}>Cancel</Button>
+    <Button variant="primary" disabled={saving} onclick={saveEdit}>{saving ? "Saving…" : "Save"}</Button>
+  {/snippet}
+</Modal>
