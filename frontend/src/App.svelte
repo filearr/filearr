@@ -310,7 +310,7 @@
       <a
         href="#/{p}"
         aria-current={page === p ? "page" : undefined}
-        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-accent font-semibold text-accent-fg' : 'text-slate-500'}">{label}</a>
+        class="rounded-lg px-3 py-1 text-sm {page === p ? 'bg-accent font-semibold text-accent-fg' : 'text-muted hover:text-accent-text'}">{label}</a>
     {/snippet}
     <nav aria-label="Primary" class="flex min-w-0 flex-wrap gap-1 sm:ml-4">
       {@render navLink("search", "Search")}
@@ -328,15 +328,15 @@
     <div class="grow"></div>
     <div class="flex flex-wrap items-center gap-2">
     {#if me}
-      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-accent text-accent-fg' : 'bg-slate-100 text-slate-600 hover:text-accent-text dark:bg-slate-800 dark:text-slate-300'}"
+      <a class="rounded-lg px-2 py-1 text-xs {page === 'account' ? 'bg-accent text-accent-fg' : 'bg-surface-3 text-fg hover:text-accent-text'}"
         href="#/account"
         title={`${me.username} · ${me.global_role} — account settings`}>
-        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-accent-fg' : 'text-slate-600 dark:text-slate-400'}">({me.global_role})</span>
+        {me.display_name || me.username}<span class="ml-1 {page === 'account' ? 'text-accent-fg' : 'text-muted'}">({me.global_role})</span>
       </a>
       <button class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
         onclick={doLogout}>Sign out</button>
     {/if}
-    <label class="flex items-center gap-1 text-xs text-slate-500" title="Which network-path spelling to show for Open/Copy actions. smb:// suits Linux/macOS; \\host\share (UNC) suits Windows.">
+    <label class="flex items-center gap-1 text-xs text-muted" title="Which network-path spelling to show for Open/Copy actions. smb:// suits Linux/macOS; \\host\share (UNC) suits Windows.">
       <span class="hidden sm:inline">Paths</span>
       <select aria-label="Network path format"
         class="rounded-control border border-border-strong bg-surface px-2 py-1 text-sm text-fg"
@@ -417,10 +417,10 @@
     {#await import("./lib/ui/ConfirmHost.svelte") then m}<m.default />{:catch}{onConfirmHostFailed()}{/await}
   {/if}
 
-  <footer class="mt-12 border-t border-slate-200 py-4 text-xs text-slate-500 dark:border-slate-800">
+  <footer class="mt-12 border-t border-border py-4 text-xs text-muted">
     <span title={buildStamp ?? "no build stamp (dev)"}>
       Filearr {__APP_VERSION__}{#if buildStamp}
-        <span class="font-mono text-slate-600 dark:text-slate-400"> · build {buildStamp.slice(0, 12)}</span>
+        <span class="font-mono text-muted"> · build {buildStamp.slice(0, 12)}</span>
       {/if}
     </span>
     <span class="px-1">·</span>

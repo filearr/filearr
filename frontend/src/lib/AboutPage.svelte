@@ -85,8 +85,8 @@
     // A host tool below its recommended minimum: working, but not doing what
     // you think. Amber, matching the outdated chips on the Agents page — the
     // two surfaces report the same tools and must look the same doing it.
-    warn: "text-amber-600 dark:text-amber-400",
-    muted: "text-slate-600 dark:text-slate-500",
+    warn: "text-warn",
+    muted: "text-muted",
   };
   // D9: every URL on this page is server-reported; only http(s) becomes a link.
   const WEB = { schemes: ["http", "https"] };
@@ -104,7 +104,7 @@
 <div class="space-y-6">
   <header class="flex flex-wrap items-baseline gap-3">
     <h2 class="text-xl font-semibold text-slate-800 dark:text-slate-100">About this deployment</h2>
-    <p class="grow text-xs text-slate-500">
+    <p class="grow text-xs text-muted">
       Every version below is read from the running process, database or service —
       not from a configuration file. This page makes no outbound network
       requests; the links open upstream documentation in a new tab.
@@ -133,34 +133,34 @@
       <h3 class="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-200">Application</h3>
       <dl class="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500">Version</dt>
+          <dt class="w-36 shrink-0 text-muted">Version</dt>
           <dd class="font-mono break-all text-slate-800 dark:text-slate-100">{app.app_version}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500" title="Written into the image by the deploy script — the ground truth for which source this container is running.">Build stamp</dt>
+          <dt class="w-36 shrink-0 text-muted" title="Written into the image by the deploy script — the ground truth for which source this container is running.">Build stamp</dt>
           <dd class="font-mono break-all {app.build_stamp ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
             {app.build_stamp ?? "none (dev checkout)"}
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500">Python</dt>
+          <dt class="w-36 shrink-0 text-muted">Python</dt>
           <dd class="text-slate-800 dark:text-slate-100">
             {app.python_implementation}
             {app.python_version}
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500">Platform</dt>
+          <dt class="w-36 shrink-0 text-muted">Platform</dt>
           <dd class="break-all text-slate-800 dark:text-slate-100">{app.platform} · {app.machine}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500">License</dt>
+          <dt class="w-36 shrink-0 text-muted">License</dt>
           <dd>
             {@render ext(app.license_url, app.license)}
           </dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-slate-500" title="AGPL-3.0 §13: the Corresponding Source of this running instance.">Source</dt>
+          <dt class="w-36 shrink-0 text-muted" title="AGPL-3.0 §13: the Corresponding Source of this running instance.">Source</dt>
           <dd class="break-all">
             {@render ext(app.source_url, app.source_url)}
           </dd>
@@ -177,7 +177,7 @@
           {#if k.state !== "unset"}
             {@const bad = keyFingerprintBad(k)}
             <div class="flex gap-2">
-              <dt class="w-36 shrink-0 text-slate-500" title={KEY_FP_TITLES[name] ?? ""}>
+              <dt class="w-36 shrink-0 text-muted" title={KEY_FP_TITLES[name] ?? ""}>
                 {KEY_FP_LABELS[name] ?? name}
               </dt>
               <dd class="font-mono break-all {bad ? 'text-danger' : 'text-slate-800 dark:text-slate-100'}">
@@ -206,14 +206,14 @@
     <!-- Services ---------------------------------------------------------- -->
     <section class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
       <h3 class="mb-1 text-sm font-semibold text-slate-700 dark:text-slate-200">Services</h3>
-      <p class="mb-3 text-xs text-slate-500">
+      <p class="mb-3 text-xs text-muted">
         Probed live, one at a time. A service that cannot be reached says so here
         rather than blanking the row — that is itself the answer.
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[32rem] text-left text-xs">
           <caption class="sr-only">Services</caption>
-          <thead class="text-slate-500">
+          <thead class="text-muted">
             <tr><th scope="col" class="py-1 pr-4 font-medium">Service</th><th scope="col" class="py-1 pr-4 font-medium">Running version</th><th scope="col" class="py-1 font-medium">Notes</th></tr>
           </thead>
           <tbody>
@@ -237,14 +237,14 @@
       <h3 class="mb-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
         Backend dependencies (Python)
       </h3>
-      <p class="mb-3 text-xs text-slate-500">
+      <p class="mb-3 text-xs text-muted">
         The direct dependencies, with the version each is actually running in
         this process — not the version the project pins.
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[32rem] text-left text-xs">
           <caption class="sr-only">Backend dependencies (Python)</caption>
-          <thead class="text-slate-500">
+          <thead class="text-muted">
             <tr><th scope="col" class="py-1 pr-4 font-medium">Package</th><th scope="col" class="py-1 pr-4 font-medium">Running version</th><th scope="col" class="py-1 font-medium">Documentation</th></tr>
           </thead>
           <tbody>
@@ -256,7 +256,7 @@
                 </td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}">{cell.text}</td>
                 <td class="py-1.5 break-all">
-                  {@render ext(p.url, p.url, "text-slate-500")}
+                  {@render ext(p.url, p.url, "text-muted")}
                 </td>
               </tr>
             {/each}
@@ -271,7 +271,7 @@
         Frontend bundle
       </h3>
       {#if frontend}
-        <p class="mb-3 text-xs text-slate-500">
+        <p class="mb-3 text-xs text-muted">
           Recorded when this bundle was compiled — the deployed image ships only
           the built assets, so these are the versions baked into the JavaScript
           you are running. Built with Node
@@ -281,7 +281,7 @@
         <div class="overflow-x-auto">
           <table class="w-full min-w-[32rem] text-left text-xs">
             <caption class="sr-only">Frontend bundle packages</caption>
-            <thead class="text-slate-500">
+            <thead class="text-muted">
               <tr><th scope="col" class="py-1 pr-4 font-medium">Package</th><th scope="col" class="py-1 pr-4 font-medium">Built version</th><th scope="col" class="py-1 pr-4 font-medium">Role</th><th scope="col" class="py-1 font-medium">Documentation</th></tr>
             </thead>
             <tbody>
@@ -291,7 +291,7 @@
                   <td class="py-1.5 pr-4 font-mono text-slate-800 dark:text-slate-100">{p.version}</td>
                   <td class="py-1.5 pr-4 text-slate-600 dark:text-slate-400">{p.kind === "runtime" ? "ships in the bundle" : "build tooling"}</td>
                   <td class="py-1.5 break-all">
-                    {@render ext(p.url, p.url, "text-slate-500")}
+                    {@render ext(p.url, p.url, "text-muted")}
                   </td>
                 </tr>
               {/each}
@@ -310,18 +310,18 @@
       <h3 class="mb-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
         Extraction tools on this server
       </h3>
-      <p class="mb-3 text-xs text-slate-500">
+      <p class="mb-3 text-xs text-muted">
         External binaries the extractors shell out to. A missing tool disables
         only the capability that needs it; agents report their own tools
         separately on the Agents page. A version shown in
-        <span class="text-amber-600 dark:text-amber-400">amber</span> is below the
+        <span class="text-warn">amber</span> is below the
         minimum Filearr recommends — still working, but hover it for what that
         costs.
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[36rem] text-left text-xs">
           <caption class="sr-only">Extraction tools on this server</caption>
-          <thead class="text-slate-500">
+          <thead class="text-muted">
             <tr><th scope="col" class="py-1 pr-4 font-medium">Tool</th><th scope="col" class="py-1 pr-4 font-medium">Used for</th><th scope="col" class="py-1 pr-4 font-medium">Version</th><th scope="col" class="py-1 font-medium">Path</th></tr>
           </thead>
           <tbody>
@@ -331,7 +331,7 @@
                 <td class="py-1.5 pr-4">
                   {@render ext(t.url, t.name)}
                 </td>
-                <td class="py-1.5 pr-4 text-slate-500">{t.purpose}</td>
+                <td class="py-1.5 pr-4 text-muted">{t.purpose}</td>
                 <td class="py-1.5 pr-4 font-mono {TONE[cell.tone]}" title={cell.hint ?? ""}>{cell.text}</td>
                 <td class="py-1.5 font-mono break-all text-slate-600 dark:text-slate-400">{t.path ?? "—"}</td>
               </tr>
@@ -347,7 +347,7 @@
         <h3 class="mb-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
           Agent fleet ({about.agents.total})
         </h3>
-        <p class="mb-3 text-xs text-slate-500">
+        <p class="mb-3 text-xs text-muted">
           Which agent build each enrolled machine is running — a rollout that has
           not finished shows as more than one row.
         </p>
@@ -359,7 +359,7 @@
           <div class="overflow-x-auto">
             <table class="w-full min-w-[20rem] text-left text-xs">
               <caption class="sr-only">Agent versions</caption>
-              <thead class="text-slate-500">
+              <thead class="text-muted">
                 <tr><th scope="col" class="py-1 pr-4 font-medium">Agent version</th><th scope="col" class="py-1 font-medium">Agents</th></tr>
               </thead>
               <tbody>
@@ -384,7 +384,7 @@
       <h3 class="mb-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
         Semantic-search embedding model
       </h3>
-      <p class="mb-3 text-xs text-slate-500">
+      <p class="mb-3 text-xs text-muted">
         {embeddingSummary(e).text}. {e.license_note}
       </p>
       <div class="overflow-x-auto">
@@ -392,18 +392,18 @@
           <caption class="sr-only">Embedding model details</caption>
           <tbody>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <th scope="row" class="font-normal w-48 py-1.5 pr-4 text-slate-500">Model</th>
+              <th scope="row" class="font-normal w-48 py-1.5 pr-4 text-muted">Model</th>
               <td class="py-1.5 text-slate-800 dark:text-slate-100">{e.name} · {e.dimensions} dimensions</td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Hugging Face repository</th>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-muted">Hugging Face repository</th>
               <td class="py-1.5 break-all">
                 {@render ext(e.model_url, e.repo)}
                 <span class="text-slate-600 dark:text-slate-400"> · {e.file}</span>
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Cached revision</th>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-muted">Cached revision</th>
               <td class="py-1.5 break-all">
                 {#if e.revision}
                   {@render ext(e.revision_url, shortSha(e.revision), "font-mono", e.revision)}
@@ -414,7 +414,7 @@
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">Cached file</th>
+              <th scope="row" class="font-normal py-1.5 pr-4 text-muted">Cached file</th>
               <td class="py-1.5 break-all">
                 {#if e.downloaded}
                   <span class="text-slate-800 dark:text-slate-100">{formatBytes(e.size)}</span>
@@ -425,7 +425,7 @@
               </td>
             </tr>
             <tr class="border-t border-slate-100 dark:border-slate-800">
-              <th scope="row" class="font-normal py-1.5 pr-4 text-slate-500">
+              <th scope="row" class="font-normal py-1.5 pr-4 text-muted">
                 <span
                   class="cursor-help underline decoration-dotted decoration-slate-400 underline-offset-2"
                   title="When THIS machine downloaded the file. The model's publication date is not shown because determining it would mean calling Hugging Face, and this page makes no outbound requests. Use the revision link for exact provenance.">

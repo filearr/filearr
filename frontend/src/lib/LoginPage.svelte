@@ -102,7 +102,8 @@
   }
 </script>
 
-<div class="mx-auto mt-24 max-w-sm rounded-panel border border-border p-6 shadow-sm">
+<!-- <main>: the login wall renders outside the app shell's main landmark. -->
+<main class="mx-auto mt-24 max-w-sm rounded-panel border border-border p-6 shadow-sm">
   <h1 class="mb-1 text-2xl font-bold text-accent-text">Filearr</h1>
   <p class="mb-4 text-sm text-muted">
     {isBootstrap ? "First run — create the administrator account." : "Sign in to continue."}
@@ -155,4 +156,4 @@
       {busy ? "Please wait…" : isBootstrap ? "Create admin & sign in" : "Sign in"}
     </Button>
   </form>
-</div>
+</main>

@@ -181,7 +181,7 @@
   <div class="mt-4 space-y-8 text-sm">
     <!-- Profile -->
     <section>
-      <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Profile</h4>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Profile</h3>
       <div class="flex max-w-md flex-col gap-3">
         <Field label="Username"
           hint={isLocal ? "This is your sign-in name." : `Managed by your identity provider (${providerLabel}).`}>
@@ -215,7 +215,7 @@
 
     <!-- Password -->
     <section>
-      <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Password</h4>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Password</h3>
       {#if !isLocal}
         <p class="text-xs text-muted">
           Your password is managed by your identity provider ({providerLabel}); change it there.
@@ -249,7 +249,7 @@
 
     <!-- Appearance -->
     <section>
-      <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Appearance defaults</h4>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Appearance defaults</h3>
       <div class="flex max-w-md flex-col gap-3">
         <Field label="Theme" class="w-48">
           <Select bind:value={mode} onchange={previewTheme}>
@@ -291,7 +291,7 @@
 
     <!-- Session -->
     <section>
-      <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Session</h4>
+      <h3 class="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Session</h3>
       {#if timeoutsErr}
         <StateBlock state="error" compact message={timeoutsErr} onRetry={loadTimeouts} />
       {:else if !timeouts}
