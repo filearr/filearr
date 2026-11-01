@@ -1,23 +1,11 @@
-<script module lang="ts">
-  import { semanticStats } from "./api";
-
-  // One semantic-enabled probe per page load, shared by every ItemDetail
-  // instance: the flag can't change without a server restart, so a cached
-  // promise avoids a /stats round-trip on every detail open.
-  let semanticProbe: Promise<boolean> | null = null;
-  function semanticEnabled(): Promise<boolean> {
-    semanticProbe ??= semanticStats()
-      .then((s) => !!s?.enabled)
-      .catch(() => false);
-    return semanticProbe;
-  }
-</script>
-
 <script lang="ts">
+  import { fmtBytes, fmtDate, fmtDateTime, fmtUtc } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
   import * as safeStorage from "./safeStorage";
   import { safeHref } from "./pathlinks";
+  import { semanticEnabled } from "./semanticProbe";
+  import { cachedCustomFields } from "./configCache";
   import {
     type ItemPermissions,
     type PermissionAce,
@@ -27,7 +15,6 @@
     getItem,
     getItemPermissions,
     itemCopies,
-    listCustomFields,
     patchItem,
     touchItem,
     similarItems,
@@ -42,26 +29,33 @@
   import RawView from "./RawView.svelte";
   import Breadcrumbs from "./Breadcrumbs.svelte";
   import { gotoBrowse } from "./routes";
-  import { cardFor, cardLabel } from "./cards/registry";
+  import { cardComponent, cardLabel } from "./cards/registry";
   import ArchiveSection from "./ArchiveSection.svelte";
   import Thumb from "./Thumb.svelte";
+  import { thumbable } from "./thumbPolicy";
   import RetrievePanel from "./RetrievePanel.svelte";
   import AgentStatusPanel from "./AgentStatusPanel.svelte";
-  import { Alert, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm } from "./ui";
+  import { Alert, Badge, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm, toneForStatus } from "./ui";
 
   let {
     id,
     onClose,
     onOpen,
+    onChanged,
   }: {
     id: string;
     onClose: () => void;
     // Optional: navigate this panel to another item (similar-items tiles).
     // Parents pass their selected-id setter; without it tiles are inert labels.
     onOpen?: (id: string) => void;
+    // A17: called once per successful save with the PATCH response, so the
+    // parent's row (search hit, browse entry) shows the new title/year/tags.
+    onChanged?: (item: ItemRecord) => void;
   } = $props();
 
   let item = $state<ItemRecord | null>(null);
+  // The item whose preview failed for good (Thumb onFail): its box collapses.
+  let previewFailedFor = $state<string | null>(null);
   let error = $state("");
   // Mount-style: the parent mounts this per item and unmounts it from onClose.
   let open = $state(true);
@@ -125,8 +119,33 @@
   // falls back to the generic key-facts card). Rendered via native Svelte-5
   // dynamic-component syntax below — no <svelte:component>.
   const mediaType = $derived(str("file_category") ?? "");
-  const CardComponent = $derived(cardFor(mediaType));
-  const cardTabLabel = $derived(cardLabel(mediaType));
+  const fileGroup = $derived(str("file_group"));
+  // Ruling 5: keyed by backend category; spreadsheets are a document group.
+  const CardComponent = $derived(cardComponent(mediaType, fileGroup));
+  const cardTabLabel = $derived(cardLabel(mediaType, fileGroup));
+
+  // A15 facts header. Reads `item`, which saveEdit replaces with the PATCH
+  // response, so a saved title/year/tags change shows here at once.
+  const factFilename = $derived(str("filename") ?? relPath.split("/").pop() ?? "");
+  const factTitle = $derived.by(() => {
+    const t = str("title")?.trim();
+    return t && t !== factFilename ? t : "";
+  });
+  const factYear = $derived(typeof item?.year === "number" ? item.year : null);
+  const factSize = $derived(typeof item?.size === "number" ? item.size : null);
+  // GET /items/{id} sends `mtime` as an ISO string (search hits: epoch
+  // seconds); format.ts reads both.
+  const factMtime = $derived(
+    typeof item?.mtime === "number" || (typeof item?.mtime === "string" && item.mtime)
+      ? (item.mtime as number | string)
+      : null,
+  );
+  const factTags = $derived(
+    Array.isArray(item?.tags)
+      ? (item.tags as unknown[]).filter((t): t is string => typeof t === "string" && t !== "")
+      : [],
+  );
+  const factStatus = $derived(str("status"));
   // IN-T4: editing is a THIRD tab rather than an inline-per-field affordance.
   // The card and Raw views are dense read-only layouts; sprinkling pencil icons
   // through them would mean redesigning both, whereas a tab reuses the switcher
@@ -293,19 +312,25 @@
     // A16: another item may open mid-save; the PATCH still lands server-side,
     // but its response must not overwrite the newer item's panel.
     const mine = itemToken;
+    let saved: ItemRecord | null = null;
     try {
       // The PATCH response IS the updated projection, so the panel refreshes
       // without a second GET (and without waiting on the async index sync).
       const r = await patchItem(id, patch);
-      if (mine !== itemToken) return;
-      item = r;
-      active = "card";
+      saved = r;
+      if (mine === itemToken) {
+        item = r;
+        active = "card";
+      }
     } catch (e) {
-      if (mine !== itemToken) return;
-      editError = errorMessage(e, { verb: "edit this item" });
+      if (mine === itemToken) editError = errorMessage(e, { verb: "edit this item" });
     } finally {
       if (mine === itemToken) saving = false;
     }
+    // Outside the try: a throwing parent callback cannot turn a save that
+    // landed into "edit failed". Told even if another item opened meanwhile —
+    // the parent matches its row by the response's id.
+    if (saved) onChanged?.(saved);
   }
 
   // P10-T3/T10: agent-hosted items (library owned by an agent) surface the
@@ -388,19 +413,6 @@
   }
   const simPct = (h: Record<string, unknown>): string =>
     typeof h.similarity === "number" ? `${(h.similarity * 100).toFixed(1)}%` : "—";
-  const simSize = (h: Record<string, unknown>): string => {
-    const n = h.size;
-    if (typeof n !== "number") return "—";
-    if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GiB`;
-    if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MiB`;
-    if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KiB`;
-    return `${n} B`;
-  };
-  const simWhen = (h: Record<string, unknown>): string => {
-    const t = h.mtime;
-    return typeof t === "number" ? new Date(t * 1000).toLocaleDateString() : "—";
-  };
-
   async function toggleSimilar() {
     similarOpen = !similarOpen;
     if (!similarOpen || similarLoaded || similarLoading) return;
@@ -467,7 +479,7 @@
     saving = false; // a save for the previous item must not leave the spinner stuck
     // Custom-field DEFINITIONS for the edit form. Same best-effort fetch pattern
     // as KeyFactsCard; a failure just means no custom-field rows to edit.
-    listCustomFields(ac.signal)
+    cachedCustomFields(ac.signal)
       .then((d) => live() && (defs = d))
       .catch(() => live() && (defs = []));
     getItem(id, ac.signal)
@@ -554,11 +566,37 @@
     </div>
 
     {#if item}
-      <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
-           first request). Hides itself on miss (skipped type / not-yet-generated). -->
-      <div class="mb-3 flex justify-center">
-        <Thumb id={String(item.id)} tier="preview" size="max-h-64 w-auto" rounded="rounded-lg" />
+      <!-- A15 facts header: what the file is, before the per-type card. -->
+      <div class="mb-3 space-y-1.5">
+        <p class="min-w-0 break-words font-medium">{factFilename}
+          {#if factYear != null}<span class="font-normal text-muted">({factYear})</span>{/if}</p>
+        {#if factTitle}<p class="min-w-0 break-words text-sm">{factTitle}</p>{/if}
+        <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+          {#if factSize != null}<span class="tabular-nums">{fmtBytes(factSize)}</span>{/if}
+          {#if factMtime != null}
+            <span class="tabular-nums" title={fmtUtc(factMtime)}>Modified {fmtDateTime(factMtime)}</span>
+          {/if}
+          {#if factStatus && factStatus !== "active"}<Badge tone={toneForStatus(factStatus)}>{factStatus}</Badge>{/if}
+          {#if mediaType}<Badge>{mediaType}</Badge>{/if}
+          {#if fileGroup}<Badge>{fileGroup}</Badge>{/if}
+        </p>
+        {#if factTags.length}
+          <ul class="flex flex-wrap gap-1" aria-label="Tags">
+            {#each factTags as t (t)}<li><Badge>{t}</Badge></li>{/each}
+          </ul>
+        {/if}
       </div>
+      <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
+           first request), only for items the server can render (thumbPolicy);
+           anything else has no preview box at all, and the box collapses when
+           the picture fails for good (audio without artwork): onFail. -->
+      {#if thumbable(mediaType, factFilename) && previewFailedFor !== String(item.id)}
+        <div class="mb-3 flex justify-center">
+          <Thumb id={String(item.id)} tier="preview" category={mediaType} filename={factFilename}
+            size="h-64 w-full max-w-md" rounded="rounded-lg" fit="contain"
+            onFail={() => (previewFailedFor = String(item?.id))} />
+        </div>
+      {/if}
     {/if}
 
     <!-- P10-T10 agent identity + online status + inline Verify (freshness updates
@@ -893,8 +931,8 @@
                         <td class="max-w-[16rem] truncate py-1 pr-2" title={hitLabel(h)}>{hitLabel(h)}</td>
                         <td class="pr-2 font-mono">{simPct(h)}</td>
                         <td class="pr-2 text-muted">{h.file_group ?? h.file_category ?? "—"}</td>
-                        <td class="pr-2 text-muted">{simSize(h)}</td>
-                        <td class="pr-2 text-muted">{simWhen(h)}</td>
+                        <td class="pr-2 text-muted">{typeof h.size === "number" ? fmtBytes(h.size) : "—"}</td>
+                        <td class="pr-2 text-muted">{fmtDate(typeof h.mtime === "number" ? h.mtime : null)}</td>
                         <td class="max-w-[18rem] truncate font-mono text-2xs text-muted" title={hitPath(h)}>{hitPath(h)}</td>
                       </tr>
                     {/each}
@@ -912,7 +950,9 @@
                       title={hitPath(h)}
                       onclick={() => void openSimilar(String(h.id))}>
                       <div class="flex h-20 items-center justify-center overflow-hidden">
-                        <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
+                        <Thumb id={String(h.id)} tier="grid" category={typeof h.file_category === "string" ? h.file_category : null}
+                          filename={typeof h.filename === "string" ? h.filename : null}
+                          size="h-20 w-full" rounded="rounded" fit="contain" />
                       </div>
                       <p class="mt-1 truncate text-xs">{hitLabel(h)}
                         {#if typeof h.similarity === "number"}<span class="ml-1 text-2xs text-muted">{simPct(h)}</span>{/if}</p>

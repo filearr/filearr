@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import { fmtBytes, fmtDate } from "./format";
   import { onDestroy } from "svelte";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { latest } from "./latest";
@@ -18,9 +19,12 @@
   // pure hash mutation (App owns the router; this component reads props and emits
   // hash changes via gotoBrowse). All names render as text (untrusted).
   import {
+    canWrite,
     libraryTree,
     listLibraries,
     targetedScan,
+    type AuthPrincipal,
+    type ItemRecord,
     type Library,
     type TreeResponse,
     errorMessage,
@@ -31,10 +35,15 @@
   import { gotoBrowse } from "./routes";
   import Breadcrumbs from "./Breadcrumbs.svelte";
   import Thumb from "./Thumb.svelte";
-  import { Alert, Button, Checkbox, Field, Input, StateBlock } from "./ui";
+  import { Alert, Badge, Button, Checkbox, Field, Input, StateBlock, toneForStatus } from "./ui";
   import { toast } from "./ui/toast.svelte";
 
-  let { libraryId, path }: { libraryId: string; path: string } = $props();
+  let {
+    libraryId,
+    path,
+    me = null,
+    authDisabled = false,
+  }: { libraryId: string; path: string; me?: AuthPrincipal | null; authDisabled?: boolean } = $props();
 
   const LIMIT = 100;
 
@@ -53,6 +62,12 @@
   // relative path) — no "Open" link then, only Copy path.
   const canOpen = $derived(!!buildOpenUrl(sharePrefix));
   let libName = $state<string>("");
+  // A21: an agent-hosted library is scanned by its agent (the scan endpoint
+  // answers 422), and scans need the write scope (write or admin role): hide the
+  // controls in both cases.
+  let libAgentId = $state<string | null>(null);
+  const isWriter = $derived(authDisabled || canWrite(me));
+  const canScan = $derived(isWriter && !libAgentId);
   let copied = $state<string | null>(null);
   let copyTimer: ReturnType<typeof setTimeout>;
   let openFolderMenu = $state<string | null>(null);
@@ -102,6 +117,14 @@
     const p = path;
     const off = offset;
     error = "";
+    if (resolvedFor !== lib) {
+      // A40: a new library never borrows the previous one's name or share
+      // prefixes, even if its lookup fails.
+      libName = "";
+      shareUrlRaw = null;
+      shareUncRaw = null;
+      libAgentId = null;
+    }
     try {
       const r = await treeLoader.run(lib, p, off);
       if (r === undefined) return;
@@ -109,6 +132,7 @@
         shareUrlRaw = r.libInfo?.share_prefix_effective ?? r.libInfo?.share_prefix ?? null;
         shareUncRaw = r.libInfo?.share_unc_effective ?? null;
         libName = r.libInfo?.name ?? "";
+        libAgentId = r.libInfo?.source_agent_id ?? null;
         resolvedFor = lib;
       }
       tree = r.res;
@@ -117,6 +141,22 @@
       tree = null;
       error = errorMessage(e);
     }
+  }
+
+  // A17: a save in ItemDetail mirrors the PATCH response's title/year into the
+  // matching row (TreeItem carries no tags).
+  function onItemChanged(rec: ItemRecord) {
+    if (!tree) return;
+    const id = typeof rec.id === "string" ? rec.id : "";
+    tree.items = tree.items.map((it) =>
+      it.id === id
+        ? {
+            ...it,
+            title: typeof rec.title === "string" ? rec.title : null,
+            year: typeof rec.year === "number" ? rec.year : null,
+          }
+        : it,
+    );
   }
 
   // Reset pagination whenever the target folder changes, then (re)load. Reading
@@ -205,21 +245,48 @@
     }
   }
 
+  // A40: the folder menu closes on Escape (focus back on its ⋯ toggle) and on
+  // a press anywhere outside its own row. The document listener lives only
+  // while a menu is open.
+  function closeFolderMenu(restoreFocus = false) {
+    const name = openFolderMenu;
+    openFolderMenu = null;
+    if (restoreFocus && name !== null) {
+      document
+        .querySelector<HTMLElement>(`[data-folder-menu-root="${CSS.escape(name)}"] [data-folder-menu-toggle]`)
+        ?.focus();
+    }
+  }
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape" && openFolderMenu !== null) {
+      e.preventDefault();
+      closeFolderMenu(true);
+    }
+  }
+  $effect(() => {
+    const name = openFolderMenu;
+    if (name === null) return;
+    const onDown = (e: PointerEvent) => {
+      const root = e.target instanceof Element ? e.target.closest("[data-folder-menu-root]") : null;
+      if (root?.getAttribute("data-folder-menu-root") === name) return;
+      closeFolderMenu();
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  });
+
+  // A40: Prev/Next bring the top of the file list back into view.
+  let filesTop = $state<HTMLElement | null>(null);
+  function gotoPage(next: number) {
+    offset = next;
+    filesTop?.scrollIntoView({ block: "start" });
+  }
+
   const shownFrom = $derived(tree && tree.total_items > 0 ? offset + 1 : 0);
   const shownTo = $derived(tree ? Math.min(offset + LIMIT, tree.total_items) : 0);
-
-  function fmtSize(n: number): string {
-    if (n < 1024) return `${n} B`;
-    const units = ["KB", "MB", "GB", "TB"];
-    let v = n / 1024;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(1)} ${units[i]}`;
-  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="mx-auto max-w-5xl">
   <div class="mt-2 rounded-panel border border-border p-3">
@@ -234,15 +301,17 @@
           onNavigate={(p) => gotoBrowse(libraryId, p)}
         />
       </div>
-      <Button
-        size="sm"
-        class="shrink-0"
-        aria-expanded={showScanForm}
-        title="Rescan this folder, or a specific path under this library, without a full library scan"
-        onclick={() => (showScanForm = !showScanForm)}>Targeted scan</Button>
+      {#if canScan}
+        <Button
+          size="sm"
+          class="shrink-0"
+          aria-expanded={showScanForm}
+          title="Rescan this folder, or a specific path under this library, without a full library scan"
+          onclick={() => (showScanForm = !showScanForm)}>Targeted scan</Button>
+      {/if}
     </div>
 
-    {#if showScanForm}
+    {#if showScanForm && canScan}
       <form class="mt-3 border-t border-border pt-3" onsubmit={submitScanForm}>
         <div class="flex flex-wrap items-end gap-2">
           <Field label="Path under the library root (blank = whole library; a file or folder)" class="min-w-[16rem] grow">
@@ -271,7 +340,11 @@
   {:else if !tree}
     <StateBlock state="loading" class="mt-6" />
   {:else}
-    {#if tree.folders.length === 0 && tree.items.length === 0}
+    {#if offset > 0 && tree.items.length === 0 && tree.total_items > 0}
+      <!-- Item 16: a later page emptied by removals is not an empty folder;
+           Prev below leads back to the files. -->
+      <StateBlock state="empty" class="mt-6" message="No files on this page." />
+    {:else if tree.folders.length === 0 && tree.items.length === 0}
       <StateBlock
         state="empty"
         class="mt-6"
@@ -282,7 +355,7 @@
       <h2 class="mt-6 text-sm font-semibold text-muted">Folders</h2>
       <ul class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {#each tree.folders as f (f.name)}
-          <li class="relative flex items-center gap-2 rounded-panel border border-border px-3 py-2">
+          <li class="relative flex items-center gap-2 rounded-panel border border-border px-3 py-2" data-folder-menu-root={f.name}>
             <button
               type="button"
               class="flex min-w-0 grow items-center gap-2 text-left"
@@ -296,6 +369,7 @@
               class="rounded-control px-1 text-xs text-muted hover:bg-surface-3 hover:text-fg"
               aria-label="Folder actions for {f.name}"
               aria-expanded={openFolderMenu === f.name}
+              data-folder-menu-toggle
               title="Folder actions"
               onclick={() => (openFolderMenu = openFolderMenu === f.name ? null : f.name)}>⋯</button>
             {#if openFolderMenu === f.name}
@@ -321,18 +395,22 @@
                     )}>
                   {copied === `folder-${f.name}` ? "Copied!" : "Copy path"}
                 </button>
-                <button
-                  type="button"
-                  class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
-                  onclick={() => scanTarget(folderRel(f.name), true, f.name)}>
-                  Scan folder + subfolders
-                </button>
-                <button
-                  type="button"
-                  class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
-                  onclick={() => scanTarget(folderRel(f.name), false, f.name)}>
-                  Scan this folder only
-                </button>
+                {#if canScan}
+                  <button
+                    type="button"
+                    class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
+                    onclick={() => scanTarget(folderRel(f.name), true, f.name)}>
+                    Scan folder + subfolders
+                  </button>
+                  <button
+                    type="button"
+                    class="block w-full rounded-control px-2 py-1 text-left hover:bg-surface-3"
+                    onclick={() => scanTarget(folderRel(f.name), false, f.name)}>
+                    Scan this folder only
+                  </button>
+                {:else if isWriter && libAgentId}
+                  <p class="max-w-[16rem] px-2 py-1 text-muted">Scans run from the Agents page for agent-hosted libraries</p>
+                {/if}
               </div>
             {/if}
           </li>
@@ -341,7 +419,7 @@
     {/if}
 
     {#if tree.items.length > 0}
-      <div class="mt-6 flex items-baseline gap-3">
+      <div class="mt-6 flex scroll-mt-4 items-baseline gap-3" bind:this={filesTop}>
         <h2 class="text-sm font-semibold text-muted">Files</h2>
         <span class="text-xs text-muted">showing {shownFrom}–{shownTo} of {tree.total_items}</span>
         <span class="grow"></span>
@@ -365,12 +443,13 @@
               type="button"
               class="flex flex-col overflow-hidden rounded-panel border border-border text-left hover:border-border-strong"
               onclick={() => (selected = it.id)}>
-              <Thumb id={it.id} size="aspect-square w-full h-auto" rounded="rounded-none" />
+              <Thumb id={it.id} category={it.file_category} filename={it.filename} size="aspect-square w-full h-auto" rounded="rounded-none" />
               <div class="flex flex-col gap-1 p-2">
-                <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
+                <span class="truncate text-sm font-medium" title={it.filename}>{it.title || it.filename}</span>
                 <span class="flex items-center gap-1">
                   <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs">{it.file_category}</span>
-                  <span class="ml-auto shrink-0 text-2xs text-muted">{fmtSize(it.size)}</span>
+                  {#if it.status && it.status !== "active"}<Badge tone={toneForStatus(it.status)}>{it.status}</Badge>{/if}
+                  <span class="ml-auto shrink-0 text-2xs text-muted">{fmtBytes(it.size)}</span>
                 </span>
               </div>
             </button>
@@ -385,20 +464,24 @@
                 type="button"
                 class="flex w-full items-center gap-3 py-3 text-left hover:bg-surface-3"
                 onclick={() => (selected = it.id)}>
-                <Thumb id={it.id} size="h-9 w-9" />
+                <Thumb id={it.id} category={it.file_category} filename={it.filename} size="h-9 w-9" />
                 <span class="rounded-control bg-surface-3 px-2 py-0.5 text-xs">{it.file_category}</span>
-                <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
+                <span class="truncate font-medium" title={it.filename}>{it.title || it.filename}</span>
                 {#if it.year}<span class="text-sm text-muted">({it.year})</span>{/if}
+                {#if it.status && it.status !== "active"}<Badge tone={toneForStatus(it.status)}>{it.status}</Badge>{/if}
                 <span class="grow"></span>
-                <span class="shrink-0 text-xs text-muted">{fmtSize(it.size)}</span>
+                {#if it.mtime != null}<span class="shrink-0 text-xs text-muted">{fmtDate(it.mtime)}</span>{/if}
+                <span class="shrink-0 text-xs text-muted">{fmtBytes(it.size)}</span>
               </button>
-              <Button
-                size="sm"
-                variant="ghost"
-                class="shrink-0"
-                title="Rescan just this file"
-                aria-label="Rescan {it.filename}"
-                onclick={() => scanTarget(it.rel_path, false, it.filename, true)}>Rescan</Button>
+              {#if canScan}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="shrink-0"
+                  title="Rescan just this file"
+                  aria-label="Rescan {it.filename}"
+                  onclick={() => scanTarget(it.rel_path, false, it.filename, true)}>Rescan</Button>
+              {/if}
             </div>
             {#if rowErrors[it.rel_path]}
               <Alert tone="danger" class="mb-2" onDismiss={() => setRowError(it.rel_path, "")}>{rowErrors[it.rel_path]}</Alert>
@@ -407,17 +490,18 @@
         {/each}
       </ul>
       {/if}
+    {/if}
 
-      {#if tree.total_items > LIMIT}
-        <div class="mt-3 flex items-center gap-2">
-          <Button
-            disabled={offset === 0}
-            onclick={() => (offset = Math.max(0, offset - LIMIT))}>Prev</Button>
-          <Button
-            disabled={offset + LIMIT >= tree.total_items}
-            onclick={() => (offset = offset + LIMIT)}>Next</Button>
-        </div>
-      {/if}
+    <!-- Outside the Files block (A40): a page emptied by removals still offers Prev. -->
+    {#if tree.total_items > LIMIT || offset > 0}
+      <div class="mt-3 flex items-center gap-2">
+        <Button
+          disabled={offset === 0}
+          onclick={() => gotoPage(Math.max(0, offset - LIMIT))}>Prev</Button>
+        <Button
+          disabled={offset + LIMIT >= tree.total_items}
+          onclick={() => gotoPage(offset + LIMIT)}>Next</Button>
+      </div>
     {/if}
   {/if}
 
@@ -427,7 +511,11 @@
          (stale chunk after a deploy) is pinned to the viewport instead, so it
          is seen wherever the user has scrolled to. -->
     {#await loadItemDetail() then m}
-      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+      <m.default
+        id={selected}
+        onClose={() => (selected = null)}
+        onOpen={(nid) => (selected = nid)}
+        onChanged={onItemChanged} />
     {:catch}
       <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
         <Alert tone="danger">

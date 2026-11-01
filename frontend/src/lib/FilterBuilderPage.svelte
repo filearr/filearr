@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import { onMount } from "svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import DslHelp from "./DslHelp.svelte";
@@ -105,16 +106,10 @@
   const hasRows = $derived(!rawMode && conditions.length > 0);
 
   const BYTE_COLUMNS = new Set(["size"]);
-  function fmtBytes(b: number): string {
-    if (!isFinite(b) || b <= 0) return "0";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-  }
   function cell(row: Record<string, unknown>, col: string): string {
     const v = row[col];
     if (v == null) return "";
-    if (BYTE_COLUMNS.has(col) && typeof v === "number") return fmtBytes(v);
+    if (BYTE_COLUMNS.has(col) && typeof v === "number") return fmtBytes(v, { zero: "0" });
     return String(v);
   }
 
@@ -583,7 +578,7 @@
 
         <Button size="sm" class="mt-3" onclick={addRow}>+ Add condition</Button>
         <p class="mt-1 text-xs text-muted">Conditions are combined with AND. (OR groups aren't in the query grammar yet.)</p>
-        <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="search" />
+        <DslHelp onInsert={(frag) => { rawQuery = (conditionsToDsl(conditions) + " " + frag).trim(); rawMode = true; }} context="reports" />
       {/if}
 
       <!-- compiled DSL preview -->

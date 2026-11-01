@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import { onMount } from "svelte";
   import ItemDetail from "./ItemDetail.svelte";
   import DslHelp from "./DslHelp.svelte";
@@ -66,16 +67,10 @@
   const BYTE_COLUMNS = new Set(["size", "total_bytes", "wasted_bytes"]);
   const RUN_LIMIT = 200;
 
-  function fmtBytes(b: number): string {
-    if (!isFinite(b) || b <= 0) return "0";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-  }
   function cell(row: Record<string, unknown>, col: string): string {
     const v = row[col];
     if (v == null) return "";
-    if (BYTE_COLUMNS.has(col) && typeof v === "number") return fmtBytes(v);
+    if (BYTE_COLUMNS.has(col) && typeof v === "number") return fmtBytes(v, { zero: "0" });
     return typeof v === "object" ? JSON.stringify(v) : String(v);
   }
 

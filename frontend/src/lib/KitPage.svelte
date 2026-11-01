@@ -5,6 +5,7 @@
   links here.
 -->
 <script lang="ts">
+  import { fmtBytes } from "./format";
   import {
     Alert,
     Badge,
@@ -209,20 +210,9 @@
   let tableLoading = $state(false);
   let tableError = $state(false);
   let tableEmpty = $state(false);
-
-  function formatBytes(n: number): string {
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let v = n;
-    let i = 0;
-    while (v >= 1024 && i < units.length - 1) {
-      v /= 1024;
-      i++;
-    }
-    return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-  }
 </script>
 
-{#snippet sizeCell(f: MediaFile)}<span class="tabular-nums">{formatBytes(f.size)}</span>{/snippet}
+{#snippet sizeCell(f: MediaFile)}<span class="tabular-nums">{fmtBytes(f.size)}</span>{/snippet}
 {#snippet statusCell(f: MediaFile)}<Badge tone={toneForStatus(f.status)}>{f.status}</Badge>{/snippet}
 
 <div class="flex flex-col gap-6 pb-8">

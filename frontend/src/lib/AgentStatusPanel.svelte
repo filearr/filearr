@@ -6,6 +6,7 @@
   // ``/agent-status`` until ``last_verified_at`` advances (freshness updates in
   // place — NO full transfer) or a timeout, which then messages clearly (offline
   // agents queue the check; never a bare spinner). Mirrors RetrievePanel's tone.
+  import { relTime } from "./format";
   import { onDestroy } from "svelte";
   import {
     friendlyError,
@@ -31,19 +32,6 @@
   const inFlight = $derived(status?.verify_in_flight === true);
   const lastVerifiedAt = $derived(status?.last_verified_at ?? null);
   const lastSeenAt = $derived(status?.last_seen_at ?? null);
-
-  function relTime(iso: string | null | undefined): string {
-    if (!iso) return "";
-    const then = new Date(iso).getTime();
-    if (Number.isNaN(then)) return "";
-    const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
-  }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

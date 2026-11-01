@@ -22,9 +22,11 @@ export function toneClasses(tone: Tone): string {
 // Exact-word lookup rather than substring matching, so e.g. "disabled" never
 // collides with "enabled" and unknown statuses fall through to neutral.
 const STATUS_TONES = new Map<string, Tone>();
+// "missing" is an item tombstoned by a scan (file gone from disk): a warning,
+// not an error — it may come back (ItemDetail / Browse status badges).
 const groups: [Tone, string[]][] = [
   ["danger", ["critical", "error", "failed", "failure", "fatal", "offline", "revoked", "disabled"]],
-  ["warn", ["warning", "warn", "degraded", "stale", "pending", "queued", "held", "stopped", "stopping", "cancelled", "canceled"]],
+  ["warn", ["warning", "warn", "degraded", "stale", "pending", "queued", "held", "stopped", "stopping", "cancelled", "canceled", "missing"]],
   ["ok", ["ok", "success", "succeeded", "completed", "done", "healthy", "online", "active", "enabled", "verified", "finished"]],
   ["info", ["running", "info", "in_progress", "scanning", "syncing"]],
 ];

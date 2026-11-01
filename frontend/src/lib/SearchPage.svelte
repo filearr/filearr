@@ -13,6 +13,7 @@
 </script>
 
 <script lang="ts">
+  import { fmtBytes, fmtDate, fmtUtc } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { listKeyAction } from "./searchKeys";
   import * as safeStorage from "./safeStorage";
@@ -35,7 +36,6 @@
     copyCounts as apiCopyCounts,
     searchTags,
     searchPrincipals,
-    semanticStats,
     fileGroups as apiFileGroups,
     getTaxonomy,
     type SearchResponse,
@@ -43,30 +43,51 @@
     type SavedSearch,
     type TagSuggestion,
     type ItemPatchBody,
+    type ItemRecord,
     errorMessage,
   } from "./api";
   import {
-    buildPatches,
     chunk,
-    mergeSummaries,
     rangeIndices,
-    summarizeResults,
     type BulkFailure,
     type BulkOps,
     type BulkSummary,
     type BulkTarget,
     type FieldTarget,
   } from "./bulkEdit";
+  import { createSettleGate, runBulk } from "./bulkOrchestrate";
   import { buildDisplayPath } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
-  import { encodeSearchHash, parseSearchHash } from "./searchparams";
+  import { encodeSearchHash, isSearchHash, parseSearchHash } from "./searchparams";
+  import { createHashSync, type HashMode } from "./searchHash";
+  import {
+    HASH_RE,
+    SORTS,
+    UI_ONLY_PARAMS,
+    applyParamsPure,
+    clearRangePair,
+    currentParamsPure,
+    pairPending,
+    pendingRangeChips,
+    uiParamsPure,
+    type RangePair,
+    type UiState,
+  } from "./searchState";
+  import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
+  import {
+    boundsProbePairs,
+    boundsProbeParams,
+    createPageSession,
+    mergeHits,
+    parseHighlight,
+    type Seg,
+  } from "./searchResults";
+  import { semanticEnabled as probeSemantic } from "./semanticProbe";
   import {
     MAP_POINT_CAP,
-    boxParams,
     formatBox,
     geoOf,
-    parseBox,
     type GeoBox,
     type MapPoint,
   } from "./map/geo";
@@ -100,21 +121,29 @@
     { key: "document", label: "Document", description: "" },
     { key: "subtitle", label: "Subtitle", description: "" },
   ];
-  // Explicit sort options (P3-T7 deep-linkable). "" = relevance; "newest" uses the
-  // FIX-3 clamped mtime_sort so bogus future mtimes cannot float to the top.
-  const SORTS: { value: string; label: string }[] = [
-    { value: "", label: "Relevance" },
-    { value: "newest", label: "Newest" },
-    { value: "size:desc", label: "Largest" },
-    { value: "title:asc", label: "Name (A–Z)" },
-  ];
   // Top-N extensions surfaced by the type-ahead-lite (P3-T4). The facet list can
   // be long; we rank by live count and show a bounded slice.
   const EXT_LIMIT = 10;
-  // A bare lowercase-hex string (16..64 chars) is an exact-hash lookup (P3-T1).
-  const HASH_RE = /^[0-9a-f]{16,64}$/;
 
   let q = $state("");
+  // P6 (A2): /search passes q to Meilisearch verbatim, so the translatable DSL
+  // operators (kind:/group:/ext:/size:/modified:/tag:) are lifted into flat params by
+  // searchDsl.ts. This live reading drives the "from query" chips and the
+  // unsupported-term notice; buildParams() re-translates at request time.
+  const dsl = $derived(HASH_RE.test(q.trim()) ? dslToParams("") : dslToParams(q));
+  // The notice is dismissable per SET of unsupported tokens: typing a different
+  // unsupported term brings it back.
+  const unsupportedKey = $derived([...new Set(dsl.unsupported)].sort().join("\n"));
+  let dismissedUnsupported = $state("");
+  // Zero results: name the unsupported terms first — they are the likely cause.
+  const noMatchesMessage = $derived.by(() => {
+    const u = dsl.unsupported;
+    if (!u.length) return "No matches. Try fewer words, remove a filter chip, or set Match in to everything.";
+    const one = u.length === 1;
+    // StateBlock renders a plain string (no snippet), so the tokens go in bare —
+    // literal backticks read as noise (item 9).
+    return `No matches. ${u.join(", ")} ${one ? "is" : "are"} not supported in search — remove ${one ? "it" : "them"} or see the query help.`;
+  });
   // W8 file taxonomy filters. Both multi-select; each rides the deep-link hash as
   // one comma-joined value and api.search() expands it into a repeatable param.
   // Empty set = "all". Options populated from GET /taxonomy (see onMount).
@@ -166,6 +195,9 @@
   let mapPoints = $state<MapPoint[]>([]);
   let geoTotal = $state(0);
   let mapLoading = $state(false);
+  // A12/A10: a failed map fetch says so (with Retry) instead of an empty map
+  // that reads as "no result carries coordinates".
+  let mapError = $state(false);
   let mapController: AbortController | null = null;
   // One page of the map fetch. 200 is the API's own per-request ceiling.
   const MAP_PAGE = 200;
@@ -190,6 +222,11 @@
   // P3-T10 duplicate badges: id -> group size (>1 only). Batched after results
   // land in ONE /items/copy-counts call — never a per-row query.
   let copyCountMap = $state<Record<string, number>>({});
+  // A failed copy-count batch: a warning with Retry above the list (badges are
+  // decoration, so the results stay). Bumped per fresh search so a stale
+  // batch's failure never lands on a newer result set.
+  let copyCountsError = $state("");
+  let copyCountsGen = 0;
 
   // P3-T7 saved searches (named, persisted param bundles).
   let saved = $state<SavedSearch[]>([]);
@@ -218,11 +255,11 @@
     savedErrors = next;
   }
   // Range params carried through from an applied/deep-linked search until the user
-  // next touches a slider (the sliders are facetStats-derived, not directly
-  // restorable — see applyParams).
+  // next moves THAT pair's slider (the sliders are facetStats-derived, not
+  // directly restorable — see applyParams). Shown as their own chips (A7).
   let pendingRange = $state<Record<string, string>>({});
-  // The last hash WE wrote, so our own reflect does not re-trigger applyParams.
-  let lastWrittenHash = "";
+  // The own-write token (A5): tells our own hash writes from Back/Forward.
+  const sync = createHashSync();
 
   let hits = $state<Hit[]>([]);
   let total = $state(0);
@@ -230,7 +267,14 @@
   let nextCursor = $state<string | null>(null);
   let error = $state("");
   let loading = $state(false);
-
+  // A12: the params the last fresh search was sent with; loadMore pages with
+  // these (plus the cursor), never the live form.
+  const pages = createPageSession();
+  // A12: a failed next page keeps the pages already shown and puts a compact
+  // error + Retry under the list; scroll/keyboard paging stays off until a
+  // Retry succeeds (no re-fire on every scroll event).
+  let loadMoreError = $state("");
+  let loadMoreBlocked = $state(false);
   // Roving LOGICAL selection (P3-T3): NOT DOM focus — rows unmount under
   // virtualization, so we track an index + drive aria-activedescendant instead.
   let selectedIndex = $state(0);
@@ -284,25 +328,25 @@
   const CHIP_ON = "border-transparent bg-accent text-accent-fg";
   const CHIP_OFF = "border-border-strong";
 
-  // P3-T5 snippet rendering. The backend returns ``snippet`` (cropped document
-  // body) with matches wrapped in <em>…</em>. We NEVER {@html} it (untrusted
-  // document content); instead we split on the marker tags and render plain text
-  // nodes + <mark> elements, so any stray "<script>"/"<img>" in the body is shown
-  // as literal text and can never execute.
-  type Seg = { text: string; mark: boolean };
-  const SNIPPET_RE = /<em>([\s\S]*?)<\/em>/g;
-  function parseSnippet(s: string): Seg[] {
-    const segs: Seg[] = [];
-    let last = 0;
-    let m: RegExpExecArray | null;
-    SNIPPET_RE.lastIndex = 0;
-    while ((m = SNIPPET_RE.exec(s)) !== null) {
-      if (m.index > last) segs.push({ text: s.slice(last, m.index), mark: false });
-      segs.push({ text: m[1], mark: true });
-      last = m.index + m[0].length;
+  // P3-T5 snippet + A15 title/filename highlighting. The backend wraps matches
+  // in <em>…</em> (``snippet``: cropped body; ``highlight.title|filename``). We
+  // NEVER {@html} them (untrusted document content): parseHighlight
+  // (searchResults.ts) splits on the markers and the template renders plain
+  // text nodes + <mark>, so any stray "<script>"/"<img>" stays literal text.
+  // The row label is the title when there is one, else the filename; its
+  // marked copy is the matching ``highlight`` key, else the plain string. A
+  // highlight whose text no longer equals the label (the row was edited in
+  // ItemDetail since the search ran) is ignored.
+  const hitLabel = (h: Hit): string => str(h, "title") || str(h, "filename");
+  function labelSegs(h: Hit): Seg[] {
+    const label = hitLabel(h);
+    const hl = h.highlight as { title?: unknown; filename?: unknown } | undefined;
+    const marked = str(h, "title") ? hl?.title : hl?.filename;
+    if (typeof marked === "string" && marked) {
+      const segs = parseHighlight(marked);
+      if (segs.map((x) => x.text).join("") === label) return segs;
     }
-    if (last < s.length) segs.push({ text: s.slice(last), mark: false });
-    return segs;
+    return [{ text: label, mark: false }];
   }
 
   // ------------------------------------------------------------------------ //
@@ -338,12 +382,55 @@
     })),
   );
 
-  function clearSelection() {
+  // The in-flight bulk run's token. A new query or ANY selection change
+  // cancels it (the P3 latest() rule: the operator moved on, so the run sends
+  // no further chunk and its late result reports only what already landed).
+  let bulkController: AbortController | null = null;
+  // "1/3" while a multi-chunk run is submitting.
+  let bulkProgress = $state("");
+  // A26: a request-level failure's lead sentence ("N updated before the
+  // request failed; M not attempted.") kept apart from the error text, which
+  // renders one line per field (pydantic 422 details join with "; ").
+  let bulkErrorLead = $state("");
+  const bulkErrorLines = $derived(bulkError ? bulkError.split("; ") : []);
+
+  // Final-review item 2: a cancelled run's in-flight chunk still commits, so
+  // it is held in `bulkSettling` until it returns; Apply shows "Cancelling…"
+  // and stays disabled meanwhile, and the next run waits on it before reading
+  // live tags (bulkOrchestrate.ts createSettleGate).
+  const bulkSettling = createSettleGate();
+  let bulkCancelling = $state(false);
+  // The in-flight applyBulk run (what a cancel hands to bulkSettling).
+  let bulkRun: Promise<void> | null = null;
+  // The run that has passed the settle gate and may mirror rows.
+  let bulkWriter: AbortController | null = null;
+  // The abort reason of the user's own Clear: that cancel needs no toast.
+  const USER_CLEAR = "user-clear";
+
+  function cancelBulk(reason?: typeof USER_CLEAR) {
+    if (!bulkController) return;
+    bulkController.abort(reason);
+    bulkController = null;
+    bulkBusy = false;
+    bulkProgress = "";
+    if (bulkRun) {
+      bulkCancelling = true;
+      void bulkSettling.hold(bulkRun).then(() => {
+        if (!bulkSettling.busy) bulkCancelling = false;
+      });
+    }
+  }
+
+  function clearSelection(reason?: typeof USER_CLEAR) {
+    cancelBulk(reason);
     selectedIds = new Set();
     lastToggledIndex = -1;
   }
+  // The Clear buttons: the user's own cancel, so no "cancelled" toast.
+  const userClearSelection = () => clearSelection(USER_CLEAR);
 
   function selectAllLoaded() {
+    cancelBulk();
     selectedIds = new Set(hits.map((h) => hitId(h)).filter(Boolean));
     lastToggledIndex = hits.length - 1;
   }
@@ -356,6 +443,7 @@
     if (!h) return;
     const id = hitId(h);
     if (!id) return;
+    cancelBulk();
     const next = new Set(selectedIds);
     const turningOn = !next.has(id);
     if (shift && lastToggledIndex >= 0 && lastToggledIndex < hits.length) {
@@ -377,57 +465,21 @@
   /** Narrow the selection to the ids the last batch REJECTED, so the operator can
    *  fix scope/permissions and re-apply the operations still sitting in the bar. */
   function selectFailedOnly(failures: BulkFailure[]) {
+    cancelBulk();
     selectedIds = new Set(failures.map((f) => f.id));
     lastToggledIndex = -1;
   }
 
-  /** Resolve each selected item's CURRENT tag list — the input the per-item tag
-   *  arithmetic needs, because `tags` replaces the whole list on the wire.
-   *
-   *  Search hits carry `tags` (it is projected into the Meili doc), so the common
-   *  path costs nothing. A hit that somehow lacks the array is re-fetched rather
-   *  than assumed empty: treating "unknown" as [] would DELETE every tag on that
-   *  item the moment any tag operation ran. An item we cannot resolve is reported
-   *  as a failure and excluded from the batch — never guessed at. */
-  async function resolveTargets(): Promise<{ targets: BulkTarget[]; unresolved: BulkFailure[] }> {
-    const targets: BulkTarget[] = [];
-    const unresolved: BulkFailure[] = [];
-    const needsFetch: Hit[] = [];
-    for (const h of selectedHits) {
-      const raw = h.tags;
-      if (Array.isArray(raw)) {
-        targets.push({
-          id: hitId(h),
-          tags: raw.filter((t): t is string => typeof t === "string"),
-          file_category: str(h, "file_category"),
-          library_id: str(h, "library_id"),
-        });
-      } else {
-        needsFetch.push(h);
-      }
-    }
-    // Bounded concurrency: the same chunking discipline as the submit path, so a
-    // 2,000-item selection cannot open 2,000 sockets.
-    for (const group of chunk(needsFetch, 20)) {
-      const recs = await Promise.all(
-        group.map((h) => getItem(hitId(h)).catch(() => null)),
-      );
-      recs.forEach((rec, i) => {
-        const h = group[i];
-        if (!rec) {
-          unresolved.push({ id: hitId(h), reason: "could not read this item's current tags" });
-          return;
-        }
-        const raw = rec.tags;
-        targets.push({
-          id: hitId(h),
-          tags: Array.isArray(raw) ? raw.filter((t): t is string => typeof t === "string") : [],
-          file_category: str(h, "file_category"),
-          library_id: str(h, "library_id"),
-        });
-      });
-    }
-    return { targets, unresolved };
+  /** The selection as bulk targets. `tags` is the hit's snapshot and is NOT
+   *  what the arithmetic uses: runBulk re-reads every item's live tags whenever
+   *  the ops touch tags (A3), so a detail-pane edit made a moment ago survives. */
+  function bulkSelection(): BulkTarget[] {
+    return selectedHits.map((h) => ({
+      id: hitId(h),
+      tags: Array.isArray(h.tags) ? h.tags.filter((t): t is string => typeof t === "string") : [],
+      file_category: str(h, "file_category"),
+      library_id: str(h, "library_id"),
+    }));
   }
 
   /** Reflect a successful patch in the rows already on screen.
@@ -451,36 +503,103 @@
     });
   }
 
+  /** A single-item save in ItemDetail: mirror the PATCH response's title, year
+   *  and tags into the matching row so the list stops showing the old values. */
+  function onItemChanged(rec: ItemRecord) {
+    const id = typeof rec.id === "string" ? rec.id : "";
+    if (!id) return;
+    hits = hits.map((h) => {
+      if (hitId(h) !== id) return h;
+      const next: Hit = { ...h, title: rec.title ?? null, year: rec.year ?? null };
+      if (Array.isArray(rec.tags)) next.tags = rec.tags;
+      return next;
+    });
+  }
+
   async function applyBulk(ops: BulkOps) {
+    cancelBulk();
+    const ctrl = new AbortController();
+    bulkController = ctrl;
     bulkBusy = true;
+    bulkProgress = "";
     bulkError = "";
+    bulkErrorLead = "";
     bulkSummary = null;
     bulkFailuresOpen = false;
+    const run = runBulkEdit(ops, ctrl);
+    bulkRun = run;
+    await run;
+    if (bulkRun === run) bulkRun = null;
+  }
+
+  async function runBulkEdit(ops: BulkOps, ctrl: AbortController) {
     try {
-      const { targets, unresolved } = await resolveTargets();
-      const patches = buildPatches(targets, ops);
-      const ids = Object.keys(patches);
-      if (!ids.length && !unresolved.length) {
+      // A cancelled earlier run may still be committing: read live tags only
+      // after it has landed, or its added tag would be overwritten.
+      await bulkSettling.wait();
+      if (ctrl.signal.aborted) {
+        if (ctrl.signal.reason !== USER_CLEAR) toast("Bulk edit cancelled — nothing was changed.", { tone: "warn" });
+        return;
+      }
+      bulkWriter = ctrl;
+      // Chunked at exactly the server's cap inside runBulk: a request over 500
+      // keys is rejected with a 413, so chunking is the contract.
+      const out = await runBulk(
+        bulkSelection(),
+        ops,
+        { getItem, batchPatch: batchPatchItems },
+        {
+          signal: ctrl.signal,
+          onChunk: (done, total) => {
+            if (bulkController === ctrl && total > 1) bulkProgress = `${done}/${total}`;
+          },
+        },
+      );
+      // Whatever committed is mirrored, even when the run was cut short —
+      // unless a newer run already owns the rows (the settle gate makes that
+      // impossible today; the guard keeps a late mirror from ever undoing one).
+      if (bulkWriter === ctrl || bulkWriter === null) applyLocally(out.summary.ok, out.patchesApplied);
+      // Cancelled or superseded: only the local mirror and the cancel toast —
+      // no error, summary or "nothing to change" for a run the user left,
+      // which would also overwrite a newer run's state. A cancel the user did
+      // not make with Clear (a checkbox, Select all, a new query) says so.
+      if (out.aborted || bulkController !== ctrl) {
+        if (Object.keys(out.patchesApplied).length) {
+          toast(`Bulk edit cancelled — ${out.summary.ok.length} items were already updated.`, { tone: "warn" });
+        } else if (ctrl.signal.reason !== USER_CLEAR) {
+          toast("Bulk edit cancelled — nothing was changed.", { tone: "warn" });
+        }
+        return;
+      }
+      if (!Object.keys(out.patches).length && !out.unresolved.length) {
         toast("Nothing to change — every selected item already matches.");
         return;
       }
-      // Chunked at exactly the server's cap: a request over 500 keys is rejected
-      // with a 413, so chunking is the contract rather than a nicety.
-      const parts: BulkSummary[] = [];
-      for (const group of chunk(ids)) {
-        const body: Record<string, ItemPatchBody> = {};
-        for (const id of group) body[id] = patches[id];
-        const res = await batchPatchItems(body);
-        parts.push(summarizeResults(res.results));
-      }
-      const sum = mergeSummaries(parts);
       // Items we could not read are failures too — they never reached the batch,
       // and silently dropping them would misreport the count.
-      sum.failures = [...sum.failures, ...unresolved];
+      const sum: BulkSummary = {
+        ok: out.summary.ok,
+        failures: [...out.summary.failures, ...out.unresolved],
+      };
+      if (out.failed) {
+        // A26: a request-level failure (auth, 413, network) on chunk k. Chunks
+        // before it committed; say so, and how many were never sent.
+        bulkErrorLead = `${sum.ok.length} updated before the request failed; ${out.notAttempted.length} not attempted.`;
+        bulkError = errorMessage(out.failed.error, { verb: "edit these items" });
+        if (sum.failures.length) {
+          bulkSummary = sum;
+          bulkFailuresOpen = true;
+        }
+        return;
+      }
+      // Per-ITEM failures come back inside a 200 and are shown in the list.
       bulkSummary = sum;
       bulkFailuresOpen = sum.failures.length > 0;
-      applyLocally(sum.ok, patches);
-      if (!sum.failures.length) clearSelection();
+      if (!sum.failures.length) {
+        // Not clearSelection(): that would cancel (and hold) this very run.
+        selectedIds = new Set();
+        lastToggledIndex = -1;
+      }
       toast(
         sum.failures.length
           ? `${sum.ok.length} updated, ${sum.failures.length} failed — search index updates shortly.`
@@ -488,78 +607,69 @@
         { tone: sum.failures.length ? "warn" : "ok" },
       );
     } catch (e) {
-      // A request-level failure (auth, 413, network). Per-ITEM failures never
-      // land here — they come back inside a 200 and are shown in the list.
+      if (bulkController !== ctrl) return;
       bulkError = errorMessage(e, { verb: "edit these items" });
     } finally {
-      bulkBusy = false;
+      if (bulkWriter === ctrl) bulkWriter = null;
+      if (bulkController === ctrl) {
+        bulkController = null;
+        bulkBusy = false;
+        bulkProgress = "";
+        bulkRun = null;
+      }
     }
   }
 
   // ---- query params -------------------------------------------------------
-  function buildParams(): Record<string, string> {
-    const term = q.trim();
-    hashMode = HASH_RE.test(term);
-    const p: Record<string, string> = {};
-    if (hashMode) p.hash = term;
-    else p.q = q;
-    if (extension) p.extension = extension;
-    // Multi-select taxonomy filters ride as one comma-joined value each;
-    // api.search() expands them into repeatable ``file_category`` /
-    // ``file_group`` query params for the backend's List[str].
-    if (selectedCategories.length) p.file_category = selectedCategories.join(",");
-    if (selectedGroups.length) p.file_group = selectedGroups.join(",");
-    if (selectedLibraries.length) p.library = selectedLibraries.join(",");
-    if (selectedPrincipals.length) p.principal = selectedPrincipals.join(",");
-    if (worldReadable) p.world_readable = worldReadable;
-    if (exposure) p.exposure = exposure;
-    if (shareMismatch) p.share_mismatch = "true";
-    if (selectedTags.length) p.tags = selectedTags.join(",");
-    if (includeSidecars) p.include_sidecars = "true";
-    if (searchIn !== "all") p.search_in = searchIn;
-    // Range filters: only send a bound when the slider is narrowed off it, so a
-    // full-range slider is a no-op (and lets the bounds keep refreshing).
-    if (sizeBounds && sizeLo > sizeBounds.min) p.size_gte = String(Math.round(sizeLo));
-    if (sizeBounds && sizeHi < sizeBounds.max) p.size_lte = String(Math.round(sizeHi));
-    if (mtimeBounds && mtimeLo > mtimeBounds.min) p.mtime_gte = String(Math.round(mtimeLo));
-    if (mtimeBounds && mtimeHi < mtimeBounds.max) p.mtime_lte = String(Math.round(mtimeHi));
-    // Range params from an applied saved search / deep link, until a slider moves.
-    for (const k of ["size_gte", "size_lte", "mtime_gte", "mtime_lte"]) {
-      if (!(k in p) && pendingRange[k]) p[k] = pendingRange[k];
-    }
-    if (sortMode) p.sort = sortMode;
-    if (view !== "list") p.view = view;
-    // R8-UI: the map's area selection is a FILTER like any other — four flat
-    // params on the same query. boxParams() emits nothing for a box the API
-    // would reject (inverted / antimeridian-crossing), so a bad box degrades to
-    // "no area filter" instead of a 422.
-    Object.assign(p, boxParams(geoBox));
-    // Only send a semantic ratio when the feature is on AND the user dialed it
-    // up — a 0 keeps the keyword path byte-identical (and deep links stay clean).
-    if (semanticEnabled && semantic > 0) p.semantic = String(semantic);
-    return p;
+  // The UI state as searchState.ts reads it (uiParamsPure / currentParamsPure:
+  // q carries any DSL verbatim; item 11 pins that no DSL-derived key leaks in).
+  function uiState(): UiState {
+    return {
+      q, extension, selectedCategories, selectedGroups, selectedLibraries,
+      selectedPrincipals, worldReadable, exposure, shareMismatch, selectedTags,
+      includeSidecars, searchIn, sortMode, view, geoBox, semantic, semanticEnabled,
+      pendingRange, sizeBounds, mtimeBounds, sizeLo, sizeHi, mtimeLo, mtimeHi,
+    };
+  }
+  function uiParams(): Record<string, string> {
+    hashMode = HASH_RE.test(q.trim());
+    return uiParamsPure(uiState());
   }
 
-  // The current, non-empty param bundle — what a saved search stores and what the
-  // URL hash reflects (deep-linkable). Identical shape to the backend /search
-  // params, so save -> apply -> /search replays byte-identically server-side.
+  // What /search (results, paging, map) receives: the UI params with the query DSL translated
+  // (searchDsl.ts). DSL list params union with the chips, the DSL extension and
+  // ranges win over the chip and sliders, and q loses the translated and
+  // unsupported tokens. A query without DSL tokens is returned untouched.
+  function buildParams(): Record<string, string> {
+    const p = uiParams();
+    return hashMode ? p : mergeDslParams(p, dslToParams(q));
+  }
+
+  // The current, non-empty UI param bundle — what the URL hash reflects and a
+  // saved search stores. It keeps the query AS TYPED and carries none of the
+  // DSL-derived params (chips still contribute theirs), so a relative
+  // `modified:>7d` is never frozen into a date: the DSL is re-translated by
+  // buildParams() on every request, including after applying a saved search.
   function currentParams(): Record<string, string> {
-    return Object.fromEntries(
-      Object.entries(buildParams()).filter(([, v]) => v !== ""),
-    );
+    return currentParamsPure(uiState());
   }
 
   // Reflect the current params into the location hash (#/search?...). Guarded
   // to SEARCH routes only: a late async continuation (or a hashchange handled
   // while unmount is pending) must never clobber a navigation to another tab —
   // writing "#/search" over "#/jobs" is exactly the snap-back bug this fixes
-  // (live 2026-08-04).
-  function reflectHash() {
-    if (location.hash && !location.hash.startsWith("#/search")) return;
+  // (live 2026-08-04). Ruling 2 (A9): typing and slider drags REPLACE the
+  // current history entry; committed changes (chips, saved search, Enter,
+  // view/sort) PUSH one. sync records the write either way and upgrades the
+  // first replace of an editing session to a push, so the committed entry under
+  // it survives Back; "canonical" re-encodes a hash the page was just handed
+  // (deep link, Back/Forward) and always replaces (searchHash.ts).
+  function reflectHash(mode: HashMode) {
+    if (!isSearchHash(location.hash)) return;
     const h = encodeSearchHash(currentParams());
-    if (h === location.hash) return;
-    lastWrittenHash = h;
-    location.hash = h;
+    const { write } = sync.reflect(location.hash, h, mode);
+    if (write === "replace") history.replaceState(null, "", h);
+    else if (write === "push") location.hash = h;
   }
 
   // Toggle list/grid. A layout change needs no re-query -- just re-render the
@@ -568,86 +678,110 @@
   function setView(v: "list" | "grid" | "map") {
     if (view === v) return;
     view = v;
-    reflectHash();
+    reflectHash("push");
     // The map needs its own bounded, geo-filtered fetch (the results page is
     // ordered by relevance and capped at a screenful) — pull it on first open.
     if (v === "map" && searched) loadMapPoints();
   }
 
   // Apply a flat param bundle (deep link, back/forward, or a saved search) into
-  // the UI state and re-query. Range params ride pendingRange until a slider moves.
-  function applyParams(p: Record<string, string>) {
-    q = p.hash ?? p.q ?? "";
-    extension = p.extension ?? "";
-    selectedCategories = p.file_category
-      ? p.file_category.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedGroups = p.file_group
-      ? p.file_group.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedLibraries = p.library
-      ? p.library.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedPrincipals = p.principal
-      ? p.principal.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    worldReadable = p.world_readable === "true" ? "true" : p.world_readable === "false" ? "false" : "";
-    exposure = ["anonymous", "authenticated", "restricted"].includes(p.exposure ?? "")
-      ? (p.exposure as typeof exposure) : "";
-    shareMismatch = p.share_mismatch === "true";
-    selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
+  // the UI state and re-query. searchState.ts validates every value (A36) and
+  // keeps range params in pendingRange until that pair's slider moves (A7).
+  // `mode` is how a re-encoded hash is written: "canonical" when the bundle came
+  // from the URL (Back/Forward, deep link), "push" for a saved search.
+  function applyParams(p: Record<string, string>, mode: "push" | "canonical") {
+    const { state: s, searchable, invalid } = applyParamsPure(p, { size: sizeBounds, mtime: mtimeBounds });
+    q = s.q;
+    extension = s.extension;
+    selectedCategories = s.selectedCategories;
+    selectedGroups = s.selectedGroups;
+    selectedLibraries = s.selectedLibraries;
+    selectedPrincipals = s.selectedPrincipals;
+    worldReadable = s.worldReadable;
+    exposure = s.exposure;
+    shareMismatch = s.shareMismatch;
+    selectedTags = s.selectedTags;
     tagQuery = "";
     tagOpen = false;
-    includeSidecars = p.include_sidecars === "true";
-    searchIn = (p.search_in as "content" | "names") || "all";
-    sortMode = p.sort ?? "";
-    view = p.view === "grid" || p.view === "map" ? p.view : "list";
-    // A deep link / saved search carrying all four geo edges restores the drawn
-    // area; a partial one restores nothing (parseBox is all-or-nothing) so we can
-    // never send half a box.
-    geoBox = parseBox(p);
-    semantic = p.semantic ? Number(p.semantic) : 0;
-    pendingRange = {};
-    for (const k of ["size_gte", "size_lte", "mtime_gte", "mtime_lte"]) {
-      if (p[k]) pendingRange[k] = p[k];
+    includeSidecars = s.includeSidecars;
+    searchIn = s.searchIn;
+    sortMode = s.sortMode;
+    view = s.view;
+    geoBox = s.geoBox;
+    semantic = s.semantic;
+    pendingRange = s.pendingRange;
+    if (s.sizeLo != null && s.sizeHi != null) { sizeLo = s.sizeLo; sizeHi = s.sizeHi; }
+    if (s.mtimeLo != null && s.mtimeHi != null) { mtimeLo = s.mtimeLo; mtimeHi = s.mtimeHi; }
+    if (invalid.length) toast(`Ignored unknown search options: ${invalid.join(", ")}`, { tone: "warn" });
+    // Auto-run ONLY when the params actually FILTER something: display-only
+    // leftovers (view / sort / semantic) restore the prefs on a blank slate
+    // (roadmap §20). A6: the blank slate is reset, not left showing the
+    // previous query's results, and the URL is brought in line.
+    if (searchable) {
+      runFresh(mode);
+    } else {
+      blankSlate();
+      reflectHash(mode);
     }
-    // Deactivate the sliders so pendingRange drives the filter until one moves.
-    if (sizeBounds) { sizeLo = sizeBounds.min; sizeHi = sizeBounds.max; }
-    if (mtimeBounds) { mtimeLo = mtimeBounds.min; mtimeHi = mtimeBounds.max; }
-    // Auto-run ONLY when the params actually FILTER something. Display-only
-    // leftovers (view / sort / semantic ride the hash after any search) used
-    // to count as "params present" and re-ran a match-all on the next visit —
-    // results appearing before any query, the exact roadmap-§20 blank-slate
-    // regression (live report 2026-08-08). Restoring the display prefs while
-    // staying blank is correct for those.
-    const displayOnly = new Set(["view", "sort", "semantic"]);
-    const searchable = Object.entries(p).some(
-      ([k, v]) => !displayOnly.has(k) && v !== "",
-    );
-    if (searchable) runFresh();
+  }
+
+  // Roadmap §20 empty start, also what a non-searchable apply returns to (A6).
+  function blankSlate() {
+    clearTimeout(debounce);
+    inputPending = false; // the next Enter must not re-run a cancelled edit
+    controller?.abort(); // a late response must not repopulate the slate
+    controller = null;
+    loading = false;
+    hits = [];
+    total = 0;
+    facets = {};
+    nextCursor = null;
+    pages.clear();
+    loadMoreError = "";
+    loadMoreBlocked = false;
+    copyCountsGen++;
+    copyCountsError = "";
+    searched = false;
+    clearSelection();
+    error = "";
+    bulkSummary = null;
+    bulkError = "";
+    mapController?.abort();
+    mapController = null;
+    mapLoading = false;
+    mapError = false;
+    mapPoints = [];
+    geoTotal = 0;
   }
 
   function onHashChange() {
-    // Only search-route hashes are ours. On a back/forward to another tab this
-    // listener still fires once before the unmount flush; treating "#/jobs" as
-    // empty params re-ran a search and wrote "#/search" back — reverting the
-    // user's navigation.
-    if (!location.hash.startsWith("#/search")) return;
-    if (location.hash === lastWrittenHash) return; // our own write — ignore
-    applyParams(parseSearchHash(location.hash));
+    // Every hashchange settles the own-write token, but only search-route
+    // hashes are ours. On a back/forward to another tab this listener still
+    // fires once before the unmount flush; treating "#/jobs" as empty params
+    // re-ran a search and wrote "#/search" back — reverting the navigation.
+    const act = sync.incoming(location.hash);
+    if (!isSearchHash(location.hash) || act === "ignore") return;
+    applyParams(parseSearchHash(location.hash), "canonical");
   }
 
-  // A manual slider interaction takes over from any applied/deep-linked range.
-  function onRangeChange() {
-    pendingRange = {};
-    reset();
+  // A slider drag takes over from that pair's applied/deep-linked range only;
+  // the other pair's pending filter stays (A7). Drags replace history.
+  function onSliderInput(pair: RangePair) {
+    if (pairPending(pendingRange, pair)) pendingRange = clearRangePair(pendingRange, pair);
+    reflectHash("replace");
+  }
+  function onRangeChange(pair: RangePair) {
+    pendingRange = clearRangePair(pendingRange, pair);
+    runFresh("replace");
+  }
+
+  // The × on a pending-range chip: drop that pair only and re-query.
+  function clearPending(pair: RangePair) {
+    pendingRange = clearRangePair(pendingRange, pair);
+    runFresh("push");
   }
 
   // ---- saved searches (P3-T7) --------------------------------------------
-  // Hash-only display prefs that are not /search params. POST/PATCH
-  // /saved-searches 422s any key outside the /search vocabulary (A4).
-  const UI_ONLY_PARAMS = ["view"] as const;
-
   function savedParams(): Record<string, string> {
     const p = currentParams();
     for (const k of UI_ONLY_PARAMS) delete p[k];
@@ -689,7 +823,7 @@
   }
 
   function applySaved(ss: SavedSearch) {
-    applyParams(ss.params ?? {});
+    applyParams(ss.params ?? {}, "push");
   }
 
   async function renameSaved(ss: SavedSearch) {
@@ -727,17 +861,27 @@
     }
   }
 
-  function applyStats(r: SearchResponse) {
+  const BOTH_PAIRS: readonly RangePair[] = ["size", "date"];
+
+  function applyStats(
+    r: SearchResponse,
+    pairs: readonly RangePair[],
+    narrowing: Record<string, string>,
+  ) {
     // Update slider bounds from facetStats ONLY while that facet isn't being
-    // narrowed — otherwise an active filter would shrink its own track.
-    const ss = r.facet_stats?.size;
-    if (ss && !sizeActive) {
+    // narrowed — otherwise an active filter would shrink its own track. A
+    // pending (URL / saved-search) range or a query `size:` / `modified:` term
+    // (`narrowing`) narrows it too: keep the bounds we had. With none yet,
+    // runFresh's bounds probe supplies the unfiltered stats (`pairs` limits
+    // which pairs a response may set).
+    const ss = pairs.includes("size") ? r.facet_stats?.size : undefined;
+    if (ss && !sizeActive && !(sizeBounds && pairPending(narrowing, "size"))) {
       sizeBounds = { min: ss.min, max: ss.max };
       sizeLo = ss.min;
       sizeHi = ss.max;
     }
-    const ms = r.facet_stats?.mtime;
-    if (ms && !mtimeActive) {
+    const ms = pairs.includes("date") ? r.facet_stats?.mtime : undefined;
+    if (ms && !mtimeActive && !(mtimeBounds && pairPending(narrowing, "date"))) {
       mtimeBounds = { min: ms.min, max: ms.max };
       mtimeLo = ms.min;
       mtimeHi = ms.max;
@@ -745,7 +889,7 @@
   }
 
   // ---- fetching -----------------------------------------------------------
-  async function runFresh() {
+  async function runFresh(mode: HashMode = "push") {
     // Cancel any in-flight request so a stale response can never overwrite a
     // newer one (P3-T3 AbortController on the 150 ms debounce).
     controller?.abort();
@@ -754,24 +898,49 @@
     searched = true;
     error = "";
     loading = true;
+    // Item 4: the old query's cursor dies now, so a failed fresh search can
+    // never page the NEW query (pages.start below) from the old offset.
+    nextCursor = null;
+    loadMoreError = "";
+    loadMoreBlocked = false;
+    copyCountsGen++;
+    copyCountsError = "";
     // IN-T4: a NEW query means a new result set — carrying a selection across it
     // would let an invisible, unrelated item ride along into the next bulk edit.
     // (Paging the SAME query via loadMore() deliberately keeps the selection.)
     clearSelection();
     bulkSummary = null;
     bulkError = "";
-    reflectHash(); // keep the URL in sync with the query being run (deep-linkable)
+    reflectHash(mode); // keep the URL in sync with the query being run (deep-linkable)
+    const params = buildParams();
+    pages.start(params); // A12: loadMore pages THIS query
+    // A filtered deep link has no slider bounds yet: one extra, hit-less request
+    // without the range keys reads the unfiltered facet_stats for those pairs,
+    // so the sliders show the whole range (ruling, P6 Task 3). Same controller:
+    // a newer search aborts it too. A failed probe falls back to the main stats.
+    // Item 3: a DSL range narrows its pair exactly like a pending one.
+    const narrowing = { ...pendingRange, ...dsl.params };
+    const probePairs = boundsProbePairs(narrowing, { size: sizeBounds, mtime: mtimeBounds });
+    const probe = probePairs.length
+      ? search(boundsProbeParams(params), ctrl.signal).catch(() => null)
+      : null;
     try {
-      const r = await search(buildParams(), ctrl.signal);
+      const r = await search(params, ctrl.signal);
       if (ctrl.signal.aborted) return;
-      hits = r.hits;
+      hits = mergeHits<Hit>([], r.hits, hitId).hits;
       total = r.total;
       facets = r.facets;
       nextCursor = r.next_cursor;
       selectedIndex = 0;
-      applyStats(r);
+      applyStats(r, BOTH_PAIRS.filter((pr) => !probePairs.includes(pr)), narrowing);
+      if (probe) {
+        void probe.then((pr) => {
+          if (ctrl.signal.aborted || controller !== ctrl) return;
+          applyStats(pr ?? r, probePairs, narrowing);
+        });
+      }
       copyCountMap = {};
-      refreshCopyCounts(r.hits); // P3-T10 batch badge counts
+      refreshCopyCounts(hits); // P3-T10 batch badge counts
       vlist?.scrollTo(0);
       if (view === "map") loadMapPoints(); // keep the map on the same query
     } catch (e) {
@@ -782,21 +951,28 @@
     }
   }
 
-  async function loadMore() {
-    if (loading || !nextCursor || !controller) return;
+  // Next page of the last fresh search. `retry` is the error block's Retry:
+  // the only way past loadMoreBlocked.
+  async function loadMore(retry = false) {
+    if (loading || !controller || (loadMoreBlocked && !retry)) return;
+    const params = pages.pageParams(nextCursor);
+    if (!params) return;
     const ctrl = controller; // reuse the session controller: a new search aborts
     loading = true;
+    loadMoreError = "";
     try {
-      const params = buildParams();
-      params.cursor = nextCursor;
       const r = await search(params, ctrl.signal);
       if (ctrl.signal.aborted || controller !== ctrl) return;
-      hits = [...hits, ...r.hits];
+      // The offset cursor repeats a row when the index shifted between pages.
+      const before = hits.length;
+      hits = mergeHits(hits, r.hits, hitId).hits;
       nextCursor = r.next_cursor;
-      refreshCopyCounts(r.hits); // badge the newly-appended rows too
+      loadMoreBlocked = false;
+      refreshCopyCounts(hits.slice(before)); // badge the newly-appended rows too
     } catch (e) {
-      if ((e as Error)?.name === "AbortError") return;
-      error = errorMessage(e);
+      if ((e as Error)?.name === "AbortError" || controller !== ctrl) return;
+      loadMoreError = errorMessage(e, { verb: "load more results" });
+      loadMoreBlocked = true;
     } finally {
       if (controller === ctrl) loading = false;
     }
@@ -820,6 +996,7 @@
     const ctrl = new AbortController();
     mapController = ctrl;
     mapLoading = true;
+    mapError = false;
     try {
       const base = buildParams();
       base.limit = String(MAP_PAGE);
@@ -829,33 +1006,38 @@
         base.geo_left_lng = "-180";
         base.geo_right_lng = "180";
       }
-      const acc: MapPoint[] = [];
+      let acc: MapPoint[] = [];
       let cursor: string | null = null;
       let seen = 0;
       do {
         const r = await search(cursor ? { ...base, cursor } : base, ctrl.signal);
         if (ctrl.signal.aborted || mapController !== ctrl) return;
         geoTotal = r.total;
+        const page: MapPoint[] = [];
         for (const h of r.hits) {
           const g = geoOf(h);
           const id = str(h, "id");
           if (!g || !id) continue;
-          acc.push({
+          page.push({
             id,
             lat: g.lat,
             lng: g.lng,
             label: str(h, "title") || str(h, "filename") || str(h, "rel_path") || id,
           });
         }
+        // A12: the same offset cursor, so the same de-dupe (the cluster list
+        // is keyed by id).
+        acc = mergeHits(acc, page, (pt) => pt.id).hits;
         seen += r.hits.length;
         cursor = r.next_cursor;
       } while (cursor && seen < MAP_POINT_CAP);
       mapPoints = acc.slice(0, MAP_POINT_CAP);
     } catch (e) {
-      if ((e as Error)?.name === "AbortError") return; // superseded — ignore
-      // Non-fatal: the map shows its empty state rather than replacing the
-      // results list with an error.
+      if ((e as Error)?.name === "AbortError" || mapController !== ctrl) return; // superseded — ignore
+      // The map panel shows an error with Retry — never an empty map, which
+      // would read as "no result carries coordinates". The results list stays.
       mapPoints = [];
+      mapError = true;
     } finally {
       if (mapController === ctrl) mapLoading = false;
     }
@@ -868,18 +1050,28 @@
     runFresh();
   }
 
-  // P3-T10: fetch copy counts for a batch of hits (ids only, cap 200) and merge
-  // into the badge map. One /items/copy-counts call — only groups with count > 1
-  // come back, so a badge appears only for genuine duplicates. Best-effort.
+  // P3-T10: fetch copy counts for a batch of hits (ids only, cap 200 per call)
+  // and merge into the badge map. Only groups with count > 1 come back, so a
+  // badge appears only for genuine duplicates. A failure keeps the results and
+  // shows a warning with Retry (A10); a stale batch's outcome is dropped.
   async function refreshCopyCounts(batch: Hit[]) {
-    const ids = batch.map((h) => hitId(h)).filter(Boolean).slice(0, 200);
+    const ids = batch.map((h) => hitId(h)).filter(Boolean);
     if (!ids.length) return;
+    const gen = copyCountsGen;
     try {
-      const counts = await apiCopyCounts(ids);
-      copyCountMap = { ...copyCountMap, ...counts };
-    } catch {
-      // Non-fatal: no badges rather than a broken results list.
+      for (const group of chunk(ids, 200)) {
+        const counts = await apiCopyCounts(group);
+        if (gen !== copyCountsGen) return;
+        copyCountMap = { ...copyCountMap, ...counts };
+      }
+    } catch (e) {
+      if (gen === copyCountsGen) copyCountsError = errorMessage(e, { verb: "load duplicate counts" });
     }
+  }
+
+  function retryCopyCounts() {
+    copyCountsError = "";
+    refreshCopyCounts(hits);
   }
 
   // ---- P3-T12 tag type-ahead -------------------------------------------
@@ -908,10 +1100,19 @@
     const ctrl = new AbortController();
     tagController = ctrl;
     try {
-      // Scope tag suggestions to the first selected category when present (the
-      // backend's tag facet scope accepts a single coarse type).
-      const scope = selectedCategories.length ? { type: selectedCategories[0] } : {};
-      const res = await searchTags(tagQuery, scope, ctrl.signal);
+      // A31: scope the suggestion counts like the results — every category
+      // (chips plus a `kind:` in the query; /search/tags takes a repeatable
+      // file_category) and the library when exactly one is chosen (the
+      // endpoint takes a single `library`).
+      const p = buildParams();
+      const res = await searchTags(
+        tagQuery,
+        {
+          file_category: p.file_category ? p.file_category.split(",") : undefined,
+          library: selectedLibraries.length === 1 ? selectedLibraries[0] : undefined,
+        },
+        ctrl.signal,
+      );
       if (ctrl.signal.aborted) return;
       // Hide already-selected tags from the suggestion list.
       tagSuggestions = res.tags.filter((t) => !selectedTags.includes(t.value));
@@ -944,9 +1145,35 @@
     }
   }
 
-  function onInput() {
+  // Typing replaces the current history entry (A9) — after the first keystroke
+  // of a session, which reflectHash/searchHash upgrade to a push; a half-composed IME
+  // string never searches (A43) — compositionend schedules the search instead,
+  // since Chrome fires no plain input event after it.
+  let inputPending = false;
+  function onInput(e: Event) {
+    if ((e as InputEvent).isComposing) return;
     clearTimeout(debounce);
-    debounce = setTimeout(runFresh, 150);
+    inputPending = true;
+    debounce = setTimeout(() => {
+      inputPending = false;
+      runFresh("replace");
+    }, 150);
+  }
+
+  // Enter commits the query: a still-debounced edit runs now and pushes its own
+  // history entry; an already-reflected one pushes nothing new.
+  // keyCode 229 is the IME's own Enter: Safari fires it after compositionend
+  // with isComposing already false (item 6).
+  function onQueryKeydown(e: KeyboardEvent) {
+    if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    if (inputPending) {
+      clearTimeout(debounce);
+      inputPending = false;
+      runFresh("push");
+    } else {
+      reflectHash("push");
+    }
   }
 
   // FIX-12 (Item B): a "Query syntax" help chip appends its example to the query
@@ -1094,7 +1321,7 @@
       sizeLo = sizeBounds.min;
       sizeHi = sizeBounds.max;
     }
-    pendingRange = { ...pendingRange, size_gte: "", size_lte: "" };
+    pendingRange = clearRangePair(pendingRange, "size");
     reset();
   }
   function snapMtime() {
@@ -1102,16 +1329,19 @@
       mtimeLo = mtimeBounds.min;
       mtimeHi = mtimeBounds.max;
     }
-    pendingRange = { ...pendingRange, mtime_gte: "", mtime_lte: "" };
+    pendingRange = clearRangePair(pendingRange, "date");
     reset();
   }
 
   // Active filters rendered as removable chips (P3-T4). Each carries a clearer.
-  type Chip = { key: string; label: string; clear: () => void };
+  // DSL-derived chips carry no clearer: the way to clear one is editing the query.
+  type Chip = { key: string; label: string; clear?: () => void };
   const activeFilters = $derived.by<Chip[]>(() => {
     const out: Chip[] = [];
     for (const c of selectedCategories) out.push({ key: `fc:${c}`, label: `category: ${categoryLabel(c)}`, clear: () => toggleCategory(c) });
-    if (extension) out.push({ key: "ext", label: `ext: ${extension}`, clear: () => { extension = ""; reset(); } });
+    // Item 10: a query `ext:` wins over the chip (mergeDslParams), so say so.
+    const extOverridden = !!dsl.params.extension && dsl.params.extension !== extension;
+    if (extension) out.push({ key: "ext", label: `ext: ${extension}${extOverridden ? " (overridden by query)" : ""}`, clear: () => { extension = ""; reset(); } });
     for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
     for (const l of selectedLibraries) out.push({ key: `lib:${l}`, label: `library: ${libraryLabel(l)}`, clear: () => toggleLibrary(l) });
     for (const pr of selectedPrincipals) out.push({ key: `pr:${pr}`, label: `readable by: ${pr}`, clear: () => removePrincipal(pr) });
@@ -1125,8 +1355,30 @@
     if (geoBox) out.push({ key: "geo", label: `area ${formatBox(geoBox)}`, clear: () => onMapBox(null) });
     if (sizeActive) out.push({ key: "size", label: `size ${fmtBytes(sizeLo)}–${fmtBytes(sizeHi)}`, clear: snapSize });
     if (mtimeActive) out.push({ key: "mtime", label: `date ${fmtDate(mtimeLo)}–${fmtDate(mtimeHi)}`, clear: snapMtime });
+    // A7: a range that arrived by URL / saved search, until its slider moves.
+    for (const c of pendingRangeChips(pendingRange)) out.push({ key: c.key, label: c.label, clear: () => clearPending(c.pair) });
+    out.push(...dslChips(dsl.params));
     return out;
   });
+
+  // "from query: …" chips for the filters searchDsl.ts lifted out of q.
+  function dslChips(d: DslResult["params"]): Chip[] {
+    const out: Chip[] = [];
+    const list = (v: string | undefined) => (v ? v.split(",") : []);
+    const range = (lo: string | undefined, hi: string | undefined, f: (n: number) => string) =>
+      lo && hi ? `${f(Number(lo))}–${f(Number(hi))}` : lo ? `≥ ${f(Number(lo))}` : `≤ ${f(Number(hi))}`;
+    for (const c of list(d.file_category)) out.push({ key: `dsl:fc:${c}`, label: `from query: kind ${c}` });
+    for (const g of list(d.file_group)) out.push({ key: `dsl:fg:${g}`, label: `from query: group ${g}` });
+    if (d.extension) out.push({ key: "dsl:ext", label: `from query: ext ${d.extension}` });
+    for (const t of list(d.tags)) out.push({ key: `dsl:tag:${t}`, label: `from query: tag ${t}` });
+    if (d.size_gte || d.size_lte) {
+      out.push({ key: "dsl:size", label: `from query: size ${range(d.size_gte, d.size_lte, (n) => fmtBytes(n))}` });
+    }
+    if (d.mtime_gte || d.mtime_lte) {
+      out.push({ key: "dsl:mtime", label: `from query: modified ${range(d.mtime_gte, d.mtime_lte, fmtDate)}` });
+    }
+    return out;
+  }
 
   // ---- keyboard nav -------------------------------------------------------
   function inEditable(el: Element | null): boolean {
@@ -1141,7 +1393,7 @@
     selectedIndex = Math.max(0, Math.min(n - 1, selectedIndex + delta));
     vlist?.scrollToIndex(selectedIndex, { align: "nearest" });
     // Keyboard nav can outrun the scroll-driven loader; prefetch near the end.
-    if (selectedIndex >= n - 8) loadMore();
+    if (selectedIndex >= n - 8 && !loadMoreBlocked) loadMore();
   }
 
   function openItem(h: Hit | undefined) {
@@ -1185,6 +1437,7 @@
         tag: el?.tagName ?? "BODY",
         editable: inEditable(el),
         inListbox: !!el?.closest("#search-results"),
+        combobox: !!el?.hasAttribute("data-results-combobox"),
       },
       { modalOpen: !!selected, view, hasHits: hits.length > 0 },
     );
@@ -1224,7 +1477,7 @@
   }
 
   function onScroll() {
-    if (!vlist || !nextCursor || loading) return;
+    if (!vlist || !nextCursor || loading || loadMoreBlocked) return;
     const end = vlist.getScrollOffset() + vlist.getViewportSize();
     if (end >= vlist.getScrollSize() - 400) loadMore();
   }
@@ -1232,45 +1485,35 @@
   // Grid infinite-scroll: the grid is a plain scroll container (not virtua), so
   // near-bottom drives the same cursor-based loadMore the list uses.
   function onGridScroll(e: Event) {
-    if (!nextCursor || loading) return;
+    if (!nextCursor || loading || loadMoreBlocked) return;
     const el = e.currentTarget as HTMLElement;
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 400) loadMore();
   }
 
-  // ---- formatting ---------------------------------------------------------
-  function fmtBytes(b: number): string {
-    if (!isFinite(b) || b <= 0) return "0 B";
-    const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-    return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-  }
-  function fmtDate(epoch: number): string {
-    if (!isFinite(epoch) || epoch <= 0) return "—";
-    return new Date(epoch * 1000).toISOString().slice(0, 10);
-  }
   const activeDescendant = $derived(
     hits.length && hits[selectedIndex] ? `row-${hitId(hits[selectedIndex])}` : undefined,
   );
+  // The results grid is on screen (the query box's combobox popup).
+  const resultsShown = $derived(searched && !error && view !== "map" && hits.length > 0);
+  // Meilisearch totals are estimates (estimated_total_hits); say so when large (A45).
+  const totalLabel = $derived(total >= 1000 ? `about ${total.toLocaleString("en-US")} results` : `${total} results`);
 
   // ---- lifecycle ----------------------------------------------------------
-  onMount(async () => {
-    // Listener registration MUST precede the awaits below. It used to sit
-    // after them, so switching tabs during the fetch window destroyed the
-    // component before registration — onDestroy's removeEventListener was a
-    // no-op and the continuation then LEAKED a listener on a dead component,
-    // which re-wrote "#/search" over every later navigation until a hard
-    // refresh (live 2026-08-04: tabs "snapped back" intermittently).
-    window.addEventListener("hashchange", onHashChange);
+  // Vocabularies and flags the page decorates results with. Each loader
+  // swallows its own failure (fallbacks below), so Promise.all never rejects.
+  async function loadLibraries() {
     try {
       const list = await listLibraries();
       libs = new Map(list.map((l) => [l.id, l]));
     } catch {
       // Non-fatal: copy-path just falls back to the container path.
     }
-    loadSaved();
-    // W8: category + group vocabularies come from the taxonomy tree (source of
-    // truth). Prefer it; if it's offline, fall back to /system/file-groups for the
-    // groups and a small static category list so the filters still render.
+  }
+
+  // W8: category + group vocabularies come from the taxonomy tree (source of
+  // truth). Prefer it; if it's offline, fall back to /system/file-groups for the
+  // groups and a small static category list so the filters still render.
+  async function loadTaxonomy() {
     try {
       const tax = await getTaxonomy();
       categoryOptions = tax.tree.map((n) => ({
@@ -1294,21 +1537,39 @@
         fileGroupOptions = FILE_GROUP_FALLBACK;
       }
     }
-    // P3-T8: learn whether semantic search is enabled so the slider can show.
-    try {
-      const sem = await semanticStats();
-      semanticEnabled = !!sem?.enabled;
-    } catch {
-      semanticEnabled = false;
-    }
-    // Deep-link entry: restore state from #/search?... then query. A BARE visit
-    // stays empty (roadmap §20) — no match-all preload; results render only
-    // once a search actually starts. Skipped entirely if the user has already
-    // navigated away while the fetches above were in flight (destroyed) or the
-    // hash is no longer a search route.
-    if (destroyed || !location.hash.startsWith("#/search")) return;
-    const initial = parseSearchHash(location.hash);
-    if (Object.keys(initial).length) applyParams(initial);
+  }
+
+  // P3-T8: learn whether semantic search is enabled so the slider can show
+  // (one cached /stats probe per page load, shared with ItemDetail — ruling 4).
+  // A deep link's `semantic` ratio is only sent once the flag is known, so a
+  // search that already ran without it re-runs with it.
+  async function loadSemantic() {
+    const on = await probeSemantic();
+    if (destroyed) return;
+    semanticEnabled = on;
+    if (on && semantic > 0 && searched && isSearchHash(location.hash)) runFresh("canonical");
+  }
+
+  // ---- lifecycle ----------------------------------------------------------
+  onMount(async () => {
+    // Listener registration MUST precede everything else. It used to sit
+    // after the awaits, so switching tabs during the fetch window destroyed the
+    // component before registration — onDestroy's removeEventListener was a
+    // no-op and the continuation then LEAKED a listener on a dead component,
+    // which re-wrote "#/search" over every later navigation until a hard
+    // refresh (live 2026-08-04: tabs "snapped back" intermittently).
+    window.addEventListener("hashchange", onHashChange);
+    // A8 deep-link entry: restore state from #/search?... and query BEFORE any
+    // vocabulary fetch — a bookmarked search no longer waits behind libraries,
+    // taxonomy and the heavy /stats probe. Chips show their raw keys until the
+    // labels land; nothing below resets the applied state. A BARE visit stays
+    // empty (roadmap §20) — no match-all preload.
+    const initial = isSearchHash(location.hash) ? parseSearchHash(location.hash) : {};
+    // (No "the user already typed" guard: this runs synchronously in the first
+    // onMount tick, before the query box can receive input.)
+    if (Object.keys(initial).length) applyParams(initial, "canonical");
+    loadSaved();
+    await Promise.all([loadLibraries(), loadTaxonomy(), loadSemantic()]);
   });
 
   let destroyed = false;
@@ -1333,7 +1594,23 @@
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
     oninput={onInput}
+    oncompositionend={onInput}
+    onkeydown={onQueryKeydown}
+    role="combobox"
+    aria-haspopup="grid"
+    aria-controls="search-results"
+    aria-expanded={resultsShown}
+    aria-autocomplete="list"
+    aria-activedescendant={resultsShown ? activeDescendant : undefined}
+    data-results-combobox
   />
+  {#if unsupportedKey && unsupportedKey !== dismissedUnsupported}
+    <Alert tone="warn" live={false} class="mt-2" onDismiss={() => (dismissedUnsupported = unsupportedKey)}>
+      Not supported in search:
+      {#each dsl.unsupported as tok, i (i)}{#if i > 0}{", "}{/if}<code class="font-mono">{tok}</code>{/each}
+      — see the query help.
+    </Alert>
+  {/if}
 
   <!-- W8 file_category chips (coarse, MULTI-select) with live facet counts. The
        primary type filter row; the granular file_group row sits below it. -->
@@ -1367,7 +1644,7 @@
             step="0.1"
             class="w-full accent-accent"
             bind:value={semantic}
-            onchange={reset}
+            onchange={() => runFresh("replace")}
             aria-label="Semantic blend ratio" />
         </span>
         <span class="w-8 tabular-nums">{semantic.toFixed(1)}</span>
@@ -1462,11 +1739,13 @@
       {#each activeFilters as chip (chip.key)}
         <span class="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2 py-1 text-accent-text">
           {chip.label}
-          <button
-            type="button"
-            class="rounded-full px-1 leading-none hover:bg-accent/25"
-            aria-label={`Remove filter ${chip.label}`}
-            onclick={chip.clear}>×</button>
+          {#if chip.clear}
+            <button
+              type="button"
+              class="rounded-full px-1 leading-none hover:bg-accent/25"
+              aria-label={`Remove filter ${chip.label}`}
+              onclick={chip.clear}>×</button>
+          {/if}
         </span>
       {/each}
     </div>
@@ -1682,15 +1961,15 @@
             <input
               type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeLo}
-              oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; }}
-              onchange={onRangeChange} aria-label="Minimum file size" />
+              oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; onSliderInput("size"); }}
+              onchange={() => onRangeChange("size")} aria-label="Minimum file size" />
           </span>
           <span class="w-40">
             <input
               type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeHi}
-              oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; }}
-              onchange={onRangeChange} aria-label="Maximum file size" />
+              oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; onSliderInput("size"); }}
+              onchange={() => onRangeChange("size")} aria-label="Maximum file size" />
           </span>
           <span class="tabular-nums">{fmtBytes(sizeLo)} – {fmtBytes(sizeHi)}</span>
         </div>
@@ -1707,15 +1986,15 @@
             <input
               type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeLo}
-              oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; }}
-              onchange={onRangeChange} aria-label="Earliest modified date" />
+              oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; onSliderInput("date"); }}
+              onchange={() => onRangeChange("date")} aria-label="Earliest modified date" />
           </span>
           <span class="w-40">
             <input
               type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeHi}
-              oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; }}
-              onchange={onRangeChange} aria-label="Latest modified date" />
+              oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; onSliderInput("date"); }}
+              onchange={() => onRangeChange("date")} aria-label="Latest modified date" />
           </span>
           <span class="tabular-nums">{fmtDate(mtimeLo)} – {fmtDate(mtimeHi)}</span>
         </div>
@@ -1734,10 +2013,20 @@
          explanation is worth seeing immediately. The panel owns only its
          viewport; the area it reports comes straight back into this page's param
          state. -->
-    {#if error}<StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />{/if}
+    {#if error}<StateBlock state="error" class="mt-6" message={error} onRetry={() => runFresh()} />{/if}
     {#await loadMapPanel()}
       <StateBlock state="loading" />
     {:then m}
+      {#if mapError}
+        <!-- Never an empty map on a failed fetch: it would read as "no result
+             carries coordinates". -->
+        <Alert tone="danger" class="mt-4">
+          <span class="flex flex-wrap items-center gap-2">
+            Could not load map points.
+            <Button size="sm" onclick={() => loadMapPoints()}>Retry</Button>
+          </span>
+        </Alert>
+      {:else}
       <m.default
         points={mapPoints}
         {geoTotal}
@@ -1749,6 +2038,7 @@
         onBoxChange={onMapBox}
         onOpenItem={(id) => (selected = id)}
       />
+      {/if}
     {:catch}
       <div role="alert" class="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted">
         <p>The map failed to load — Filearr may have been updated since this tab was opened.</p>
@@ -1771,12 +2061,12 @@
       </p>
     </div>
   {:else if error}
-    <StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />
+    <StateBlock state="error" class="mt-6" message={error} onRetry={() => runFresh()} />
   {:else}
     {#if hashMode}
       <p class="mt-4 text-sm text-accent-text">Exact hash match ({total} found)</p>
     {:else}
-      <p class="mt-4 text-sm text-muted">{total} results</p>
+      <p class="mt-4 text-sm text-muted">{totalLabel}</p>
     {/if}
 
     <!-- IN-T4 selection controls. Deliberately "all LOADED", never "all
@@ -1786,7 +2076,7 @@
       <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted">
         <Button size="sm" onclick={selectAllLoaded}>Select all loaded ({hits.length})</Button>
         {#if selectedIds.size}
-          <Button size="sm" onclick={clearSelection}>Clear selection</Button>
+          <Button size="sm" onclick={userClearSelection}>Clear selection</Button>
         {:else}
           <span>
             Tick a row (or press Space) to select; shift-click extends a range.
@@ -1799,14 +2089,30 @@
       <BulkEditBar
         count={selectedIds.size}
         targets={bulkTargets}
-        busy={bulkBusy}
+        busy={bulkBusy || bulkCancelling}
+        cancelling={bulkCancelling}
+        progress={bulkProgress}
         onApply={applyBulk}
-        onClear={clearSelection} />
+        onClear={userClearSelection} />
     {/if}
 
-    <!-- A request-level failure of the bar's Apply, right below the bar. -->
+    <!-- Duplicate badges failed to load: the results stand, the badges retry. -->
+    {#if copyCountsError}
+      <Alert tone="warn" class="mt-2" onDismiss={() => (copyCountsError = "")}>
+        <span class="flex flex-wrap items-center gap-2">
+          {copyCountsError}
+          <Button size="sm" onclick={retryCopyCounts}>Retry</Button>
+        </span>
+      </Alert>
+    {/if}
+
+    <!-- A request-level failure of the bar's Apply, right below the bar: what
+         committed before it (A26), then the error one line per field. -->
     {#if bulkError}
-      <Alert tone="danger" class="mt-2" onDismiss={() => (bulkError = "")}>{bulkError}</Alert>
+      <Alert tone="danger" class="mt-2" onDismiss={() => (bulkError = "")}>
+        {#if bulkErrorLead}<span class="block">{bulkErrorLead}</span>{/if}
+        {#each bulkErrorLines as line, i (i)}<span class="block">{line}</span>{/each}
+      </Alert>
     {/if}
 
     <!-- Per-item outcomes. RBAC path grants can deny an arbitrary subset of a
@@ -1866,7 +2172,7 @@
       <StateBlock
         state="empty"
         class="mt-2"
-        message="No matches. Try fewer words, remove a filter chip, or set Match in to everything." />
+        message={noMatchesMessage} />
     {:else if view === "grid"}
       <!-- P12 slice 2: responsive thumbnail GRID. Non-virtualized (a CSS grid of
            the already-loaded, paginated hits) with lazy <img>s (loading="lazy")
@@ -1915,14 +2221,15 @@
                 onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
             </div>
             <div role="gridcell" class="flex min-w-0 flex-col">
-              <Thumb id={hitId(hit)} size="aspect-square w-full h-auto" rounded="rounded-none" />
+              <Thumb id={hitId(hit)} category={str(hit, "file_category")} filename={str(hit, "filename")} size="aspect-square w-full h-auto" rounded="rounded-none" />
               <div class="flex min-w-0 flex-col gap-1 p-2">
-                <span class="truncate text-sm font-medium" title={str(hit, "title") || str(hit, "filename")}
-                  >{str(hit, "title") || str(hit, "filename")}</span>
+                <span class="truncate text-sm font-medium" title={hitLabel(hit)}
+                  >{#each labelSegs(hit) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 <span class="flex items-center gap-1">
                   <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs"
                     >{str(hit, "file_category")}</span>
                   {#if num(hit, "year")}<span class="text-xs text-muted">({num(hit, "year")})</span>{/if}
+                  {#if num(hit, "size") != null}<span class="shrink-0 text-2xs tabular-nums text-muted">{fmtBytes(num(hit, "size"))}</span>{/if}
                   {#if copyCountMap[hitId(hit)] > 1}
                     <span class="ml-auto shrink-0 rounded-full bg-warn-bg px-1.5 py-0.5 text-2xs font-medium text-warn"
                       title="Has duplicate copies">{copyCountMap[hitId(hit)]}×</span>
@@ -1988,13 +2295,15 @@
               onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
           </div>
           <div role="gridcell" class="flex min-w-0 flex-1 items-center gap-3">
-            <Thumb id={hitId(hit)} size="h-9 w-9" />
+            <Thumb id={hitId(hit)} category={str(hit, "file_category")} filename={str(hit, "filename")} size="h-9 w-9" />
             <span class="shrink-0 rounded-control bg-surface-3 px-2 py-0.5 text-xs"
               >{str(hit, "file_category")}</span>
             <span class="flex min-w-0 flex-1 flex-col">
-              <span class="flex items-center gap-2">
-                <span class="truncate font-medium" title={str(hit, "title") || str(hit, "filename")}
-                  >{str(hit, "title") || str(hit, "filename")}</span>
+              <!-- leading-5: label line + snippet line fit the 44 px row, so a
+                   row with a snippet is no taller than one without. -->
+              <span class="flex items-center gap-2 leading-5">
+                <span class="truncate font-medium" title={hitLabel(hit)}
+                  >{#each labelSegs(hit) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 {#if num(hit, "year")}<span class="shrink-0 text-sm text-muted">({num(hit, "year")})</span>{/if}
                 {#if copyCountMap[hitId(hit)] > 1}
                   <!-- P3-T10 duplicate badge: opens the detail (Copies section). -->
@@ -2009,11 +2318,18 @@
               </span>
               {#if str(hit, "snippet")}
                 <span class="truncate text-xs text-muted">
-                  {#each parseSnippet(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                  {#each parseHighlight(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
               {/if}
             </span>
           </div>
+          <!-- A15: size and modified date, so "Largest" / "Newest" can be checked
+               by eye. -->
+          <div role="gridcell" class="hidden w-16 shrink-0 text-right text-xs tabular-nums text-muted sm:block"
+            >{num(hit, "size") != null ? fmtBytes(num(hit, "size")) : ""}</div>
+          <div role="gridcell" class="hidden w-20 shrink-0 text-right text-xs tabular-nums text-muted sm:block"
+            title={num(hit, "mtime") != null ? fmtUtc(num(hit, "mtime")) : undefined}
+            >{num(hit, "mtime") != null ? fmtDate(num(hit, "mtime")) : ""}</div>
           <div role="gridcell" class="hidden min-w-0 shrink basis-1/3 text-right sm:block">
             <span class="block truncate text-xs text-muted" title={str(hit, "path")}>{str(hit, "path")}</span>
           </div>
@@ -2030,7 +2346,10 @@
     </VList>
     {/if}
 
-    {#if loading}
+    {#if loadMoreError}
+      <!-- A12: the next page failed; the pages above stay, paging resumes on Retry. -->
+      <StateBlock state="error" compact message={loadMoreError} onRetry={() => loadMore(true)} />
+    {:else if loading}
       <StateBlock state="loading" compact />
     {/if}
   {/if}
@@ -2041,7 +2360,11 @@
          (stale chunk after a deploy) is pinned to the viewport instead, so it
          is seen wherever the user has scrolled to. -->
     {#await loadItemDetail() then m}
-      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+      <m.default
+        id={selected}
+        onClose={() => (selected = null)}
+        onOpen={(nid) => (selected = nid)}
+        onChanged={onItemChanged} />
     {:catch}
       <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
         <Alert tone="danger">

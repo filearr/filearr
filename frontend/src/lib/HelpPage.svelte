@@ -171,7 +171,7 @@
           <dt class="text-sm font-medium text-slate-800 dark:text-slate-200">
             {sec.title}{#if sec.searchOnly}
               <span class="ml-1 rounded bg-slate-100 px-1 py-0.5 text-[10px] font-normal
-                           text-slate-500 dark:bg-slate-800 dark:text-slate-400">search only</span>
+                           text-slate-500 dark:bg-slate-800 dark:text-slate-400">not supported yet</span>
             {/if}
           </dt>
           <dd class="mt-0.5 text-sm leading-snug text-slate-600 dark:text-slate-400">

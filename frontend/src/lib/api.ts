@@ -466,11 +466,25 @@ export const mintTransferEventsToken = (id: string) =>
     { method: "POST" },
   );
 
-/** Fetch the verified staged file and save it as ``filename``. Mirrors
- *  ``downloadExport`` (a blob save); served only for a verified,
- *  staged/downloaded transfer. */
-export async function downloadTransfer(id: string, filename: string): Promise<void> {
-  await saveBlob(`/transfers/${id}/download`, filename || `transfer-${id}`);
+/** The staged file's download URL (session cookie auth). Navigated to by an
+ *  ``<a download>`` so the browser streams it to disk: no blob, no memory (A29). */
+export function transferDownloadUrl(id: string): string {
+  return `${API_BASE}/transfers/${id}/download`;
+}
+
+/** Ask whether the staged file is downloadable before navigating to it, so a
+ *  409/401/403 surfaces as an ``ApiError`` (inline) instead of a failed browser
+ *  download. A one-byte ranged GET: FastAPI GET routes answer 405 to HEAD (the
+ *  backend ticket to add HEAD is in the ledger). The backend answers 206 with
+ *  one byte, and a partial range does not mark the transfer downloaded; the
+ *  body is discarded. If a proxy strips ``Range``, the answer is a 200 with the
+ *  FULL file, which ``expect: "response"`` reads once into memory before the
+ *  anchor download starts (accepted; the HEAD ticket removes it). */
+export async function probeDownload(id: string): Promise<void> {
+  await send("GET", `/transfers/${id}/download`, {
+    expect: "response",
+    headers: { Range: "bytes=0-0" },
+  });
 }
 
 // P3-T9 — related / near-duplicate items via the semantic vector. Returns 409
@@ -1743,6 +1757,10 @@ export interface TreeItem {
   size: number;
   title: string | null;
   year: number | null;
+  // Ruling 7 (forward-compatible): the tree endpoint does not send these yet
+  // (backend ticket); Browse renders a status badge / date only when present.
+  status?: string | null;
+  mtime?: number | string | null;
 }
 
 export interface TreeResponse {
@@ -2074,16 +2092,17 @@ export interface TagSuggestion {
 }
 
 /** Typo-tolerant, count-ordered tag suggestions from Meili facet-search (read
- *  scope). `q` is the partial tag; the optional scope narrows the counts. */
+ *  scope). `q` is the partial tag; the optional scope narrows the counts. The
+ *  backend (`GET /search/tags`) reads a repeatable `file_category` and ONE
+ *  `library` (A31: the old `type` param was ignored). */
 export function searchTags(
   q: string,
-  scope: { type?: string; library?: string } = {},
+  scope: { file_category?: string[]; library?: string } = {},
   signal?: AbortSignal,
 ): Promise<{ tags: TagSuggestion[] }> {
-  const params: Record<string, string> = { q };
-  if (scope.type) params.type = scope.type;
-  if (scope.library) params.library = scope.library;
-  const qs = new URLSearchParams(params);
+  const qs = new URLSearchParams({ q });
+  for (const c of scope.file_category ?? []) if (c) qs.append("file_category", c);
+  if (scope.library) qs.set("library", scope.library);
   return request(`/search/tags?${qs}`, { signal });
 }
 
@@ -2452,6 +2471,12 @@ export interface AuthPrincipal {
  *  roles too — never test `global_role === "admin"` in the UI). */
 export const isAdminPrincipal = (me: AuthPrincipal | null | undefined): boolean =>
   !!me && (me.scopes ? me.scopes.includes("admin") : me.global_role === "admin");
+
+/** True when the principal holds the ``write`` scope (the gate on write
+ *  routes such as targeted scans; the write and admin roles both carry it).
+ *  Payloads without ``scopes`` fall back to the admin check. */
+export const canWrite = (me: AuthPrincipal | null | undefined): boolean =>
+  !!me && (me.scopes ? me.scopes.includes("write") : isAdminPrincipal(me));
 
 // --- Account (self-service) --------------------------------------------------
 export interface ProfilePatch {

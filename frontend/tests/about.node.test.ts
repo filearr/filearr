@@ -41,13 +41,13 @@ const TOOL: AboutTool = {
   impact: null,
 };
 
-test("formatBytes: binary units, and an unknown size says so", () => {
+test("formatBytes: the shared byte format, and an unknown size reads 'unknown', never a zero", () => {
   assert.equal(formatBytes(0), "0 B");
   assert.equal(formatBytes(512), "512 B");
-  assert.equal(formatBytes(1024), "1.0 KiB");
-  assert.equal(formatBytes(133_000_000), "127 MiB");
-  assert.equal(formatBytes(5 * 1024 ** 3), "5.0 GiB");
-  // The states that must never become "0 B".
+  assert.equal(formatBytes(1024), "1 KB");
+  assert.equal(formatBytes(133_000_000), "126.8 MB");
+  assert.equal(formatBytes(5 * 1024 ** 3), "5 GB");
+  // The states that must never become "0 B" — the module's explicit word (item 17).
   assert.equal(formatBytes(null), "unknown");
   assert.equal(formatBytes(undefined), "unknown");
   assert.equal(formatBytes(Number.NaN), "unknown");
@@ -265,7 +265,7 @@ test("aboutMarkdown never emits an empty version cell", () => {
     FIXED_NOW,
   );
   assert.match(cached, /local download time, not the model's release date/);
-  assert.ok(cached.includes("127 MiB"));
+  assert.ok(cached.includes("126.8 MB"));
   assert.ok(cached.includes("https://hf/tree/a"));
   // Never-downloaded says so where the revision would be.
   assert.match(md, /\| Revision \| not downloaded \|/);

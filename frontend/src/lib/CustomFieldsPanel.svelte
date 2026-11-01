@@ -19,6 +19,7 @@
     type Library,
     errorMessage,
   } from "./api";
+  import { invalidateCustomFields } from "./configCache";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
   import { Alert, Button, Checkbox, DataTable, Field, Input, Modal, Select, Textarea, confirm } from "./ui";
@@ -97,6 +98,7 @@
       cLibraryIds = [];
       cFacetable = cSortable = cRequired = false;
       cSelectOptions = "";
+      invalidateCustomFields(); // A44: item details and the bulk bar refetch
       await refresh();
     } catch (err) {
       createError = errorMessage(err, { verb: "manage custom fields" });
@@ -145,6 +147,7 @@
             : null,
       });
       editing = null;
+      invalidateCustomFields(); // A44: item details and the bulk bar refetch
       await refresh();
     } catch (err) {
       editError = errorMessage(err, { verb: "manage custom fields" });
@@ -166,6 +169,7 @@
     deleteError = "";
     try {
       await deleteCustomField(f.id);
+      invalidateCustomFields(); // A44: item details and the bulk bar refetch
       await refresh();
     } catch (err) {
       deleteError = errorMessage(err, { verb: "manage custom fields" });

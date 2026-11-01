@@ -11,6 +11,8 @@
 // cell turns "we could not determine this" into "there is nothing here" — the
 // exact misreading that costs an operator twenty minutes mid-incident.
 
+import { fmtBytes } from "./format.ts";
+
 export type AboutApplication = {
   app_version: string;
   build_stamp: string | null;
@@ -139,20 +141,13 @@ export type FrontendStack = {
   packages: { name: string; version: string; kind: "runtime" | "build"; url: string }[];
 };
 
-/** Human byte size. Binary units, because that is what `ls -lh` and every disk
- *  figure elsewhere in this console uses. */
-export function formatBytes(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n) || n < 0) return "unknown";
-  if (n < 1024) return `${n} B`;
-  const units = ["KiB", "MiB", "GiB", "TiB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
+/** Human byte size, from the shared formatter (A32). An unknown size keeps
+ *  this module's explicit "unknown" (the one rule above) — never "0 B", and
+ *  not the shared formatter's bare "—" either. */
+export const formatBytes = (n: number | null | undefined): string => {
+  const s = fmtBytes(n);
+  return s === "—" ? "unknown" : s;
+};
 
 /** First 12 characters of a commit sha — enough to be unambiguous, short enough
  *  to sit in a table cell. Returns null for a missing sha so callers must make

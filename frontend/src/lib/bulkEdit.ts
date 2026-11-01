@@ -184,8 +184,8 @@ export interface ItemPatchBody {
 }
 
 /** One selected item as the patch builder needs it: identity + the current tag
- *  list (already resolved from the search hit, or re-fetched when the hit did
- *  not carry one). */
+ *  list (runBulk in ./bulkOrchestrate.ts re-reads it live with GET /items/{id}
+ *  whenever a tag op is present; the hit's snapshot is never used for tags). */
 export interface BulkTarget extends FieldTarget {
   id: string;
   tags: string[];

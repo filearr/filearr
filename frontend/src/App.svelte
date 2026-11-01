@@ -381,7 +381,7 @@
   {:else if page === "alerts"}
     {#await loadPage("alerts")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "browse"}
-    {#await loadPage("browse")}{@render pageLoading()}{:then m}<m.default libraryId={browseLib} path={browsePath} />{:catch}{@render pageLoadFailed()}{/await}
+    {#await loadPage("browse")}{@render pageLoading()}{:then m}<m.default libraryId={browseLib} path={browsePath} {me} authDisabled={authMode === "disabled"} />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "timeline"}
     {#await loadPage("timeline")}{@render pageLoading()}{:then m}<m.default />{:catch}{@render pageLoadFailed()}{/await}
   {:else if page === "reports"}

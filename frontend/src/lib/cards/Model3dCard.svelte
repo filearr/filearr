@@ -2,15 +2,15 @@
   import Highlights from "./Highlights.svelte";
   import KeyFactsCard from "./KeyFactsCard.svelte";
   import { effectiveMeta } from "./keyfacts";
+  import { HIGHLIGHT_KEYS } from "./highlights";
   import { asStr } from "./format";
+  import { Alert } from "../ui";
 
   let { item }: { item: Record<string, unknown> } = $props();
   const m = $derived(effectiveMeta(item));
 
-  const CURATED = [
-    "triangles", "vertices", "mesh_count", "bbox", "bbox_volume",
-    "watertight", "file_format", "unsupported",
-  ];
+  // A14: every key here is rendered below AND excluded from "More details".
+  const KEYS = HIGHLIGHT_KEYS["three-d-cad"];
 
   const highlights = $derived([
     { label: "Triangles", value: asStr(m.triangles) },
@@ -25,10 +25,8 @@
 
 <div class="space-y-4">
   {#if m.unsupported}
-    <p class="rounded-lg bg-amber-100 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-      Unsupported / non-mesh geometry — stats may be incomplete.
-    </p>
+    <Alert tone="warn" live={false}>Unsupported / non-mesh geometry — stats may be incomplete.</Alert>
   {/if}
   <Highlights facts={highlights} />
-  <KeyFactsCard {item} exclude={CURATED} heading="More details" />
+  <KeyFactsCard {item} exclude={KEYS} heading="More details" />
 </div>

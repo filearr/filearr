@@ -271,11 +271,6 @@ export function labelColor(fill: string): string {
   return l >= 55 ? "#0f172a" : "#ffffff";
 }
 
-/** Human byte size for tooltips/captions. Local to the treemap so the module
- *  stays importable from Node tests without pulling a Svelte/DOM dependency. */
-export function fmtBytes(b: number): string {
-  if (!isFinite(b) || b <= 0) return "0 B";
-  const u = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.min(u.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
-  return `${(b / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
-}
+/** Human byte size for tooltips/captions: the shared formatter (A32), which is
+ *  itself DOM-free, so this module stays importable from Node tests. */
+export { fmtBytes } from "./format.ts";
