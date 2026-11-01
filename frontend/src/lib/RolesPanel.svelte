@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { createRawSnippet, onMount, type Snippet } from "svelte";
   import RoleForm from "./RoleForm.svelte";
   import {
     listRoles, compareRoles, deleteRole, friendlyError,
@@ -59,25 +59,66 @@
 
   const cell = (role: string, key: string) => !!cmp?.matrix?.[role]?.[key];
 
-  // Comparison matrix rows: one per scope, one per action, then the users row.
-  // Each role is a column whose value the DataTable accessor reads.
-  type MatrixRow = { key: string; kind: "scope" | "action" | "users"; name: string; help: string };
+  // Comparison matrix rows: the role's description (and bypass note) first,
+  // one row per scope, one per action, then the full user list. Each role is
+  // a column (key `role:<name>`, so no role name can collide with the
+  // Permission column) rendered by that role's cell snippet.
+  type MatrixRow = { key: string; kind: "about" | "scope" | "action" | "users"; name: string; help: string };
   const matrixRows = $derived<MatrixRow[]>(
     cmp
       ? [
+          { key: "about", kind: "about" as const, name: "About", help: "" },
           ...cmp.scopes.map((s) => ({ key: `scope:${s}`, kind: "scope" as const, name: s, help: cmp?.scope_help?.[s] ?? "" })),
           ...cmp.actions.map((a) => ({ key: `action:${a}`, kind: "action" as const, name: a, help: cmp?.action_help?.[a] ?? "" })),
           { key: "users", kind: "users" as const, name: "Users", help: "" },
         ]
       : [],
   );
-  const matrixValue = (row: MatrixRow, role: string): string =>
-    row.kind === "users" ? userList(role) : cell(role, row.key) ? "✓" : "—";
+  /** Every user holding the role, untruncated (the cell wraps). */
   function userList(role: string): string {
     const names = cmp?.users_by_role?.[role] ?? [];
-    if (names.length === 0) return "—";
-    return names.length > 5 ? `${names.slice(0, 5).join(", ")} +${names.length - 5}` : names.join(", ");
+    return names.length === 0 ? "—" : names.join(", ");
   }
+  function aboutText(r: RoleDef): string {
+    const parts = [r.description, r.bypass ? "Admin scope: bypasses path grants." : ""].filter(Boolean);
+    return parts.length ? parts.join(" ") : "—";
+  }
+
+  // Fills one matrix cell with DOM text nodes (never HTML), so role and user
+  // names cannot inject markup. ✓/— are hidden from screen readers in favour
+  // of "Yes"/"No".
+  function fillMatrixCell(node: Element, row: MatrixRow, r: RoleDef) {
+    if (row.kind === "users" || row.kind === "about") {
+      node.className = "text-xs text-muted";
+      node.textContent = row.kind === "users" ? userList(r.name) : aboutText(r);
+      return;
+    }
+    const yes = cell(r.name, row.key);
+    const glyph = document.createElement("span");
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.className = yes ? "text-ok" : "text-muted";
+    glyph.textContent = yes ? "✓" : "—";
+    const sr = document.createElement("span");
+    sr.className = "sr-only";
+    sr.textContent = yes ? "Yes" : "No";
+    node.className = "";
+    node.replaceChildren(glyph, sr);
+  }
+  // One cell snippet per role: DataTable cell snippets receive only the row,
+  // so the role is closed over here.
+  const roleCells = $derived(
+    new Map<string, Snippet<[MatrixRow]>>(
+      (cmp?.roles ?? []).map((r) => [
+        r.name,
+        createRawSnippet((row: () => MatrixRow) => ({
+          render: () => "<span></span>",
+          setup: (node) => {
+            $effect(() => fillMatrixCell(node, row(), r));
+          },
+        })),
+      ]),
+    ),
+  );
 </script>
 
 {#snippet roleNameCell(r: RoleDef)}
@@ -115,8 +156,8 @@
 {/snippet}
 
 {#snippet permissionCell(row: MatrixRow)}
-  {#if row.kind === "users"}
-    <span class="font-medium">Users</span>
+  {#if row.kind === "users" || row.kind === "about"}
+    <span class="font-medium">{row.name}</span>
   {:else}
     <span title={row.help}><span class="text-xs text-muted">{row.kind}</span> <span class="font-mono">{row.name}</span></span>
   {/if}
@@ -181,11 +222,10 @@
         captionHidden
         columns={[
           { key: "permission", label: "Permission", cell: permissionCell },
-          ...cmp.roles.map((r) => ({ key: r.name, label: r.display_name || r.name })),
+          ...cmp.roles.map((r) => ({ key: `role:${r.name}`, label: r.display_name || r.name, cell: roleCells.get(r.name) })),
         ]}
         rows={matrixRows}
         rowKey={(row) => row.key}
-        accessor={(row, role) => matrixValue(row, role)}
       />
     </div>
   {/if}
