@@ -92,3 +92,45 @@ export function boundsProbeParams(params: Record<string, string>): Record<string
   out.limit = String(BOUNDS_PROBE_LIMIT);
   return out;
 }
+
+// ---- highlight markers (P3-T5 snippet, A15 title/filename) -------------------
+// The backend wraps matches in <em>…</em> (search.py HIGHLIGHT_PRE/POST). They
+// are NEVER rendered with {@html} (untrusted document text): the string is split
+// into text segments and the template renders plain text nodes and <mark>s, so
+// any other markup in the value stays literal text.
+
+export type Seg = { text: string; mark: boolean };
+
+/** Split `s` on the `pre`/`post` markers. Nested markers mark the whole span
+ *  once; a stray `post` is dropped; an unclosed `pre` marks to the end. Marker
+ *  text never appears in a segment; adjacent segments of one kind merge. */
+export function parseMarked(s: string, pre: string, post: string): Seg[] {
+  const segs: Seg[] = [];
+  const push = (text: string, mark: boolean) => {
+    if (!text) return;
+    const last = segs[segs.length - 1];
+    if (last && last.mark === mark) last.text += text;
+    else segs.push({ text, mark });
+  };
+  let depth = 0;
+  let i = 0;
+  while (i < s.length) {
+    const a = s.indexOf(pre, i);
+    const b = s.indexOf(post, i);
+    const next = a < 0 ? b : b < 0 ? a : Math.min(a, b);
+    if (next < 0) break;
+    push(s.slice(i, next), depth > 0);
+    if (next === a) {
+      depth++;
+      i = a + pre.length;
+    } else {
+      if (depth > 0) depth--;
+      i = b + post.length;
+    }
+  }
+  push(s.slice(i), depth > 0);
+  return segs;
+}
+
+/** The backend's snippet / highlight markers. */
+export const parseHighlight = (s: string): Seg[] => parseMarked(s, "<em>", "</em>");

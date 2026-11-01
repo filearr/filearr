@@ -2,12 +2,14 @@
   import Highlights from "./Highlights.svelte";
   import KeyFactsCard from "./KeyFactsCard.svelte";
   import { effectiveMeta } from "./keyfacts";
+  import { HIGHLIGHT_KEYS } from "./highlights";
   import { asStr } from "./format";
 
   let { item }: { item: Record<string, unknown> } = $props();
   const m = $derived(effectiveMeta(item));
 
-  const CURATED = ["width", "height", "format", "mode", "camera", "taken_at"];
+  // A14: every key here is rendered below AND excluded from "More details".
+  const KEYS = HIGHLIGHT_KEYS["image"];
 
   const highlights = $derived([
     { label: "Dimensions", value: m.width && m.height ? `${asStr(m.width)}×${asStr(m.height)}` : null },
@@ -20,5 +22,5 @@
 
 <div class="space-y-4">
   <Highlights facts={highlights} />
-  <KeyFactsCard {item} exclude={CURATED} heading="More details" />
+  <KeyFactsCard {item} exclude={KEYS} heading="More details" />
 </div>

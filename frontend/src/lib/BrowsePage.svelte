@@ -371,7 +371,7 @@
               type="button"
               class="flex flex-col overflow-hidden rounded-panel border border-border text-left hover:border-border-strong"
               onclick={() => (selected = it.id)}>
-              <Thumb id={it.id} size="aspect-square w-full h-auto" rounded="rounded-none" />
+              <Thumb id={it.id} category={it.file_category} filename={it.filename} size="aspect-square w-full h-auto" rounded="rounded-none" />
               <div class="flex flex-col gap-1 p-2">
                 <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 <span class="flex items-center gap-1">
@@ -391,7 +391,7 @@
                 type="button"
                 class="flex w-full items-center gap-3 py-3 text-left hover:bg-surface-3"
                 onclick={() => (selected = it.id)}>
-                <Thumb id={it.id} size="h-9 w-9" />
+                <Thumb id={it.id} category={it.file_category} filename={it.filename} size="h-9 w-9" />
                 <span class="rounded-control bg-surface-3 px-2 py-0.5 text-xs">{it.file_category}</span>
                 <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 {#if it.year}<span class="text-sm text-muted">({it.year})</span>{/if}

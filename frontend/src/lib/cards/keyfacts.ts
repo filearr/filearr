@@ -86,6 +86,13 @@ export function orderKeyFacts(
   return facts;
 }
 
+/** The reason extraction failed (`_extract_error`, set by the extractors and
+ *  listed by the libraries errors endpoint), or null. `_`-prefixed keys never
+ *  appear in the leftovers, so KeyFactsCard shows this one as a warning. */
+export function extractError(meta: Record<string, unknown>): string | null {
+  return factValue(meta._extract_error);
+}
+
 /** Project a profile's `fields` map into ordered {name,label} labels. */
 export function profileFieldLabels(
   fields: Record<string, { label?: string }> | undefined,

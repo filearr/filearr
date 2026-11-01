@@ -3,17 +3,14 @@
   import TrackTable from "./TrackTable.svelte";
   import KeyFactsCard from "./KeyFactsCard.svelte";
   import { effectiveMeta } from "./keyfacts";
-  import { asStr, asRows, fmtDuration } from "./format";
+  import { HIGHLIGHT_KEYS } from "./highlights";
+  import { asStr, asRows, fmtDuration, fmtVideoBitrate } from "./format";
 
   let { item }: { item: Record<string, unknown> } = $props();
   const m = $derived(effectiveMeta(item));
 
-  const CURATED = [
-    "resolution", "video_codec", "audio_codec", "duration", "container",
-    "hdr", "hdr_format", "width", "height", "frame_rate", "bitrate",
-    "color_primaries", "color_transfer", "audio_tracks", "subtitle_tracks",
-    "title", "year", "season", "episode",
-  ];
+  // A14: every key here is rendered below AND excluded from "More details".
+  const KEYS = HIGHLIGHT_KEYS["video"];
 
   const highlights = $derived([
     { label: "Resolution", value: asStr(m.resolution) ?? (m.width && m.height ? `${m.width}×${m.height}` : null) },
@@ -24,6 +21,15 @@
     { label: "HDR", value: m.hdr ? (asStr(m.hdr_format) ?? "yes") : null },
     { label: "Container", value: asStr(m.container) },
   ]);
+  const rows = $derived([
+    { label: "Title", value: asStr(m.title) },
+    { label: "Year", value: asStr(m.year) },
+    { label: "Season", value: asStr(m.season) },
+    { label: "Episode", value: asStr(m.episode) },
+    { label: "Bitrate", value: fmtVideoBitrate(m.bitrate) },
+    { label: "Colour primaries", value: asStr(m.color_primaries) },
+    { label: "Colour transfer", value: asStr(m.color_transfer) },
+  ]);
   const audioTracks = $derived(asRows(m.audio_tracks));
   const subtitleTracks = $derived(asRows(m.subtitle_tracks));
 </script>
@@ -32,5 +38,5 @@
   <Highlights facts={highlights} />
   {#if audioTracks}<TrackTable title="Audio tracks" rows={audioTracks} />{/if}
   {#if subtitleTracks}<TrackTable title="Subtitle tracks" rows={subtitleTracks} />{/if}
-  <KeyFactsCard {item} exclude={CURATED} heading="More details" />
+  <KeyFactsCard {item} exclude={KEYS} lead={rows} heading="More details" />
 </div>

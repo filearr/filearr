@@ -13,7 +13,7 @@
 </script>
 
 <script lang="ts">
-  import { fmtBytes, fmtDate } from "./format";
+  import { fmtBytes, fmtDate, fmtUtc } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { listKeyAction } from "./searchKeys";
   import * as safeStorage from "./safeStorage";
@@ -71,7 +71,14 @@
     type RangePair,
   } from "./searchState";
   import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
-  import { boundsProbePairs, boundsProbeParams, createPageSession, mergeHits } from "./searchResults";
+  import {
+    boundsProbePairs,
+    boundsProbeParams,
+    createPageSession,
+    mergeHits,
+    parseHighlight,
+    type Seg,
+  } from "./searchResults";
   import { semanticEnabled as probeSemantic } from "./semanticProbe";
   import {
     MAP_POINT_CAP,
@@ -322,25 +329,25 @@
   const CHIP_ON = "border-transparent bg-accent text-accent-fg";
   const CHIP_OFF = "border-border-strong";
 
-  // P3-T5 snippet rendering. The backend returns ``snippet`` (cropped document
-  // body) with matches wrapped in <em>…</em>. We NEVER {@html} it (untrusted
-  // document content); instead we split on the marker tags and render plain text
-  // nodes + <mark> elements, so any stray "<script>"/"<img>" in the body is shown
-  // as literal text and can never execute.
-  type Seg = { text: string; mark: boolean };
-  const SNIPPET_RE = /<em>([\s\S]*?)<\/em>/g;
-  function parseSnippet(s: string): Seg[] {
-    const segs: Seg[] = [];
-    let last = 0;
-    let m: RegExpExecArray | null;
-    SNIPPET_RE.lastIndex = 0;
-    while ((m = SNIPPET_RE.exec(s)) !== null) {
-      if (m.index > last) segs.push({ text: s.slice(last, m.index), mark: false });
-      segs.push({ text: m[1], mark: true });
-      last = m.index + m[0].length;
+  // P3-T5 snippet + A15 title/filename highlighting. The backend wraps matches
+  // in <em>…</em> (``snippet``: cropped body; ``highlight.title|filename``). We
+  // NEVER {@html} them (untrusted document content): parseHighlight
+  // (searchResults.ts) splits on the markers and the template renders plain
+  // text nodes + <mark>, so any stray "<script>"/"<img>" stays literal text.
+  // The row label is the title when there is one, else the filename; its
+  // marked copy is the matching ``highlight`` key, else the plain string. A
+  // highlight whose text no longer equals the label (the row was edited in
+  // ItemDetail since the search ran) is ignored.
+  const hitLabel = (h: Hit): string => str(h, "title") || str(h, "filename");
+  function labelSegs(h: Hit): Seg[] {
+    const label = hitLabel(h);
+    const hl = h.highlight as { title?: unknown; filename?: unknown } | undefined;
+    const marked = str(h, "title") ? hl?.title : hl?.filename;
+    if (typeof marked === "string" && marked) {
+      const segs = parseHighlight(marked);
+      if (segs.map((x) => x.text).join("") === label) return segs;
     }
-    if (last < s.length) segs.push({ text: s.slice(last), mark: false });
-    return segs;
+    return [{ text: label, mark: false }];
   }
 
   // ------------------------------------------------------------------------ //
@@ -2179,14 +2186,15 @@
                 onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
             </div>
             <div role="gridcell" class="flex min-w-0 flex-col">
-              <Thumb id={hitId(hit)} size="aspect-square w-full h-auto" rounded="rounded-none" />
+              <Thumb id={hitId(hit)} category={str(hit, "file_category")} filename={str(hit, "filename")} size="aspect-square w-full h-auto" rounded="rounded-none" />
               <div class="flex min-w-0 flex-col gap-1 p-2">
-                <span class="truncate text-sm font-medium" title={str(hit, "title") || str(hit, "filename")}
-                  >{str(hit, "title") || str(hit, "filename")}</span>
+                <span class="truncate text-sm font-medium" title={hitLabel(hit)}
+                  >{#each labelSegs(hit) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 <span class="flex items-center gap-1">
                   <span class="shrink-0 rounded-control bg-surface-3 px-1.5 py-0.5 text-2xs"
                     >{str(hit, "file_category")}</span>
                   {#if num(hit, "year")}<span class="text-xs text-muted">({num(hit, "year")})</span>{/if}
+                  {#if num(hit, "size") != null}<span class="shrink-0 text-2xs tabular-nums text-muted">{fmtBytes(num(hit, "size"))}</span>{/if}
                   {#if copyCountMap[hitId(hit)] > 1}
                     <span class="ml-auto shrink-0 rounded-full bg-warn-bg px-1.5 py-0.5 text-2xs font-medium text-warn"
                       title="Has duplicate copies">{copyCountMap[hitId(hit)]}×</span>
@@ -2252,13 +2260,13 @@
               onclick={(e) => { e.stopPropagation(); toggleSelect(index, e.shiftKey); }} />
           </div>
           <div role="gridcell" class="flex min-w-0 flex-1 items-center gap-3">
-            <Thumb id={hitId(hit)} size="h-9 w-9" />
+            <Thumb id={hitId(hit)} category={str(hit, "file_category")} filename={str(hit, "filename")} size="h-9 w-9" />
             <span class="shrink-0 rounded-control bg-surface-3 px-2 py-0.5 text-xs"
               >{str(hit, "file_category")}</span>
             <span class="flex min-w-0 flex-1 flex-col">
               <span class="flex items-center gap-2">
-                <span class="truncate font-medium" title={str(hit, "title") || str(hit, "filename")}
-                  >{str(hit, "title") || str(hit, "filename")}</span>
+                <span class="truncate font-medium" title={hitLabel(hit)}
+                  >{#each labelSegs(hit) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 {#if num(hit, "year")}<span class="shrink-0 text-sm text-muted">({num(hit, "year")})</span>{/if}
                 {#if copyCountMap[hitId(hit)] > 1}
                   <!-- P3-T10 duplicate badge: opens the detail (Copies section). -->
@@ -2273,11 +2281,18 @@
               </span>
               {#if str(hit, "snippet")}
                 <span class="truncate text-xs text-muted">
-                  {#each parseSnippet(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                  {#each parseHighlight(str(hit, "snippet")) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 </span>
               {/if}
             </span>
           </div>
+          <!-- A15: size and modified date, so "Largest" / "Newest" can be checked
+               by eye. -->
+          <div role="gridcell" class="hidden w-16 shrink-0 text-right text-xs tabular-nums text-muted sm:block"
+            >{num(hit, "size") != null ? fmtBytes(num(hit, "size")) : ""}</div>
+          <div role="gridcell" class="hidden w-20 shrink-0 text-right text-xs tabular-nums text-muted sm:block"
+            title={num(hit, "mtime") != null ? fmtUtc(num(hit, "mtime")) : undefined}
+            >{num(hit, "mtime") != null ? fmtDate(num(hit, "mtime")) : ""}</div>
           <div role="gridcell" class="hidden min-w-0 shrink basis-1/3 text-right sm:block">
             <span class="block truncate text-xs text-muted" title={str(hit, "path")}>{str(hit, "path")}</span>
           </div>

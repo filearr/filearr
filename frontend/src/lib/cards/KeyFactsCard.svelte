@@ -5,9 +5,14 @@
   // (alphabetical), rendering text-only values (see keyfacts.ts).
   // A44: both definitions are fetched once per page load and shared by every
   // card mount, ItemDetail and BulkEditBar (configCache.ts).
+  // P6 (A14): `lead` rows are facts the per-type card renders as plain rows
+  // (their keys are in its `exclude`); a failed extraction's `_extract_error`
+  // shows as a warning above the facts instead of "No additional details".
   import { cachedCustomFields, cachedProfile } from "../configCache";
+  import { Alert } from "../ui";
   import {
     effectiveMeta,
+    extractError,
     orderKeyFacts,
     profileFieldLabels,
     customFieldLabels,
@@ -18,11 +23,19 @@
     item,
     exclude = [],
     heading = "",
-  }: { item: Record<string, unknown>; exclude?: string[]; heading?: string } = $props();
+    lead = [],
+  }: {
+    item: Record<string, unknown>;
+    exclude?: readonly string[];
+    heading?: string;
+    lead?: { label: string; value: string | null }[];
+  } = $props();
 
   const mediaType = $derived(typeof item.file_category === "string" ? item.file_category : "");
   const libraryId = $derived(typeof item.library_id === "string" ? item.library_id : "");
   const meta = $derived(effectiveMeta(item));
+  const extractFailure = $derived(extractError(meta));
+  const leadRows = $derived(lead.filter((r) => r.value != null && r.value !== ""));
 
   let profileLabels = $state<FieldLabel[]>([]);
   let cfLabels = $state<FieldLabel[]>([]);
@@ -65,21 +78,28 @@
     return () => ac.abort();
   });
 
-  const facts = $derived(orderKeyFacts(meta, profileLabels, cfLabels, { exclude }));
+  const facts = $derived(orderKeyFacts(meta, profileLabels, cfLabels, { exclude: [...exclude] }));
 </script>
 
-{#if facts.length}
+{#if extractFailure}
+  <Alert tone="warn" live={false} class="mb-3">Extraction failed: {extractFailure}</Alert>
+{/if}
+{#if facts.length || leadRows.length}
   <div>
     {#if heading}
-      <div class="mb-1 text-xs font-semibold text-slate-500">{heading}</div>
+      <div class="mb-1 text-xs font-semibold text-muted">{heading}</div>
     {/if}
     <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
+      {#each leadRows as r (r.label)}
+        <dt class="text-muted">{r.label}</dt>
+        <dd class="min-w-0 break-words">{r.value}</dd>
+      {/each}
       {#each facts as f (f.key)}
-        <dt class="text-slate-500">{f.label}</dt>
+        <dt class="text-muted">{f.label}</dt>
         <dd class="min-w-0 break-words">{f.value}</dd>
       {/each}
     </dl>
   </div>
-{:else if !heading}
-  <p class="text-sm text-slate-500">No additional details extracted.</p>
+{:else if !heading && !extractFailure}
+  <p class="text-sm text-muted">No additional details extracted.</p>
 {/if}

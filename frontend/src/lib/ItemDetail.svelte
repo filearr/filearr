@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fmtBytes, fmtDate } from "./format";
+  import { fmtBytes, fmtDate, fmtDateTime, fmtUtc } from "./format";
   import { COPY_FAILED, copyText } from "./clipboard";
   import { toast } from "./ui/toast.svelte";
   import * as safeStorage from "./safeStorage";
@@ -29,12 +29,13 @@
   import RawView from "./RawView.svelte";
   import Breadcrumbs from "./Breadcrumbs.svelte";
   import { gotoBrowse } from "./routes";
-  import { cardFor, cardLabel } from "./cards/registry";
+  import { cardComponent, cardLabel } from "./cards/registry";
   import ArchiveSection from "./ArchiveSection.svelte";
   import Thumb from "./Thumb.svelte";
+  import { thumbable } from "./thumbPolicy";
   import RetrievePanel from "./RetrievePanel.svelte";
   import AgentStatusPanel from "./AgentStatusPanel.svelte";
-  import { Alert, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm } from "./ui";
+  import { Alert, Badge, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm, toneForStatus } from "./ui";
 
   let {
     id,
@@ -116,8 +117,33 @@
   // falls back to the generic key-facts card). Rendered via native Svelte-5
   // dynamic-component syntax below — no <svelte:component>.
   const mediaType = $derived(str("file_category") ?? "");
-  const CardComponent = $derived(cardFor(mediaType));
-  const cardTabLabel = $derived(cardLabel(mediaType));
+  const fileGroup = $derived(str("file_group"));
+  // Ruling 5: keyed by backend category; spreadsheets are a document group.
+  const CardComponent = $derived(cardComponent(mediaType, fileGroup));
+  const cardTabLabel = $derived(cardLabel(mediaType, fileGroup));
+
+  // A15 facts header. Reads `item`, which saveEdit replaces with the PATCH
+  // response, so a saved title/year/tags change shows here at once.
+  const factFilename = $derived(str("filename") ?? relPath.split("/").pop() ?? "");
+  const factTitle = $derived.by(() => {
+    const t = str("title")?.trim();
+    return t && t !== factFilename ? t : "";
+  });
+  const factYear = $derived(typeof item?.year === "number" ? item.year : null);
+  const factSize = $derived(typeof item?.size === "number" ? item.size : null);
+  // GET /items/{id} sends `mtime` as an ISO string (search hits: epoch
+  // seconds); format.ts reads both.
+  const factMtime = $derived(
+    typeof item?.mtime === "number" || (typeof item?.mtime === "string" && item.mtime)
+      ? (item.mtime as number | string)
+      : null,
+  );
+  const factTags = $derived(
+    Array.isArray(item?.tags)
+      ? (item.tags as unknown[]).filter((t): t is string => typeof t === "string" && t !== "")
+      : [],
+  );
+  const factStatus = $derived(str("status"));
   // IN-T4: editing is a THIRD tab rather than an inline-per-field affordance.
   // The card and Raw views are dense read-only layouts; sprinkling pencil icons
   // through them would mean redesigning both, whereas a tab reuses the switcher
@@ -538,11 +564,35 @@
     </div>
 
     {#if item}
-      <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
-           first request). Hides itself on miss (skipped type / not-yet-generated). -->
-      <div class="mb-3 flex justify-center">
-        <Thumb id={String(item.id)} tier="preview" size="max-h-64 w-auto" rounded="rounded-lg" />
+      <!-- A15 facts header: what the file is, before the per-type card. -->
+      <div class="mb-3 space-y-1.5">
+        <p class="min-w-0 break-words font-medium">{factFilename}
+          {#if factYear != null}<span class="font-normal text-muted">({factYear})</span>{/if}</p>
+        {#if factTitle}<p class="min-w-0 break-words text-sm">{factTitle}</p>{/if}
+        <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+          {#if factSize != null}<span class="tabular-nums">{fmtBytes(factSize)}</span>{/if}
+          {#if factMtime != null}
+            <span class="tabular-nums" title={fmtUtc(factMtime)}>Modified {fmtDateTime(factMtime)}</span>
+          {/if}
+          {#if factStatus && factStatus !== "active"}<Badge tone={toneForStatus(factStatus)}>{factStatus}</Badge>{/if}
+          {#if mediaType}<Badge>{mediaType}</Badge>{/if}
+          {#if fileGroup}<Badge>{fileGroup}</Badge>{/if}
+        </p>
+        {#if factTags.length}
+          <ul class="flex flex-wrap gap-1" aria-label="Tags">
+            {#each factTags as t (t)}<li><Badge>{t}</Badge></li>{/each}
+          </ul>
+        {/if}
       </div>
+      <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
+           first request), only for items the server can render (thumbPolicy);
+           anything else has no preview box at all. -->
+      {#if thumbable(mediaType, factFilename)}
+        <div class="mb-3 flex justify-center">
+          <Thumb id={String(item.id)} tier="preview" category={mediaType} filename={factFilename}
+            size="h-64 w-full max-w-md" rounded="rounded-lg" fit="contain" />
+        </div>
+      {/if}
     {/if}
 
     <!-- P10-T10 agent identity + online status + inline Verify (freshness updates
@@ -896,7 +946,9 @@
                       title={hitPath(h)}
                       onclick={() => void openSimilar(String(h.id))}>
                       <div class="flex h-20 items-center justify-center overflow-hidden">
-                        <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
+                        <Thumb id={String(h.id)} tier="grid" category={typeof h.file_category === "string" ? h.file_category : null}
+                          filename={typeof h.filename === "string" ? h.filename : null}
+                          size="h-20 w-full" rounded="rounded" fit="contain" />
                       </div>
                       <p class="mt-1 truncate text-xs">{hitLabel(h)}
                         {#if typeof h.similarity === "number"}<span class="ml-1 text-2xs text-muted">{simPct(h)}</span>{/if}</p>

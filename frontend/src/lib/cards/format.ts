@@ -23,6 +23,22 @@ export const fmtBytes = (b: unknown): string | null => {
   return n == null ? null : bytes(n);
 };
 
+/** Audio bitrate in kbps. The extractors disagree on the unit (A32): tinytag
+ *  reports kbit/s, while the mutagen fallback (tasks/extract.py) and ffprobe
+ *  store bit/s. No real audio stream is above 10000 kbit/s, so a larger value
+ *  is bit/s and is divided down; null when absent/non-positive. */
+export function fmtAudioBitrate(v: unknown): string | null {
+  const n = positive(v);
+  if (n == null) return null;
+  return `${Math.round(n > 10000 ? n / 1000 : n)} kbps`;
+}
+
+/** Video bitrate (always bit/s: ffprobe) in kbps; null when absent. */
+export function fmtVideoBitrate(v: unknown): string | null {
+  const n = positive(v);
+  return n == null ? null : `${Math.round(n / 1000)} kbps`;
+}
+
 /** Coerce an arbitrary metadata value to a short display string, or null. */
 export function asStr(v: unknown): string | null {
   if (v == null) return null;

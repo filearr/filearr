@@ -12,6 +12,8 @@ import {
   boundsProbeParams,
   createPageSession,
   mergeHits,
+  parseHighlight,
+  parseMarked,
 } from "../src/lib/searchResults.ts";
 import {
   cachedCustomFields,
@@ -269,4 +271,55 @@ test("invalidateCustomFields: the next cachedCustomFields() GETs /custom-fields 
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ---- parseMarked / parseHighlight (A15) ---------------------------------------
+
+const segs = (s: string) => parseMarked(s, "<em>", "</em>");
+
+test("parseMarked: plain text is one unmarked segment; empty is none", () => {
+  assert.deepEqual(segs("hello"), [{ text: "hello", mark: false }]);
+  assert.deepEqual(segs(""), []);
+});
+
+test("parseMarked: marked runs between text", () => {
+  assert.deepEqual(segs("a <em>b</em> c <em>d</em>"), [
+    { text: "a ", mark: false },
+    { text: "b", mark: true },
+    { text: " c ", mark: false },
+    { text: "d", mark: true },
+  ]);
+});
+
+test("parseMarked: nested markers mark the whole span once, no tags leak", () => {
+  assert.deepEqual(segs("x<em>a<em>b</em>c</em>y"), [
+    { text: "x", mark: false },
+    { text: "abc", mark: true },
+    { text: "y", mark: false },
+  ]);
+});
+
+test("parseMarked: a stray close is dropped; an unclosed open marks to the end", () => {
+  assert.deepEqual(segs("a</em>b"), [{ text: "ab", mark: false }]);
+  assert.deepEqual(segs("a<em>bc"), [
+    { text: "a", mark: false },
+    { text: "bc", mark: true },
+  ]);
+  assert.deepEqual(segs("<em></em>z"), [{ text: "z", mark: false }]);
+});
+
+test("parseMarked: other markup stays literal text; custom markers work", () => {
+  assert.deepEqual(segs("<script>x</script>"), [{ text: "<script>x</script>", mark: false }]);
+  assert.deepEqual(parseMarked("a[[b]]c", "[[", "]]"), [
+    { text: "a", mark: false },
+    { text: "b", mark: true },
+    { text: "c", mark: false },
+  ]);
+});
+
+test("parseHighlight uses the backend's <em> markers", () => {
+  assert.deepEqual(parseHighlight("<em>Holiday</em>.mkv"), [
+    { text: "Holiday", mark: true },
+    { text: ".mkv", mark: false },
+  ]);
 });

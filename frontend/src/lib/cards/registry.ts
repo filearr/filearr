@@ -1,12 +1,10 @@
-// P4-T10 — per-`media_type` detail-card registry.
-//
-// Maps a MediaType value to a hand-written Svelte detail component. An
-// unregistered / future media type (e.g. `sample`, `other`, or a type added to
-// the backend before its card ships) falls back to the generic KeyFactsCard, so
-// extractor work landing ahead of frontend polish is NEVER blocked by a missing
-// card. ItemDetail resolves the component via `cardFor(media_type)` and renders
-// it with native Svelte-5 dynamic-component syntax (`{@const C = cardFor(mt)}` +
-// `<C {item} />` — no `<svelte:component>`).
+// Detail-card components (P4-T10), keyed by backend category since P6 (A13,
+// ruling 5). The choice itself lives in the DOM-free highlights.ts (`cardFor`,
+// Node-tested); this module only maps a card name to its component. A category
+// without a hand-written card (development / archive / system / other, or one
+// the backend adds before its card ships) gets the generic KeyFactsCard, so
+// extractor work is never blocked by a missing card. ItemDetail renders the
+// result with Svelte 5 dynamic-component syntax (`<CardComponent {item} />`).
 
 import type { Component } from "svelte";
 import VideoCard from "./VideoCard.svelte";
@@ -16,40 +14,26 @@ import Model3dCard from "./Model3dCard.svelte";
 import DocumentCard from "./DocumentCard.svelte";
 import SpreadsheetCard from "./SpreadsheetCard.svelte";
 import KeyFactsCard from "./KeyFactsCard.svelte";
+import { cardFor, type CardName } from "./highlights";
+
+export { cardLabel } from "./highlights";
 
 // A card component always takes at least `{ item }`; KeyFactsCard additionally
-// accepts optional `exclude`/`heading` (widened here so all cards share a type).
-type CardProps = { item: Record<string, unknown>; exclude?: string[]; heading?: string };
+// accepts optional `exclude`/`heading`/`lead` (widened so all cards share a type).
+type CardProps = { item: Record<string, unknown>; exclude?: readonly string[]; heading?: string };
 export type CardComponent = Component<CardProps>;
 
-export const CARD_REGISTRY: Record<string, CardComponent> = {
-  video: VideoCard as CardComponent,
-  audio: AudioCard as CardComponent,
-  audiobook: AudioCard as CardComponent,
-  image: ImageCard as CardComponent,
-  model3d: Model3dCard as CardComponent,
-  document: DocumentCard as CardComponent,
-  spreadsheet: SpreadsheetCard as CardComponent,
+const COMPONENTS: Record<CardName, CardComponent> = {
+  VideoCard: VideoCard as CardComponent,
+  AudioCard: AudioCard as CardComponent,
+  ImageCard: ImageCard as CardComponent,
+  DocumentCard: DocumentCard as CardComponent,
+  SpreadsheetCard: SpreadsheetCard as CardComponent,
+  Model3dCard: Model3dCard as CardComponent,
+  KeyFactsCard: KeyFactsCard as CardComponent,
 };
 
-// Human tab labels per media type (the fallback keeps a neutral "Details").
-const CARD_LABELS: Record<string, string> = {
-  video: "Video",
-  audio: "Audio",
-  audiobook: "Audiobook",
-  image: "Image",
-  model3d: "3D model",
-  document: "Document",
-  spreadsheet: "Spreadsheet",
-};
-
-/** The detail component for a media type, or the generic KeyFactsCard fallback
- *  for an unregistered / future type (never throws). */
-export function cardFor(mediaType: string | undefined | null): CardComponent {
-  return (mediaType && CARD_REGISTRY[mediaType]) || (KeyFactsCard as CardComponent);
-}
-
-/** The tab label for a media type's card ("Details" for the generic fallback). */
-export function cardLabel(mediaType: string | undefined | null): string {
-  return (mediaType && CARD_LABELS[mediaType]) || "Details";
+/** The detail component for an item's category (+ group, for spreadsheets). */
+export function cardComponent(category: string | null | undefined, fileGroup?: string | null): CardComponent {
+  return COMPONENTS[cardFor(category, fileGroup)];
 }
