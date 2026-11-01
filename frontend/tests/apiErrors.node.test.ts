@@ -117,12 +117,23 @@ test("a non-network TypeError keeps its message", () => {
   assert.equal(errorMessage(new TypeError("x is not a function")), "x is not a function");
 });
 
-test("TimeoutError / AbortError read as a timeout", () => {
+test("TimeoutError reads as a timeout", () => {
   assert.equal(errorMessage(new DOMException("signal timed out", "TimeoutError")), "The request timed out.");
-  assert.equal(errorMessage(new DOMException("aborted", "AbortError")), "The request timed out.");
+  const e = new Error("x");
+  e.name = "TimeoutError";
+  assert.equal(errorMessage(e), "The request timed out.");
+});
+
+test("AbortError reads as a cancellation, not a timeout", () => {
+  assert.equal(errorMessage(new DOMException("aborted", "AbortError")), "The request was cancelled.");
   const e = new Error("x");
   e.name = "AbortError";
-  assert.equal(errorMessage(e), "The request timed out.");
+  assert.equal(errorMessage(e), "The request was cancelled.");
+});
+
+test("a 2xx ApiError with no detail is an unexpected response", () => {
+  assert.equal(errorMessage(new ApiError(200, "<html>login</html>")), "The server returned an unexpected response.");
+  assert.equal(errorMessage(new ApiError(200, "{not json")), "The server returned an unexpected response.");
 });
 
 test("other values: Error.message, else String()", () => {

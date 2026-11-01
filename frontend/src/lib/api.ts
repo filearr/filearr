@@ -90,6 +90,32 @@ export type SendOpts = {
 
 /** Downloads and exports stream large bodies; give them ten minutes. */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+/** Server-side heavy lifting (report runs, folder walks, live provider tests). */
+const SLOW_TIMEOUT_MS = 120_000;
+
+// 401s from these are expected answers (probe, login wall), not a lapsed session.
+const AUTH_HOOK_SKIP = new Set([
+  "/auth/status",
+  "/auth/me",
+  "/auth/login",
+  "/auth/logout",
+  "/auth/bootstrap",
+  "/auth/password",
+]);
+
+/** ``AbortSignal.any`` with a fallback: Safari < 17.4 lacks it. */
+export function anySignal(signals: AbortSignal[]): AbortSignal {
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+  const ac = new AbortController();
+  for (const s of signals) {
+    if (s.aborted) {
+      ac.abort(s.reason);
+      return ac.signal;
+    }
+  }
+  for (const s of signals) s.addEventListener("abort", () => ac.abort(s.reason), { once: true });
+  return ac.signal;
+}
 
 const isJsonType = (ct: string | null) => !!ct && /\bjson\b/i.test(ct);
 
@@ -117,21 +143,32 @@ export async function send<T>(method: string, path: string, opts: SendOpts = {})
     headers,
     body: payload,
     credentials: "same-origin",
-    signal: AbortSignal.any(signals),
+    signal: anySignal(signals),
   });
   if (!res.ok) {
-    if (res.status === 401 && !path.startsWith("/auth/")) onUnauthorized?.(path);
+    if (res.status === 401 && !AUTH_HOOK_SKIP.has(path.split("?")[0])) {
+      try {
+        onUnauthorized?.(path);
+      } catch {
+        /* a broken hook must not replace the ApiError below */
+      }
+    }
     throw new ApiError(res.status, await res.text());
   }
+  // Blob/text callers get the body as-is, even when it is empty.
+  if (expect === "blob") return (await res.blob()) as T;
+  if (expect === "text") return (await res.text()) as T;
   if (expect === "none" || res.status === 204 || res.status === 205 || res.headers.get("content-length") === "0") {
     return undefined as T;
   }
-  if (expect === "blob") return (await res.blob()) as T;
-  if (expect === "text") return (await res.text()) as T;
   const text = await res.text();
   if (!text.trim()) return undefined as T;
   if (!isJsonType(res.headers.get("content-type"))) throw new ApiError(res.status, text);
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(res.status, text);
+  }
 }
 
 /** Legacy fetch-shaped wrapper over ``send``: callers already ``JSON.stringify``
@@ -1827,7 +1864,7 @@ export interface TestFireResult {
 /** Fire a sample alert through the real driver (delivery failures come back in
  *  the 200 body with ok=false; config/secret problems are 4xx/503). */
 export const testAlertChannel = (id: string) =>
-  request<TestFireResult>(`/alert-channels/${id}/test`, { method: "POST" });
+  send<TestFireResult>("POST", `/alert-channels/${id}/test`, { timeoutMs: SLOW_TIMEOUT_MS });
 
 export interface AlertRule {
   id: string;
@@ -2148,7 +2185,9 @@ export const folderTree = (
   if (opts.parent) qs.set("parent", opts.parent);
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const s = qs.toString();
-  return request<FolderTreeResponse>(`/reports/folder-tree${s ? `?${s}` : ""}`);
+  return send<FolderTreeResponse>("GET", `/reports/folder-tree${s ? `?${s}` : ""}`, {
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 };
 
 /** Fetch ``path`` as a blob and save it as a download file. Central so every
@@ -2670,7 +2709,9 @@ export const runCustomReport = (
   const qs = new URLSearchParams({ format: "json" });
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   if (opts.offset != null) qs.set("offset", String(opts.offset));
-  return request<CustomRunPage>(`/custom-reports/${id}/run?${qs.toString()}`);
+  return send<CustomRunPage>("GET", `/custom-reports/${id}/run?${qs.toString()}`, {
+    timeoutMs: SLOW_TIMEOUT_MS,
+  });
 };
 
 /** Download a custom report in a chosen streaming format (csv/ndjson/xml). */
@@ -3865,11 +3906,7 @@ export interface AuthTestResult {
 }
 
 export const testAuthProvider = (provider: string, body: Record<string, unknown>) =>
-  request<AuthTestResult>(`/auth-config/${provider}/test`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  send<AuthTestResult>("POST", `/auth-config/${provider}/test`, { body, timeoutMs: SLOW_TIMEOUT_MS });
 
 export interface FetchedCert {
   subject: string;

@@ -76,6 +76,7 @@ function statusSentence(status: number, verb: string | undefined): string {
     case 422: return "Some of the input is invalid.";
     case 429: return "Too many requests. Try again shortly.";
   }
+  if (status >= 200 && status < 300) return "The server returned an unexpected response.";
   return status >= 500 ? `The server returned an error (${status}).` : `Request failed (${status}).`;
 }
 
@@ -94,7 +95,8 @@ export function errorMessage(e: unknown, opts: { verb?: string } = {}): string {
     return "Can't reach the server. Check your connection and try again.";
   }
   const name = (e instanceof Error || e instanceof DOMException) ? e.name : "";
-  if (name === "AbortError" || name === "TimeoutError") return "The request timed out.";
+  if (name === "TimeoutError") return "The request timed out.";
+  if (name === "AbortError") return "The request was cancelled.";
   if (e instanceof Error) return e.message || e.name;
   return String(e);
 }

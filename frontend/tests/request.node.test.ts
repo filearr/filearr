@@ -6,6 +6,7 @@ import { afterEach, test } from "node:test";
 
 import {
   ApiError,
+  anySignal,
   changeMyPassword,
   deleteLibrary,
   errorMessage,
@@ -26,10 +27,31 @@ function stub(respond: (url: string, init: RequestInit) => Response | Promise<Re
   }) as typeof fetch;
 }
 
+const realAny = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+
 afterEach(() => {
   globalThis.fetch = realFetch;
   setUnauthorizedHandler(null);
+  if (realAny) Object.defineProperty(AbortSignal, "any", realAny);
 });
+
+/** A fetch that only ever settles by rejecting with its signal's reason. */
+const hang = (_url: string, init: RequestInit) =>
+  new Promise<Response>((_res, rej) => {
+    const s = init.signal!;
+    if (s.aborted) rej(s.reason);
+    s.addEventListener("abort", () => rej(s.reason));
+  });
+
+// AbortSignal.timeout's timer is unref'd; keep the loop alive while waiting.
+async function alive<T>(p: Promise<T>): Promise<T> {
+  const keepalive = setTimeout(() => {}, 2000);
+  try {
+    return await p;
+  } finally {
+    clearTimeout(keepalive);
+  }
+}
 
 const jsonRes = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -173,4 +195,80 @@ test("a folded delete helper throws ApiError (not plain Error) on failure", asyn
   });
   stub(() => new Response(null, { status: 204 }));
   assert.equal(await deleteLibrary("lib1", "name"), undefined);
+});
+
+test("200 content-length 0 with expect blob resolves an empty Blob", async () => {
+  stub(() => new Response(null, { status: 200, headers: { "content-length": "0" } }));
+  const b = await send<Blob>("GET", "/x", { expect: "blob" });
+  assert.ok(b instanceof Blob);
+  assert.equal(b.size, 0);
+  assert.equal(await send<string>("GET", "/x", { expect: "text" }), "");
+});
+
+test("malformed JSON throws ApiError rendered as an unexpected response", async () => {
+  stub(() => new Response("{oops", { status: 200, headers: { "content-type": "application/json" } }));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => {
+    assert.ok(e instanceof ApiError);
+    assert.equal(e.status, 200);
+    assert.equal(errorMessage(e), "The server returned an unexpected response.");
+    return true;
+  });
+});
+
+test("a non-JSON 2xx renders as an unexpected response", async () => {
+  stub(() => new Response("<html>sso</html>", { status: 200, headers: { "content-type": "text/html" } }));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => {
+    assert.equal(errorMessage(e), "The server returned an unexpected response.");
+    return true;
+  });
+});
+
+test("hook skip list is exact: /auth/users and /auth-config/x invoke it", async () => {
+  const seen: string[] = [];
+  setUnauthorizedHandler((p) => seen.push(p));
+  stub(() => jsonRes({ detail: "x" }, 401));
+  await assert.rejects(send("GET", "/auth/users"), ApiError);
+  await assert.rejects(send("POST", "/auth-config/ldap/test"), ApiError);
+  await assert.rejects(send("GET", "/auth/me"), ApiError);
+  await assert.rejects(send("GET", "/auth/status?probe=1"), ApiError);
+  assert.deepEqual(seen, ["/auth/users", "/auth-config/ldap/test"]);
+});
+
+test("a throwing hook still yields the ApiError", async () => {
+  setUnauthorizedHandler(() => {
+    throw new Error("hook broke");
+  });
+  stub(() => jsonRes({ detail: "x" }, 401));
+  await assert.rejects(send("GET", "/libraries"), (e: unknown) => {
+    assert.ok(e instanceof ApiError);
+    assert.equal(e.status, 401);
+    return true;
+  });
+});
+
+test("without AbortSignal.any, a caller signal still aborts the request", async () => {
+  delete (AbortSignal as { any?: unknown }).any;
+  assert.equal(typeof AbortSignal.any, "undefined");
+  stub(hang);
+  const ac = new AbortController();
+  const p = send("GET", "/slow", { signal: ac.signal });
+  ac.abort();
+  await alive(assert.rejects(p, (e: unknown) => errorMessage(e) === "The request was cancelled."));
+});
+
+test("without AbortSignal.any, the timeout still fires", async () => {
+  delete (AbortSignal as { any?: unknown }).any;
+  stub(hang);
+  await alive(
+    assert.rejects(send("GET", "/slow", { timeoutMs: 10 }), (e: unknown) => errorMessage(e) === "The request timed out."),
+  );
+});
+
+test("anySignal fallback honours an already-aborted input", () => {
+  delete (AbortSignal as { any?: unknown }).any;
+  const ac = new AbortController();
+  ac.abort(new DOMException("gone", "AbortError"));
+  const s = anySignal([new AbortController().signal, ac.signal]);
+  assert.equal(s.aborted, true);
+  assert.equal((s.reason as DOMException).name, "AbortError");
 });
