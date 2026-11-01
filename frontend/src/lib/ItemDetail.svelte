@@ -54,6 +54,8 @@
   } = $props();
 
   let item = $state<ItemRecord | null>(null);
+  // The item whose preview failed for good (Thumb onFail): its box collapses.
+  let previewFailedFor = $state<string | null>(null);
   let error = $state("");
   // Mount-style: the parent mounts this per item and unmounts it from onClose.
   let open = $state(true);
@@ -586,11 +588,13 @@
       </div>
       <!-- S12/P12 slice 1: the larger preview-tier thumbnail (lazy-generated on
            first request), only for items the server can render (thumbPolicy);
-           anything else has no preview box at all. -->
-      {#if thumbable(mediaType, factFilename)}
+           anything else has no preview box at all, and the box collapses when
+           the picture fails for good (audio without artwork): onFail. -->
+      {#if thumbable(mediaType, factFilename) && previewFailedFor !== String(item.id)}
         <div class="mb-3 flex justify-center">
           <Thumb id={String(item.id)} tier="preview" category={mediaType} filename={factFilename}
-            size="h-64 w-full max-w-md" rounded="rounded-lg" fit="contain" />
+            size="h-64 w-full max-w-md" rounded="rounded-lg" fit="contain"
+            onFail={() => (previewFailedFor = String(item?.id))} />
         </div>
       {/if}
     {/if}

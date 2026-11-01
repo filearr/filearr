@@ -5,7 +5,9 @@
   // can render (thumbPolicy.thumbable, mirroring backend thumbs.py) request an
   // image, layered over the placeholder. A failed load retries once after
   // RETRY_DELAY_MS — a video poster that is still queued is a 404 at first —
-  // and a second failure leaves the placeholder.
+  // and a second failure leaves the placeholder. `onFail` fires once per item
+  // when that placeholder is final (second failure, or not thumbable) so a
+  // caller such as the detail preview can drop the box; rows keep it.
   import { onDestroy } from "svelte";
   import { thumbUrl } from "./api";
   import { RETRY_DELAY_MS, placeholderText, retryUrl, thumbable } from "./thumbPolicy";
@@ -21,6 +23,9 @@
     filename?: string | null;
     /** "contain" for previews that must show the whole picture. */
     fit?: "cover" | "contain";
+    /** called once when the placeholder is final: the retry failed too, or
+     *  the item is not thumbable (no request is made). */
+    onFail?: () => void;
   }
   let {
     id,
@@ -30,6 +35,7 @@
     category = null,
     filename = null,
     fit = "cover",
+    onFail,
   }: Props = $props();
 
   const wanted = $derived(thumbable(category, filename));
@@ -49,7 +55,15 @@
   const loaded = $derived(wanted && loadedSrc === src && (phase === "first" || phase === "retrying"));
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // An <img> being torn down (rows replaced by a new query) can still deliver
+  // its load/error event after this component is destroyed; reading the
+  // deriveds then is a Svelte derived_inert warning and the result is unused.
+  let destroyed = false;
+  function onLoad() {
+    if (!destroyed) loadedSrc = src;
+  }
   function onError() {
+    if (destroyed) return;
     const key = base;
     if (phase === "first") {
       load = { key, phase: "waiting" };
@@ -61,7 +75,20 @@
       load = { key, phase: "failed" };
     }
   }
-  onDestroy(() => clearTimeout(timer));
+  onDestroy(() => {
+    destroyed = true;
+    clearTimeout(timer);
+  });
+
+  // Reported per URL (plain variable: bookkeeping, not render state).
+  let failReported = "";
+  $effect(() => {
+    const key = base;
+    if ((!wanted || phase === "failed") && failReported !== key) {
+      failReported = key;
+      onFail?.();
+    }
+  });
 </script>
 
 <span class="relative flex shrink-0 items-center justify-center overflow-hidden bg-surface-3 {size} {rounded}">
@@ -75,7 +102,7 @@
       loading="lazy"
       decoding="async"
       class="absolute inset-0 h-full w-full {fit === 'contain' ? 'object-contain' : 'object-cover'} {rounded}"
-      onload={() => (loadedSrc = src)}
+      onload={onLoad}
       onerror={onError}
     />
   {/if}

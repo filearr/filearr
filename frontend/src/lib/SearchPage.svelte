@@ -2264,7 +2264,9 @@
             <span class="shrink-0 rounded-control bg-surface-3 px-2 py-0.5 text-xs"
               >{str(hit, "file_category")}</span>
             <span class="flex min-w-0 flex-1 flex-col">
-              <span class="flex items-center gap-2">
+              <!-- leading-5: label line + snippet line fit the 44 px row, so a
+                   row with a snippet is no taller than one without. -->
+              <span class="flex items-center gap-2 leading-5">
                 <span class="truncate font-medium" title={hitLabel(hit)}
                   >{#each labelSegs(hit) as seg}{#if seg.mark}<mark class="bg-accent/25 text-inherit">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
                 {#if num(hit, "year")}<span class="shrink-0 text-sm text-muted">({num(hit, "year")})</span>{/if}
