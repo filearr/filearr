@@ -29,6 +29,7 @@
     count,
     targets,
     busy = false,
+    progress = "",
     onApply,
     onClear,
   }: {
@@ -39,6 +40,8 @@
      *  intersection. */
     targets: FieldTarget[];
     busy?: boolean;
+    /** Chunk progress of a multi-request run ("1/3"), shown on the button. */
+    progress?: string;
     onApply: (ops: BulkOps) => void;
     onClear: () => void;
   } = $props();
@@ -104,6 +107,15 @@
   const usable = $derived(applicableFields(defs, targets));
   const chosen = $derived(usable.find((d) => d.name === fieldName) ?? null);
 
+  /** Pick a field: the value and action restart from the NEW field's
+   *  defaults, so a value typed for the previous field never rides along. */
+  function pickField(name: string) {
+    fieldName = name;
+    fieldMode = "none";
+    const def = usable.find((d) => d.name === name);
+    fieldRaw = def?.data_type === "boolean" ? false : "";
+  }
+
   // A selection change can make the chosen field inapplicable; drop it rather
   // than silently submit a field the new selection does not accept.
   $effect(() => {
@@ -127,7 +139,9 @@
     fieldValue: null, // filled in by apply() after coercion
   });
 
-  const nothingToDo = $derived(opsAreEmpty(ops));
+  // A half-typed tag counts: apply() folds it in, so Apply works in ONE click
+  // (the input's blur would otherwise enable the button only after the click).
+  const nothingToDo = $derived(opsAreEmpty(ops) && !addDraft.trim() && !removeDraft.trim());
 
   function apply() {
     error = "";
@@ -135,6 +149,8 @@
     // without pressing Enter still gets what they meant.
     if (addDraft.trim()) commitAdd();
     if (removeDraft.trim()) commitRemove();
+    // A draft of only separators ("," ) folds to nothing: still a no-op.
+    if (opsAreEmpty({ ...ops, tagsAdd, tagsRemove })) return;
 
     let fieldValue: unknown = null;
     if (fieldName && fieldMode === "set") {
@@ -185,7 +201,7 @@
       variant="primary"
       disabled={busy || nothingToDo}
       title={nothingToDo ? "Choose a tag, year or custom-field change first" : "Apply to every selected item"}
-      onclick={apply}>{busy ? "Applying…" : `Apply to ${count}`}</Button>
+      onclick={apply}>{busy ? `Applying…${progress ? ` ${progress}` : ""}` : `Apply to ${count}`}</Button>
   </div>
   <!-- Validation of the operations above, right under the Apply button. -->
   {#if error}
@@ -289,7 +305,11 @@
       </span>
     {:else}
       <span class="w-48">
-        <Select size="sm" aria-label="Custom field" bind:value={fieldName}>
+        <Select
+          size="sm"
+          aria-label="Custom field"
+          value={fieldName}
+          onchange={(e) => pickField(e.currentTarget.value)}>
           <option value="">— no change —</option>
           {#each usable as d (d.id)}
             <option value={d.name}>{d.label}</option>

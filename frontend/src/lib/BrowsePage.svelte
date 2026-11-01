@@ -22,6 +22,7 @@
     libraryTree,
     listLibraries,
     targetedScan,
+    type ItemRecord,
     type Library,
     type TreeResponse,
     errorMessage,
@@ -118,6 +119,22 @@
       tree = null;
       error = errorMessage(e);
     }
+  }
+
+  // A17: a save in ItemDetail mirrors the PATCH response's title/year into the
+  // matching row (TreeItem carries no tags).
+  function onItemChanged(rec: ItemRecord) {
+    if (!tree) return;
+    const id = typeof rec.id === "string" ? rec.id : "";
+    tree.items = tree.items.map((it) =>
+      it.id === id
+        ? {
+            ...it,
+            title: typeof rec.title === "string" ? rec.title : null,
+            year: typeof rec.year === "number" ? rec.year : null,
+          }
+        : it,
+    );
   }
 
   // Reset pagination whenever the target folder changes, then (re)load. Reading
@@ -416,7 +433,11 @@
          (stale chunk after a deploy) is pinned to the viewport instead, so it
          is seen wherever the user has scrolled to. -->
     {#await loadItemDetail() then m}
-      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+      <m.default
+        id={selected}
+        onClose={() => (selected = null)}
+        onOpen={(nid) => (selected = nid)}
+        onChanged={onItemChanged} />
     {:catch}
       <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
         <Alert tone="danger">

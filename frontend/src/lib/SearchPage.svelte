@@ -43,20 +43,19 @@
     type SavedSearch,
     type TagSuggestion,
     type ItemPatchBody,
+    type ItemRecord,
     errorMessage,
   } from "./api";
   import {
-    buildPatches,
     chunk,
-    mergeSummaries,
     rangeIndices,
-    summarizeResults,
     type BulkFailure,
     type BulkOps,
     type BulkSummary,
     type BulkTarget,
     type FieldTarget,
   } from "./bulkEdit";
+  import { runBulk } from "./bulkOrchestrate";
   import { buildDisplayPath } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
@@ -377,12 +376,34 @@
     })),
   );
 
+  // The in-flight bulk run's token. A new query or ANY selection change
+  // cancels it (the P3 latest() rule: the operator moved on, so the run sends
+  // no further chunk and its late result reports only what already landed).
+  let bulkController: AbortController | null = null;
+  // "1/3" while a multi-chunk run is submitting.
+  let bulkProgress = $state("");
+  // A26: a request-level failure's lead sentence ("N updated before the
+  // request failed; M not attempted.") kept apart from the error text, which
+  // renders one line per field (pydantic 422 details join with "; ").
+  let bulkErrorLead = $state("");
+  const bulkErrorLines = $derived(bulkError ? bulkError.split("; ") : []);
+
+  function cancelBulk() {
+    if (!bulkController) return;
+    bulkController.abort();
+    bulkController = null;
+    bulkBusy = false;
+    bulkProgress = "";
+  }
+
   function clearSelection() {
+    cancelBulk();
     selectedIds = new Set();
     lastToggledIndex = -1;
   }
 
   function selectAllLoaded() {
+    cancelBulk();
     selectedIds = new Set(hits.map((h) => hitId(h)).filter(Boolean));
     lastToggledIndex = hits.length - 1;
   }
@@ -395,6 +416,7 @@
     if (!h) return;
     const id = hitId(h);
     if (!id) return;
+    cancelBulk();
     const next = new Set(selectedIds);
     const turningOn = !next.has(id);
     if (shift && lastToggledIndex >= 0 && lastToggledIndex < hits.length) {
@@ -416,57 +438,21 @@
   /** Narrow the selection to the ids the last batch REJECTED, so the operator can
    *  fix scope/permissions and re-apply the operations still sitting in the bar. */
   function selectFailedOnly(failures: BulkFailure[]) {
+    cancelBulk();
     selectedIds = new Set(failures.map((f) => f.id));
     lastToggledIndex = -1;
   }
 
-  /** Resolve each selected item's CURRENT tag list — the input the per-item tag
-   *  arithmetic needs, because `tags` replaces the whole list on the wire.
-   *
-   *  Search hits carry `tags` (it is projected into the Meili doc), so the common
-   *  path costs nothing. A hit that somehow lacks the array is re-fetched rather
-   *  than assumed empty: treating "unknown" as [] would DELETE every tag on that
-   *  item the moment any tag operation ran. An item we cannot resolve is reported
-   *  as a failure and excluded from the batch — never guessed at. */
-  async function resolveTargets(): Promise<{ targets: BulkTarget[]; unresolved: BulkFailure[] }> {
-    const targets: BulkTarget[] = [];
-    const unresolved: BulkFailure[] = [];
-    const needsFetch: Hit[] = [];
-    for (const h of selectedHits) {
-      const raw = h.tags;
-      if (Array.isArray(raw)) {
-        targets.push({
-          id: hitId(h),
-          tags: raw.filter((t): t is string => typeof t === "string"),
-          file_category: str(h, "file_category"),
-          library_id: str(h, "library_id"),
-        });
-      } else {
-        needsFetch.push(h);
-      }
-    }
-    // Bounded concurrency: the same chunking discipline as the submit path, so a
-    // 2,000-item selection cannot open 2,000 sockets.
-    for (const group of chunk(needsFetch, 20)) {
-      const recs = await Promise.all(
-        group.map((h) => getItem(hitId(h)).catch(() => null)),
-      );
-      recs.forEach((rec, i) => {
-        const h = group[i];
-        if (!rec) {
-          unresolved.push({ id: hitId(h), reason: "could not read this item's current tags" });
-          return;
-        }
-        const raw = rec.tags;
-        targets.push({
-          id: hitId(h),
-          tags: Array.isArray(raw) ? raw.filter((t): t is string => typeof t === "string") : [],
-          file_category: str(h, "file_category"),
-          library_id: str(h, "library_id"),
-        });
-      });
-    }
-    return { targets, unresolved };
+  /** The selection as bulk targets. `tags` is the hit's snapshot and is NOT
+   *  what the arithmetic uses: runBulk re-reads every item's live tags whenever
+   *  the ops touch tags (A3), so a detail-pane edit made a moment ago survives. */
+  function bulkSelection(): BulkTarget[] {
+    return selectedHits.map((h) => ({
+      id: hitId(h),
+      tags: Array.isArray(h.tags) ? h.tags.filter((t): t is string => typeof t === "string") : [],
+      file_category: str(h, "file_category"),
+      library_id: str(h, "library_id"),
+    }));
   }
 
   /** Reflect a successful patch in the rows already on screen.
@@ -490,35 +476,75 @@
     });
   }
 
+  /** A single-item save in ItemDetail: mirror the PATCH response's title, year
+   *  and tags into the matching row so the list stops showing the old values. */
+  function onItemChanged(rec: ItemRecord) {
+    const id = typeof rec.id === "string" ? rec.id : "";
+    if (!id) return;
+    hits = hits.map((h) => {
+      if (hitId(h) !== id) return h;
+      const next: Hit = { ...h, title: rec.title ?? null, year: rec.year ?? null };
+      if (Array.isArray(rec.tags)) next.tags = rec.tags;
+      return next;
+    });
+  }
+
   async function applyBulk(ops: BulkOps) {
+    cancelBulk();
+    const ctrl = new AbortController();
+    bulkController = ctrl;
     bulkBusy = true;
+    bulkProgress = "";
     bulkError = "";
+    bulkErrorLead = "";
     bulkSummary = null;
     bulkFailuresOpen = false;
     try {
-      const { targets, unresolved } = await resolveTargets();
-      const patches = buildPatches(targets, ops);
-      const ids = Object.keys(patches);
-      if (!ids.length && !unresolved.length) {
+      // Chunked at exactly the server's cap inside runBulk: a request over 500
+      // keys is rejected with a 413, so chunking is the contract.
+      const out = await runBulk(
+        bulkSelection(),
+        ops,
+        { getItem, batchPatch: batchPatchItems },
+        {
+          signal: ctrl.signal,
+          onChunk: (done, total) => {
+            if (bulkController === ctrl && total > 1) bulkProgress = `${done}/${total}`;
+          },
+        },
+      );
+      // Whatever committed is mirrored, even when the run was cut short.
+      applyLocally(out.summary.ok, out.patchesApplied);
+      if (out.aborted) {
+        if (Object.keys(out.patchesApplied).length) {
+          toast(`Bulk edit cancelled — ${out.summary.ok.length} items were already updated.`, { tone: "warn" });
+        }
+        return;
+      }
+      if (!Object.keys(out.patches).length && !out.unresolved.length) {
         toast("Nothing to change — every selected item already matches.");
         return;
       }
-      // Chunked at exactly the server's cap: a request over 500 keys is rejected
-      // with a 413, so chunking is the contract rather than a nicety.
-      const parts: BulkSummary[] = [];
-      for (const group of chunk(ids)) {
-        const body: Record<string, ItemPatchBody> = {};
-        for (const id of group) body[id] = patches[id];
-        const res = await batchPatchItems(body);
-        parts.push(summarizeResults(res.results));
-      }
-      const sum = mergeSummaries(parts);
       // Items we could not read are failures too — they never reached the batch,
       // and silently dropping them would misreport the count.
-      sum.failures = [...sum.failures, ...unresolved];
+      const sum: BulkSummary = {
+        ok: out.summary.ok,
+        failures: [...out.summary.failures, ...out.unresolved],
+      };
+      if (out.failed) {
+        // A26: a request-level failure (auth, 413, network) on chunk k. Chunks
+        // before it committed; say so, and how many were never sent.
+        bulkErrorLead = `${sum.ok.length} updated before the request failed; ${out.notAttempted.length} not attempted.`;
+        bulkError = errorMessage(out.failed.error, { verb: "edit these items" });
+        if (sum.failures.length) {
+          bulkSummary = sum;
+          bulkFailuresOpen = true;
+        }
+        return;
+      }
+      // Per-ITEM failures come back inside a 200 and are shown in the list.
       bulkSummary = sum;
       bulkFailuresOpen = sum.failures.length > 0;
-      applyLocally(sum.ok, patches);
       if (!sum.failures.length) clearSelection();
       toast(
         sum.failures.length
@@ -527,11 +553,14 @@
         { tone: sum.failures.length ? "warn" : "ok" },
       );
     } catch (e) {
-      // A request-level failure (auth, 413, network). Per-ITEM failures never
-      // land here — they come back inside a 200 and are shown in the list.
+      if (bulkController !== ctrl) return;
       bulkError = errorMessage(e, { verb: "edit these items" });
     } finally {
-      bulkBusy = false;
+      if (bulkController === ctrl) {
+        bulkController = null;
+        bulkBusy = false;
+        bulkProgress = "";
+      }
     }
   }
 
@@ -2017,6 +2046,7 @@
         count={selectedIds.size}
         targets={bulkTargets}
         busy={bulkBusy}
+        progress={bulkProgress}
         onApply={applyBulk}
         onClear={clearSelection} />
     {/if}
@@ -2031,9 +2061,13 @@
       </Alert>
     {/if}
 
-    <!-- A request-level failure of the bar's Apply, right below the bar. -->
+    <!-- A request-level failure of the bar's Apply, right below the bar: what
+         committed before it (A26), then the error one line per field. -->
     {#if bulkError}
-      <Alert tone="danger" class="mt-2" onDismiss={() => (bulkError = "")}>{bulkError}</Alert>
+      <Alert tone="danger" class="mt-2" onDismiss={() => (bulkError = "")}>
+        {#if bulkErrorLead}<span class="block">{bulkErrorLead}</span>{/if}
+        {#each bulkErrorLines as line, i (i)}<span class="block">{line}</span>{/each}
+      </Alert>
     {/if}
 
     <!-- Per-item outcomes. RBAC path grants can deny an arbitrary subset of a
@@ -2271,7 +2305,11 @@
          (stale chunk after a deploy) is pinned to the viewport instead, so it
          is seen wherever the user has scrolled to. -->
     {#await loadItemDetail() then m}
-      <m.default id={selected} onClose={() => (selected = null)} onOpen={(nid) => (selected = nid)} />
+      <m.default
+        id={selected}
+        onClose={() => (selected = null)}
+        onOpen={(nid) => (selected = nid)}
+        onChanged={onItemChanged} />
     {:catch}
       <div class="fixed inset-x-0 bottom-4 z-50 mx-auto w-fit shadow">
         <Alert tone="danger">

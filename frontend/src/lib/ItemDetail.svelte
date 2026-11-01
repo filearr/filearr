@@ -40,12 +40,16 @@
     id,
     onClose,
     onOpen,
+    onChanged,
   }: {
     id: string;
     onClose: () => void;
     // Optional: navigate this panel to another item (similar-items tiles).
     // Parents pass their selected-id setter; without it tiles are inert labels.
     onOpen?: (id: string) => void;
+    // A17: called once per successful save with the PATCH response, so the
+    // parent's row (search hit, browse entry) shows the new title/year/tags.
+    onChanged?: (item: ItemRecord) => void;
   } = $props();
 
   let item = $state<ItemRecord | null>(null);
@@ -284,6 +288,9 @@
       // The PATCH response IS the updated projection, so the panel refreshes
       // without a second GET (and without waiting on the async index sync).
       const r = await patchItem(id, patch);
+      // The save landed even if another item opened meanwhile; the parent
+      // matches its row by the response's id, so it is told either way.
+      onChanged?.(r);
       if (mine !== itemToken) return;
       item = r;
       active = "card";
