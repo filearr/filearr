@@ -13,6 +13,7 @@
     open = $bindable(false),
     title,
     message,
+    details,
     confirmLabel = "Confirm",
     cancelLabel = "Cancel",
     tone = "default",
@@ -24,6 +25,8 @@
     open?: boolean;
     title: string;
     message?: string;
+    /** Consequence summary listed under the message (what will be lost). */
+    details?: string[];
     confirmLabel?: string;
     cancelLabel?: string;
     tone?: "default" | "danger";
@@ -82,9 +85,16 @@
                 <h2 {...titleProps} class="text-lg font-semibold">{title}</h2>
               {/snippet}
             </AlertDialog.Title>
-            {#if children || message}
+            <!-- The details sit inside the description so aria-describedby
+                 reads the consequences too, not just the message. -->
+            {#if children || message || details?.length}
               <AlertDialog.Description class="mt-1 text-sm text-muted">
                 {#if children}{@render children()}{:else}{message}{/if}
+                {#if details?.length}
+                  <ul class="mt-2 list-disc space-y-0.5 pl-5 text-sm text-muted">
+                    {#each details as item, i (i)}<li>{item}</li>{/each}
+                  </ul>
+                {/if}
               </AlertDialog.Description>
             {/if}
             {#if typedName !== undefined}

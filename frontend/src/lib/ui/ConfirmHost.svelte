@@ -14,6 +14,7 @@
       open
       title={req.title}
       message={req.message}
+      details={req.details}
       confirmLabel={req.confirmLabel}
       cancelLabel={req.cancelLabel}
       tone={req.tone}
