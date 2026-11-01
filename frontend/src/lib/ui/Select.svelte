@@ -1,7 +1,8 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { getContext, type Snippet } from "svelte";
   import type { HTMLSelectAttributes } from "svelte/elements";
   import { controlClass, type ControlSize } from "./control.ts";
+  import { controlAttrs, FIELD_CTX, type FieldCtx } from "./fieldContext.ts";
 
   // The native numeric `size` attribute is replaced by the kit's size scale.
   type Props = Omit<HTMLSelectAttributes, "size" | "value" | "class" | "children"> & {
@@ -15,19 +16,35 @@
 
   let {
     value = $bindable(),
-    invalid = false,
+    invalid,
     size = "md",
     class: className = "",
     children,
     ...rest
   }: Props = $props();
+
+  // Inside a <Field> the context supplies id, aria-describedby, invalid and
+  // required; outside one getContext returns undefined and only own props
+  // apply. `invalid` has no default so an absent prop lets the Field decide.
+  // `invalid` alone drives aria-invalid (see controlAttrs); attrs spread after
+  // rest so the merged values are the ones that land on the element.
+  const field = getContext<FieldCtx | undefined>(FIELD_CTX);
+  const { invalid: isInvalid, ...attrs } = $derived(
+    controlAttrs(field, {
+      id: rest.id ?? undefined,
+      "aria-describedby": rest["aria-describedby"] ?? undefined,
+      "aria-invalid": rest["aria-invalid"] ?? undefined,
+      required: rest.required ?? undefined,
+      invalid,
+    }),
+  );
 </script>
 
 <select
   {...rest}
   bind:value
-  aria-invalid={invalid ? "true" : rest["aria-invalid"]}
-  class="{controlClass(size, invalid)} {className}"
+  {...attrs}
+  class="{controlClass(size, isInvalid)} {className}"
 >
   {@render children?.()}
 </select>
