@@ -6,6 +6,7 @@
   import { fetchLogs, friendlyError, type LogRow } from "./api";
   import { usePolling } from "./polling";
   import { latest } from "./latest";
+  import { Alert, Badge, Button, Checkbox, DataTable, Input, Select, StateBlock, type Tone } from "./ui";
 
   let rows = $state<LogRow[]>([]);
   let enabled = $state(true);
@@ -79,13 +80,19 @@
     return () => poller.stop();
   });
 
-  function levelClass(level: string): string {
-    if (level === "CRITICAL" || level === "ERROR")
-      return "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300";
-    if (level === "WARNING")
-      return "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300";
-    return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  // Badge tone per record level (CRITICAL/ERROR/WARNING map through the kit's
+  // status vocabulary; INFO and DEBUG stay neutral).
+  function levelTone(level: string): Tone {
+    if (level === "CRITICAL" || level === "ERROR") return "danger";
+    if (level === "WARNING") return "warn";
+    return "neutral";
   }
+
+  // The log pane scrolls, so it must take focus for keyboard users (axe
+  // scrollable-region-focusable): a named region with tabindex="0". Spread
+  // because Svelte's a11y_no_noninteractive_tabindex lint has no exception
+  // for scroll containers, and this repo adds no lint suppressions.
+  const scrollRegion = { role: "region", "aria-label": "Log records", tabindex: 0 } as const;
 
   function fmtTs(iso: string): string {
     const d = new Date(iso);
@@ -96,80 +103,108 @@
   }
 </script>
 
-<section class="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+{#snippet tsCell(r: LogRow)}
+  <span class="whitespace-nowrap tabular-nums text-muted" title={new Date(r.ts).toLocaleString()}>{fmtTs(r.ts)}</span>
+{/snippet}
+{#snippet levelCell(r: LogRow)}<Badge tone={levelTone(r.level)}>{r.level.toLowerCase()}</Badge>{/snippet}
+{#snippet sourceCell(r: LogRow)}<span class="whitespace-nowrap text-muted">{r.source}</span>{/snippet}
+{#snippet loggerCell(r: LogRow)}
+  <span class="whitespace-nowrap text-muted" title={r.logger}>{r.logger.replace(/^filearr\./, "")}</span>
+{/snippet}
+{#snippet messageCell(r: LogRow)}
+  <span class="break-all whitespace-pre-wrap">{r.message}</span>
+  {#if r.exc}
+    <button
+      type="button"
+      class="ml-1 text-accent-text underline decoration-dotted"
+      aria-expanded={!!expanded[r.id]}
+      onclick={() => (expanded[r.id] = !expanded[r.id])}>
+      {expanded[r.id] ? "hide traceback" : "traceback"}</button>
+    {#if expanded[r.id]}
+      <pre class="mt-1 max-h-48 overflow-auto rounded-control bg-surface-3 p-2 text-[11px] leading-snug text-muted">{r.exc}</pre>
+    {/if}
+  {/if}
+{/snippet}
+
+<section class="rounded-2xl border border-border bg-surface p-4">
   <div class="mb-3 flex flex-wrap items-center gap-2">
-    <h3 class="mr-auto text-sm font-semibold text-slate-700 dark:text-slate-200" title="One stream from both containers: filearr activity (INFO) plus warnings and errors from everything else. Request access lines are never recorded.">
+    <h3 class="mr-auto text-sm font-semibold" title="One stream from both containers: filearr activity (INFO) plus warnings and errors from everything else. Request access lines are never recorded.">
       Logs
     </h3>
-    <select bind:value={minLevel} class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700" title="Minimum level">
-      <option value="info">info+</option>
-      <option value="warning">warning+</option>
-      <option value="error">errors</option>
-    </select>
-    <select bind:value={source} class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700" title="Which process">
-      <option value="">app + worker</option>
-      <option value="app">app</option>
-      <option value="worker">worker</option>
-    </select>
-    <input
-      bind:value={search}
-      oninput={onSearchInput}
-      placeholder="filter messages…"
-      class="w-40 rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-xs dark:border-slate-700"
-    />
-    <label class="flex items-center gap-1 text-xs text-slate-500">
-      <input type="checkbox" bind:checked={auto} /> auto-refresh
-    </label>
-    <button
-      class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+    <!-- Kit controls fill their parent, so each sits in a sizing wrapper. -->
+    <div>
+      <Select size="sm" bind:value={minLevel} aria-label="Minimum level" title="Minimum level">
+        <option value="info">info+</option>
+        <option value="warning">warning+</option>
+        <option value="error">errors</option>
+      </Select>
+    </div>
+    <div>
+      <Select size="sm" bind:value={source} aria-label="Which process" title="Which process">
+        <option value="">app + worker</option>
+        <option value="app">app</option>
+        <option value="worker">worker</option>
+      </Select>
+    </div>
+    <div class="w-40">
+      <Input
+        size="sm"
+        type="search"
+        bind:value={search}
+        oninput={onSearchInput}
+        aria-label="Filter messages"
+        placeholder="filter messages…"
+      />
+    </div>
+    <Checkbox label="auto-refresh" bind:checked={auto} />
+    <Button
+      size="sm"
+      variant="ghost"
       onclick={() => void load()}
       disabled={loading}
-      title="Refresh">↻</button>
+      aria-label="Refresh"
+      title="Refresh"><span aria-hidden="true">↻</span></Button>
   </div>
 
-  {#if error}
-    <p class="text-sm text-red-600 dark:text-red-400">{error}</p>
-  {:else if loaded && !enabled}
-    <p class="text-sm text-slate-500">
-      The log stream is disabled (<code class="text-xs">FILEARR_LOG_DB_ENABLED=false</code>) — nothing is being recorded.
-    </p>
-  {:else if loaded && rows.length === 0}
-    <p class="text-sm text-slate-500">No log records match. The stream fills as the app and worker run{minLevel !== "info" ? " — try the info+ level" : ""}.</p>
+  {#if error && !loaded}
+    <StateBlock state="error" message={error} onRetry={() => void load()} />
+  {:else if !loaded}
+    <StateBlock state="loading" message="Loading logs…" />
   {:else}
-    <div class="max-h-96 overflow-y-auto font-mono text-xs">
-      <div class="overflow-x-auto"><table class="w-full border-collapse">
-        <tbody>
-          {#each rows as r (r.id)}
-            <tr class="border-b border-slate-100 align-top dark:border-slate-800">
-              <td class="whitespace-nowrap py-1 pr-2 tabular-nums text-slate-600 dark:text-slate-400" title={new Date(r.ts).toLocaleString()}>{fmtTs(r.ts)}</td>
-              <td class="py-1 pr-2">
-                <span class="rounded px-1 py-0.5 text-[10px] font-medium {levelClass(r.level)}">{r.level.toLowerCase()}</span>
-              </td>
-              <td class="whitespace-nowrap py-1 pr-2 text-slate-600 dark:text-slate-400">{r.source}</td>
-              <td class="hidden whitespace-nowrap py-1 pr-2 text-slate-600 dark:text-slate-400 sm:table-cell" title={r.logger}>{r.logger.replace(/^filearr\./, "")}</td>
-              <td class="w-full py-1 text-slate-700 dark:text-slate-300">
-                <span class="break-all whitespace-pre-wrap">{r.message}</span>
-                {#if r.exc}
-                  <button
-                    class="ml-1 text-sky-600 underline decoration-dotted dark:text-sky-400"
-                    onclick={() => (expanded[r.id] = !expanded[r.id])}>
-                    {expanded[r.id] ? "hide traceback" : "traceback"}</button>
-                  {#if expanded[r.id]}
-                    <pre class="mt-1 max-h-48 overflow-auto rounded bg-slate-50 p-2 text-[11px] leading-snug text-slate-600 dark:bg-slate-950 dark:text-slate-400">{r.exc}</pre>
-                  {/if}
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table></div>
-    </div>
-    {#if nextBeforeId !== null}
-      <button
-        class="mt-2 rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
-        onclick={() => void load(true)}
-        disabled={loading}>
-        {loading ? "…" : "Load older"}</button>
+    {#if error}
+      <!-- A failed refresh keeps the records already shown. -->
+      <Alert tone="danger" class="mb-2" onDismiss={() => (error = "")}>{error}</Alert>
+    {/if}
+    {#if !enabled}
+      <p class="text-sm text-muted">
+        The log stream is disabled (<code class="text-xs">FILEARR_LOG_DB_ENABLED=false</code>) — nothing is being recorded.
+      </p>
+    {:else if rows.length === 0}
+      <StateBlock
+        state="empty"
+        message="No log records match. The stream fills as the app and worker run{minLevel !== 'info' ? ' — try the info+ level' : ''}." />
+    {:else}
+      <!-- Scrollable region: focusable so keyboard users can scroll it. -->
+      <div class="max-h-96 overflow-y-auto font-mono text-xs" {...scrollRegion}>
+        <DataTable
+          caption="Log records, newest first"
+          captionHidden
+          columns={[
+            { key: "ts", label: "Time", cell: tsCell },
+            { key: "level", label: "Level", cell: levelCell },
+            { key: "source", label: "Source", cell: sourceCell },
+            { key: "logger", label: "Logger", cell: loggerCell },
+            { key: "message", label: "Message", width: "100%", cell: messageCell },
+          ]}
+          {rows}
+          rowKey={(r) => r.id}
+          {loading}
+        />
+      </div>
+      {#if nextBeforeId !== null}
+        <Button size="sm" class="mt-2" onclick={() => void load(true)} disabled={loading}>
+          {loading ? "…" : "Load older"}</Button>
+      {/if}
     {/if}
   {/if}
 </section>
