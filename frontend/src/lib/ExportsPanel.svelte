@@ -65,6 +65,8 @@
   // "complete" is this endpoint's success word (the kit vocabulary has
   // "completed"); everything else goes through the shared status map.
   function statusTone(status: string): Tone {
+    // A queued export is waiting its turn, not a problem: neutral, not warn.
+    if (status === "queued") return "neutral";
     return status === "complete" ? "ok" : toneForStatus(status);
   }
 

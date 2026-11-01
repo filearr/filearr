@@ -47,7 +47,7 @@
   import Thumb from "./Thumb.svelte";
   import RetrievePanel from "./RetrievePanel.svelte";
   import AgentStatusPanel from "./AgentStatusPanel.svelte";
-  import { Alert, Button, Field, Input, Modal, ScrollRegion, StateBlock } from "./ui";
+  import { Alert, Button, Field, Input, Modal, ScrollRegion, StateBlock, confirm } from "./ui";
 
   let {
     id,
@@ -158,6 +158,19 @@
   let seeded = "";
   const editSnapshot = () => JSON.stringify([eTitle, eYear, eTags, eTagDraft, eFields]);
   const isDirty = () => active === "edit" && editSnapshot() !== seeded;
+  // Leaving the edit form by any route other than the Modal's own dismissal
+  // (breadcrumb, principal search, a Similar item, the Card/Raw tabs) asks too.
+  async function guardDirty(): Promise<boolean> {
+    return (
+      !isDirty() ||
+      confirm({
+        title: "Discard changes?",
+        message: "Your edits will be lost.",
+        confirmLabel: "Discard",
+        tone: "danger",
+      })
+    );
+  }
 
   // Only fields whose applies_to / library_ids cover THIS item (same rule the
   // key-facts card uses to decide what to display).
@@ -304,7 +317,8 @@
   const fileName = $derived(str("filename") ?? relPath.split("/").pop() ?? "download");
 
   // Navigating a breadcrumb folder closes the modal and switches to browse.
-  function navigate(folderRelPath: string) {
+  async function navigate(folderRelPath: string) {
+    if (!(await guardDirty())) return;
     onClose();
     if (libId) gotoBrowse(libId, folderRelPath);
   }
@@ -336,10 +350,15 @@
     return v.join(", ");
   }
   /** Deep link to the Search page scoped to one principal. */
-  function searchByPrincipal(value: string) {
+  async function searchByPrincipal(value: string) {
+    if (!(await guardDirty())) return;
     const qs = new URLSearchParams({ principal: value });
     window.location.hash = `#/search?${qs}`;
     onClose?.();
+  }
+  async function openSimilar(id: string) {
+    if (!onOpen || !(await guardDirty())) return;
+    onOpen(id);
   }
   let copiedPath = $state<string | null>(null);
   let copiedTimer: ReturnType<typeof setTimeout>;
@@ -560,11 +579,11 @@
       <button
         class="rounded-control px-3 py-1 text-sm {active === 'card' ? TAB_ON : TAB_OFF}"
         aria-pressed={active === "card"}
-        onclick={() => (active = "card")}>{cardTabLabel}</button>
+        onclick={async () => { if (await guardDirty()) active = "card"; }}>{cardTabLabel}</button>
       <button
         class="rounded-control px-3 py-1 text-sm {active === 'raw' ? TAB_ON : TAB_OFF}"
         aria-pressed={active === "raw"}
-        onclick={() => (active = "raw")}>Raw</button>
+        onclick={async () => { if (await guardDirty()) active = "raw"; }}>Raw</button>
       <!-- IN-T4: the ONLY metadata-writing surface for a single item. Only ever
            writes `user_metadata` + the editable columns — invariant 2 (extracted
            `metadata` belongs to scans) is a backend rule this UI never asks to
@@ -870,7 +889,7 @@
                   <tbody class="divide-y divide-border">
                     {#each similar.hits as h (h.id)}
                       <tr class={onOpen ? "cursor-pointer hover:bg-surface-3" : ""}
-                        onclick={() => onOpen?.(String(h.id))}>
+                        onclick={() => void openSimilar(String(h.id))}>
                         <td class="max-w-[16rem] truncate py-1 pr-2" title={hitLabel(h)}>{hitLabel(h)}</td>
                         <td class="pr-2 font-mono">{simPct(h)}</td>
                         <td class="pr-2 text-muted">{h.file_group ?? h.file_category ?? "—"}</td>
@@ -891,7 +910,7 @@
                       class="w-full rounded-panel border border-border p-2 text-left hover:border-accent disabled:cursor-default disabled:hover:border-border"
                       disabled={!onOpen}
                       title={hitPath(h)}
-                      onclick={() => onOpen?.(String(h.id))}>
+                      onclick={() => void openSimilar(String(h.id))}>
                       <div class="flex h-20 items-center justify-center overflow-hidden">
                         <Thumb id={String(h.id)} tier="grid" size="max-h-20 w-auto" rounded="rounded" />
                       </div>

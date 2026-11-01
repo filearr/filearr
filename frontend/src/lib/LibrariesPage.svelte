@@ -640,15 +640,22 @@
   // badge looked broken; the breakdown is now click-to-open (title kept as a
   // bonus for hover users).
   let excludedOpen = $state<Record<string, boolean>>({});
+  // Two controls open the panel (the slow badge, the excluded count), each with
+  // its own data attribute; Hide returns focus to whichever opened it.
+  type DetailsOpener = "data-scan-details-for" | "data-excluded-for";
+  let excludedOpener = $state<Record<string, DetailsOpener>>({});
 
-  function toggleExcluded(libId: string) {
+  function toggleExcluded(libId: string, opener: DetailsOpener) {
     excludedOpen = { ...excludedOpen, [libId]: !excludedOpen[libId] };
-    if (excludedOpen[libId]) void focusPanel(`scan-details-${libId}`);
+    if (excludedOpen[libId]) {
+      excludedOpener = { ...excludedOpener, [libId]: opener };
+      void focusPanel(`scan-details-${libId}`);
+    }
   }
 
   function hideExcluded(libId: string) {
     excludedOpen = { ...excludedOpen, [libId]: false };
-    void focusRowButton("data-scan-details-for", libId);
+    void focusRowButton(excludedOpener[libId] ?? "data-excluded-for", libId);
   }
 
   // Failing-item kinds: chip tone and the explanation shown once per panel.
@@ -919,7 +926,7 @@
           aria-expanded={!!excludedOpen[lib.id]}
           aria-controls={excludedOpen[lib.id] ? `scan-details-${lib.id}` : undefined}
           data-scan-details-for={lib.id}
-          onclick={() => toggleExcluded(lib.id)}>
+          onclick={() => toggleExcluded(lib.id, "data-scan-details-for")}>
           <Badge tone="warn">slower than usual</Badge>
         </button>
       {/if}
@@ -935,8 +942,8 @@
           title={excludedDetail(ls)}
           aria-expanded={!!excludedOpen[lib.id]}
           aria-controls={excludedOpen[lib.id] ? `scan-details-${lib.id}` : undefined}
-          data-scan-details-for={lib.id}
-          onclick={() => toggleExcluded(lib.id)}
+          data-excluded-for={lib.id}
+          onclick={() => toggleExcluded(lib.id, "data-excluded-for")}
         >excluded {(ls.excluded ?? 0).toLocaleString()}{lowerBound
             ? "+"
             : ls.pruned_files
@@ -1043,6 +1050,7 @@
 
 <!-- Expanded per-library failing-item list (below its table). -->
 {#snippet failingPanel(lib: Library)}
+  {@const failingLoaded = failing[lib.id] !== undefined}
   {@const items = failing[lib.id] ?? []}
   <section
     id="failing-{lib.id}"
@@ -1057,6 +1065,8 @@
     </div>
     {#if failingError[lib.id]}
       <StateBlock state="error" compact message={failingError[lib.id]} onRetry={() => loadFailing(lib.id)} />
+    {:else if !failingLoaded}
+      <StateBlock state="loading" compact />
     {:else if items.length === 0}
       <StateBlock state="empty" compact message="No failing items — nothing to retry." />
     {:else}

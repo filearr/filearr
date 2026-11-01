@@ -184,10 +184,11 @@
         // A click on a toast over the modal (e.g. its Undo) is not a dismissal.
         const target = e.target as Element | null;
         if (target?.closest?.("[data-toast-region]")) return;
-        // Nor is a click inside another dialog stacked over this one. bits-ui
-        // already ignores one in its own layer stack (a nested Modal, the
-        // confirm() dialog); this also covers a hand-rolled role="dialog"
-        // (FolderPicker), which it sees as outside this panel.
+        // Nor is a click inside another dialog stacked over this one (the
+        // confirm() alertdialog, a nested Modal such as FolderPicker), should
+        // bits-ui's own layer stack not already have ignored it; it also
+        // covers any future hand-rolled role="dialog", which bits-ui sees as
+        // outside this panel.
         const dialog = target?.closest?.('[role="dialog"],[role="alertdialog"]');
         if (dialog && dialog !== panel && !panel?.contains(dialog)) return;
         void requestClose("outside");

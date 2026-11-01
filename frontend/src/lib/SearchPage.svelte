@@ -713,7 +713,7 @@
   async function removeSaved(ss: SavedSearch) {
     const ok = await confirm({
       title: "Delete saved search?",
-      message: `Delete saved search "${ss.name}"?`,
+      message: `"${ss.name}" will be removed from your saved searches.`,
       confirmLabel: "Delete",
       tone: "danger",
     });
@@ -1220,7 +1220,7 @@
   // Keys on a control inside the row (its checkbox) are left to that control.
   function focusGrid(e: KeyboardEvent) {
     if (e.target !== e.currentTarget) return;
-    (e.currentTarget as HTMLElement).closest<HTMLElement>("#search-results")?.focus();
+    (e.currentTarget as HTMLElement).closest<HTMLElement>("#search-results")?.focus({ preventScroll: true });
   }
 
   function onScroll() {
@@ -1862,7 +1862,12 @@
          Cmd/Ctrl+Enter copies the path. The controls inside rows are
          tabindex=-1 (pointer only; the keys above cover them), so Tab leaves
          the grid instead of walking every row. -->
-    {#if view === "grid"}
+    {#if !loading && hits.length === 0}
+      <StateBlock
+        state="empty"
+        class="mt-2"
+        message="No matches. Try fewer words, remove a filter chip, or set Match in to everything." />
+    {:else if view === "grid"}
       <!-- P12 slice 2: responsive thumbnail GRID. Non-virtualized (a CSS grid of
            the already-loaded, paginated hits) with lazy <img>s (loading="lazy")
            so only on-screen thumbs fetch; infinite-scroll reuses loadMore via the

@@ -15,6 +15,7 @@
     type ServiceAccountOut,
   } from "./api";
   import { COPY_FAILED, copyText } from "./clipboard";
+  import { intOrNull } from "./numInput";
   import { Alert, Badge, Button, DataTable, Field, Input, Select, confirm, toast } from "./ui";
 
   let keys = $state<LlmKey[]>([]);
@@ -31,7 +32,9 @@
   let mintAccount = $state<string>("");
   let newAccountName = $state("");
   let mintRole = $state("librarian");
-  let mintExpires = $state("");
+  // bind:value on a number input writes a number, or null when emptied.
+  let mintExpires = $state<number | null>(null);
+  let expiresError = $state("");
   let mintPathScope = $state("");
   let minted = $state<LlmKey | null>(null);
   let copied = $state(false);
@@ -62,10 +65,19 @@
   async function mint(e: SubmitEvent) {
     e.preventDefault();
     mintError = "";
+    expiresError = "";
     // The form is novalidate (it reports its own errors), so the name check
     // the native `required` used to make happens here.
     if (!mintName.trim()) {
       mintError = "Name the key.";
+      return;
+    }
+    // The novalidate form drops the native min/max, so the expiry range is
+    // checked here, before a service account can be created for a key that
+    // would then fail (0 would otherwise mint a never-expiring key).
+    const days = intOrNull(mintExpires, { min: 1, max: 3650 });
+    if (mintExpires !== null && days === null) {
+      expiresError = "Expiry must be 1–3650 whole days, or blank.";
       return;
     }
     try {
@@ -87,11 +99,11 @@
         service_account_id: owner,
         role: mintRole,
         path_scope: mintPathScope.trim() || null,
-        expires_days: mintExpires ? Number(mintExpires) : null,
+        expires_days: days,
       });
       mintName = "";
       mintPathScope = "";
-      mintExpires = "";
+      mintExpires = null;
       showMint = false;
       await load();
     } catch (e2) {
@@ -153,7 +165,7 @@
     <h2 class="text-lg font-semibold">LLM access keys</h2>
     <Button
       variant={showMint ? "secondary" : "primary"}
-      onclick={() => { showMint = !showMint; minted = null; mintError = ""; }}
+      onclick={() => { showMint = !showMint; minted = null; mintError = ""; expiresError = ""; }}
     >{showMint ? "Cancel" : "Mint key"}</Button>
   </div>
   <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
@@ -204,7 +216,7 @@
         </Select>
       </Field>
       <div class="grid grid-cols-2 gap-3">
-        <Field label="Expires (days, blank = never)">
+        <Field label="Expires (days, blank = never)" error={expiresError}>
           <Input type="number" min="1" max="3650" bind:value={mintExpires} />
         </Field>
         <Field label="Path scope (optional, ltree)">

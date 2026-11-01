@@ -12,6 +12,10 @@
   let enabled = $state(true);
   let nextBeforeId = $state<number | null>(null);
   let loading = $state(false);
+  // Only "Load older" dims the table (aria-busy): the 10 s auto-refresh and
+  // filter reloads swap rows in place without flashing it every tick. A newer
+  // request supersedes an older one, so each load() sets this afresh.
+  let loadingOlder = $state(false);
   let loaded = $state(false);
   let error = $state("");
 
@@ -36,6 +40,7 @@
 
   async function load(older = false) {
     loading = true;
+    loadingOlder = older;
     try {
       const res = await logsLoader.run({
         min_level: minLevel,
@@ -51,9 +56,11 @@
       error = "";
       loaded = true;
       loading = false;
+      loadingOlder = false;
     } catch (e) {
       error = friendlyError(e, "load logs");
       loading = false;
+      loadingOlder = false;
     }
   }
 
@@ -192,7 +199,7 @@
           ]}
           {rows}
           rowKey={(r) => r.id}
-          {loading}
+          loading={loadingOlder}
         />
       </ScrollRegion>
       {#if nextBeforeId !== null}

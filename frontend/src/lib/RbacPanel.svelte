@@ -34,6 +34,7 @@
   let newGroupDesc = $state("");
   let openGroup = $state<string | null>(null);
   let members = $state<RbacMember[]>([]);
+  let membersLoading = $state(false);
   let addMemberId = $state("");
 
   // grant create form
@@ -100,10 +101,21 @@
   async function toggleMembers(id: string) {
     if (openGroup === id) { openGroup = null; return; }
     openGroup = id;
+    // Another group's list must not show under this group's heading while
+    // its own members load.
+    members = [];
+    membersLoading = true;
     void focusPanel(membersPanelId(id));
     errors.groups = undefined;
     errors.members = undefined;
-    try { members = await listMembers(id); } catch (e) { fail("groups", e); }
+    try {
+      const list = await listMembers(id);
+      if (openGroup === id) members = list;
+    } catch (e) {
+      if (openGroup === id) fail("members", e);
+    } finally {
+      if (openGroup === id) membersLoading = false;
+    }
   }
   async function doAddMember() {
     if (!openGroup || !addMemberId) return;
@@ -248,6 +260,9 @@
           <Button onclick={doAddMember}>Add</Button>
         </div>
         {@render errorFor("members")}
+        {#if membersLoading}
+          <StateBlock state="loading" compact />
+        {:else}
         <ul class="mt-2 flex flex-col gap-1">
           {#each members as m (m.principal_id)}
             <li class="flex items-center gap-2">
@@ -258,6 +273,7 @@
             <li><StateBlock state="empty" compact message="No members yet. Add one above." /></li>
           {/each}
         </ul>
+        {/if}
       </section>
     {/key}
   {/if}
@@ -326,9 +342,9 @@
     rows={grants}
     rowKey={(gr) => gr.id}
     {loading}
-    error={loadError || null}
-    onRetry={refresh}
-    emptyMessage="No grants yet. Add one with the form above."
+    emptyMessage={loadError
+      ? "Grants could not be loaded — use Retry under Groups above."
+      : "No grants yet. Add one with the form above."}
   />
   {@render errorFor("grants")}
 

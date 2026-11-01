@@ -1237,14 +1237,20 @@
   // lives outside the form and loads after it opens).
   let dialogBaseline = "";
   let collectorBaseline = "";
+  // The phased-rollout draft (tiers + start time) lives in the footer, outside
+  // the form, so it has its own baseline.
+  let rolloutBaseline = "";
   const collectorKey = (names: string[]): string => [...names].sort().join("\n");
+  const rolloutKey = (): string => JSON.stringify([tiers, rolloutStartsAt]);
   function markDialogClean(storedCollectors: string[]) {
     dialogBaseline = JSON.stringify(dialog);
     collectorBaseline = collectorKey(storedCollectors);
+    rolloutBaseline = rolloutKey();
   }
   function dialogDirty(): boolean {
     if (!dialog) return false;
     if (JSON.stringify(dialog) !== dialogBaseline) return true;
+    if (rolloutKey() !== rolloutBaseline) return true;
     return collectorKey(collectorsToSave(collectorEditor, dialog.collectorsText)) !== collectorBaseline;
   }
   const dialogTitle = $derived(
@@ -1437,14 +1443,18 @@
 
   function openRollout() {
     rolloutOpen = true;
-    if (!tiers.length)
+    if (!tiers.length) {
       // A sane default an operator can accept as-is: a small first wave, a half
       // fleet an hour later, everyone an hour after that.
+      const untouched = rolloutKey() === rolloutBaseline;
       tiers = [
         { percent: 10, delay_minutes: 0 },
         { percent: 50, delay_minutes: 60 },
         { percent: 100, delay_minutes: 60 },
       ];
+      // Seeding the default is not an edit: only a change to it is dirty.
+      if (untouched) rolloutBaseline = rolloutKey();
+    }
   }
   function addTier() {
     if (tiers.length >= MAX_ROLLOUT_TIERS) return;
@@ -3006,10 +3016,10 @@
       caption="Registered agents"
       captionHidden
       columns={[
-        { key: "name", label: "Name", sortable: true, cell: agentNameCell },
-        { key: "hostname", label: "Hostname", sortable: true, cell: agentHostCell },
-        { key: "platform", label: "Platform", sortable: true, cell: agentPlatformCell },
-        { key: "status", label: "Status", sortable: true, cell: agentStatusCell },
+        { key: "name", label: "Name", cell: agentNameCell },
+        { key: "hostname", label: "Hostname", cell: agentHostCell },
+        { key: "platform", label: "Platform", cell: agentPlatformCell },
+        { key: "status", label: "Status", cell: agentStatusCell },
         { key: "online", label: "Online", cell: agentOnlineCell },
         { key: "groups", label: "Config groups", cell: agentGroupsCell },
         { key: "agent_version", label: "Version", cell: agentVersionCell },

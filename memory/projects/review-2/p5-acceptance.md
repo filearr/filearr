@@ -52,7 +52,7 @@ Dialogs at 390: library edit light 0 / dark 2, taxonomy 0 / 0, config group 0 / 
 | Custom-field edit (fixture field) | PASS | PASS | PASS | PASS | PASS | PASS (closes, focus → Edit) | axe both themes (PASS) |
 | Taxonomy (New category) | PASS | PASS | PASS | PASS | PASS | PASS (creates, closes, focus → New category) | axe both themes (PASS) |
 | Agents config group (mocked list + create) | PASS | PASS | PASS | PASS | PASS | PASS (closes, focus → New group) | axe both themes (PASS) |
-| Item detail, edit tab | PASS (focus → results grid) | PASS | PASS | PASS | PASS (dialog-level Close in the header) | PASS (no prompt; Save stays in the dialog by design) | after Save, Escape closes with no prompt + focus → grid (PASS) · edit-tab Cancel returns to the card with no prompt, a tab-level cancel by design (PASS) · year restored (PASS) · axe both themes (PASS) |
+| Item detail, edit tab | PASS (focus → results grid) | PASS | PASS | PASS | PASS (dialog-level Close in the tab row) | PASS (no prompt; Save stays in the dialog by design) | after Save, Escape closes with no prompt + focus → grid (PASS) · edit-tab Cancel returns to the card with no prompt, a tab-level cancel by design (PASS) · year restored (PASS) · axe both themes (PASS) |
 
 ### Dialogs without a dirty check (Escape + Cancel/Close + focus return)
 
@@ -86,12 +86,14 @@ Library edit, taxonomy, config group, item detail each open at 390×844 and were
 
 | Check | Result |
 |---|---|
-| Search grid: ArrowDown moves `aria-activedescendant` | PASS |
-| Search grid: Space sets `aria-selected=true`, Space again clears it | PASS |
-| Search grid: Enter opens item detail, Escape returns focus to the grid | PASS |
+| Search grid keys (list view): ArrowDown moves `aria-activedescendant` | PASS |
+| Search grid keys (list view): Space sets `aria-selected=true`, Space again clears it | PASS |
+| Search grid keys (list view): Enter opens item detail, Escape returns focus to the grid | PASS |
 | `nested-interactive` = 0 on results, list + grid × light/dark × 1440/390 | PASS ×8 |
 | AgentStatusPanel renders for a (mocked) agent-hosted item; axe both themes | PASS |
 | Console: no errors after login | PASS |
+
+Not exercised this run: tile view keys, Tab-out, Cmd/Ctrl+Enter, shift-click ranges, duplicate-name validator.
 
 ## Console
 

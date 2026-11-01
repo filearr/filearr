@@ -10,7 +10,7 @@
   import { diagnoseLibrary, type Library, type LibraryDiagnosis, type LibraryVerdict, errorMessage } from "./api";
   import { copyText } from "./clipboard";
   import DiagnoseSection from "./DiagnoseSection.svelte";
-  import { Badge, Button, Modal, StateBlock, type Tone } from "./ui";
+  import { Alert, Badge, Button, Modal, StateBlock, toneForStatus, type Tone } from "./ui";
 
   let { library, onClose }: { library: Library; onClose: () => void } = $props();
 
@@ -50,13 +50,6 @@
   };
   const sev = (s: string) => SEV[s as LibraryVerdict["severity"]] ?? SEV.info;
 
-  // Same colours as before: finished is ok, a stopped/cancelled run a warning.
-  function scanTone(s: string): Tone {
-    if (s === "failed") return "danger";
-    if (s === "running") return "info";
-    if (s === "stopped" || s === "cancelled") return "warn";
-    return "ok";
-  }
   const fmtTs = (s: string | null | undefined) => (s ? new Date(s).toLocaleString() : "—");
   const yn = (v: unknown) => (v === true ? "yes" : v === false ? "no" : v == null ? "unknown" : String(v));
   const stat = (st: Record<string, unknown>, k: string) => (st[k] == null ? "—" : String(st[k]));
@@ -79,11 +72,18 @@
     </div>
   </div>
 
-  {#if loading}
+  <!-- Re-run keeps a report already on screen (dimmed, aria-busy) rather
+       than blanking it; the loading/error blocks stand in only when there
+       is no report yet. A failed re-run says so above the kept report. -->
+  {#if loading && !report}
     <StateBlock state="loading" message="Probing path, reading scans, errors, jobs and logs…" />
-  {:else if error}
+  {:else if error && !report}
     <StateBlock state="error" message="Diagnosis failed: {error}" onRetry={run} />
   {:else if report}
+    {#if error}
+      <Alert tone="danger" class="mt-3" onDismiss={() => (error = "")}>Re-run failed: {error}</Alert>
+    {/if}
+    <div aria-busy={loading} class={loading ? "opacity-60" : ""}>
     <!-- Verdicts -->
     <ul class="mt-4 space-y-2">
       {#each report.verdicts as v, i (v.code + i)}
@@ -173,7 +173,7 @@
               <tbody>
                 {#each report.scans as r (r.id)}
                   <tr class="border-t border-border align-top">
-                    <td class="pr-2 py-1"><Badge tone={scanTone(r.status)} class="uppercase">{r.status}</Badge></td>
+                    <td class="pr-2 py-1"><Badge tone={toneForStatus(r.status)} class="uppercase">{r.status}</Badge></td>
                     <td class="pr-2 py-1 whitespace-nowrap">{fmtTs(r.started_at)}</td>
                     <td class="pr-2 py-1">{r.duration_s == null ? "—" : `${r.duration_s} s`}</td>
                     <td class="pr-2 py-1">{stat(r.stats, "seen")}</td>
@@ -286,6 +286,7 @@
           <dt class="text-muted">worker concurrency</dt><dd>{String(report.context.worker_concurrency ?? "—")}</dd>
         </dl>
       </DiagnoseSection>
+    </div>
     </div>
   {/if}
 

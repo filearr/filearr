@@ -157,6 +157,9 @@
     // Another report's rows (and columns) must not linger dimmed while this
     // one runs; paging the same report keeps its rows on screen.
     page = null;
+    // The previous report's download failure / queued notice belongs to it.
+    dlError = "";
+    queued = "";
     await load();
   }
 

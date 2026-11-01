@@ -23,6 +23,10 @@
   let library = $state("");
   let libs = $state<Library[]>([]);
   let data = $state<TimelineResponse | null>(null);
+  // The bucket and library `data` was fetched for. Labels and bar links read
+  // these, not the controls, so bars on screen always describe themselves.
+  let shownBucket = $state<"month" | "year">("month");
+  let shownLibrary = $state("");
   let error = $state("");
   let loading = $state(false);
 
@@ -39,20 +43,28 @@
   async function load() {
     error = "";
     loading = true;
+    const b = bucket;
+    const lib = library;
     try {
-      const r = await timelineLoader.run(bucket, library);
+      const r = await timelineLoader.run(b, lib);
       if (r === undefined) return;
       data = r;
+      shownBucket = b;
+      shownLibrary = lib;
       loading = false;
     } catch (e) {
       error = errorMessage(e);
+      // A failed refresh of the same view keeps its histogram (with an Alert);
+      // after a bucket/library change the old bars would sit under controls
+      // that no longer describe them, so drop them for the error block.
+      if (b !== shownBucket || lib !== shownLibrary) data = null;
       loading = false;
     }
   }
 
   function label(b: TimelineBucket): string {
     const d = new Date(b.start);
-    return bucket === "year"
+    return shownBucket === "year"
       ? String(d.getUTCFullYear())
       : d.toLocaleString(undefined, { timeZone: "UTC", year: "numeric", month: "short" });
   }
@@ -64,7 +76,7 @@
       mtime_gte: String(b.start_epoch),
       mtime_lte: String(b.end_epoch - 1),
     };
-    if (library) params.library = library;
+    if (shownLibrary) params.library = shownLibrary;
     location.hash = encodeSearchHash(params);
   }
 
@@ -72,7 +84,7 @@
   function openInvalid() {
     if (!data) return;
     const params: Record<string, string> = { mtime_gte: String(data.invalid_mtime_gte) };
-    if (library) params.library = library;
+    if (shownLibrary) params.library = shownLibrary;
     location.hash = encodeSearchHash(params);
   }
 

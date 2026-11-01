@@ -58,10 +58,12 @@
       events = reset ? page.events : [...events, ...page.events];
       nextCursor = page.next_cursor;
       loading = false;
+      loadingMore = false;
     } catch (e) {
       if (reset) loadError = friendlyError(e);
       else moreError = friendlyError(e);
       loading = false;
+      loadingMore = false;
     }
   }
 

@@ -1113,5 +1113,10 @@
       error={events.length ? null : evError || null}
       onRetry={loadEvents}
       emptyMessage="No events match these filters. Events appear here once a rule fires; widen the filters to see more." />
+    {#if events.length}
+      <!-- Only the newest 100 events are fetched, so a column sort reorders
+           those, not the whole history. -->
+      <p class="mt-1 text-xs text-muted">Sorting applies to the events shown on this page.</p>
+    {/if}
   {/if}
 </div>

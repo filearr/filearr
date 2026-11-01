@@ -17,6 +17,7 @@
     type ServiceAccountOut,
   } from "./api";
   import { COPY_FAILED, copyText } from "./clipboard";
+  import { intOrNull } from "./numInput";
   import { Alert, Badge, Button, Checkbox, DataTable, Field, Input, Select, confirm, toast } from "./ui";
 
   let keys = $state<ApiKeyRow[]>([]);
@@ -32,7 +33,9 @@
   let showMint = $state(false);
   let mintName = $state("");
   let mintScopes = $state<ApiKeyScope[]>(["read"]);
-  let mintExpires = $state("");
+  // bind:value on a number input writes a number, or null when emptied.
+  let mintExpires = $state<number | null>(null);
+  let expiresError = $state("");
   let minted = $state<ApiKeyRow | null>(null);
   let copied = $state(false);
 
@@ -68,6 +71,7 @@
   async function mint(e: SubmitEvent) {
     e.preventDefault();
     mintError = "";
+    expiresError = "";
     // The form is novalidate (it reports its own errors), so the name check
     // the native `required` used to make happens here.
     if (!mintName.trim()) {
@@ -76,6 +80,14 @@
     }
     if (mintScopes.length === 0) {
       mintError = "Pick at least one scope.";
+      return;
+    }
+    // The novalidate form drops the native min/max, so the expiry range is
+    // checked here, before a service account can be created for a key that
+    // would then fail (0 would otherwise mint a never-expiring key).
+    const days = intOrNull(mintExpires, { min: 1, max: 3650 });
+    if (mintExpires !== null && days === null) {
+      expiresError = "Expiry must be 1–3650 whole days, or blank.";
       return;
     }
     try {
@@ -95,13 +107,13 @@
       minted = await mintApiKey({
         name: mintName.trim(),
         scopes: mintScopes,
-        expires_days: mintExpires ? Number(mintExpires) : null,
+        expires_days: days,
         service_account_id: owner,
       });
       mintAccount = owner;
       mintName = "";
       mintScopes = ["read"];
-      mintExpires = "";
+      mintExpires = null;
       showMint = false;
       await load();
     } catch (e2) {
@@ -164,7 +176,7 @@
     <h2 class="text-lg font-semibold">API keys</h2>
     <Button
       variant={showMint ? "secondary" : "primary"}
-      onclick={() => { showMint = !showMint; minted = null; mintError = ""; }}
+      onclick={() => { showMint = !showMint; minted = null; mintError = ""; expiresError = ""; }}
     >{showMint ? "Cancel" : "Create key"}</Button>
   </div>
   <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
@@ -215,7 +227,7 @@
           />
         {/each}
       </fieldset>
-      <Field label="Expires (days, blank = never)" class="max-w-xs">
+      <Field label="Expires (days, blank = never)" error={expiresError} class="max-w-xs">
         <Input type="number" min="1" max="3650" bind:value={mintExpires} />
       </Field>
       <div>

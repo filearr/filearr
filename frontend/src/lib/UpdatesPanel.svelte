@@ -82,7 +82,8 @@
   {:else if !loaded}
     <StateBlock state="loading" compact message="Loading update state…" />
   {:else if data?.error}
-    <Alert tone="warn">{data.error}</Alert>
+    <!-- A standing state of the last check, not news: no live role. -->
+    <Alert tone="warn" live={false}>{data.error}</Alert>
   {:else if !data?.checked_at}
     <StateBlock
       state="empty"
