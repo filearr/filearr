@@ -64,7 +64,10 @@
     const css = getComputedStyle(document.documentElement);
     const read = (name: string) => css.getPropertyValue(name).trim().toLowerCase();
     const hex = (v: string) => /^#[0-9a-f]{6}$/.test(v);
-    accentText = read("--accent-text");
+    // A local, not the state: reading `accentText` back here would make this
+    // effect depend on what it just wrote.
+    const fg = read("--accent-text");
+    accentText = fg;
     contrasts = [
       { token: "surface", cls: "bg-surface" },
       { token: "surface-2", cls: "bg-surface-2" },
@@ -72,7 +75,7 @@
     ].map(({ token, cls }) => {
       const bg = read(`--${token}`);
       // Without applyTheme (no JS ran yet) the token is a color-mix() fallback.
-      return { token, cls, ratio: hex(accentText) && hex(bg) ? contrastRatio(accentText, bg) : null };
+      return { token, cls, ratio: hex(fg) && hex(bg) ? contrastRatio(fg, bg) : null };
     });
   });
 
@@ -110,7 +113,8 @@
 
   // Modal with a dirty check: Escape and outside clicks are off, and every
   // remaining way out (Close, Cancel) asks before discarding edits.
-  const savedEdit = { name: "Movies", path: "/mnt/media/movies" };
+  // $state, so `dirty` re-derives when Save moves the baseline.
+  const savedEdit = $state({ name: "Movies", path: "/mnt/media/movies" });
   let editOpen = $state(false);
   let editName = $state(savedEdit.name);
   let editPath = $state(savedEdit.path);
@@ -120,14 +124,28 @@
     editPath = savedEdit.path;
     editOpen = true;
   }
+  // Set by Save; the toast fires from onBeforeClose once the close is allowed,
+  // so a vetoed close never reports a save.
+  let justSaved = false;
   function saveEdit() {
+    // Moving the baseline makes `dirty` false, so the close is not vetoed.
     savedEdit.name = editName;
     savedEdit.path = editPath;
-    // Values now equal the saved ones, so onBeforeClose lets this close through.
-    editName = savedEdit.name;
-    editPath = savedEdit.path;
+    justSaved = true;
     editOpen = false;
-    toast("Library saved", { tone: "ok" });
+  }
+  async function beforeEditClose(): Promise<boolean> {
+    const ok =
+      !dirty ||
+      (await confirm({
+        title: "Discard changes?",
+        message: "Your edits to Movies will be lost.",
+        tone: "danger",
+        confirmLabel: "Discard",
+      }));
+    if (ok && justSaved) toast("Library saved", { tone: "ok" });
+    justSaved = false;
+    return ok;
   }
 
   async function askDefault() {
@@ -415,9 +433,7 @@
       title="Edit library"
       description="Escape and outside clicks are disabled while editing."
       dismissible={false}
-      onBeforeClose={async () =>
-        !dirty ||
-        confirm({ title: "Discard changes?", message: "Your edits to Movies will be lost.", tone: "danger", confirmLabel: "Discard" })}
+      onBeforeClose={beforeEditClose}
       initialFocus={() => document.getElementById("kit-edit-path")}
     >
       <div class="flex flex-col gap-3">

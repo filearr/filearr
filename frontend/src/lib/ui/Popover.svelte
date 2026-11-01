@@ -31,7 +31,7 @@
     | {
         /** Text of a Button trigger with a ▾; also the panel's default name. */
         label: string;
-        /** Accessible name for the panel (bits-ui renders it as role=dialog). */
+        /** Accessible name for the panel (role=dialog, set here: bits-ui adds none). */
         ariaLabel?: string;
         trigger?: TriggerSnippet;
       }
@@ -75,12 +75,16 @@
   </Popover.Trigger>
   <Popover.Portal>
     <!-- collisionPadding + the viewport-relative max width keep the panel
-         fully on screen down to 360 px, whatever width the caller sets. -->
+         fully on screen down to 360 px, whatever width the caller sets.
+         role="dialog" is explicit: bits-ui 2.18 gives the trigger
+         aria-haspopup="dialog" but renders Content with no role, and an
+         aria-label on a role-less div is ignored by screen readers. -->
     <Popover.Content
       {side}
       {align}
       sideOffset={6}
       collisionPadding={8}
+      role="dialog"
       aria-label={ariaLabel ?? label}
       class="z-50 max-w-[calc(100vw-1rem)] rounded-panel border border-border bg-surface-2 p-3 shadow-lg {className}"
     >
