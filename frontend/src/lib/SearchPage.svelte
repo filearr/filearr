@@ -61,14 +61,23 @@
   import { buildDisplayPath } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
-  import { encodeSearchHash, parseSearchHash } from "./searchparams";
+  import { encodeSearchHash, isSearchHash, parseSearchHash } from "./searchparams";
+  import { createHashSync } from "./searchHash";
+  import {
+    SORTS,
+    UI_ONLY_PARAMS,
+    applyParamsPure,
+    clearRangePair,
+    pairPending,
+    pendingRangeChips,
+    type RangePair,
+  } from "./searchState";
   import { dslToParams, mergeDslParams, type DslResult } from "./searchDsl";
   import {
     MAP_POINT_CAP,
     boxParams,
     formatBox,
     geoOf,
-    parseBox,
     type GeoBox,
     type MapPoint,
   } from "./map/geo";
@@ -101,14 +110,6 @@
     { key: "raw-photo", label: "Raw photo", description: "" },
     { key: "document", label: "Document", description: "" },
     { key: "subtitle", label: "Subtitle", description: "" },
-  ];
-  // Explicit sort options (P3-T7 deep-linkable). "" = relevance; "newest" uses the
-  // FIX-3 clamped mtime_sort so bogus future mtimes cannot float to the top.
-  const SORTS: { value: string; label: string }[] = [
-    { value: "", label: "Relevance" },
-    { value: "newest", label: "Newest" },
-    { value: "size:desc", label: "Largest" },
-    { value: "title:asc", label: "Name (A–Z)" },
   ];
   // Top-N extensions surfaced by the type-ahead-lite (P3-T4). The facet list can
   // be long; we rank by live count and show a bounded slice.
@@ -236,11 +237,11 @@
     savedErrors = next;
   }
   // Range params carried through from an applied/deep-linked search until the user
-  // next touches a slider (the sliders are facetStats-derived, not directly
-  // restorable — see applyParams).
+  // next moves THAT pair's slider (the sliders are facetStats-derived, not
+  // directly restorable — see applyParams). Shown as their own chips (A7).
   let pendingRange = $state<Record<string, string>>({});
-  // The last hash WE wrote, so our own reflect does not re-trigger applyParams.
-  let lastWrittenHash = "";
+  // The own-write token (A5): tells our own hash writes from Back/Forward.
+  const sync = createHashSync();
 
   let hits = $state<Hit[]>([]);
   let total = $state(0);
@@ -583,13 +584,15 @@
   // to SEARCH routes only: a late async continuation (or a hashchange handled
   // while unmount is pending) must never clobber a navigation to another tab —
   // writing "#/search" over "#/jobs" is exactly the snap-back bug this fixes
-  // (live 2026-08-04).
-  function reflectHash() {
-    if (location.hash && !location.hash.startsWith("#/search")) return;
+  // (live 2026-08-04). Ruling 2 (A9): typing and slider drags REPLACE the
+  // current history entry; committed changes (chips, saved search, Enter,
+  // view/sort) PUSH one. sync records the write either way (searchHash.ts).
+  function reflectHash(mode: "push" | "replace") {
+    if (!isSearchHash(location.hash)) return;
     const h = encodeSearchHash(currentParams());
-    if (h === location.hash) return;
-    lastWrittenHash = h;
-    location.hash = h;
+    const { write } = sync.reflect(location.hash, h, mode);
+    if (write === "replace") history.replaceState(null, "", h);
+    else if (write === "push") location.hash = h;
   }
 
   // Toggle list/grid. A layout change needs no re-query -- just re-render the
@@ -598,86 +601,96 @@
   function setView(v: "list" | "grid" | "map") {
     if (view === v) return;
     view = v;
-    reflectHash();
+    reflectHash("push");
     // The map needs its own bounded, geo-filtered fetch (the results page is
     // ordered by relevance and capped at a screenful) — pull it on first open.
     if (v === "map" && searched) loadMapPoints();
   }
 
   // Apply a flat param bundle (deep link, back/forward, or a saved search) into
-  // the UI state and re-query. Range params ride pendingRange until a slider moves.
-  function applyParams(p: Record<string, string>) {
-    q = p.hash ?? p.q ?? "";
-    extension = p.extension ?? "";
-    selectedCategories = p.file_category
-      ? p.file_category.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedGroups = p.file_group
-      ? p.file_group.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedLibraries = p.library
-      ? p.library.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    selectedPrincipals = p.principal
-      ? p.principal.split(",").map((t) => t.trim()).filter(Boolean)
-      : [];
-    worldReadable = p.world_readable === "true" ? "true" : p.world_readable === "false" ? "false" : "";
-    exposure = ["anonymous", "authenticated", "restricted"].includes(p.exposure ?? "")
-      ? (p.exposure as typeof exposure) : "";
-    shareMismatch = p.share_mismatch === "true";
-    selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
+  // the UI state and re-query. searchState.ts validates every value (A36) and
+  // keeps range params in pendingRange until that pair's slider moves (A7).
+  // `mode` is how a re-encoded hash is written: "replace" when the bundle came
+  // from the URL (Back/Forward, deep link), "push" for a saved search.
+  function applyParams(p: Record<string, string>, mode: "push" | "replace") {
+    const { state: s, searchable, invalid } = applyParamsPure(p, { size: sizeBounds, mtime: mtimeBounds });
+    q = s.q;
+    extension = s.extension;
+    selectedCategories = s.selectedCategories;
+    selectedGroups = s.selectedGroups;
+    selectedLibraries = s.selectedLibraries;
+    selectedPrincipals = s.selectedPrincipals;
+    worldReadable = s.worldReadable;
+    exposure = s.exposure;
+    shareMismatch = s.shareMismatch;
+    selectedTags = s.selectedTags;
     tagQuery = "";
     tagOpen = false;
-    includeSidecars = p.include_sidecars === "true";
-    searchIn = (p.search_in as "content" | "names") || "all";
-    sortMode = p.sort ?? "";
-    view = p.view === "grid" || p.view === "map" ? p.view : "list";
-    // A deep link / saved search carrying all four geo edges restores the drawn
-    // area; a partial one restores nothing (parseBox is all-or-nothing) so we can
-    // never send half a box.
-    geoBox = parseBox(p);
-    semantic = p.semantic ? Number(p.semantic) : 0;
-    pendingRange = {};
-    for (const k of ["size_gte", "size_lte", "mtime_gte", "mtime_lte"]) {
-      if (p[k]) pendingRange[k] = p[k];
+    includeSidecars = s.includeSidecars;
+    searchIn = s.searchIn;
+    sortMode = s.sortMode;
+    view = s.view;
+    geoBox = s.geoBox;
+    semantic = s.semantic;
+    pendingRange = s.pendingRange;
+    if (s.sizeLo != null && s.sizeHi != null) { sizeLo = s.sizeLo; sizeHi = s.sizeHi; }
+    if (s.mtimeLo != null && s.mtimeHi != null) { mtimeLo = s.mtimeLo; mtimeHi = s.mtimeHi; }
+    if (invalid.length) toast(`Ignored unknown search options: ${invalid.join(", ")}`, { tone: "warn" });
+    // Auto-run ONLY when the params actually FILTER something: display-only
+    // leftovers (view / sort / semantic) restore the prefs on a blank slate
+    // (roadmap §20). A6: the blank slate is reset, not left showing the
+    // previous query's results, and the URL is brought in line.
+    if (searchable) {
+      runFresh(mode);
+    } else {
+      blankSlate();
+      reflectHash(mode);
     }
-    // Deactivate the sliders so pendingRange drives the filter until one moves.
-    if (sizeBounds) { sizeLo = sizeBounds.min; sizeHi = sizeBounds.max; }
-    if (mtimeBounds) { mtimeLo = mtimeBounds.min; mtimeHi = mtimeBounds.max; }
-    // Auto-run ONLY when the params actually FILTER something. Display-only
-    // leftovers (view / sort / semantic ride the hash after any search) used
-    // to count as "params present" and re-ran a match-all on the next visit —
-    // results appearing before any query, the exact roadmap-§20 blank-slate
-    // regression (live report 2026-08-08). Restoring the display prefs while
-    // staying blank is correct for those.
-    const displayOnly = new Set(["view", "sort", "semantic"]);
-    const searchable = Object.entries(p).some(
-      ([k, v]) => !displayOnly.has(k) && v !== "",
-    );
-    if (searchable) runFresh();
+  }
+
+  // Roadmap §20 empty start, also what a non-searchable apply returns to (A6).
+  function blankSlate() {
+    clearTimeout(debounce);
+    controller?.abort(); // a late response must not repopulate the slate
+    controller = null;
+    loading = false;
+    hits = [];
+    total = 0;
+    facets = {};
+    nextCursor = null;
+    searched = false;
+    clearSelection();
+    error = "";
   }
 
   function onHashChange() {
-    // Only search-route hashes are ours. On a back/forward to another tab this
-    // listener still fires once before the unmount flush; treating "#/jobs" as
-    // empty params re-ran a search and wrote "#/search" back — reverting the
-    // user's navigation.
-    if (!location.hash.startsWith("#/search")) return;
-    if (location.hash === lastWrittenHash) return; // our own write — ignore
-    applyParams(parseSearchHash(location.hash));
+    // Every hashchange settles the own-write token, but only search-route
+    // hashes are ours. On a back/forward to another tab this listener still
+    // fires once before the unmount flush; treating "#/jobs" as empty params
+    // re-ran a search and wrote "#/search" back — reverting the navigation.
+    const act = sync.incoming(location.hash);
+    if (!isSearchHash(location.hash) || act === "ignore") return;
+    applyParams(parseSearchHash(location.hash), "replace");
   }
 
-  // A manual slider interaction takes over from any applied/deep-linked range.
-  function onRangeChange() {
-    pendingRange = {};
-    reset();
+  // A slider drag takes over from that pair's applied/deep-linked range only;
+  // the other pair's pending filter stays (A7). Drags replace history.
+  function onSliderInput(pair: RangePair) {
+    if (pairPending(pendingRange, pair)) pendingRange = clearRangePair(pendingRange, pair);
+    reflectHash("replace");
+  }
+  function onRangeChange(pair: RangePair) {
+    pendingRange = clearRangePair(pendingRange, pair);
+    runFresh("replace");
+  }
+
+  // The × on a pending-range chip: drop that pair only and re-query.
+  function clearPending(pair: RangePair) {
+    pendingRange = clearRangePair(pendingRange, pair);
+    runFresh("push");
   }
 
   // ---- saved searches (P3-T7) --------------------------------------------
-  // Hash-only display prefs that are not /search params. POST/PATCH
-  // /saved-searches 422s any key outside the /search vocabulary (A4).
-  const UI_ONLY_PARAMS = ["view"] as const;
-
   function savedParams(): Record<string, string> {
     const p = currentParams();
     for (const k of UI_ONLY_PARAMS) delete p[k];
@@ -719,7 +732,7 @@
   }
 
   function applySaved(ss: SavedSearch) {
-    applyParams(ss.params ?? {});
+    applyParams(ss.params ?? {}, "push");
   }
 
   async function renameSaved(ss: SavedSearch) {
@@ -759,15 +772,17 @@
 
   function applyStats(r: SearchResponse) {
     // Update slider bounds from facetStats ONLY while that facet isn't being
-    // narrowed — otherwise an active filter would shrink its own track.
+    // narrowed — otherwise an active filter would shrink its own track. A
+    // pending (URL / saved-search) range narrows it too: keep the bounds we had,
+    // and take the filtered stats only when there are none yet (A7).
     const ss = r.facet_stats?.size;
-    if (ss && !sizeActive) {
+    if (ss && !sizeActive && !(sizeBounds && pairPending(pendingRange, "size"))) {
       sizeBounds = { min: ss.min, max: ss.max };
       sizeLo = ss.min;
       sizeHi = ss.max;
     }
     const ms = r.facet_stats?.mtime;
-    if (ms && !mtimeActive) {
+    if (ms && !mtimeActive && !(mtimeBounds && pairPending(pendingRange, "date"))) {
       mtimeBounds = { min: ms.min, max: ms.max };
       mtimeLo = ms.min;
       mtimeHi = ms.max;
@@ -775,7 +790,7 @@
   }
 
   // ---- fetching -----------------------------------------------------------
-  async function runFresh() {
+  async function runFresh(mode: "push" | "replace" = "push") {
     // Cancel any in-flight request so a stale response can never overwrite a
     // newer one (P3-T3 AbortController on the 150 ms debounce).
     controller?.abort();
@@ -790,7 +805,7 @@
     clearSelection();
     bulkSummary = null;
     bulkError = "";
-    reflectHash(); // keep the URL in sync with the query being run (deep-linkable)
+    reflectHash(mode); // keep the URL in sync with the query being run (deep-linkable)
     try {
       const r = await search(buildParams(), ctrl.signal);
       if (ctrl.signal.aborted) return;
@@ -974,9 +989,32 @@
     }
   }
 
-  function onInput() {
+  // Typing replaces the current history entry (A9); a half-composed IME
+  // string never searches (A43) — compositionend schedules the search instead,
+  // since Chrome fires no plain input event after it.
+  let inputPending = false;
+  function onInput(e: Event) {
+    if ((e as InputEvent).isComposing) return;
     clearTimeout(debounce);
-    debounce = setTimeout(runFresh, 150);
+    inputPending = true;
+    debounce = setTimeout(() => {
+      inputPending = false;
+      runFresh("replace");
+    }, 150);
+  }
+
+  // Enter commits the query: a still-debounced edit runs now and pushes its own
+  // history entry; an already-reflected one pushes nothing new.
+  function onQueryKeydown(e: KeyboardEvent) {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    if (inputPending) {
+      clearTimeout(debounce);
+      inputPending = false;
+      runFresh("push");
+    } else {
+      reflectHash("push");
+    }
   }
 
   // FIX-12 (Item B): a "Query syntax" help chip appends its example to the query
@@ -1124,7 +1162,7 @@
       sizeLo = sizeBounds.min;
       sizeHi = sizeBounds.max;
     }
-    pendingRange = { ...pendingRange, size_gte: "", size_lte: "" };
+    pendingRange = clearRangePair(pendingRange, "size");
     reset();
   }
   function snapMtime() {
@@ -1132,7 +1170,7 @@
       mtimeLo = mtimeBounds.min;
       mtimeHi = mtimeBounds.max;
     }
-    pendingRange = { ...pendingRange, mtime_gte: "", mtime_lte: "" };
+    pendingRange = clearRangePair(pendingRange, "date");
     reset();
   }
 
@@ -1156,6 +1194,8 @@
     if (geoBox) out.push({ key: "geo", label: `area ${formatBox(geoBox)}`, clear: () => onMapBox(null) });
     if (sizeActive) out.push({ key: "size", label: `size ${fmtBytes(sizeLo)}–${fmtBytes(sizeHi)}`, clear: snapSize });
     if (mtimeActive) out.push({ key: "mtime", label: `date ${fmtDate(mtimeLo)}–${fmtDate(mtimeHi)}`, clear: snapMtime });
+    // A7: a range that arrived by URL / saved search, until its slider moves.
+    for (const c of pendingRangeChips(pendingRange)) out.push({ key: c.key, label: c.label, clear: () => clearPending(c.pair) });
     out.push(...dslChips(dsl.params));
     return out;
   });
@@ -1236,6 +1276,7 @@
         tag: el?.tagName ?? "BODY",
         editable: inEditable(el),
         inListbox: !!el?.closest("#search-results"),
+        combobox: !!el?.hasAttribute("data-results-combobox"),
       },
       { modalOpen: !!selected, view, hasHits: hits.length > 0 },
     );
@@ -1291,6 +1332,10 @@
   const activeDescendant = $derived(
     hits.length && hits[selectedIndex] ? `row-${hitId(hits[selectedIndex])}` : undefined,
   );
+  // The results grid is on screen (the query box's combobox popup).
+  const resultsShown = $derived(searched && !error && view !== "map" && hits.length > 0);
+  // Meilisearch totals are estimates (estimated_total_hits); say so when large (A45).
+  const totalLabel = $derived(total >= 1000 ? `about ${total.toLocaleString("en-US")} results` : `${total} results`);
 
   // ---- lifecycle ----------------------------------------------------------
   onMount(async () => {
@@ -1346,9 +1391,9 @@
     // once a search actually starts. Skipped entirely if the user has already
     // navigated away while the fetches above were in flight (destroyed) or the
     // hash is no longer a search route.
-    if (destroyed || !location.hash.startsWith("#/search")) return;
+    if (destroyed || !isSearchHash(location.hash)) return;
     const initial = parseSearchHash(location.hash);
-    if (Object.keys(initial).length) applyParams(initial);
+    if (Object.keys(initial).length) applyParams(initial, "replace");
   });
 
   let destroyed = false;
@@ -1373,6 +1418,15 @@
     placeholder="Search your library…  (press / to focus)"
     bind:value={q}
     oninput={onInput}
+    oncompositionend={onInput}
+    onkeydown={onQueryKeydown}
+    role="combobox"
+    aria-haspopup="grid"
+    aria-controls="search-results"
+    aria-expanded={resultsShown}
+    aria-autocomplete="list"
+    aria-activedescendant={resultsShown ? activeDescendant : undefined}
+    data-results-combobox
   />
   {#if unsupportedKey && unsupportedKey !== dismissedUnsupported}
     <Alert tone="warn" live={false} class="mt-2" onDismiss={() => (dismissedUnsupported = unsupportedKey)}>
@@ -1414,7 +1468,7 @@
             step="0.1"
             class="w-full accent-accent"
             bind:value={semantic}
-            onchange={reset}
+            onchange={() => runFresh("replace")}
             aria-label="Semantic blend ratio" />
         </span>
         <span class="w-8 tabular-nums">{semantic.toFixed(1)}</span>
@@ -1731,15 +1785,15 @@
             <input
               type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeLo}
-              oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; }}
-              onchange={onRangeChange} aria-label="Minimum file size" />
+              oninput={() => { if (sizeLo > sizeHi) sizeHi = sizeLo; onSliderInput("size"); }}
+              onchange={() => onRangeChange("size")} aria-label="Minimum file size" />
           </span>
           <span class="w-40">
             <input
               type="range" class="w-full accent-accent" min={sizeBounds.min} max={sizeBounds.max} step="1"
               bind:value={sizeHi}
-              oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; }}
-              onchange={onRangeChange} aria-label="Maximum file size" />
+              oninput={() => { if (sizeHi < sizeLo) sizeLo = sizeHi; onSliderInput("size"); }}
+              onchange={() => onRangeChange("size")} aria-label="Maximum file size" />
           </span>
           <span class="tabular-nums">{fmtBytes(sizeLo)} – {fmtBytes(sizeHi)}</span>
         </div>
@@ -1756,15 +1810,15 @@
             <input
               type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeLo}
-              oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; }}
-              onchange={onRangeChange} aria-label="Earliest modified date" />
+              oninput={() => { if (mtimeLo > mtimeHi) mtimeHi = mtimeLo; onSliderInput("date"); }}
+              onchange={() => onRangeChange("date")} aria-label="Earliest modified date" />
           </span>
           <span class="w-40">
             <input
               type="range" class="w-full accent-accent" min={mtimeBounds.min} max={mtimeBounds.max} step="1"
               bind:value={mtimeHi}
-              oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; }}
-              onchange={onRangeChange} aria-label="Latest modified date" />
+              oninput={() => { if (mtimeHi < mtimeLo) mtimeLo = mtimeHi; onSliderInput("date"); }}
+              onchange={() => onRangeChange("date")} aria-label="Latest modified date" />
           </span>
           <span class="tabular-nums">{fmtDate(mtimeLo)} – {fmtDate(mtimeHi)}</span>
         </div>
@@ -1783,7 +1837,7 @@
          explanation is worth seeing immediately. The panel owns only its
          viewport; the area it reports comes straight back into this page's param
          state. -->
-    {#if error}<StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />{/if}
+    {#if error}<StateBlock state="error" class="mt-6" message={error} onRetry={() => runFresh()} />{/if}
     {#await loadMapPanel()}
       <StateBlock state="loading" />
     {:then m}
@@ -1820,12 +1874,12 @@
       </p>
     </div>
   {:else if error}
-    <StateBlock state="error" class="mt-6" message={error} onRetry={runFresh} />
+    <StateBlock state="error" class="mt-6" message={error} onRetry={() => runFresh()} />
   {:else}
     {#if hashMode}
       <p class="mt-4 text-sm text-accent-text">Exact hash match ({total} found)</p>
     {:else}
-      <p class="mt-4 text-sm text-muted">{total} results</p>
+      <p class="mt-4 text-sm text-muted">{totalLabel}</p>
     {/if}
 
     <!-- IN-T4 selection controls. Deliberately "all LOADED", never "all

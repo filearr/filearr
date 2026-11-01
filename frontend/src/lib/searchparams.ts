@@ -35,12 +35,16 @@ export function isSearchHash(hash: string): boolean {
 }
 
 /** Parse the query part of a `#/search?...` hash back into a flat params record.
- *  Returns `{}` for a non-search hash or a search hash with no query. */
+ *  Returns `{}` for a non-search hash or a search hash with no query. A repeated
+ *  key (`a=1&a=2`, the API's own list style) joins into one comma value `"1,2"`:
+ *  the page and saved searches carry lists comma-joined (ruling 3, A31). */
 export function parseSearchHash(hash: string): Record<string, string> {
   if (!isSearchHash(hash)) return {};
   const qi = hash.indexOf("?");
   if (qi === -1) return {};
   const out: Record<string, string> = {};
-  for (const [k, v] of new URLSearchParams(hash.slice(qi + 1))) out[k] = v;
+  for (const [k, v] of new URLSearchParams(hash.slice(qi + 1))) {
+    out[k] = k in out ? `${out[k]},${v}` : v;
+  }
   return out;
 }
