@@ -627,6 +627,16 @@
   }
 
   // ---- saved searches (P3-T7) --------------------------------------------
+  // Hash-only display prefs that are not /search params. POST/PATCH
+  // /saved-searches 422s any key outside the /search vocabulary (A4).
+  const UI_ONLY_PARAMS = ["view"] as const;
+
+  function savedParams(): Record<string, string> {
+    const p = currentParams();
+    for (const k of UI_ONLY_PARAMS) delete p[k];
+    return p;
+  }
+
   async function loadSaved() {
     try {
       saved = await listSavedSearches();
@@ -640,7 +650,7 @@
     if (!name?.trim()) return;
     savedError = "";
     try {
-      await createSavedSearch({ name: name.trim(), params: currentParams() });
+      await createSavedSearch({ name: name.trim(), params: savedParams() });
       await loadSaved();
     } catch (e) {
       savedError = errorMessage(e);

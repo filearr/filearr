@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { copyText } from "./clipboard";
+  import { intOrNull } from "./numInput";
   import ScheduleField from "./ScheduleField.svelte";
   import {
     CAPABILITY_TOOLS,
@@ -1079,7 +1080,8 @@ ${detail}
      *  name, or "agent" = each member agent's own local time. */
     invScheduleTz: string;
     invInheritScanPaths: boolean;
-    invMaxEntries: string;
+    /** type="number" bind:value — a number, or null when emptied (= agent default). */
+    invMaxEntries: number | null;
     invPathsText: string;
     invPreset: string;
     selections: SelRow[];
@@ -1472,7 +1474,7 @@ ${detail}
       invScheduleCron: "",
       invScheduleTz: "",
       invInheritScanPaths: true,
-      invMaxEntries: "",
+      invMaxEntries: null,
       invPathsText: "",
       invPreset: "",
       selections: [],
@@ -1511,7 +1513,7 @@ ${detail}
       invScheduleCron: s.inventory?.schedule_cron ?? "",
       invScheduleTz: s.inventory?.schedule_tz ?? "",
       invInheritScanPaths: s.inventory?.inherit_scan_paths ?? false,
-      invMaxEntries: s.inventory?.max_entries ? String(s.inventory.max_entries) : "",
+      invMaxEntries: s.inventory?.max_entries || null,
       invPathsText: (s.inventory?.paths ?? []).join("\n"),
       invPreset: s.inventory?.preset ?? "",
       selections: (s.scan_selections ?? []).map((sel) => ({
@@ -1586,6 +1588,9 @@ ${detail}
   // the catalogue never loaded, from the free-text field) — see
   // ./inventoryCollectors.collectorsToSave. Passed in rather than derived here
   // so the payload rule stays in the DOM-free, unit-tested module.
+  // Mirrors the agent's inventory.max_entries bound (and the input's min/max).
+  const INV_MAX_ENTRIES = { min: 1000, max: 5_000_000 };
+
   function buildSettings(f: GroupForm, collectors: string[]): GroupSettings {
     const settings: GroupSettings = {};
     if (f.logLevel) settings.log_level = f.logLevel as GroupSettings["log_level"];
@@ -1639,7 +1644,8 @@ ${detail}
       if (invPaths.length) inventory.paths = invPaths;
       if (f.invPreset.trim()) inventory.preset = f.invPreset.trim();
       if (f.invInheritScanPaths) inventory.inherit_scan_paths = true;
-      if (f.invMaxEntries.trim()) inventory.max_entries = Number(f.invMaxEntries.trim());
+      const maxEntries = intOrNull(f.invMaxEntries, INV_MAX_ENTRIES);
+      if (maxEntries !== null) inventory.max_entries = maxEntries;
       settings.inventory = inventory;
     }
     if (f.selections.length) {
@@ -1691,6 +1697,10 @@ ${detail}
         dialog.auditRetain > MAX_RETAIN_SNAPSHOTS)
     ) {
       dialogError = `Audit "retain snapshots" must be a whole number from 1 to ${MAX_RETAIN_SNAPSHOTS}.`;
+      return;
+    }
+    if (dialog.invMaxEntries !== null && intOrNull(dialog.invMaxEntries, INV_MAX_ENTRIES) === null) {
+      dialogError = `Inventory "max entries per run" must be a whole number from ${INV_MAX_ENTRIES.min.toLocaleString()} to ${INV_MAX_ENTRIES.max.toLocaleString()}, or blank for the agent default.`;
       return;
     }
     const collectors = collectorsToSave(collectorEditor, dialog.collectorsText);

@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { latest } from "./latest";
+  import { toast } from "./ui/toast.svelte";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
@@ -497,7 +498,14 @@
     busy[lib.id] = true;
     queued = { ...queued, [lib.id]: Date.now() }; // reassign, don't mutate
     try {
-      await scanLibrary(lib.id);
+      const res = await scanLibrary(lib.id);
+      if (res.already_running) {
+        // Nothing new was enqueued, so there is no "queued" job to wait for (B8).
+        const { [lib.id]: _dup, ...rest } = queued;
+        queued = rest;
+        toast(`A scan is already running for ${lib.name}.`, { tone: "info" });
+        return;
+      }
       await refresh();
     } catch (e) {
       error = errorMessage(e, { verb: "scan this library" });
@@ -969,14 +977,12 @@
                   onclick={() => (deleting = lib)}>Delete</button>
                 <button
                   class="rounded-lg bg-[var(--accent)] px-2 py-1 text-xs text-[var(--accent-fg)] disabled:opacity-50"
-                  disabled={busy[lib.id]}
+                  disabled={busy[lib.id] || running || stopping}
                   onclick={() => runScan(lib)}>
                   {#if busy[lib.id]}
                     Starting…
                   {:else if isQueued(lib.id)}
                     Queued
-                  {:else if running || stopping}
-                    Restart
                   {:else}
                     Scan
                   {/if}

@@ -20,6 +20,7 @@
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
+  import { intOrNull, numOrNull } from "./numInput";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import FolderPicker from "./FolderPicker.svelte";
@@ -73,7 +74,7 @@
         scanCron: "",
         watchMode: false,
         hashPolicy: "auto" as HashPolicy,
-        hashCeiling: "",
+        hashCeiling: null as number | null,
         presets: [] as string[],
         groups: [] as string[],
         ocrEnabled: false,
@@ -95,7 +96,7 @@
         scanCron: library.scan_cron ?? "",
         watchMode: library.watch_mode,
         hashPolicy: library.hash_policy,
-        hashCeiling: library.hash_full_max_bytes != null ? String(library.hash_full_max_bytes) : "",
+        hashCeiling: library.hash_full_max_bytes ?? null,
         presets: [...(library.enabled_presets ?? [])],
         groups: [...(library.enabled_extension_groups ?? [])],
         ocrEnabled: library.ocr_enabled,
@@ -140,7 +141,13 @@
   let scanCron = $state(seed.scanCron);
   let watchMode = $state(seed.watchMode);
   let hashPolicy = $state<HashPolicy>(seed.hashPolicy);
-  let hashCeiling = $state(seed.hashCeiling);
+  // bind:value on type="number" writes a number, or null when emptied.
+  let hashCeiling = $state<number | null>(seed.hashCeiling);
+  // Blank = global default; anything else must be a positive integer byte count.
+  const hashCeilingValue = $derived(intOrNull(hashCeiling, { min: 1 }));
+  const hashCeilingError = $derived(
+    hashCeiling !== null && hashCeilingValue === null ? "Enter a whole number of bytes (1 or more), or leave blank." : "",
+  );
   let presets = $state<string[]>(seed.presets);
   let groups = $state<string[]>(seed.groups);
   let ocrEnabled = $state(seed.ocrEnabled);
@@ -169,11 +176,11 @@
     { key: "email_max_bytes", label: "E-mail ceiling", unit: "MiB", scale: 1048576,
       help: "E-mail files larger than this are guard-skipped (FILEARR_EMAIL_MAX_BYTES)." },
   ];
-  let overrideInputs = $state<Record<string, string>>(
+  let overrideInputs = $state<Record<string, number | null>>(
     Object.fromEntries(
       OVERRIDE_FIELDS.map((f) => {
         const v = seed.extractOverrides[f.key];
-        return [f.key, v != null ? String(v / f.scale) : ""];
+        return [f.key, v != null ? v / f.scale : null];
       }),
     ),
   );
@@ -181,10 +188,11 @@
   function overridesPayload(): Record<string, number> | null {
     const out: Record<string, number> = {};
     for (const f of OVERRIDE_FIELDS) {
-      const raw = (overrideInputs[f.key] ?? "").trim();
-      if (!raw) continue;
-      const n = Number(raw);
-      if (Number.isFinite(n) && n > 0) out[f.key] = Math.round(n * f.scale);
+      const n = numOrNull(overrideInputs[f.key]);
+      if (n === null || n <= 0) continue;
+      // MiB fields become whole bytes; scale-1 fields (seconds, ratio) keep
+      // their fractions (B20).
+      out[f.key] = f.scale > 1 ? Math.round(n * f.scale) : n;
     }
     return Object.keys(out).length ? out : null;
   }
@@ -237,6 +245,7 @@
   }
 
   async function save() {
+    if (hashCeilingError) return;
     busy = true;
     error = "";
     try {
@@ -253,7 +262,7 @@
           scan_cron: scanCron.trim() ? scanCron.trim() : null,
           watch_mode: watchMode,
           hash_policy: hashPolicy,
-          hash_full_max_bytes: hashCeiling.trim() ? Number(hashCeiling) : null,
+          hash_full_max_bytes: hashCeilingValue,
           enabled_presets: presets,
           enabled_extension_groups: groups,
           ocr_enabled: ocrEnabled,
@@ -278,7 +287,7 @@
         scan_cron: scanCron.trim() ? scanCron.trim() : null,
         watch_mode: watchMode,
         hash_policy: hashPolicy,
-        hash_full_max_bytes: hashCeiling.trim() ? Number(hashCeiling) : null,
+        hash_full_max_bytes: hashCeilingValue,
         enabled_presets: presets,
         enabled_extension_groups: groups,
         ocr_enabled: ocrEnabled,
@@ -455,7 +464,11 @@
             Full-hash ceiling <Help text={HELP.hash_ceiling} label="hash ceiling" />
           </label>
           <input class="w-56 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-xs dark:border-slate-700"
-            type="number" min="1" placeholder="bytes (blank = global default)" bind:value={hashCeiling} />
+            type="number" min="1" step="1" placeholder="bytes (blank = global default)"
+            aria-invalid={hashCeilingError ? "true" : undefined} bind:value={hashCeiling} />
+          {#if hashCeilingError}
+            <p class="text-2xs text-danger sm:col-start-2" role="alert">{hashCeilingError}</p>
+          {/if}
         </div>
       </section>
 
@@ -615,7 +628,7 @@
       <button class="rounded-lg border border-slate-300 px-4 py-2 text-sm dark:border-slate-700"
         onclick={onClose}>Cancel</button>
       <button class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm text-[var(--accent-fg)] disabled:opacity-50"
-        disabled={busy || (creating && (!name.trim() || !rootPath.trim()))} onclick={save}>
+        disabled={busy || !!hashCeilingError || (creating && (!name.trim() || !rootPath.trim()))} onclick={save}>
         {#if creating}{busy ? "Adding…" : "Add library"}{:else}{busy ? "Saving…" : "Save changes"}{/if}
       </button>
     </div>

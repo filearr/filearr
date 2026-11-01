@@ -947,8 +947,10 @@ export async function deleteCustomField(id: string): Promise<void> {
   await send("DELETE", `/custom-fields/${id}`, { expect: "none" });
 }
 
+/** Enqueue a full scan. When one is already queued/running for the library the
+ *  server answers `{ job_id: null, already_running: true }` instead (B8). */
 export const scanLibrary = (id: string) =>
-  request<{ job_id: number }>(`/libraries/${id}/scan`, { method: "POST" });
+  request<{ job_id: number | null; already_running?: boolean }>(`/libraries/${id}/scan`, { method: "POST" });
 
 /** W9 targeted rescan of a single FILE or a DIRECTORY under a library root. The
  *  `path` is a rel_path ('' = whole library, file or dir); `recursive` descends

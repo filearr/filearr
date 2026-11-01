@@ -28,6 +28,7 @@
     type AuthPrincipal,
     errorMessage,
   } from "./api";
+  import { intOrNull } from "./numInput";
 
   let { me = null, authDisabled = false }: { me?: AuthPrincipal | null; authDisabled?: boolean } =
     $props();
@@ -102,42 +103,41 @@
 
   // ---- category / group dialog ---------------------------------------------
   type Dialog =
-    | { kind: "category"; mode: "create" | "edit"; key: string; label: string; description: string; extractor: string; sortOrder: string }
-    | { kind: "group"; mode: "create" | "edit"; key: string; label: string; description: string; categoryKey: string; sortOrder: string };
+    | { kind: "category"; mode: "create" | "edit"; key: string; label: string; description: string; extractor: string; sortOrder: number | null }
+    | { kind: "group"; mode: "create" | "edit"; key: string; label: string; description: string; categoryKey: string; sortOrder: number | null };
   let dialog = $state<Dialog | null>(null);
   let dialogError = $state("");
   let dialogBusy = $state(false);
 
   function newCategory() {
     dialogError = "";
-    dialog = { kind: "category", mode: "create", key: "", label: "", description: "", extractor: "none", sortOrder: "" };
+    dialog = { kind: "category", mode: "create", key: "", label: "", description: "", extractor: "none", sortOrder: null };
   }
   function editCategory(n: TaxonomyNode) {
     dialogError = "";
     dialog = {
       kind: "category", mode: "edit",
       key: n.category.key, label: n.category.label, description: n.category.description ?? "",
-      extractor: n.category.extractor || "none", sortOrder: String(n.category.sort_order ?? ""),
+      extractor: n.category.extractor || "none", sortOrder: n.category.sort_order ?? null,
     };
   }
   function newGroup(categoryKey: string) {
     dialogError = "";
-    dialog = { kind: "group", mode: "create", key: "", label: "", description: "", categoryKey, sortOrder: "" };
+    dialog = { kind: "group", mode: "create", key: "", label: "", description: "", categoryKey, sortOrder: null };
   }
   function editGroup(categoryKey: string, g: TaxonomyNode["groups"][number]) {
     dialogError = "";
     dialog = {
       kind: "group", mode: "edit",
       key: g.key, label: g.label, description: g.description ?? "",
-      categoryKey, sortOrder: String(g.sort_order ?? ""),
+      categoryKey, sortOrder: g.sort_order ?? null,
     };
   }
 
-  function sortNum(s: string): number | undefined {
-    const t = s.trim();
-    if (!t) return undefined;
-    const n = Number(t);
-    return Number.isFinite(n) ? n : undefined;
+  // bind:value on the type="number" input writes a number, or null when
+  // emptied. Blank = auto (undefined); the backend wants an integer.
+  function sortNum(v: number | null): number | undefined {
+    return intOrNull(v) ?? undefined;
   }
 
   async function saveDialog() {
@@ -148,6 +148,10 @@
     }
     if (!dialog.label.trim()) {
       dialogError = "Label is required.";
+      return;
+    }
+    if (dialog.sortOrder !== null && intOrNull(dialog.sortOrder) === null) {
+      dialogError = "Sort order must be a whole number, or blank for auto.";
       return;
     }
     dialogBusy = true;
@@ -426,7 +430,7 @@
         {/if}
 
         <label class="text-xs text-slate-500">Sort order
-          <input type="number" class="mt-1 block w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
+          <input type="number" step="1" class="mt-1 block w-32 rounded-lg border border-slate-300 bg-transparent px-3 py-2 text-sm dark:border-slate-700"
             placeholder="(auto)" bind:value={dialog.sortOrder} />
         </label>
       </div>
