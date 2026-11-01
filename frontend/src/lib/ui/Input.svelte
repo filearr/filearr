@@ -2,7 +2,7 @@
   import { getContext } from "svelte";
   import type { HTMLInputAttributes } from "svelte/elements";
   import { controlClass, type ControlSize } from "./control.ts";
-  import { controlAttrs, FIELD_CTX, type FieldCtx } from "./fieldContext.ts";
+  import { controlAttrs, FIELD_CTX, warnFieldIdMismatch, type FieldCtx } from "./fieldContext.ts";
 
   // The native numeric `size` attribute is replaced by the kit's size scale.
   type Props = Omit<HTMLInputAttributes, "size" | "value" | "class"> & {
@@ -10,9 +10,18 @@
     invalid?: boolean;
     size?: ControlSize;
     class?: string;
+    /** The <input> element, for focus() and the like: `bind:ref`. */
+    ref?: HTMLInputElement | null;
   };
 
-  let { value = $bindable(), invalid, size = "md", class: className = "", ...rest }: Props = $props();
+  let {
+    value = $bindable(),
+    ref = $bindable<HTMLInputElement | null>(null),
+    invalid,
+    size = "md",
+    class: className = "",
+    ...rest
+  }: Props = $props();
 
   // Inside a <Field> the context supplies id, aria-describedby, invalid and
   // required; outside one getContext returns undefined and only own props
@@ -29,11 +38,15 @@
       invalid,
     }),
   );
+
+  // An own id inside a Field orphans the Field's <label for>.
+  $effect(() => warnFieldIdMismatch(field, rest.id ?? undefined, import.meta.env.DEV));
 </script>
 
 <input
   {...rest}
   bind:value
+  bind:this={ref}
   {...attrs}
   class="{controlClass(size, isInvalid)} {className}"
 />

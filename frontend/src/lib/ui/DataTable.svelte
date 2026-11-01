@@ -235,7 +235,7 @@
         <Button
           variant="ghost"
           size="sm"
-          aria-label="Toggle sort direction"
+          aria-label={sort?.dir === "desc" ? "Sort ascending" : "Sort descending"}
           disabled={!sort}
           onclick={() => (sort = toggleDir(sort))}
         >

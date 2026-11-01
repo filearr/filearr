@@ -118,6 +118,30 @@ test("accentTextColor always returns 7-char lowercase hex", () => {
   }
 });
 
+// applyTheme's targets: each theme's strictest surface (surface-3). Every
+// surface of that theme must then clear 4.5:1.
+const SAMPLE_ACCENTS = ["#4f46e5", "#326fd1", "#0b7caf", "#d73d3d", "#facc15"];
+
+test("accentTextColor on the light target clears 4.5:1 on every light surface", () => {
+  for (const a of SAMPLE_ACCENTS) {
+    const out = accentTextColor(a, "#f1f5f9");
+    for (const s of ["#ffffff", "#f8fafc", "#f1f5f9"]) {
+      const r = contrastRatio(out, s);
+      assert.ok(r >= 4.5, `${a} -> ${out} on ${s}: ${r.toFixed(2)}`);
+    }
+  }
+});
+
+test("accentTextColor on the dark target clears 4.5:1 on every dark surface", () => {
+  for (const a of SAMPLE_ACCENTS) {
+    const out = accentTextColor(a, "#1e293b");
+    for (const s of ["#020617", "#0f172a", "#1e293b"]) {
+      const r = contrastRatio(out, s);
+      assert.ok(r >= 4.5, `${a} -> ${out} on ${s}: ${r.toFixed(2)}`);
+    }
+  }
+});
+
 test("border-strong tokens meet 3:1 (WCAG 1.4.11) on their surfaces", () => {
   assert.ok(contrastRatio("#7c8ba1", "#ffffff") >= 3);
   assert.ok(contrastRatio("#64748b", "#020617") >= 3);

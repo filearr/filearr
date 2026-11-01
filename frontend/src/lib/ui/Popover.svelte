@@ -57,7 +57,7 @@
     children,
   }: Props = $props();
 
-  // The union type already rejects neither; this covers untyped callers.
+  // The union type rejects passing neither; this covers untyped callers.
   $effect(() => {
     if (import.meta.env.DEV && !label && !trigger) console.warn("Popover: pass `label` or a `trigger` snippet.");
   });

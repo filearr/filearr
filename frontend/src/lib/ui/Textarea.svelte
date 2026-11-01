@@ -2,17 +2,20 @@
   import { getContext } from "svelte";
   import type { HTMLTextareaAttributes } from "svelte/elements";
   import { controlClass, type ControlSize } from "./control.ts";
-  import { controlAttrs, FIELD_CTX, type FieldCtx } from "./fieldContext.ts";
+  import { controlAttrs, FIELD_CTX, warnFieldIdMismatch, type FieldCtx } from "./fieldContext.ts";
 
   type Props = Omit<HTMLTextareaAttributes, "value" | "class"> & {
     value?: HTMLTextareaAttributes["value"];
     invalid?: boolean;
     size?: ControlSize;
     class?: string;
+    /** The <textarea> element, for focus() and the like: `bind:ref`. */
+    ref?: HTMLTextAreaElement | null;
   };
 
   let {
     value = $bindable(),
+    ref = $bindable<HTMLTextAreaElement | null>(null),
     invalid,
     size = "md",
     rows = 3,
@@ -35,6 +38,9 @@
       invalid,
     }),
   );
+
+  // An own id inside a Field orphans the Field's <label for>.
+  $effect(() => warnFieldIdMismatch(field, rest.id ?? undefined, import.meta.env.DEV));
 </script>
 
 <!-- Vertical-only resize keeps the field inside its column. -->
@@ -42,6 +48,7 @@
   {...rest}
   {rows}
   bind:value
+  bind:this={ref}
   {...attrs}
   class="{controlClass(size, isInvalid)} resize-y {className}"
 ></textarea>

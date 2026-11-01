@@ -6,8 +6,11 @@
     <Field label="Name" error={err} required><Input bind:value={name} /></Field>
 
   Input, Select, Textarea, Checkbox and Switch read that context; explicit
-  props on the control still win. For a custom control that does not read the
-  context, take the values from the snippet arguments instead:
+  props on the control still win, except aria-describedby, whose ids are
+  merged ahead of the Field's. Put an id on the Field, not the control (the
+  label points at the Field's id; DEV warns otherwise). For a custom control
+  that does not read the context, take the values from the snippet arguments
+  instead:
 
     <Field label="Name" error={err}>
       {#snippet children({ id, describedBy, invalid, required })}

@@ -124,28 +124,30 @@
     editPath = savedEdit.path;
     editOpen = true;
   }
-  // Set by Save; the toast fires from onBeforeClose once the close is allowed,
-  // so a vetoed close never reports a save.
-  let justSaved = false;
-  function saveEdit() {
-    // Moving the baseline makes `dirty` false, so the close is not vetoed.
-    savedEdit.name = editName;
-    savedEdit.path = editPath;
-    justSaved = true;
-    editOpen = false;
-  }
-  async function beforeEditClose(): Promise<boolean> {
-    const ok =
+  // Focus target for initialFocus, via the Input's bindable element ref.
+  let editPathInput = $state<HTMLInputElement | null>(null);
+  async function confirmDiscard(): Promise<boolean> {
+    return (
       !dirty ||
       (await confirm({
         title: "Discard changes?",
         message: "Your edits to Movies will be lost.",
         tone: "danger",
         confirmLabel: "Discard",
-      }));
-    if (ok && justSaved) toast("Library saved", { tone: "ok" });
-    justSaved = false;
-    return ok;
+      }))
+    );
+  }
+  function saveEdit() {
+    savedEdit.name = editName;
+    savedEdit.path = editPath;
+    editOpen = false;
+    // A "caller" close is never vetoed, so the save is final here.
+    toast("Library saved", { tone: "ok" });
+  }
+  // onBeforeClose waves a "caller" close through (Save, or Cancel after this
+  // check); the × button ("close-button") asks.
+  async function cancelEdit() {
+    if (await confirmDiscard()) editOpen = false;
   }
 
   async function askDefault() {
@@ -433,18 +435,18 @@
       title="Edit library"
       description="Escape and outside clicks are disabled while editing."
       dismissible={false}
-      onBeforeClose={beforeEditClose}
-      initialFocus={() => document.getElementById("kit-edit-path")}
+      onBeforeClose={(r) => r === "caller" || confirmDiscard()}
+      initialFocus={() => editPathInput}
     >
       <div class="flex flex-col gap-3">
         <Field label="Library name"><Input bind:value={editName} /></Field>
-        <!-- An explicit Field id: Input forwards no element ref, so initialFocus
-             finds the second input by the id Field hands it. -->
-        <Field label="Share path" id="kit-edit-path" hint="Absolute path on the agent host."><Input bind:value={editPath} /></Field>
+        <Field label="Share path" hint="Absolute path on the agent host.">
+          <Input bind:value={editPath} bind:ref={editPathInput} />
+        </Field>
       </div>
       <p class="mt-3 text-2xs text-muted">{dirty ? "Unsaved changes" : "No changes"}</p>
       {#snippet footer()}
-        <Button variant="secondary" onclick={() => (editOpen = false)}>Cancel</Button>
+        <Button variant="secondary" onclick={cancelEdit}>Cancel</Button>
         <Button onclick={saveEdit}>Save</Button>
       {/snippet}
     </Modal>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import type { HTMLInputAttributes } from "svelte/elements";
-  import { controlAttrs, FIELD_CTX, type FieldCtx } from "./fieldContext.ts";
+  import { controlAttrs, FIELD_CTX, warnFieldIdMismatch, type FieldCtx } from "./fieldContext.ts";
 
   type Props = Omit<HTMLInputAttributes, "type" | "checked" | "indeterminate" | "size" | "class" | "children"> & {
     checked?: boolean;
@@ -13,10 +13,13 @@
     invalid?: boolean;
     size?: "sm" | "md";
     class?: string;
+    /** The <input type="checkbox"> element, for focus() and the like: `bind:ref`. */
+    ref?: HTMLInputElement | null;
   };
 
   let {
     checked = $bindable(false),
+    ref = $bindable<HTMLInputElement | null>(null),
     label,
     description,
     indeterminate = $bindable(false),
@@ -42,19 +45,24 @@
       invalid,
     }),
   );
+
+  // An own id inside a Field orphans the Field's <label for>.
+  $effect(() => warnFieldIdMismatch(field, rest.id ?? undefined, import.meta.env.DEV));
 </script>
 
 <!-- No focus-visible:outline-hidden: the global :focus-visible outline in
      app.css is the kit's only keyboard focus indicator (see control.ts). -->
-<label class="inline-flex items-start gap-2 {sizes[size]} {className}">
+<!-- The wrapper dims when disabled so the label reads as unavailable too. -->
+<label class="inline-flex items-start gap-2 {sizes[size]} {className}" class:opacity-50={disabled}>
   <input
     {...rest}
     type="checkbox"
     bind:checked
     bind:indeterminate
+    bind:this={ref}
     {disabled}
     {...attrs}
-    class="mt-0.5 size-4 shrink-0 rounded border-border-strong accent-[var(--accent)]"
+    class="mt-0.5 size-4 shrink-0 accent-accent"
   />
   <span>
     <span class="text-fg">{label}</span>

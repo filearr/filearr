@@ -31,19 +31,38 @@ export type ControlAttrs = {
   invalid: boolean;
 };
 
+/** Space-separated id lists joined in order, de-duplicated; empty → undefined. */
+function mergeIds(...lists: (string | undefined)[]): string | undefined {
+  const ids = [...new Set(lists.flatMap((l) => l?.split(/\s+/) ?? []).filter(Boolean))];
+  return ids.length ? ids.join(" ") : undefined;
+}
+
 /**
  * Attributes for a control: explicit props win, the Field context (if any)
- * fills the gaps. `invalid` is the single source of truth for aria-invalid:
- * it is "true" when invalid and otherwise omitted, so a caller's own
- * aria-invalid string (including "false") is deliberately not passed through.
+ * fills the gaps. aria-describedby is the exception: own ids come first and
+ * the Field's hint/error ids are appended, so a caller's extra description
+ * does not silently drop the Field's. `invalid` is the single source of
+ * truth for aria-invalid: it is "true" when invalid and otherwise omitted, so
+ * a caller's own aria-invalid string (including "false") is deliberately not
+ * passed through.
  */
 export function controlAttrs(ctx: FieldCtx | undefined, own: OwnControlProps): ControlAttrs {
   const invalid = own.invalid ?? ctx?.invalid ?? false;
   return {
     id: own.id ?? ctx?.id,
-    "aria-describedby": own["aria-describedby"] ?? ctx?.describedBy,
+    "aria-describedby": mergeIds(own["aria-describedby"], ctx?.describedBy),
     "aria-invalid": invalid ? "true" : undefined,
     required: own.required ?? ctx?.required,
     invalid,
   };
+}
+
+/** An own id on a control inside a <Field> wins over the Field's, which leaves
+ *  the Field's <label for> pointing at nothing. `enabled` is the caller's
+ *  Vite DEV flag; this module reads no Vite env itself so Node can
+ *  load it. */
+export function warnFieldIdMismatch(ctx: FieldCtx | undefined, ownId: string | undefined, enabled: boolean): void {
+  if (enabled && ctx && ownId && ownId !== ctx.id) {
+    console.warn("Put the id on <Field> rather than the control; the label points at the Field's id.");
+  }
 }

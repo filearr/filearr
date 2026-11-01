@@ -136,7 +136,13 @@ export async function send<T>(
   path: string,
   opts: SendOpts & { expect: "response" },
 ): Promise<SendResponse<T>>;
-export async function send<T>(method: string, path: string, opts?: SendOpts): Promise<T>;
+// The fallback excludes "response" so a widened `expect` cannot slip a
+// SendResponse past the first overload typed as a bare T.
+export async function send<T>(
+  method: string,
+  path: string,
+  opts?: SendOpts & { expect?: Exclude<NonNullable<SendOpts["expect"]>, "response"> },
+): Promise<T>;
 export async function send<T>(method: string, path: string, opts: SendOpts = {}): Promise<T | SendResponse<T>> {
   const { body, signal, timeoutMs, expect = "json" } = opts;
   const headers: Record<string, string> = { ...opts.headers };

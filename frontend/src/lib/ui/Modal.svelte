@@ -7,14 +7,23 @@
       {#snippet footer()}<Button onclick={save}>Save</Button>{/snippet}
     </Modal>
 
-  Dirty-check every way out (Escape, outside click, Close, `open = false`):
-    <Modal bind:open title="Edit" onBeforeClose={() => !dirty || confirm({ title: "Discard changes?" })}>
+  Dirty-check every way out. The check gets the reason, so a save that closes
+  with `open = false` ("caller") is not asked about the edits it just saved:
+    <Modal bind:open title="Edit" onBeforeClose={(r) => r === "caller" || !dirty || confirm({ title: "Discard changes?" })}>
+  A Cancel button that sets `open = false` is then a "caller" close too, so it
+  runs the discard check itself before closing.
+  Use `bind:open` together with `onBeforeClose`: after a veto the dialog
+  writes `open = true` back, which a one-way `open` cannot receive, so the
+  parent would still hold `false` and could not close it again.
 -->
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
   import { Dialog } from "bits-ui";
 
   type Size = "sm" | "md" | "lg" | "xl";
+  /** Why a close was requested: Escape, an outside click, the × button, or the
+   *  parent setting `open = false`. */
+  type CloseReason = "escape" | "outside" | "close-button" | "caller";
 
   let {
     open = $bindable(false),
@@ -37,9 +46,10 @@
     onClose?: () => void;
     /** False: Escape and outside clicks do nothing; Close and `open = false` still close. */
     dismissible?: boolean;
-    /** Asked before every close, including `open = false` from the caller;
-     *  returning false keeps the dialog open. */
-    onBeforeClose?: () => boolean | Promise<boolean>;
+    /** Asked before every close, including `open = false` from the caller
+     *  (reason "caller"); returning false keeps the dialog open. A throw counts
+     *  as false. Pair it with `bind:open`. */
+    onBeforeClose?: (reason: CloseReason) => boolean | Promise<boolean>;
     /** The element to focus on open instead of the body's first control. */
     initialFocus?: () => HTMLElement | null | undefined;
     class?: string;
@@ -63,17 +73,19 @@
   let deciding = false;
   let panel = $state<HTMLElement | null>(null);
 
-  /** `fromCaller`: the parent set `open = false`. That path skips onClose,
-   *  which is for user dismissals only. */
-  async function requestClose(fromCaller = false) {
+  /** "caller": the parent set `open = false`. That path skips onClose, which
+   *  is for user dismissals only. */
+  async function requestClose(reason: CloseReason) {
     if (deciding) return;
+    const fromCaller = reason === "caller";
     if (onBeforeClose) {
       deciding = true;
       let ok = false;
       try {
-        ok = await onBeforeClose();
-      } catch {
+        ok = await onBeforeClose(reason);
+      } catch (e) {
         // A failing check must not discard what it was guarding.
+        if (import.meta.env.DEV) console.error("Modal: onBeforeClose threw; keeping the dialog open.", e);
       } finally {
         deciding = false;
       }
@@ -98,7 +110,7 @@
     const want = open;
     untrack(() => {
       if (want && !inner) inner = true;
-      else if (!want && inner) void requestClose(true);
+      else if (!want && inner) void requestClose("caller");
     });
   });
 
@@ -107,13 +119,15 @@
 </script>
 
 <!-- Every close above goes through requestClose, so bits-ui should never
-     report one; if it does (a future path), undo it and ask first. -->
+     report one; if it does (a future path), undo it and ask first. It is a
+     user dismissal, so it goes in as "outside" (never "caller", which a
+     dirty check may wave through). -->
 <Dialog.Root
   bind:open={inner}
   onOpenChange={(v) => {
     if (v) return;
     inner = true;
-    void requestClose();
+    void requestClose("outside");
   }}
 >
   <Dialog.Portal>
@@ -136,11 +150,11 @@
         e.preventDefault();
         // A click on a toast over the modal (e.g. its Undo) is not a dismissal.
         if ((e.target as Element | null)?.closest?.("[data-toast-region]")) return;
-        void requestClose();
+        void requestClose("outside");
       }}
       onEscapeKeydown={(e) => {
         e.preventDefault();
-        void requestClose();
+        void requestClose("escape");
       }}
       onOpenAutoFocus={(e) => {
         if (!initialFocus) return;
@@ -182,7 +196,7 @@
               type="button"
               aria-label="Close"
               class="absolute right-3 top-3 rounded-control px-1.5 py-0.5 leading-none text-muted hover:bg-surface-3 hover:text-fg"
-              onclick={() => void requestClose()}
+              onclick={() => void requestClose("close-button")}
             >
               <span aria-hidden="true">×</span>
             </button>

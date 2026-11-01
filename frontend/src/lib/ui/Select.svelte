@@ -2,7 +2,7 @@
   import { getContext, type Snippet } from "svelte";
   import type { HTMLSelectAttributes } from "svelte/elements";
   import { controlClass, type ControlSize } from "./control.ts";
-  import { controlAttrs, FIELD_CTX, type FieldCtx } from "./fieldContext.ts";
+  import { controlAttrs, FIELD_CTX, warnFieldIdMismatch, type FieldCtx } from "./fieldContext.ts";
 
   // The native numeric `size` attribute is replaced by the kit's size scale.
   type Props = Omit<HTMLSelectAttributes, "size" | "value" | "class" | "children"> & {
@@ -12,10 +12,13 @@
     class?: string;
     /** The `<option>` / `<optgroup>` elements. */
     children?: Snippet;
+    /** The <select> element, for focus() and the like: `bind:ref`. */
+    ref?: HTMLSelectElement | null;
   };
 
   let {
     value = $bindable(),
+    ref = $bindable<HTMLSelectElement | null>(null),
     invalid,
     size = "md",
     class: className = "",
@@ -38,11 +41,15 @@
       invalid,
     }),
   );
+
+  // An own id inside a Field orphans the Field's <label for>.
+  $effect(() => warnFieldIdMismatch(field, rest.id ?? undefined, import.meta.env.DEV));
 </script>
 
 <select
   {...rest}
   bind:value
+  bind:this={ref}
   {...attrs}
   class="{controlClass(size, isInvalid)} {className}"
 >
