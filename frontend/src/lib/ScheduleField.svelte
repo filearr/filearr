@@ -8,15 +8,28 @@
   //
   // Props: `value` (current cron or null, UTC) seeded ONCE; emits the regenerated
   // cron-or-null through `onChange`. All dynamic strings render as text.
+  //
+  // Validity (P7, Ruling 10): the cron comes from the guarded `scheduleCron`,
+  // so a choice that must not be stored (weekly with no day, an empty or
+  // out-of-range number, a monthly time that would shift the day in UTC) emits
+  // null, shows the reason under the controls, and reports it through
+  // `onValidity` so the hosting form can block Save. Off is valid (null cron,
+  // null error). Under a stored cron, "Next runs" previews three local times.
   import { untrack } from "svelte";
   import {
     describeSchedule,
-    generateCron,
+    fmtTime,
     getOffsetMinutes,
     parseCron,
+    parseMinuteInput,
+    parseTimeInput,
+    scheduleCron,
     type Schedule,
+    type ScheduleIssueCode,
     type ScheduleMode,
   } from "./schedule";
+  import { nextRuns } from "./scheduleNext";
+  import { fmtDateTime } from "./format";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
   import { Field, Input, Select } from "./ui";
@@ -24,12 +37,18 @@
   let {
     value,
     onChange,
+    onValidity,
     offsetMinutes,
     tzLabel,
     dstNote = true,
+    preview,
   }: {
     value: string | null;
     onChange: (cron: string | null) => void;
+    /** The current field error (null when the choice may be stored, incl.
+     *  Off), reported on mount and on every change. A host form blocks Save
+     *  while it is non-null. */
+    onValidity?: (error: string | null) => void;
     /** Minute offset for the wall-clock -> stored-cron conversion, in JS
      *  getTimezoneOffset() convention (+west). Omit for the classic
      *  browser-local -> fixed-UTC storage; pass 0 to author the cron VERBATIM
@@ -42,7 +61,13 @@
      *  cron is offset-converted (the default mode). Verbatim schedules either
      *  have no drift (DST-aware zones) or their own caveats; pass false. */
     dstNote?: boolean;
+    /** The "Next runs" preview. Defaults to on only for the classic
+     *  fixed-UTC storage (offsetMinutes omitted): a verbatim cron is read
+     *  against a clock this page cannot evaluate. */
+    preview?: boolean;
   } = $props();
+
+  const errorId = $props.id();
 
   // Offset + initial classification are captured once; the modal/form remounts
   // this component per edit target, so seeding from the prop is intentional.
@@ -70,8 +95,8 @@
   const pad2 = (n: number) => String(n).padStart(2, "0");
 
   let mode = $state<ScheduleMode>(init.mode);
-  // Hourly minute-past-the-hour.
-  let hourlyMinute = $state(init.mode === "hourly" ? (init.minute ?? 0) : 0);
+  // Hourly minute-past-the-hour; null when the number input is emptied.
+  let hourlyMinute = $state<number | null>(init.mode === "hourly" ? (init.minute ?? 0) : 0);
   // Shared local time-of-day for daily/weekly/monthly, as a type="time" Input.
   let timeStr = $state(
     init.hour != null ? `${pad2(init.hour)}:${pad2(init.minute ?? 0)}` : "03:00",
@@ -95,13 +120,11 @@
   })();
   const tzName = $derived(tzLabel ?? browserZone);
 
-  function parseTimeStr(s: string): [number, number] {
-    const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
-    if (!m) return [0, 0];
-    const h = Math.min(23, Math.max(0, Number(m[1])));
-    const mi = Math.min(59, Math.max(0, Number(m[2])));
-    return [h, mi];
-  }
+  // Empty or invalid inputs stay null so scheduleCron reports them (B32);
+  // the minute is rounded and clamped, never silently 0.
+  const time = $derived(parseTimeInput(timeStr));
+  const hour = $derived(time?.hour ?? null);
+  const minute = $derived(time?.minute ?? null);
 
   // The builder's current LOCAL schedule, recomputed reactively from the inputs.
   const schedule = $derived.by<Schedule>(() => {
@@ -109,26 +132,32 @@
       case "off":
         return { mode: "off" };
       case "hourly":
-        return { mode: "hourly", minute: Math.min(59, Math.max(0, hourlyMinute || 0)) };
-      case "daily": {
-        const [h, mi] = parseTimeStr(timeStr);
-        return { mode: "daily", hour: h, minute: mi };
-      }
-      case "weekly": {
-        const [h, mi] = parseTimeStr(timeStr);
-        return { mode: "weekly", hour: h, minute: mi, daysOfWeek };
-      }
-      case "monthly": {
-        const [h, mi] = parseTimeStr(timeStr);
-        return { mode: "monthly", hour: h, minute: mi, dayOfMonth };
-      }
+        return { mode: "hourly", minute: parseMinuteInput(hourlyMinute) };
+      case "daily":
+        return { mode: "daily", hour, minute };
+      case "weekly":
+        return { mode: "weekly", hour, minute, daysOfWeek };
+      case "monthly":
+        return { mode: "monthly", hour, minute, dayOfMonth };
       case "advanced":
         return { mode: "advanced", cron: advancedCron };
     }
   });
 
+  const built = $derived(scheduleCron(schedule, offset));
+  const cron = $derived(built.cron);
+  const issue = $derived(built.issue);
   const summary = $derived(describeSchedule(schedule));
-  const cron = $derived(generateCron(schedule, offset));
+
+  // Which control an issue belongs to, for its invalid styling.
+  const TIME_ISSUES: ScheduleIssueCode[] = ["time-required", "time-range", "monthly-day-shift"];
+  const minuteInvalid = $derived(issue?.code === "minute-required" || issue?.code === "minute-range");
+  const timeInvalid = $derived(issue !== null && TIME_ISSUES.includes(issue.code));
+  const describedBy = $derived(issue ? errorId : undefined);
+
+  const showPreview = $derived(preview ?? offsetMinutes === undefined);
+  // `now` is read when the cron changes; the preview is a hint, not a clock.
+  const upcoming = $derived(showPreview && cron ? nextRuns(cron, 3, new Date()) : []);
   // The DST caveat only matters for wall-clock-anchored modes, and only when
   // the stored cron is a fixed-UTC conversion (dstNote prop).
   const showTzNote = $derived(
@@ -147,6 +176,18 @@
     }
     untrack(() => onChange(next));
   });
+
+  // Validity is reported on mount too, so a host never starts out of sync.
+  $effect(() => {
+    const err = issue?.message ?? null; // track
+    untrack(() => onValidity?.(err));
+  });
+
+  // Show the rounded/clamped minute once the user leaves the input.
+  function normaliseMinute() {
+    const n = parseMinuteInput(hourlyMinute);
+    if (n !== null) hourlyMinute = n;
+  }
 
   function toggleDay(d: number) {
     daysOfWeek = daysOfWeek.includes(d)
@@ -176,7 +217,17 @@
     <div class="flex items-center gap-2 text-xs text-muted">
       At minute
       <span class="w-20">
-        <Input size="sm" type="number" min="0" max="59" aria-label="Minute past every hour" bind:value={hourlyMinute} />
+        <Input
+          size="sm"
+          type="number"
+          min="0"
+          max="59"
+          step="1"
+          aria-label="Minute past every hour"
+          invalid={minuteInvalid}
+          aria-describedby={describedBy}
+          onblur={normaliseMinute}
+          bind:value={hourlyMinute} />
       </span>
       past every hour
     </div>
@@ -184,12 +235,18 @@
     <div class="flex items-center gap-2 text-xs text-muted">
       At
       <span class="w-32">
-        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+        <Input
+          size="sm"
+          type="time"
+          aria-label="Time of day ({tzName})"
+          invalid={timeInvalid}
+          aria-describedby={describedBy}
+          bind:value={timeStr} />
       </span>
       ({tzName})
     </div>
   {:else if mode === "weekly"}
-    <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Days of the week">
+    <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Days of the week" aria-describedby={describedBy}>
       {#each DOW as day}
         <button
           type="button"
@@ -203,7 +260,13 @@
     <div class="flex items-center gap-2 text-xs text-muted">
       At
       <span class="w-32">
-        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+        <Input
+          size="sm"
+          type="time"
+          aria-label="Time of day ({tzName})"
+          invalid={timeInvalid}
+          aria-describedby={describedBy}
+          bind:value={timeStr} />
       </span>
       ({tzName})
     </div>
@@ -219,7 +282,13 @@
       </span>
       at
       <span class="w-32">
-        <Input size="sm" type="time" aria-label="Time of day ({tzName})" bind:value={timeStr} />
+        <Input
+          size="sm"
+          type="time"
+          aria-label="Time of day ({tzName})"
+          invalid={timeInvalid}
+          aria-describedby={describedBy}
+          bind:value={timeStr} />
       </span>
       ({tzName})
     </div>
@@ -233,21 +302,31 @@
           size="sm"
           class="font-mono"
           placeholder={offset === 0 ? "e.g. 0 4 * * *" : "e.g. 0 4 * * * (UTC)"}
+          invalid={issue?.code === "cron-required"}
+          aria-describedby={describedBy}
           bind:value={advancedCron} />
       </Field>
       <span class="pt-0.5"><Help text={HELP.scan_cron} label="scan cron" /></span>
     </div>
   {/if}
 
-  <p class="text-xs text-muted">{summary}</p>
-  {#if showTzNote}
-    <p class="text-xs text-muted">
-      Runs at {parseTimeStr(timeStr)[0].toString().padStart(2, "0")}:{parseTimeStr(
-        timeStr,
-      )[1]
-        .toString()
-        .padStart(2, "0")}
-      {tzName} (stored as UTC; shifts ±1h across DST).
-    </p>
+  {#if issue}
+    <p id={errorId} class="text-xs text-danger" role="alert">{issue.message}</p>
+  {:else}
+    <p class="text-xs text-muted">{summary}</p>
+    {#if showTzNote && time}
+      <p class="text-xs text-muted">
+        Runs at {fmtTime(time.hour, time.minute)} {tzName} (stored as UTC; shifts ±1h across DST).
+      </p>
+    {/if}
+    {#if showPreview && cron}
+      <p class="text-xs text-muted">
+        {#if upcoming.length > 0}
+          Next runs: {upcoming.map((d) => fmtDateTime(d)).join(" · ")}
+        {:else}
+          No upcoming runs for this expression.
+        {/if}
+      </p>
+    {/if}
   {/if}
 </div>

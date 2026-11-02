@@ -498,7 +498,6 @@ bucket decays on its own window (it may be shared behind a NAT).
 | `FILEARR_AUTH_RATELIMIT_WINDOW_SECONDS` | `120` | the find window |
 | `FILEARR_AUTH_RATELIMIT_LOCK_SECONDS` | `300` | how long a locked bucket stays locked |
 | `FILEARR_TRUSTED_PROXIES` | unset | IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed |
-| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | legacy: trust the leftmost `X-Forwarded-For` unconditionally |
 
 **Proxy note — client IPs behind a proxy.** The per-IP bucket, every security
 event and every session row record the *caller's* IP, which behind a reverse
@@ -514,9 +513,6 @@ when the request demonstrably came through a trusted proxy (`filearr/proxy_trust
 * **A third-party proxy** (nginx, Traefik, NPM): list its address(es) in
   `FILEARR_TRUSTED_PROXIES=10.0.0.5,172.18.0.0/16`. The chain is walked from the
   right, skipping trusted hops; the first untrusted hop is the client.
-* `TRUST_FORWARDED_FOR=true` is the old blunt switch (leftmost entry, no
-  checks) — keep it only if you already rely on it and nothing can reach the
-  app port except the proxy.
 
 The per-username bucket is unspoofable either way.
 

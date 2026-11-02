@@ -18,6 +18,7 @@
   import { safeHref } from "./pathlinks";
   import {
     aboutMarkdown,
+    buildTitle,
     embeddingSummary,
     formatBytes,
     formatWhen,
@@ -137,9 +138,9 @@
           <dd class="font-mono break-all text-slate-800 dark:text-slate-100">{app.app_version}</dd>
         </div>
         <div class="flex gap-2">
-          <dt class="w-36 shrink-0 text-muted" title="Written into the image by the deploy script — the ground truth for which source this container is running.">Build stamp</dt>
-          <dd class="font-mono break-all {app.build_stamp ? 'text-slate-800 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}">
-            {app.build_stamp ?? "none (dev checkout)"}
+          <dt class="w-36 shrink-0 text-muted" title="Resolved from the deploy stamp, the container image's build args, a git checkout, or — when none of those exist — the package version alone.">Build</dt>
+          <dd class="font-mono break-all {app.build.source === 'runtime' ? 'text-slate-600 dark:text-slate-400' : 'text-slate-800 dark:text-slate-100'}">
+            {buildTitle(app.build)}
           </dd>
         </div>
         <div class="flex gap-2">

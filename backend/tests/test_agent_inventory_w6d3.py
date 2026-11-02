@@ -793,11 +793,11 @@ async def test_inventory_now_uses_effective_group_settings(client):
     }
 
 
-async def test_permission_ingest_accepts_legacy_record_key(client):
-    """Agent builds <= 1.5.3 emitted the permissions record under ``record``
-    (the walker merges collector maps flat into the entry) while central read
-    ``permissions`` -- so nothing was ever ingested. Both keys ingest now, and
-    Go's nil-slice ``"entries": null`` counts as an empty ACE list."""
+async def test_permission_ingest_reads_only_the_permissions_key(client):
+    """The record rides under ``permissions`` (the walker merges collector maps
+    flat into the entry); any other key -- e.g. the pre-1.5.4 ``record`` -- is
+    not a permissions record. Go's nil-slice ``"entries": null`` counts as an
+    empty ACE list."""
     from filearr.models import PermissionSnapshot
 
     c, maker, _, _ = client
@@ -808,12 +808,11 @@ async def test_permission_ingest_accepts_legacy_record_key(client):
         lib.source_agent_id = agent_id
         await s.commit()
     cid = await _mk_inventory_command(maker, agent_id, item_id)
-    legacy = _perm_record()
     empty = {**_perm_record(owner_id="7"), "entries": None}
     entries = [
-        {"path": "/data/x.mkv", "rel": "x.mkv", "size": 1, "is_dir": False, "record": legacy},
+        {"path": "/data/x.mkv", "rel": "x.mkv", "size": 1, "is_dir": False, "permissions": _perm_record()},
         {"path": "/data/pub", "rel": "pub", "is_dir": True, "permissions": empty},
-        {"path": "/data/none", "rel": "none", "record": {"not": "a record"}},
+        {"path": "/data/old", "rel": "old", "record": _perm_record()},
     ]
     r = await c.post(
         f"/api/v1/agents/{agent_id}/commands/{cid}/complete",
@@ -846,7 +845,7 @@ async def test_upload_defers_ingest_to_worker_task(client):
     cid = await _mk_inventory_command(maker, agent_id, item_id)
     lines = [
         json.dumps({"path": "/data/x.mkv", "rel": "x.mkv", "permissions": _perm_record()}),
-        json.dumps({"path": "/data/pub", "rel": "pub", "is_dir": True, "record": _perm_record()}),
+        json.dumps({"path": "/data/pub", "rel": "pub", "is_dir": True, "permissions": _perm_record()}),
     ]
     blob = gzip.compress(("\n".join(lines) + "\n").encode())
     r = await c.post(

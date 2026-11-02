@@ -591,10 +591,10 @@ async def test_csv_streams_in_chunks(api):
     # row off the server-side cursor, so peak memory is ~one row, not the whole
     # 3000-row result. (Asserting HTTP chunk count through httpx is unreliable —
     # its ASGI transport coalesces small body events.)
-    from filearr.api.reports import _csv_response
+    from filearr.api.reports import export_response
     from filearr.reports import ReportParams, get_report
 
-    resp = _csv_response(get_report("bad_mtime"), ReportParams(limit=1000))
+    resp = export_response(get_report("bad_mtime"), ReportParams(limit=1000), "csv", None)
     yields = 0
     lines = 0
     async for chunk in resp.body_iterator:

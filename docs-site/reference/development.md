@@ -10,7 +10,7 @@ backend/filearr/
   main.py          FastAPI app factory (SPA static mount, /api/v1)
   config.py        pydantic-settings — every FILEARR_* env var
   models.py        SQLAlchemy 2.0 models (libraries, items, scans, agents, ...)
-  media_types.py   extension -> media-type map
+  file_groups.py   extension -> file_category/file_group seed taxonomy
   security.py      Bearer API keys + scopes (read/write/admin)
   rbac.py          path-scoped RBAC (ltree grants)
   search.py        Meilisearch projection (build_doc, ensure_index, rebuild)

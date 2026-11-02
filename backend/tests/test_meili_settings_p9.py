@@ -11,6 +11,7 @@ from meilisearch_python_sdk.models.settings import (
     TypoTolerance,
 )
 
+from filearr import meili_ops
 from filearr import search as search_mod
 from filearr.config import Settings, get_settings
 from filearr.meili_ops import (
@@ -103,9 +104,9 @@ async def test_ensure_index_applies_typed_settings_on_fresh_index(monkeypatch):
 async def test_ensure_index_is_idempotent_when_settings_match(monkeypatch):
     # feed back exactly what _apply_settings would produce -> settings_drift empty
     current = MeilisearchSettings(
-        searchable_attributes=list(search_mod.SEARCHABLE),
+        searchable_attributes=list(meili_ops.SEARCHABLE_ATTRIBUTES),
         filterable_attributes=search_mod._filterable_settings(),
-        sortable_attributes=list(search_mod.SORTABLE),
+        sortable_attributes=list(meili_ops.SORTABLE_ATTRIBUTES),
         ranking_rules=list(search_mod.RANKING_RULES),
         typo_tolerance=search_mod._typo_tolerance(),
         faceting=search_mod._faceting(),

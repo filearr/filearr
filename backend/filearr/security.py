@@ -466,9 +466,9 @@ class PermissionContext:
         # roles registry loaded, and a custom role's ceiling can change later:
         # snapshot the ceiling/bypass the request was authorised under too.
         return {
-            "role": role.value if hasattr(role, "value") else str(role),
-            "ceiling": sorted(role.ceiling) if hasattr(role, "ceiling") else [],
-            "bypass": bool(getattr(role, "bypass", False)),
+            "role": role.name,
+            "ceiling": sorted(role.ceiling),
+            "bypass": bool(role.bypass),
             "use_ltree": self.use_ltree,
             "grants": [
                 {"path": g.path, "action": g.action, "allow": g.allow}

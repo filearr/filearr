@@ -39,15 +39,14 @@ class _Bucket:
     key: str
 
 
-def client_ip(request: Request, *, trust_forwarded: bool | None = None) -> str | None:
+def client_ip(request: Request) -> str | None:
     """The caller's source IP — see :mod:`filearr.proxy_trust` for the trust
-    rules (Caddy proxy-trust header, ``FILEARR_TRUSTED_PROXIES`` CIDRs, or the
-    legacy unconditional ``FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR``). Never
+    rules (Caddy proxy-trust header or ``FILEARR_TRUSTED_PROXIES`` CIDRs). Never
     trusts ``X-Forwarded-For`` by default: a client could otherwise spoof it to
     dodge the per-IP bucket (the per-username bucket stays unspoofable)."""
     from filearr.proxy_trust import client_ip as _resolve
 
-    return _resolve(request, trust_forwarded=trust_forwarded)
+    return _resolve(request)
 
 
 def _buckets(username: str | None, ip: str | None) -> list[_Bucket]:

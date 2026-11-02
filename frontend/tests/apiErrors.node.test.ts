@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ApiError, NetworkError, errorMessage, errorStatus, friendlyError } from "../src/lib/apiErrors.ts";
+import { ApiError, NetworkError, errorMessage, errorStatus, friendlyError, parseRetryAfter } from "../src/lib/apiErrors.ts";
 
 const json = (o: unknown) => JSON.stringify(o);
 const statusOf409 = "That conflicts with the current state. Reload and try again.";
@@ -186,4 +186,43 @@ test("friendlyError is errorMessage with a default 'view' verb", () => {
   assert.equal(friendlyError(new ApiError(403, "")), "You don't have permission to view.");
   assert.equal(friendlyError(new ApiError(403, ""), "save"), "You don't have permission to save.");
   assert.equal(friendlyError(new ApiError(409, json({ detail: "dup" }))), "dup");
+});
+
+// ---- Ruling 9: Retry-After ------------------------------------------------
+
+test("parseRetryAfter: delta-seconds", () => {
+  assert.equal(parseRetryAfter("30"), 30);
+  assert.equal(parseRetryAfter(" 5 "), 5);
+  assert.equal(parseRetryAfter("0"), 0);
+});
+
+test("parseRetryAfter: HTTP-date is seconds from now, rounded up, never negative", () => {
+  const now = Date.UTC(2026, 10, 2, 12, 0, 0);
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 12:00:30 GMT", now), 30);
+  assert.equal(parseRetryAfter(new Date(now + 1500).toUTCString(), now - 500), 2);
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 11:00:00 GMT", now), 0);
+});
+
+test("parseRetryAfter: absent or malformed is null", () => {
+  for (const v of [null, undefined, "", "  ", "-3", "1.5", "soon", "30s", "Mon, 99 Foo"]) {
+    assert.equal(parseRetryAfter(v), null, String(v));
+  }
+});
+
+test("ApiError.retryAfter defaults to null and carries a given value", () => {
+  assert.equal(new ApiError(429, "").retryAfter, null);
+  assert.equal(new ApiError(429, "", 30).retryAfter, 30);
+});
+
+test("429 with a known Retry-After says when to try again", () => {
+  assert.equal(errorMessage(new ApiError(429, "", 30)), "Too many requests. Try again in 30 s.");
+  assert.equal(
+    errorMessage(new ApiError(429, json({ detail: "too many active exports (3); wait for one to finish (limit 3)" }), 30)),
+    "too many active exports (3); wait for one to finish (limit 3). Try again in 30 s.",
+  );
+  assert.equal(errorMessage(new ApiError(429, json({ detail: "Slow down." }), 5)), "Slow down. Try again in 5 s.");
+  // Unknown: unchanged.
+  assert.equal(errorMessage(new ApiError(429, "")), "Too many requests. Try again shortly.");
+  // Only 429 gets the suffix (a 503 Retry-After is the server's business).
+  assert.equal(errorMessage(new ApiError(503, "", 10)), "The server returned an error (503).");
 });

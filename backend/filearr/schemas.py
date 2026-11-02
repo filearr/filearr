@@ -2,9 +2,16 @@
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 
 from filearr.models import HashPolicy
 
@@ -29,7 +36,32 @@ def _validate_extract_overrides(v: dict | None) -> dict | None:
     return v or None
 
 
-class LibraryIn(BaseModel):
+# Library name / root_path on WRITE: surrounding whitespace stripped, then
+# non-empty. A trailing-space name makes the typed-name delete confirmation
+# unguessable (whitespace is invisible), and a blank root walks nothing.
+NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+def _validate_globs(v: list[str] | None, include: bool) -> list[str] | None:
+    """Shared LibraryIn/LibraryUpdate glob check: every line must compile under
+    the same ``GitIgnoreSpec`` construction the scan walk uses
+    (``presets.build_exclusion_spec``), else 422 naming the bad line(s)."""
+    if v is None:
+        return None
+    from filearr.presets import glob_errors
+
+    errors = glob_errors(v, include=include)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return v
+
+
+class _LibraryFields(BaseModel):
+    """Every client-settable library field, shared by the write model
+    (:class:`LibraryIn`, which adds write-time validation) and the read model
+    (:class:`LibraryOut`, which must serialise ANY stored row — a validator here
+    would 500 the listing on a legacy value)."""
+
     name: str
     root_path: str
     # W8-B taxonomy gating (replaced the MediaType-keyed ``enabled_types``). A file
@@ -42,10 +74,8 @@ class LibraryIn(BaseModel):
     # P2-T3/T5 indexing controls. ``enabled_presets`` holds preset-bundle
     # names plus ``-name`` opt-out sentinels for default-on bundles; empty =
     # "no explicit config" (default-on bundles like hidden_dotfiles still apply,
-    # resolved at scan time). ``enabled_extension_groups`` (W8-B: superseded for
-    # gating by ``enabled_groups``) is retained as a validated preset surface.
+    # resolved at scan time).
     enabled_presets: list[str] = Field(default_factory=list)
-    enabled_extension_groups: list[str] = Field(default_factory=list)
     scan_cron: str | None = None
     watch_mode: bool = False
     # T7 hash policy. 'auto' (default): network root -> quick_only, local -> full.
@@ -81,23 +111,43 @@ class LibraryIn(BaseModel):
     # for this library's extract jobs. None = global settings.
     extract_overrides: dict[str, float] | None = None
 
+
+class LibraryIn(_LibraryFields):
+    name: NonBlankStr
+    root_path: NonBlankStr
+
     _check_extract_overrides = field_validator("extract_overrides")(
         _validate_extract_overrides
     )
 
+    @field_validator("include_globs")
+    @classmethod
+    def _check_include_globs(cls, v: list[str]) -> list[str]:
+        return _validate_globs(v, include=True)
+
+    @field_validator("exclude_globs")
+    @classmethod
+    def _check_exclude_globs(cls, v: list[str]) -> list[str]:
+        return _validate_globs(v, include=False)
+
 
 class LibraryUpdate(BaseModel):
     """Partial library update (PATCH). Absent fields are left untouched;
-    scan_cron/watch_mode/root_path edits are re-validated at the API layer."""
+    scan_cron/watch_mode/root_path edits are re-validated at the API layer.
 
-    name: str | None = None
-    root_path: str | None = None
+    Null rule: an explicit ``null`` is accepted only for the NULLABLE columns
+    (``scan_cron``, ``native_prefix``, ``share_prefix``, ``hash_full_max_bytes``,
+    ``extract_overrides`` -- null clears them). Every NOT NULL column, lists
+    included, refuses ``null`` with a 422 (``_not_null``): send ``[]`` to clear a
+    list, omit the field to leave it unchanged. No null->default coercion."""
+
+    name: NonBlankStr | None = None
+    root_path: NonBlankStr | None = None
     enabled_categories: list[str] | None = None
     enabled_groups: list[str] | None = None
     include_globs: list[str] | None = None
     exclude_globs: list[str] | None = None
     enabled_presets: list[str] | None = None
-    enabled_extension_groups: list[str] | None = None
     scan_cron: str | None = None
     watch_mode: bool | None = None
     hash_policy: HashPolicy | None = None
@@ -115,6 +165,41 @@ class LibraryUpdate(BaseModel):
         _validate_extract_overrides
     )
 
+    @field_validator(
+        "name",
+        "root_path",
+        "enabled_categories",
+        "enabled_groups",
+        "include_globs",
+        "exclude_globs",
+        "enabled_presets",
+        "watch_mode",
+        "hash_policy",
+        "ocr_enabled",
+        "chunking_enabled",
+        "expose_gps",
+        "count_pruned_files",
+        "enabled",
+        mode="before",
+    )
+    @classmethod
+    def _not_null(cls, v):
+        # Only runs when the field was SENT (defaults are not validated): an
+        # explicit null would hit the NOT NULL column as an IntegrityError.
+        if v is None:
+            raise ValueError("may not be null; omit the field to leave it unchanged")
+        return v
+
+    @field_validator("include_globs")
+    @classmethod
+    def _check_include_globs(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_globs(v, include=True)
+
+    @field_validator("exclude_globs")
+    @classmethod
+    def _check_exclude_globs(cls, v: list[str] | None) -> list[str] | None:
+        return _validate_globs(v, include=False)
+
 
 class LastScan(BaseModel):
     """Most-recent ScanRun for a library (FIX-10).
@@ -124,8 +209,20 @@ class LastScan(BaseModel):
     is NOT filtered out of the capped, global ``GET /scans`` feed. Terminal
     non-``finished`` states (``failed``/``stopped``/``cancelled``) are included so
     the Admin UI shows a failed last scan rather than "never ran"; the counts are
-    lifted from ``ScanRun.stats`` when present (cheap -- already loaded)."""
+    lifted from ``ScanRun.stats`` when present (cheap -- already loaded).
 
+    ``LibraryOut.last_scan`` is the newest FULL run (``rel_path`` null) and
+    ``LibraryOut.last_scoped_scan`` the newest scoped one (B10) — a hot-folder
+    run's counts and files/s are not comparable with a full walk."""
+
+    id: uuid.UUID
+    # null for a full run; the scanned subtree/file for a scoped run.
+    rel_path: str | None = None
+    # Why a failed run failed, when recorded: ``stats.error`` (crash handler,
+    # stalled reaper, trigger_scan's pre-defer reap) and ``stats.reconcile_note``
+    # (orphan reconciler). Both null when nothing was recorded (B11).
+    error: str | None = None
+    reconcile_note: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
     status: str
@@ -165,7 +262,7 @@ class LastScan(BaseModel):
     throughput_runs: int = 0
 
 
-class LibraryOut(LibraryIn):
+class LibraryOut(_LibraryFields):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     enabled: bool
@@ -185,8 +282,10 @@ class LibraryOut(LibraryIn):
     agent_status: str | None = None
     agent_last_seen_at: datetime | None = None
     agent_last_reconcile_at: datetime | None = None
-    # FIX-10: most-recent scan pulled straight from scan_runs (survives redeploy).
+    # FIX-10: most-recent FULL scan pulled straight from scan_runs (survives
+    # redeploy); B10: the newest scoped (hot-folder/targeted) run rides apart.
     last_scan: LastScan | None = None
+    last_scoped_scan: LastScan | None = None
     # OPS-T7: the EFFECTIVE user-facing share prefix + where it came from.
     # ``share_prefix`` above stays the raw manual override (NULL = unset); these
     # two are computed at read time (filearr.share_map.effective_library_share):
@@ -216,21 +315,10 @@ class PresetOut(BaseModel):
     builtin: bool = True
 
 
-class ExtensionGroupOut(BaseModel):
-    """One extension group (P2-T5): a set of extensions refining one taxonomy
-    ``file_category`` (W8-B re-keyed this off the removed MediaType)."""
-
-    name: str
-    label: str
-    file_category: str
-    extensions: list[str]
-
-
 class PresetsResponse(BaseModel):
-    """``GET /api/v1/presets`` payload: all bundles + all extension groups."""
+    """``GET /api/v1/presets`` payload: all preset bundles."""
 
     presets: list[PresetOut]
-    extension_groups: list[ExtensionGroupOut]
 class ScanPathIn(BaseModel):
     """Create a scan_paths row (P2-T6 hot folder). ``rel_path`` is relative to
     the library root ('' = whole library); ``scan_cron``/``watch_mode`` are
@@ -504,6 +592,9 @@ class ScanOut(BaseModel):
     finished_at: datetime | None
     status: str
     stats: dict[str, Any]
+    # Scan scope: null = a full-library run; a rel_path = a scoped (hot-folder /
+    # targeted) run over that subtree or file (B9).
+    rel_path: str | None = None
 
 
 class FailingItem(BaseModel):

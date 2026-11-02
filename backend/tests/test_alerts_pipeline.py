@@ -601,7 +601,7 @@ async def test_events_endpoint_limit_cap(client):
     assert ok.status_code == 200
 
 
-async def test_events_endpoint_delivered_filter(client):
+async def test_events_endpoint_status_filter(client):
     c, maker = client
     async with maker() as s:
         rule = await _mk_rule(s, event_types=["created"])
@@ -612,7 +612,7 @@ async def test_events_endpoint_delivered_filter(client):
                          payload={}, occurred_at=now))
         await s.commit()
 
-    only_pending = await c.get("/api/v1/alert-events?delivered=false")
+    only_pending = await c.get("/api/v1/alert-events?status=pending")
     assert only_pending.status_code == 200
     body = only_pending.json()
     assert len(body) == 1 and body[0]["delivered"] is False

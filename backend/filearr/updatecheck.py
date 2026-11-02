@@ -72,13 +72,16 @@ def _stamp_time(stamp: str) -> datetime | None:
     return datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
 
 
-def _local_identity() -> tuple[str | None, str | None]:
-    """(build_stamp, dist_version) of the running instance — both best-effort."""
+def _local_identity() -> tuple[str | None, str | None, str | None]:
+    """(build_stamp, dist_version, commit) of the running instance — all
+    best-effort. ``commit`` is the build's git sha when the image's baked build
+    args or a git checkout supplied one (``filearr.buildinfo``)."""
     from filearr.api.agent_dist import _dist_root, _version
-    from filearr.api.system import _read_stamp
+    from filearr.buildinfo import build_info, read_stamp
     from filearr.config import get_settings
 
-    stamp = _read_stamp()
+    stamp = read_stamp()
+    commit = build_info().get("commit")
     dist = None
     try:
         root = _dist_root(get_settings())
@@ -86,13 +89,17 @@ def _local_identity() -> tuple[str | None, str | None]:
             dist = _version(root)
     except Exception:  # noqa: BLE001 - identity is best-effort
         pass
-    return stamp, dist
+    return stamp, dist, commit
 
 
 def _central_row(
-    stamp: str | None, dist: str | None, head_sha: str, head_date: datetime
+    stamp: str | None,
+    dist: str | None,
+    head_sha: str,
+    head_date: datetime,
+    commit: str | None = None,
 ) -> dict[str, Any]:
-    running = stamp or dist or "unknown"
+    running = stamp or (commit[:7] if commit else None) or dist or "unknown"
     latest = f"{head_sha[:7]} ({head_date.date().isoformat()})"
     built = _stamp_time(stamp) if stamp else None
     if built is not None:
@@ -106,6 +113,19 @@ def _central_row(
                 f"repository has commits newer than this build ({built.isoformat()})"
                 if newer
                 else "no repository commits newer than this build"
+            ),
+        }
+    if commit:
+        current = head_sha.startswith(commit) or commit.startswith(head_sha)
+        return {
+            "component": "central",
+            "running": running,
+            "latest": latest,
+            "update_available": not current,
+            "detail": (
+                "running build's commit is the repository head"
+                if current
+                else f"running build {commit[:7]}; repository head {head_sha[:7]}"
             ),
         }
     sha7 = _SHA7_RE.search(dist or "")
@@ -239,8 +259,8 @@ async def check(*, force: bool = False) -> dict[str, Any]:
             }
         head = commits[0]
         head_date = datetime.fromisoformat((head["date"] or "").replace("Z", "+00:00"))
-        stamp, dist = _local_identity()
-        central = _central_row(stamp, dist, head["sha"], head_date)
+        stamp, dist, commit = _local_identity()
+        central = _central_row(stamp, dist, head["sha"], head_date, commit)
         built = _stamp_time(stamp) if stamp else None
         for c in commits:
             c_date = datetime.fromisoformat((c["date"] or "").replace("Z", "+00:00"))

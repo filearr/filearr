@@ -7,16 +7,12 @@ const SLATE_900 = "#0f172a";
 const HEX = /^#[0-9a-fA-F]{6}$/;
 // indigo-600: the old indigo-500 default fell short of 4.5:1 for white text on it.
 export const DEFAULT_ACCENT = "#4f46e5";
-// The previous default. The only place the literal may appear in src/.
-const LEGACY_DEFAULT_ACCENT = "#6366f1";
 
 /** A stored accent (localStorage or server preferences) → the accent to use,
- *  or null when it is not a `#rrggbb` colour. The old default was the shipped
- *  value, not a user choice (applyTheme saved it for everyone), so it
- *  migrates to the current default instead of pinning the low-contrast one. */
+ *  or null when it is not a `#rrggbb` colour. */
 export function normalizeAccent(raw: unknown): string | null {
   if (typeof raw !== "string" || !HEX.test(raw)) return null;
-  return raw.toLowerCase() === LEGACY_DEFAULT_ACCENT ? DEFAULT_ACCENT : raw;
+  return raw;
 }
 
 /** WCAG 2.x relative luminance of a `#rrggbb` colour (0 = black, 1 = white). */

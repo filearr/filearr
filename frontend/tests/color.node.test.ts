@@ -30,11 +30,6 @@ test("onAccentColor picks slate-900 on light accents", () => {
   assert.equal(onAccentColor("#ffffff"), "#0f172a");
 });
 
-test("normalizeAccent migrates the legacy default to the current one", () => {
-  assert.equal(normalizeAccent("#6366f1"), "#4f46e5");
-  assert.equal(normalizeAccent("#6366F1"), "#4f46e5"); // case-insensitive
-});
-
 test("normalizeAccent keeps a valid #rrggbb as given", () => {
   assert.equal(normalizeAccent("#ABCDEF"), "#ABCDEF");
 });

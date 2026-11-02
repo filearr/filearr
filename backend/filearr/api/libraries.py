@@ -5,15 +5,26 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, literal, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import audit, share_map
 from filearr.api.scan_paths import _normalize_rel_path
 from filearr.db import get_session
 from filearr.errors import collect_retryable_items, extract_error_count, failing_items
-from filearr.models import Item, ItemStatus, Library, ScanRun
-from filearr.presets import PRESET_BUNDLES, validate_extension_group_names
+from filearr.models import (
+    AlertEvent,
+    AlertRule,
+    Item,
+    ItemStatus,
+    Library,
+    PathGrant,
+    ScanPath,
+    ScanRun,
+)
+from filearr.presets import PRESET_BUNDLES
 from filearr.schedule import InvalidCronError, is_network_path, validate_cron
 from filearr.schemas import (
     FailingItem,
@@ -24,9 +35,10 @@ from filearr.schemas import (
     TargetedScanIn,
     TreeResponse,
 )
-from filearr.search import delete_docs
 from filearr.security import PermissionContext, require_permission, require_scope
 from filearr.worker import (
+    SCAN_TASK_NAME,
+    defer_delete_docs,
     defer_extract,
     defer_rehash_library,
     defer_scan,
@@ -56,7 +68,11 @@ async def _refuse_during_maintenance(session: AsyncSession) -> None:
         )
 
 
-def _library_out(library: Library, last_scan: "LastScan | None" = None) -> LibraryOut:
+def _library_out(
+    library: Library,
+    last_scan: "LastScan | None" = None,
+    last_scoped_scan: "LastScan | None" = None,
+) -> LibraryOut:
     """Serialize a Library ORM row to LibraryOut, annotating the OPS-T7 effective
     share prefix (manual override wins; else the deploy mount map covering the
     library root; else none) so callers never hand-maintain ``share_prefix``."""
@@ -71,12 +87,9 @@ def _library_out(library: Library, last_scan: "LastScan | None" = None) -> Libra
     out.share_unc_effective = loc.unc
     if last_scan is not None:
         out.last_scan = last_scan
+    if last_scoped_scan is not None:
+        out.last_scoped_scan = last_scoped_scan
     return out
-
-# Batch size for the explicit-id Meili delete after a library is dropped. Keeps a
-# single delete_documents request bounded even for a multi-hundred-thousand-item
-# library (each batch is one Meili task).
-_MEILI_DELETE_BATCH = 10_000
 
 # Folder-browse (UI-T12) caps. Folders are capped so a pathological flat tree
 # can't return an unbounded distinct-segment list; items are paginated.
@@ -172,34 +185,62 @@ def _validate_preset_entries(names: list[str]) -> None:
         raise HTTPException(422, f"unknown or invalid preset(s): {', '.join(bad)}")
 
 
-def _validate_group_names(names: list[str]) -> None:
-    """P2-T5: 422 if any name is not a known extension group."""
-    unknown = validate_extension_group_names(names)
-    if unknown:
-        raise HTTPException(422, f"unknown extension group(s): {', '.join(unknown)}")
+# Postgres' default name for the baseline's unnamed ``UniqueConstraint('name')``.
+_LIBRARY_NAME_CONSTRAINT = "libraries_name_key"
+
+
+def _is_duplicate_name(exc: IntegrityError) -> bool:
+    """True only for a unique violation (23505) on ``libraries_name_key``."""
+    orig = exc.orig
+    if getattr(orig, "sqlstate", None) != "23505":
+        return False
+    diag = getattr(orig, "diag", None)
+    return getattr(diag, "constraint_name", None) == _LIBRARY_NAME_CONSTRAINT
+
+
+async def _commit_unique_name(session: AsyncSession, name: str) -> None:
+    """Commit a library create/update, mapping a unique violation on the
+    ``libraries.name`` constraint to a 409 the form can show beside the Name
+    field (B3). Any other IntegrityError (a different constraint, a NOT NULL or
+    FK violation) is re-raised untouched -- it is a bug, not a duplicate name."""
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        if _is_duplicate_name(exc):
+            raise HTTPException(409, f'a library named "{name}" already exists') from exc
+        raise
 
 
 @router.get("", response_model=list[LibraryOut], dependencies=[Depends(require_scope("read"))])
 async def list_libraries(session: AsyncSession = Depends(get_session)):
-    """List libraries, each annotated with its most-recent scan (FIX-10).
+    """List libraries, each annotated with its most-recent scans (FIX-10, B10).
 
-    ``last_scan`` is sourced per-library directly from ``scan_runs`` via a single
-    ``DISTINCT ON (library_id)`` query (no N+1), so the Libraries page's "Last scan"
-    column survives worker restarts / redeploys and is NOT subject to the capped,
-    global ``GET /scans`` feed dropping a library's latest run out of its window.
-    Terminal non-``finished`` runs (failed/stopped/cancelled) are surfaced too, so
-    a failed last scan shows its status instead of "never ran"."""
+    ``last_scan`` (newest FULL run) and ``last_scoped_scan`` (newest scoped run)
+    are sourced per-library directly from ``scan_runs`` via ``DISTINCT ON
+    (library_id)`` queries (no N+1), so the Libraries page's "Last scan" column
+    survives worker restarts / redeploys and is NOT subject to the capped, global
+    ``GET /scans`` feed. Terminal non-``finished`` runs (failed/stopped/cancelled)
+    are surfaced too, so a failed last scan shows its status instead of "never
+    ran"."""
     libraries = (await session.execute(select(Library))).scalars().all()
-    # Latest ScanRun per library in one query. DISTINCT ON keeps the first row per
-    # library after ordering by (library_id, started_at DESC) -- i.e. the newest.
-    latest_runs = (
-        await session.execute(
-            select(ScanRun)
-            .distinct(ScanRun.library_id)
-            .order_by(ScanRun.library_id, ScanRun.started_at.desc())
-        )
-    ).scalars().all()
-    by_library = {run.library_id: run for run in latest_runs}
+
+    async def _latest(scoped: bool) -> dict:
+        # DISTINCT ON keeps the first row per library after ordering by
+        # (library_id, started_at DESC) -- i.e. the newest of that scope.
+        scope = ScanRun.rel_path.isnot(None) if scoped else ScanRun.rel_path.is_(None)
+        runs = (
+            await session.execute(
+                select(ScanRun)
+                .where(scope)
+                .distinct(ScanRun.library_id)
+                .order_by(ScanRun.library_id, ScanRun.started_at.desc())
+            )
+        ).scalars().all()
+        return {run.library_id: run for run in runs}
+
+    by_library = await _latest(scoped=False)
+    scoped_by_library = await _latest(scoped=True)
     # Roadmap §17: rolling per-library walk-throughput median over recent
     # finished FULL scans (scoped runs walk subtrees of arbitrary size — their
     # files/s is not comparable). One grouped aggregate, same 30-day window as
@@ -243,38 +284,52 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
         except Exception:  # noqa: BLE001 — annotation only, never break listing
             agent_rows = {}
 
+    def _last_scan(run: ScanRun | None, library_id) -> LastScan | None:
+        if run is None:
+            return None
+        stats = run.stats or {}
+        # §17: the median covers FULL runs only, so it rides only on a full run
+        # — a scoped run's subtree files/s is not comparable (B10).
+        median, runs = (
+            (medians.get(library_id) or (None, 0)) if run.rel_path is None else (None, 0)
+        )
+        return LastScan(
+            id=run.id,
+            rel_path=run.rel_path,
+            error=stats.get("error"),
+            reconcile_note=stats.get("reconcile_note"),
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            status=run.status,
+            seen=stats.get("seen"),
+            new=stats.get("new"),
+            changed=stats.get("changed"),
+            missing=stats.get("missing"),
+            # Why enumerated files were skipped — lets the Libraries page
+            # explain a gap between the OS folder count and the item count.
+            excluded=stats.get("excluded"),
+            excluded_gate=stats.get("excluded_gate"),
+            excluded_filtered=stats.get("excluded_filtered"),
+            pruned_dirs=stats.get("pruned_dirs"),
+            permission_denied=stats.get("permission_denied"),
+            bytes_seen=stats.get("bytes_seen"),
+            pruned_files=stats.get("pruned_files"),
+            pruned_counted=stats.get("pruned_counted"),
+            pruned_paths=stats.get("pruned_paths"),
+            # §17 throughput annotation (this run's own rate rides along for
+            # the comparison with the full-scan median).
+            files_per_s=stats.get("files_per_s"),
+            median_files_per_s=median,
+            throughput_runs=runs,
+        )
+
     out: list[LibraryOut] = []
     for library in libraries:
-        run = by_library.get(library.id)
-        last_scan = None
-        if run is not None:
-            stats = run.stats or {}
-            last_scan = LastScan(
-                started_at=run.started_at,
-                finished_at=run.finished_at,
-                status=run.status,
-                seen=stats.get("seen"),
-                new=stats.get("new"),
-                changed=stats.get("changed"),
-                missing=stats.get("missing"),
-                # Why enumerated files were skipped — lets the Libraries page
-                # explain a gap between the OS folder count and the item count.
-                excluded=stats.get("excluded"),
-                excluded_gate=stats.get("excluded_gate"),
-                excluded_filtered=stats.get("excluded_filtered"),
-                pruned_dirs=stats.get("pruned_dirs"),
-                permission_denied=stats.get("permission_denied"),
-                bytes_seen=stats.get("bytes_seen"),
-                pruned_files=stats.get("pruned_files"),
-                pruned_counted=stats.get("pruned_counted"),
-                pruned_paths=stats.get("pruned_paths"),
-                # §17 throughput annotation (median only for full scans; this
-                # run's own rate rides along for the comparison).
-                files_per_s=stats.get("files_per_s"),
-                median_files_per_s=(medians.get(library.id) or (None, 0))[0],
-                throughput_runs=(medians.get(library.id) or (None, 0))[1],
-            )
-        lo = _library_out(library, last_scan)
+        lo = _library_out(
+            library,
+            _last_scan(by_library.get(library.id), library.id),
+            _last_scan(scoped_by_library.get(library.id), library.id),
+        )
         agent = agent_rows.get(library.source_agent_id)
         if agent is not None:
             lo.agent_name = agent.name
@@ -354,14 +409,13 @@ async def create_library(body: LibraryIn, session: AsyncSession = Depends(get_se
     scan_cron = body.scan_cron.strip() if body.scan_cron and body.scan_cron.strip() else None
     _validate_schedule_fields(scan_cron, body.watch_mode, body.root_path)
     _validate_preset_entries(body.enabled_presets)
-    _validate_group_names(body.enabled_extension_groups)
     # mode="json" flattens the HashPolicy enum to its string value for the Text
     # column (pydantic 'gt=0' already rejected a non-positive hash_full_max_bytes).
     data = body.model_dump(mode="json")
     data["scan_cron"] = scan_cron
     library = Library(**data)
     session.add(library)
-    await session.commit()
+    await _commit_unique_name(session, body.name)
     await session.refresh(library)
     return _library_out(library)
 
@@ -416,9 +470,6 @@ async def update_library(
     if "enabled_presets" in fields:
         fields["enabled_presets"] = fields["enabled_presets"] or []
         _validate_preset_entries(fields["enabled_presets"])
-    if "enabled_extension_groups" in fields:
-        fields["enabled_extension_groups"] = fields["enabled_extension_groups"] or []
-        _validate_group_names(fields["enabled_extension_groups"])
 
     # R8: remember the pre-patch GPS exposure so a CHANGE can trigger the
     # re-projection below. Read before the setattr loop — afterwards it is gone.
@@ -426,7 +477,7 @@ async def update_library(
 
     for key, value in fields.items():
         setattr(library, key, value)
-    await session.commit()
+    await _commit_unique_name(session, library.name)
     await session.refresh(library)
 
     # R8 — the ``expose_gps`` flip must reach the search index, in BOTH directions.
@@ -687,6 +738,115 @@ async def retry_extracts(
     return {"library_id": str(library_id), "retried": len(ids)}
 
 
+# Pending procrastinate jobs attributable to one library (B16/B17). Two shapes
+# are reliably attributable: jobs whose args carry ``library_id`` (scan_library,
+# rehash_library, reproject_library, associate_agent_library) and jobs whose
+# args carry a single ``item_id`` of one of the library's items (extract_item,
+# thumb_item, embed_item, chunk_item). Batch jobs keyed by an ``item_ids`` list
+# (index_sync.sync_items) are NOT counted — attributing them would mean
+# unnesting every queued id list. ``aborting`` counts as in flight.
+_PENDING_JOBS_SQL = """
+SELECT
+  count(*) FILTER (WHERE j.task_name = :scan_task) AS scan_jobs,
+  count(*) AS jobs
+FROM procrastinate_jobs j
+WHERE j.status IN ('todo', 'doing', 'aborting')
+  AND (
+        j.args->>'library_id' = :lib
+     OR j.args->>'item_id' IN (SELECT i.id::text FROM items i WHERE i.library_id = :lib_uuid)
+      )
+"""
+
+_SCAN_JOB_PENDING_SQL = """
+SELECT 1 FROM procrastinate_jobs
+WHERE task_name = :scan_task
+  AND status IN ('todo', 'doing', 'aborting')
+  AND args->>'library_id' = :lib
+LIMIT 1
+"""
+
+
+async def _has_job_queue(session: AsyncSession) -> bool:
+    """False on a DB without the procrastinate schema (fresh DB / unit tests) —
+    same ``to_regclass`` convention as hash-status/retry_extracts."""
+    return (
+        await session.execute(text("SELECT to_regclass('procrastinate_jobs')"))
+    ).scalar() is not None
+
+
+async def _get_library(session: AsyncSession, library_id: uuid.UUID) -> Library:
+    library = (
+        await session.execute(select(Library).where(Library.id == library_id))
+    ).scalar_one_or_none()
+    if library is None:
+        raise HTTPException(404, "Library not found")
+    return library
+
+
+@router.get(
+    "/{library_id}/delete-impact",
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def library_delete_impact(
+    library_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """What ``DELETE /libraries/{id}`` would remove (B16), for the confirm
+    dialog. Same admin scope as the delete itself.
+
+    Counts rows the FK ``ON DELETE CASCADE`` removes with the library: ``items``,
+    ``scan_runs``, ``alert_rules`` scoped to it and ``alert_events`` of those
+    rules (other rules' events about this library survive with
+    ``library_id`` nulled), RBAC ``path_grants``, and hot folders
+    (``scan_paths``). ``pending_jobs`` counts queued/running jobs attributable to
+    the library (args ``library_id``, or a single ``item_id`` of its items;
+    ``item_ids``-list batch jobs such as index sync are not attributable and not
+    counted); ``scan_job_pending`` is true while a scan job is queued or running
+    — the delete refuses (409) in that state. Both are 0/false on a DB without
+    the job queue."""
+    library = await _get_library(session, library_id)
+
+    async def _count(stmt) -> int:
+        return int((await session.execute(stmt)).scalar_one())
+
+    rule_ids = select(AlertRule.id).where(AlertRule.library_id == library_id)
+    impact = {
+        "library_id": str(library_id),
+        "name": library.name,
+        "items": await _count(
+            select(func.count()).select_from(Item).where(Item.library_id == library_id)
+        ),
+        "scan_runs": await _count(
+            select(func.count()).select_from(ScanRun).where(ScanRun.library_id == library_id)
+        ),
+        "alert_rules": await _count(
+            select(func.count()).select_from(AlertRule).where(AlertRule.library_id == library_id)
+        ),
+        "alert_events": await _count(
+            select(func.count())
+            .select_from(AlertEvent)
+            .where(AlertEvent.rule_id.in_(rule_ids))
+        ),
+        "path_grants": await _count(
+            select(func.count()).select_from(PathGrant).where(PathGrant.library_id == library_id)
+        ),
+        "scan_paths": await _count(
+            select(func.count()).select_from(ScanPath).where(ScanPath.library_id == library_id)
+        ),
+        "pending_jobs": 0,
+        "scan_job_pending": False,
+    }
+    if await _has_job_queue(session):
+        row = (
+            await session.execute(
+                text(_PENDING_JOBS_SQL),
+                {"scan_task": SCAN_TASK_NAME, "lib": str(library_id), "lib_uuid": library_id},
+            )
+        ).one()
+        impact["pending_jobs"] = int(row.jobs)
+        impact["scan_job_pending"] = bool(row.scan_jobs)
+    return impact
+
+
 @router.delete(
     "/{library_id}",
     status_code=204,
@@ -711,20 +871,21 @@ async def delete_library(
       * 404 if the library is unknown.
       * 422 unless ``?confirm=`` exactly matches the library name (typed-name
         confirmation -- guards against deleting the wrong library).
-      * 409 while any ScanRun for it is still ``running`` (deleting mid-scan would
-        race the scan worker and orphan its writes).
+      * 409 while any ScanRun for it is ``running``/``stopping``, OR any scan job
+        for it (full or scoped) is queued/running (B17) -- a queued job would
+        otherwise start against a vanished library, and deleting mid-scan would
+        race the scan worker and orphan its writes.
 
-    On success the row is deleted; Postgres FK ``ON DELETE CASCADE`` removes the
-    library's items, scan_runs, scan_paths and item_versions. The Meilisearch
-    projection is then pruned by EXPLICIT document id (never a filter delete):
-    the item ids are collected BEFORE the DB delete (the rows are gone
-    afterwards), and the Meili deletes are issued only AFTER the DB commit so a
-    failed commit never removes still-live docs. Returns 204."""
-    library = (
-        await session.execute(select(Library).where(Library.id == library_id))
-    ).scalar_one_or_none()
-    if library is None:
-        raise HTTPException(404, "Library not found")
+    On success the row is deleted in-request; Postgres FK ``ON DELETE CASCADE``
+    removes the library's items, scan_runs, scan_paths, alert rules (+ their
+    events), path grants and item_versions (see ``GET .../delete-impact``). The
+    Meilisearch projection is pruned by EXPLICIT document id in deferred
+    ``index_sync.delete_documents`` jobs (B17): the item ids are collected BEFORE
+    the DB delete (the rows are gone afterwards) and the jobs are deferred only
+    AFTER the commit (invariant 5) so a failed commit never removes live docs. A
+    failed defer is logged; the hourly ``reconcile_meili`` sweep removes the
+    orphans. Returns 204."""
+    library = await _get_library(session, library_id)
 
     # Typed-name confirmation (exact match, no trimming/casefold -- a mismatch is
     # a refusal, not a coercion).
@@ -750,6 +911,19 @@ async def delete_library(
             "cannot delete a library while a scan is running; cancel or wait for "
             "the scan to finish first",
         )
+    if await _has_job_queue(session):
+        queued = (
+            await session.execute(
+                text(_SCAN_JOB_PENDING_SQL),
+                {"scan_task": SCAN_TASK_NAME, "lib": str(library_id)},
+            )
+        ).first()
+        if queued is not None:
+            raise HTTPException(
+                409,
+                "cannot delete a library while a scan job for it is queued or "
+                "running; cancel it on the Jobs page or wait for it to finish first",
+            )
 
     # Collect item ids for the Meili prune BEFORE the cascade removes the rows.
     item_ids = [
@@ -763,8 +937,15 @@ async def delete_library(
     await session.commit()
 
     # Prune the disposable projection by explicit id, after the commit succeeded.
-    for start in range(0, len(item_ids), _MEILI_DELETE_BATCH):
-        await delete_docs(item_ids[start : start + _MEILI_DELETE_BATCH])
+    try:
+        await defer_delete_docs(item_ids)
+    except Exception:  # noqa: BLE001 - the delete itself already landed
+        logger.exception(
+            "library %s deleted but its search-document prune could not be queued "
+            "(%d ids); the hourly reconcile_meili sweep will remove the orphans",
+            library_id,
+            len(item_ids),
+        )
 
     logger.info(
         "library deleted: id=%s name=%r items_removed=%d",
@@ -805,20 +986,42 @@ async def trigger_scan(
     # we report it rather than reaping its ScanRun out from under it. FAIL-OPEN:
     # if procrastinate is unreachable we do NOT block an explicit manual trigger
     # (worst case one duplicate, vs. blocking a legitimate operator action).
+    queue_checked = True
     try:
         async with open_pool_if_needed():
             pending = await scan_job_pending(str(library_id), None)
     except Exception:  # noqa: BLE001 - fail open on any queue-connectivity error
         pending = False
+        queue_checked = False
     if pending:
         return {"job_id": None, "already_running": True}
-    # No unfinished job: reap any leftover orphaned runs (e.g. worker restarted
-    # mid-scan without the reaper having caught up) so the UI unblocks, then defer.
+    # No unfinished job: reap any leftover orphaned FULL runs (e.g. worker
+    # restarted mid-scan without the reaper having caught up) so the UI
+    # unblocks, then defer. Only full runs (rel_path IS NULL): the pending check
+    # above covered the full-scan scope only, so a scoped run's live job was
+    # never looked at (the FIX-15 reconciler owns scoped orphans). B11: record
+    # WHY on the row so the Libraries page can show it.
+    reason = (
+        "no queued or running scan job remained for this run; marked failed by a "
+        "manual scan trigger before re-queueing"
+        if queue_checked
+        else "job queue unreachable when a manual scan was triggered; marked "
+        "failed (could not confirm a live scan job) before re-queueing"
+    )
     await session.execute(
         update(ScanRun)
-        .where(ScanRun.library_id == library_id,
-            ScanRun.status.in_(("running", "stopping")))
-        .values(status="failed", finished_at=datetime.now(UTC))
+        .where(
+            ScanRun.library_id == library_id,
+            ScanRun.rel_path.is_(None),
+            ScanRun.status.in_(("running", "stopping")),
+        )
+        .values(
+            status="failed",
+            finished_at=datetime.now(UTC),
+            stats=func.coalesce(ScanRun.stats, text("'{}'::jsonb")).op("||")(
+                literal({"error": reason, "reaped": True}, type_=JSONB)
+            ),
+        )
     )
     await session.commit()
     # force=True: the operator explicitly asked for a scan and we just confirmed no

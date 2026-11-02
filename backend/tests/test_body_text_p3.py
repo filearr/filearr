@@ -170,8 +170,11 @@ def test_build_doc_omits_empty_body_text():
 
 # --------------------------------------------------------- searchable ordering
 def test_body_text_is_last_searchable():
-    from filearr import search as search_mod
-    from filearr.meili_ops import SEARCHABLE_ATTRIBUTES
+    from filearr.meili_ops import (
+        FILTERABLE_ATTRIBUTES,
+        SEARCHABLE_ATTRIBUTES,
+        SORTABLE_ATTRIBUTES,
+    )
 
     # body_text sits at the TAIL of searchableAttributes so a name/title/tags hit
     # outranks a deep body match (attribute-ranking rule). P3-T13 appended
@@ -182,10 +185,9 @@ def test_body_text_is_last_searchable():
     assert SEARCHABLE_ATTRIBUTES[-2] == "archive_members"
     assert SEARCHABLE_ATTRIBUTES[-3] == "body_text"
     assert SEARCHABLE_ATTRIBUTES.index("body_text") > SEARCHABLE_ATTRIBUTES.index("filename")
-    assert "body_text" in search_mod.SEARCHABLE
     # never a filter/sort target (it is free text, not a facet).
-    assert "body_text" not in search_mod.FILTERABLE
-    assert "body_text" not in search_mod.SORTABLE
+    assert "body_text" not in FILTERABLE_ATTRIBUTES
+    assert "body_text" not in SORTABLE_ATTRIBUTES
 
 
 # ------------------------------------------------------------ zip-bomb guard

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDateTime } from "./format";
   import { onMount } from "svelte";
   import {
     listUsers, createUser, updateUser, deleteUser, listRoles,
@@ -343,7 +344,7 @@
               {#if prof.netbios}<dt class="text-muted">NetBIOS name</dt><dd class="font-mono break-all">{prof.netbios}</dd>{/if}
               {#if prof.sam}<dt class="text-muted">Account name</dt><dd class="font-mono break-all">{prof.sam}</dd>{/if}
               {#if prof.mapped_role}<dt class="text-muted">Role from directory</dt><dd>{prof.mapped_role} <span class="text-muted">(re-applied at every login — a manual role change lasts until then)</span></dd>{/if}
-              {#if u.last_login_at}<dt class="text-muted">Last login</dt><dd>{new Date(u.last_login_at).toLocaleString()}</dd>{/if}
+              {#if u.last_login_at}<dt class="text-muted">Last login</dt><dd>{fmtDateTime(u.last_login_at)}</dd>{/if}
               {#if groups.length}
                 <dt class="text-muted">Directory groups</dt>
                 <dd class="flex flex-wrap gap-1">

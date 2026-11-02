@@ -14,9 +14,11 @@ extracted):
     resolved T7 hash policy (``root_path`` because ``auto`` resolves network vs
     local from it), i.e. whether an item gets a full ``content_hash``.
   * ``enabled_categories`` / ``enabled_groups`` / ``include_globs`` /
-    ``exclude_globs`` / ``enabled_presets`` / ``enabled_extension_groups`` — the
-    inclusion controls that decide whether the file is scanned at all and, via the
-    taxonomy gate, under which file_category/file_group.
+    ``exclude_globs`` / ``enabled_presets`` — the inclusion controls that decide
+    whether the file is scanned at all and, via the taxonomy gate, under which
+    file_category/file_group. (The dead ``enabled_extension_groups`` column was
+    dropped 2026-11-02 without a ``_SCHEME`` bump: stale detection keys on the
+    scheme prefix only, and nothing compares full fingerprints.)
 
 The fingerprint is a JSON-canonical, order-insensitive digest (lists sorted) so
 reordering an array in the config is not a spurious change. Prefixed with the
@@ -75,7 +77,6 @@ def _canonical(library: Library, global_hash_full_max_bytes: int) -> dict:
         "include_globs": sorted(library.include_globs or []),
         "exclude_globs": sorted(library.exclude_globs or []),
         "enabled_presets": sorted(library.enabled_presets or []),
-        "enabled_extension_groups": sorted(library.enabled_extension_groups or []),
     }
 
 

@@ -31,7 +31,6 @@ def _req(peer: str, headers: dict[str, str] | None = None) -> Request:
 def settings(monkeypatch):
     get_settings.cache_clear()
     s = get_settings()
-    monkeypatch.setattr(s, "auth_ratelimit_trust_forwarded_for", False)
     monkeypatch.setattr(s, "trusted_proxies", None)
     monkeypatch.setattr(s, "proxy_shared_secret", None)
     proxy_trust._parse_networks.cache_clear()
@@ -105,12 +104,6 @@ def test_trusted_proxies_all_hops_trusted_falls_back_to_leftmost(settings, monke
     monkeypatch.setattr(settings, "trusted_proxies", "172.18.0.0/16")
     r = _req("172.18.0.5", {"X-Forwarded-For": "172.18.0.7"})
     assert proxy_trust.client_ip(r) == "172.18.0.7"
-
-
-def test_legacy_flag_takes_leftmost(settings, monkeypatch):
-    monkeypatch.setattr(settings, "auth_ratelimit_trust_forwarded_for", True)
-    r = _req("172.18.0.5", {"X-Forwarded-For": "203.0.113.9, 10.0.0.1"})
-    assert proxy_trust.client_ip(r) == "203.0.113.9"
 
 
 def test_ipv6_bracketed_hop(settings, monkeypatch):

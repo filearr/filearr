@@ -9,7 +9,9 @@ surface: outbound webhooks + stored credentials):
   are **write-only**: a GET/list NEVER returns a plaintext secret (it shows a
   ``"__redacted__"`` marker), and a PATCH keeps the stored ciphertext unless the
   client sends a real new value (the ``"__unchanged__"`` sentinel or an absent
-  field = keep). Encryption requires ``FILEARR_SECRET_KEY``; when it is unset the
+  field = keep; an explicit ``null`` clears it). A PATCH ``config`` is MERGED
+  into the stored config key by key (``null`` removes a key), never a
+  wholesale replace. Encryption requires ``FILEARR_SECRET_KEY``; when it is unset the
   write/test endpoints return **503** with generation guidance (never a plaintext
   fallback). A per-channel ``POST /{id}/test`` fires a sample alert through the
   real driver.
@@ -25,11 +27,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -196,6 +199,96 @@ def _encrypt_config_secrets(
     return out
 
 
+def _merge_config_patch(
+    type_: str, stored: dict, patch: dict, key: bytes
+) -> dict:
+    """Apply a channel ``config`` PATCH as a MERGE onto the stored config (B23).
+
+    * absent key -> kept as stored (a client that only knows some keys, e.g.
+      the UI, can no longer drop ``allow_insecure`` set via the API);
+    * explicit ``null`` -> the key is REMOVED (including a secret: this is the
+      one way to clear a stored secret);
+    * a secret sub-field equal to ``""`` / ``UNCHANGED`` / ``REDACTED`` -> the
+      stored ciphertext is kept (write-only secrets never round-trip);
+    * any other value -> set (a secret is encrypted first).
+    """
+    out = dict(stored or {})
+    secrets = SECRET_FIELDS.get(type_, ())
+    for k, v in patch.items():
+        if v is None:
+            out.pop(k, None)
+        elif k in secrets:
+            if v in ("", UNCHANGED, REDACTED):
+                continue
+            out[k] = crypto.encrypt_secret(str(v), key)
+        else:
+            out[k] = v
+    return out
+
+
+def _email_destination(config: dict) -> tuple[str, int, str]:
+    """The SMTP endpoint a stored password is sent to, normalised the way
+    ``dispatch._send_email_sync`` reads it (port missing/null = 587, security
+    default ``starttls``)."""
+    host = str(config.get("host") or "").strip().lower()
+    try:
+        port = int(config.get("port") or 587)
+    except (TypeError, ValueError):
+        port = -1
+    security = str(config.get("security") or "starttls").strip().lower()
+    return host, port, security
+
+
+def _webhook_destination(config: dict) -> tuple[str, str, int | None]:
+    """(scheme, host, port) of a webhook URL; the HMAC ``secret`` is bound to it."""
+    try:
+        parts = urlsplit(str(config.get("url") or "").strip())
+        return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return "", str(config.get("url") or ""), None
+
+
+_DESTINATION = {
+    "email": (_email_destination, "password", "mail server (host, port or security)"),
+    "webhook": (_webhook_destination, "secret", "webhook URL's scheme, host or port"),
+}
+
+
+def _check_secret_destination(type_: str, stored: dict, patch: dict) -> None:
+    """A stored secret never silently follows a channel to a new destination.
+
+    When an edit moves an ``email`` channel to another SMTP endpoint (host, port
+    or security) or a ``webhook`` to another origin (scheme/host/port) while a
+    secret is stored, the PATCH must also carry a NEW secret value, or an
+    explicit ``null`` to drop it -- otherwise 422. Without this, anyone who can
+    edit a channel could point it at a server they control and harvest the SMTP
+    password (or HMAC-signed payloads) the original operator entered. ``apprise``
+    needs no check: its whole URL is the secret, so a new destination is a new
+    secret by construction."""
+    spec = _DESTINATION.get(type_)
+    if spec is None:
+        return
+    dest, secret_key, what = spec
+    if not (stored or {}).get(secret_key):
+        return
+    merged = dict(stored or {})
+    for k, v in patch.items():
+        if v is None:
+            merged.pop(k, None)
+        else:
+            merged[k] = v
+    if dest(merged) == dest(stored or {}):
+        return
+    if secret_key in patch and patch[secret_key] not in ("", UNCHANGED, REDACTED):
+        return  # a new value, or an explicit null that drops the stored one
+    raise HTTPException(
+        422,
+        f"re-enter the {secret_key} when changing the {what}: the stored "
+        f"{secret_key} is not carried to a new destination (send {secret_key}: "
+        "null to remove it)",
+    )
+
+
 def _decrypt_config_secrets(type_: str, config: dict, key: bytes) -> dict:
     out = dict(config or {})
     for f in SECRET_FIELDS.get(type_, ()):
@@ -257,6 +350,20 @@ def _validate_webhook_format(type_: str, config: dict | None) -> None:
             422,
             f"invalid webhook_format {fmt!r}; one of "
             f"{sorted(webhook_formats.WEBHOOK_FORMATS)}",
+        )
+
+
+def _validate_email_port(type_: str, config: dict | None) -> None:
+    """An email channel's ``port`` is optional (missing/null = 587 at delivery,
+    ``dispatch._send_email_sync``) but must be an integer 1-65535 when present."""
+    if type_ != "email" or not config:
+        return
+    port = config.get("port")
+    if port is None:
+        return
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise HTTPException(
+            422, f"invalid email port {port!r}; an integer 1-65535 (omit for 587)"
         )
 
 
@@ -394,6 +501,7 @@ async def create_channel(
             f"one of {sorted(DISPATCH_LOCALITIES)}",
         )
     _validate_webhook_format(body.type, body.config)
+    _validate_email_port(body.type, body.config)
     key = _require_key()
     stored_config = _encrypt_config_secrets(body.type, body.config, key)
     row = AlertChannel(
@@ -448,11 +556,13 @@ async def update_channel(
     if "dispatch_locality" in sent and body.dispatch_locality not in DISPATCH_LOCALITIES:
         raise HTTPException(422, f"invalid dispatch_locality {body.dispatch_locality!r}")
     if "config" in sent and body.config is not None:
+        # Validate what the client SENT (a legacy stored value is not the
+        # caller's mistake), then merge.
         _validate_webhook_format(row.type_, body.config)
+        _validate_email_port(row.type_, body.config)
+        _check_secret_destination(row.type_, row.config, body.config)
         key = _require_key()
-        row.config = _encrypt_config_secrets(
-            row.type_, body.config, key, prev=row.config
-        )
+        row.config = _merge_config_patch(row.type_, row.config, body.config, key)
     if "name" in sent and body.name is not None:
         row.name = body.name
     if "dispatch_locality" in sent and body.dispatch_locality is not None:
@@ -816,29 +926,44 @@ def _event_out(row: AlertEvent, max_attempts: int) -> AlertEventOut:
 async def list_alert_events(
     rule_id: uuid.UUID | None = None,
     library_id: uuid.UUID | None = None,
-    delivered: bool | None = None,
     status: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    before_ts: datetime | None = None,
+    before_id: uuid.UUID | None = None,
     session: AsyncSession = Depends(get_session),
 ):
     """Recent alert-events, newest first. ``limit`` is capped at 200 (P8-T13).
+    Ordering is ``occurred_at DESC, id DESC``; to page further back pass the
+    LAST row's ``occurred_at`` as ``before_ts`` and its ``id`` as ``before_id``
+    (keyset cursor, B24) -- rows strictly older than that ``(occurred_at, id)``
+    are returned, so events arriving between page loads never shift or repeat
+    a page. Both cursor halves or neither (422 otherwise).
 
     Filterable by ``rule_id``, ``library_id`` and the derived ``status``
     (``delivered`` / ``failed`` / ``pending``) -- ``failed`` = retries exhausted,
-    ``pending`` = still deliverable (includes ceiling-held). The legacy
-    ``delivered`` boolean is kept for back-compat."""
+    ``pending`` = still deliverable (includes ceiling-held)."""
     max_attempts = get_settings().alert_max_delivery_attempts
     if status is not None and status not in EVENT_STATUSES:
         raise HTTPException(
             422, f"unknown status {status!r}; one of {sorted(EVENT_STATUSES)}"
         )
-    stmt = select(AlertEvent).order_by(AlertEvent.occurred_at.desc()).limit(limit)
+    if (before_ts is None) != (before_id is None):
+        raise HTTPException(422, "before_ts and before_id must be sent together")
+    stmt = (
+        select(AlertEvent)
+        .order_by(AlertEvent.occurred_at.desc(), AlertEvent.id.desc())
+        .limit(limit)
+    )
+    if before_ts is not None:
+        if before_ts.tzinfo is None:
+            raise HTTPException(422, "before_ts must carry a timezone offset")
+        stmt = stmt.where(
+            tuple_(AlertEvent.occurred_at, AlertEvent.id) < tuple_(before_ts, before_id)
+        )
     if rule_id is not None:
         stmt = stmt.where(AlertEvent.rule_id == rule_id)
     if library_id is not None:
         stmt = stmt.where(AlertEvent.library_id == library_id)
-    if delivered is not None:
-        stmt = stmt.where(AlertEvent.delivered.is_(delivered))
     if status == "delivered":
         stmt = stmt.where(AlertEvent.delivered.is_(True))
     elif status == "failed":

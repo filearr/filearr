@@ -434,7 +434,7 @@ async def test_run_csv_streams_and_guards_formula(env):
     # Streaming property asserted at the StreamingResponse generator level (httpx
     # coalesces chunks): the body yields the header + one chunk per row off the
     # server-side cursor, so peak memory is ~one row.
-    from filearr.api.reports import _csv_response
+    from filearr.api.reports import export_response
     from filearr.custom_reports import build_custom_report
     from filearr.reports import ReportParams
 
@@ -442,7 +442,7 @@ async def test_run_csv_streams_and_guards_formula(env):
         report_id="c", name="c", query="kind:video",
         columns=["rel_path", "size"], sort="rel_path", custom_defs={},
     )
-    sresp = _csv_response(report, ReportParams(limit=1000))
+    sresp = export_response(report, ReportParams(limit=1000), "csv", None)
     chunks = [c async for c in sresp.body_iterator]
     assert len(chunks) >= 3  # header + 2 rows, each its own yield
 

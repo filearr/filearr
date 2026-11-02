@@ -2,7 +2,7 @@
 in-place ``reclassify-extensions`` endpoint.
 
 Layers:
-* **pure** — the new ``media_types.detect`` mappings (tif/psd/3gp/mts/...);
+* **pure** — the new ``file_groups.detect_category`` mappings (tif/psd/3gp/mts/...);
 * **integration** (pgserver + alembic) — the ``unmapped_extensions`` report now
   excludes linked sidecars (``sidecar_of IS NOT NULL``), and the reclassify pass
   moves stale ``media_type`` rows to the current map, returns per-type counts,
@@ -24,8 +24,8 @@ from alembic import command
 from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
+from filearr.file_groups import detect_category as detect
 from filearr.main import create_app
-from filearr.media_types import detect
 from filearr.models import Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent

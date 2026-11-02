@@ -38,6 +38,9 @@ Emitted schema (merged into ``metadata_`` by the extract wrapper, all optional):
   ``archive``:            {member_count:int, total_uncompressed:int,
                            members:list[{name:str, size:int}] (<= max_stored),
                            truncated:bool, format:str}
+                          ``truncated`` is true when EITHER the enumeration
+                          stopped early (count/size/ratio guard) OR the stored
+                          ``members`` list is shorter than ``member_count``.
   ``archive_members``:    newline-joined member names, char-capped — the flat,
                           SEARCHABLE projection target (Meili attribute, added LAST
                           so a NAME/title hit outranks an archive-member hit).
@@ -211,6 +214,10 @@ class _Accumulator:
         self.total += isize
         if len(self.members) < self.max_stored:
             self.members.append({"name": clean, "size": isize})
+        else:
+            # B50: the stored listing is now shorter than member_count — flag it
+            # so the UI says the list is capped instead of silently stopping.
+            self.truncated = True
         if self._flat_len < self.index_chars:
             piece = clean + "\n"
             self._flat.append(piece)

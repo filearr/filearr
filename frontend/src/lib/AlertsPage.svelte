@@ -3,7 +3,7 @@
   // (file-watch + read-only is_system operational rules) and a recent-events
   // view with failed-delivery surfacing. All admin-scope. Secret channel fields
   // are password inputs whose decrypted value NEVER round-trips (empty on edit =
-  // keep, via the "__unchanged__" sentinel). Every dynamic string renders as
+  // keep: the key is omitted and the server merges; alertConfig.ts). Every dynamic string renders as
   // text (Svelte auto-escapes) — a crafted path/error can't inject markup.
   import { onDestroy, onMount } from "svelte";
   import { latest } from "./latest";
@@ -12,7 +12,6 @@
     DISPATCH_LOCALITIES,
     DIGEST_WINDOWS,
     EVENT_TYPES,
-    UNCHANGED,
     alertEventsSummary,
     createAlertChannel,
     createAlertRule,
@@ -27,7 +26,6 @@
     updateAlertChannel,
     updateAlertRule,
     WEBHOOK_FORMATS,
-    detectWebhookFormat,
     type AlertChannel,
     type AlertEvent,
     type AlertEventStatus,
@@ -41,10 +39,24 @@
     type TestFireResult,
     errorMessage,
   } from "./api";
+  import {
+    buildChannelConfig,
+    channelFormFromConfig,
+    detectWebhookFormat,
+    emptyChannelForm,
+    hasStoredSecret,
+    secretReentryRequired,
+    parseRuleTimings,
+    DEFAULT_GROUP_WAIT_S,
+    DEFAULT_INHIBIT_WINDOW_S,
+    type ChannelForm,
+  } from "./alertConfig";
+  import { fmtDateTime, fmtUtc } from "./format";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
+  import { usePolling } from "./polling";
   import { focusPanel, focusRowButton } from "./rowPanel";
-  import { Alert, Badge, Button, Checkbox, DataTable, Field, Input, Select, StateBlock, confirm, type SortState, type Tone } from "./ui";
+  import { Alert, Badge, Button, Checkbox, DataTable, Field, Input, Select, StateBlock, confirm, toast, type SortState, type Tone } from "./ui";
 
   type Tab = "channels" | "rules" | "events";
   let tab = $state<Tab>("channels");
@@ -69,20 +81,41 @@
     Promise.all([listLibraries(signal), listAlertChannels(signal), listAlertRules(signal)]),
   );
   const eventsLoader = latest(
-    (signal, filters: { rule_id?: string; status?: AlertEventStatus; limit: number }) =>
-      Promise.all([listAlertEvents(filters, signal), alertEventsSummary(undefined, signal)]),
+    (signal, filters: Parameters<typeof listAlertEvents>[0]) => listAlertEvents(filters, signal),
   );
+  const summaryLoader = latest((signal) => alertEventsSummary(undefined, signal));
+  // B22: the failed-delivery banner is fed on load, after every mutation
+  // (refresh) and by a slow poll, so it shows on every tab.
+  const SUMMARY_POLL_MS = 60_000;
+  let summaryPoller: { stop(): void } | null = null;
   onDestroy(() => {
     configLoader.cancel();
     eventsLoader.cancel();
+    summaryLoader.cancel();
+    summaryPoller?.stop();
   });
+
+  // The banner is supplementary: a failed summary keeps the last counts and
+  // never displaces the page (the config load reports connectivity).
+  async function loadSummary() {
+    try {
+      const s = await summaryLoader.run();
+      if (s !== undefined) summary = s;
+    } catch {
+      // keep the last summary
+    }
+  }
 
   async function refresh() {
     loading = true;
+    void loadSummary();
     try {
       const r = await configLoader.run();
       if (r === undefined) return;
       [libraries, channels, rules] = r;
+      // Drop selections whose rule no longer exists (deleted here or elsewhere).
+      const live = new Set(rules.map((x) => x.id));
+      if ([...bulkSel].some((id) => !live.has(id))) bulkSel = new Set([...bulkSel].filter((id) => live.has(id)));
       error = "";
       loading = false;
       loaded = true;
@@ -91,7 +124,10 @@
       loading = false;
     }
   }
-  onMount(refresh);
+  onMount(() => {
+    void refresh();
+    summaryPoller = usePolling(loadSummary, SUMMARY_POLL_MS, { refreshOnReturn: true });
+  });
 
   // ---- channels -------------------------------------------------------- //
   let chEditing = $state<AlertChannel | null>(null); // null while not editing
@@ -100,26 +136,27 @@
   let chType = $state<ChannelType>("webhook");
   let chLocality = $state<DispatchLocality>("central");
   let chEnabled = $state(true);
-  // per-type config fields
-  let cWebhookUrl = $state("");
-  let cWebhookSecret = $state("");
-  let cWebhookFormat = $state<WebhookFormat>("generic");
+  // Per-type config fields; alertConfig.ts turns them into the API config
+  // (B23: an edit sends only the changed keys, which the server merges).
+  let chForm = $state<ChannelForm>(emptyChannelForm());
   // FIX-16: once the operator picks a format by hand, stop auto-detecting from URL.
   let chFormatTouched = $state(false);
-  let cEmailHost = $state("");
-  let cEmailPort = $state(587);
-  let cEmailSecurity = $state("starttls");
-  let cEmailFrom = $state("");
-  let cEmailTo = $state("");
-  let cEmailUser = $state("");
-  let cEmailPassword = $state("");
-  let cAppriseUrl = $state("");
   let chBusy = $state(false);
   let chErr = $state("");
-  // Required-field messages, keyed by field; the form is novalidate.
+  // Field messages, keyed by field; the form is novalidate.
   let chFieldErr = $state<Record<string, string>>({});
   let chRowErr = $state<Record<string, string>>({});
   let testResults = $state<Record<string, TestFireResult | { error: string }>>({});
+  const chStoredSecret = $derived(!!chEditing && hasStoredSecret(chEditing.type, chEditing.config));
+  // Editing the server/host of a channel with a stored secret: the server will
+  // not carry the stored secret to the new destination, so it must be retyped.
+  const chReentry = $derived(!!chEditing && secretReentryRequired(chType, chForm, chEditing.config));
+
+  // The editor renders below the table (rowPanel.ts): opening it focuses it,
+  // Cancel returns focus to the row's edit button.
+  const uid = $props.id();
+  const chPanelId = `${uid}-channel-editor`;
+  const rlPanelId = `${uid}-rule-editor`;
 
   function resetChannelForm() {
     chEditing = null;
@@ -128,20 +165,22 @@
     chType = "webhook";
     chLocality = "central";
     chEnabled = true;
-    cWebhookUrl = cWebhookSecret = "";
-    cWebhookFormat = "generic";
+    chForm = emptyChannelForm();
     chFormatTouched = false;
-    cEmailHost = cEmailFrom = cEmailTo = cEmailUser = cEmailPassword = "";
-    cEmailPort = 587;
-    cEmailSecurity = "starttls";
-    cAppriseUrl = "";
     chErr = "";
     chFieldErr = {};
+  }
+
+  function cancelChannel() {
+    const id = chEditing?.id;
+    resetChannelForm();
+    if (id) void focusRowButton("data-ch-edit-for", id);
   }
 
   function startNewChannel() {
     resetChannelForm();
     chNew = true;
+    void focusPanel(chPanelId);
   }
 
   function startEditChannel(c: AlertChannel) {
@@ -151,107 +190,46 @@
     chType = c.type;
     chLocality = c.dispatch_locality;
     chEnabled = c.enabled;
-    const cfg = c.config ?? {};
-    if (c.type === "webhook") {
-      cWebhookUrl = String(cfg.url ?? "");
-      cWebhookSecret = ""; // secret redacted on read; empty = keep
-      cWebhookFormat = (String(cfg.webhook_format ?? "generic") as WebhookFormat);
-      chFormatTouched = true; // an existing channel keeps its stored format
-    } else if (c.type === "email") {
-      cEmailHost = String(cfg.host ?? "");
-      cEmailPort = Number(cfg.port ?? 587);
-      cEmailSecurity = String(cfg.security ?? "starttls");
-      cEmailFrom = String(cfg.from_addr ?? cfg.from ?? "");
-      const to = cfg.to ?? cfg.to_addrs ?? [];
-      cEmailTo = Array.isArray(to) ? to.join(", ") : String(to);
-      cEmailUser = String(cfg.username ?? "");
-      cEmailPassword = ""; // keep unless typed
-    } else {
-      cAppriseUrl = ""; // whole url is the secret; empty = keep
-    }
-  }
-
-  // Build the config for the API. `editing` decides whether an empty secret
-  // means "keep" (send the UNCHANGED sentinel) rather than "clear".
-  function buildConfig(editing: boolean): Record<string, unknown> {
-    if (chType === "webhook") {
-      const secret = cWebhookSecret
-        ? cWebhookSecret
-        : editing
-          ? UNCHANGED
-          : undefined;
-      return {
-        url: cWebhookUrl,
-        webhook_format: cWebhookFormat,
-        ...(secret !== undefined ? { secret } : {}),
-      };
-    }
-    if (chType === "email") {
-      const password = cEmailPassword
-        ? cEmailPassword
-        : editing
-          ? UNCHANGED
-          : undefined;
-      return {
-        host: cEmailHost,
-        port: cEmailPort,
-        security: cEmailSecurity,
-        from_addr: cEmailFrom,
-        to: cEmailTo.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
-        username: cEmailUser,
-        ...(password !== undefined ? { password } : {}),
-      };
-    }
-    // apprise: the whole url is the secret
-    const url = cAppriseUrl ? cAppriseUrl : editing ? UNCHANGED : "";
-    return { url };
+    chForm = channelFormFromConfig(c.type, c.config);
+    chFormatTouched = true; // an existing channel keeps its stored format
+    void focusPanel(chPanelId);
   }
 
   // FIX-16: auto-detect the format from the URL until the operator overrides it.
   function onWebhookUrlInput() {
-    if (!chFormatTouched) cWebhookFormat = detectWebhookFormat(cWebhookUrl);
-  }
-
-  // The checks the old native `required` attributes made, per channel type.
-  function validateChannel(): Record<string, string> {
-    const errs: Record<string, string> = {};
-    const need = (key: string, v: string, label: string) => {
-      if (!v.trim()) errs[key] = `${label} is required.`;
-    };
-    need("name", chName_, "Name");
-    if (chType === "webhook") need("url", cWebhookUrl, "URL");
-    else if (chType === "email") {
-      need("host", cEmailHost, "SMTP host");
-      need("from", cEmailFrom, "From");
-      need("to", cEmailTo, "To");
-    }
-    return errs;
+    if (!chFormatTouched) chForm.webhookFormat = detectWebhookFormat(chForm.webhookUrl);
   }
 
   async function saveChannel(e: Event) {
     e.preventDefault();
-    chFieldErr = validateChannel();
-    if (Object.keys(chFieldErr).length) return;
+    const built = buildChannelConfig(chType, chForm, chEditing?.config ?? null);
+    const errs: Record<string, string> = built.ok ? {} : { ...built.errors };
+    if (!chName_.trim()) errs.name = "Name is required.";
+    chFieldErr = errs;
+    if (!built.ok || Object.keys(errs).length) return;
     chBusy = true;
     chErr = "";
     try {
       if (chEditing) {
-        await updateAlertChannel(chEditing.id, {
-          name: chName_,
-          config: buildConfig(true),
-          dispatch_locality: chLocality,
-          enabled: chEnabled,
-        });
+        const patch: Parameters<typeof updateAlertChannel>[1] = {};
+        if (chName_.trim() !== chEditing.name) patch.name = chName_.trim();
+        if (Object.keys(built.config).length) patch.config = built.config;
+        if (chLocality !== chEditing.dispatch_locality) patch.dispatch_locality = chLocality;
+        if (chEnabled !== chEditing.enabled) patch.enabled = chEnabled;
+        const id = chEditing.id;
+        if (Object.keys(patch).length) await updateAlertChannel(id, patch);
+        resetChannelForm();
+        void focusRowButton("data-ch-edit-for", id);
       } else {
         await createAlertChannel({
-          name: chName_,
+          name: chName_.trim(),
           type: chType,
-          config: buildConfig(false),
+          config: built.config,
           dispatch_locality: chLocality,
           enabled: chEnabled,
         });
+        resetChannelForm();
       }
-      resetChannelForm();
       await refresh();
     } catch (err) {
       chErr = errorMessage(err, { verb: "manage alerts" });
@@ -289,7 +267,6 @@
 
   // A channel's test progress/result renders below the table (rowPanel.ts):
   // firing focuses it, dismissing returns focus to the row's test button.
-  const uid = $props.id();
   const testPanelId = (channelId: string) => `${uid}-test-${channelId}`;
 
   function dismissTest(c: AlertChannel) {
@@ -317,7 +294,8 @@
   let rEvents = $state<string[]>(["created"]);
   let rHashOnly = $state(false);
   let rThrottle = $state<"immediate" | "digest">("immediate");
-  let rGroupWait = $state(30);
+  // Number inputs: a number, or null when emptied (blank = the stated default).
+  let rGroupWait = $state<number | null>(DEFAULT_GROUP_WAIT_S);
   let rDigest = $state<DigestWindow>("hourly");
   let rRepeat = $state<string>(""); // seconds, blank = none
   let rChannels = $state<string[]>([]);
@@ -326,7 +304,7 @@
   // 2026-08-20 mass edit: selection + one change-set applied to many rules.
   let bulkSel = $state<Set<string>>(new Set());
   let bulkThrottle = $state<"" | "immediate" | "hourly" | "daily">("");
-  let bulkGroupWait = $state(30);
+  let bulkGroupWait = $state<number | null>(DEFAULT_GROUP_WAIT_S);
   let bulkChannelMode = $state<"set" | "add" | "remove">("set");
   let bulkChannels = $state<string[]>([]);
   let bulkTouchChannels = $state(false);
@@ -342,26 +320,56 @@
 
   async function applyBulk() {
     if (bulkSel.size === 0) return;
-    bulkBusy = true;
     bulkErr = "";
+    const n = bulkSel.size;
+    const rulesWord = `${n} rule${n === 1 ? "" : "s"}`;
+    const body: Record<string, unknown> = { rule_ids: [...bulkSel] };
+    if (bulkThrottle) {
+      body.set_throttle = true;
+      body.digest_window = bulkThrottle === "immediate" ? null : bulkThrottle;
+      if (bulkThrottle === "immediate") {
+        const t = parseRuleTimings({ repeat: "", groupWait: bulkGroupWait, inhibitWindow: null });
+        if (!t.ok) {
+          bulkErr = t.errors.groupWait;
+          return;
+        }
+        body.group_wait_s = t.values.group_wait_s;
+      }
+    }
+    if (bulkTouchChannels) {
+      if (bulkChannels.length === 0 && bulkChannelMode !== "set") {
+        bulkErr = "Pick at least one channel.";
+        return;
+      }
+      if (bulkChannels.length === 0) {
+        // "Replace with" nothing detaches every channel: the rules stop notifying.
+        const ok = await confirm({
+          title: "Remove all channels?",
+          message: `No channel is selected, so this removes every channel from ${rulesWord}.`,
+          details: ["Those rules keep matching but send no notifications until a channel is attached again"],
+          confirmLabel: "Remove all channels",
+          tone: "danger",
+        });
+        if (!ok) return;
+      }
+      body.channel_mode = bulkChannelMode;
+      body.channel_ids = bulkChannels;
+    }
+    bulkBusy = true;
     try {
-      const body: Record<string, unknown> = { rule_ids: [...bulkSel] };
-      if (bulkThrottle) {
-        body.set_throttle = true;
-        body.digest_window = bulkThrottle === "immediate" ? null : bulkThrottle;
-        if (bulkThrottle === "immediate") body.group_wait_s = bulkGroupWait;
-      }
-      if (bulkTouchChannels) {
-        body.channel_mode = bulkChannelMode;
-        body.channel_ids = bulkChannels;
-      }
-      await bulkUpdateAlertRules(body);
+      const r = await bulkUpdateAlertRules(body);
+      const missing = r.missing.length
+        ? ` ${r.missing.length} selected rule${r.missing.length === 1 ? " no longer exists" : "s no longer exist"}.`
+        : "";
+      toast(`Updated ${r.updated} rule${r.updated === 1 ? "" : "s"}.${missing}`, {
+        tone: r.missing.length ? "warn" : "ok",
+      });
       bulkSel = new Set();
       bulkThrottle = "";
       bulkTouchChannels = false;
       await refresh();
     } catch (e) {
-      bulkErr = errorMessage(e);
+      bulkErr = errorMessage(e, { verb: "manage alerts" });
     } finally {
       bulkBusy = false;
     }
@@ -369,7 +377,7 @@
   // Roadmap §6 polish (2026-08-19): optional extra grouping keys and inhibition.
   let rGroupExtras = $state<string[]>([]);
   let rInhibitedBy = $state<string[]>([]);
-  let rInhibitWindow = $state(900);
+  let rInhibitWindow = $state<number | null>(DEFAULT_INHIBIT_WINDOW_S);
   const GROUP_EXTRAS: { key: string; label: string; hint: string }[] = [
     { key: "folder", label: "top-level folder", hint: "one notification per first-level folder that changed" },
     { key: "extension", label: "file extension", hint: "one notification per extension" },
@@ -391,7 +399,7 @@
     rEvents = ["created"];
     rHashOnly = false;
     rThrottle = "immediate";
-    rGroupWait = 30;
+    rGroupWait = DEFAULT_GROUP_WAIT_S;
     rDigest = "hourly";
     rRepeat = "";
     rChannels = [];
@@ -399,7 +407,7 @@
     rShowAdvanced = false;
     rGroupExtras = [];
     rInhibitedBy = [];
-    rInhibitWindow = 900;
+    rInhibitWindow = DEFAULT_INHIBIT_WINDOW_S;
     rlErr = "";
     rlFieldErr = {};
   }
@@ -407,6 +415,13 @@
   function startNewRule() {
     resetRuleForm();
     rlNew = true;
+    void focusPanel(rlPanelId);
+  }
+
+  function cancelRule() {
+    const id = rlEditing?.id;
+    resetRuleForm();
+    if (id) void focusRowButton("data-rl-edit-for", id);
   }
 
   function startEditRule(r: AlertRule) {
@@ -425,8 +440,9 @@
     rEnabled = r.enabled;
     rGroupExtras = (r.group_by ?? []).filter((g) => GROUP_EXTRAS.some((x) => x.key === g));
     rInhibitedBy = [...(r.inhibited_by ?? [])];
-    rInhibitWindow = r.inhibit_window_s ?? 900;
-    if (rGroupExtras.length || rInhibitedBy.length) rShowAdvanced = true;
+    rInhibitWindow = r.inhibit_window_s ?? DEFAULT_INHIBIT_WINDOW_S;
+    if (rGroupExtras.length || rInhibitedBy.length || r.repeat_interval_s != null) rShowAdvanced = true;
+    void focusPanel(rlPanelId);
   }
 
   function toggle(list: string[], id: string): string[] {
@@ -436,22 +452,37 @@
   async function saveRule(e: Event) {
     e.preventDefault();
     // The old native `required` on Name (system rules keep their fixed name).
-    rlFieldErr = !isSystem && !rName.trim() ? { name: "Name is required." } : {};
-    if (Object.keys(rlFieldErr).length) return;
+    const errs: Record<string, string> = !isSystem && !rName.trim() ? { name: "Name is required." } : {};
+    // B42: garbage → field errors (never NaN/null); cleared waits → defaults.
+    // The group-wait box is disabled (and not sent) in digest mode.
+    const t = parseRuleTimings({
+      repeat: rRepeat,
+      groupWait: rThrottle === "immediate" ? rGroupWait : null,
+      inhibitWindow: rInhibitWindow,
+    });
+    if (!t.ok) {
+      Object.assign(errs, t.errors);
+      if (errs.repeat || errs.inhibitWindow) rShowAdvanced = true;
+    }
+    rlFieldErr = errs;
+    if (!t.ok || Object.keys(errs).length) return;
+    const v = t.values;
     rlBusy = true;
     rlErr = "";
     try {
-      const repeat = rRepeat.trim() === "" ? null : Number(rRepeat);
+      const timings = {
+        group_wait_s: rThrottle === "immediate" ? v.group_wait_s : 0,
+        digest_window: rThrottle === "digest" ? rDigest : null,
+        repeat_interval_s: v.repeat_interval_s,
+        inhibit_window_s: v.inhibit_window_s,
+      };
       if (rlEditing) {
         // System rules: only channels + throttle/timings are editable.
         const patch: Record<string, unknown> = {
           enabled: rEnabled,
-          group_wait_s: rThrottle === "immediate" ? rGroupWait : 0,
-          digest_window: rThrottle === "digest" ? rDigest : null,
-          repeat_interval_s: repeat,
+          ...timings,
           channel_ids: rChannels,
           inhibited_by: rInhibitedBy,
-          inhibit_window_s: rInhibitWindow,
         };
         if (!rlEditing.is_system) {
           patch.name = rName;
@@ -461,7 +492,10 @@
           patch.hash_change_only = rHashOnly && rEvents.includes("modified");
           patch.group_by = ["event_type", "library_id", "rule_id", ...rGroupExtras];
         }
-        await updateAlertRule(rlEditing.id, patch);
+        const id = rlEditing.id;
+        await updateAlertRule(id, patch);
+        resetRuleForm();
+        void focusRowButton("data-rl-edit-for", id);
       } else {
         await createAlertRule({
           name: rName,
@@ -470,16 +504,13 @@
           path_glob: rGlob || null,
           event_types: rEvents,
           hash_change_only: rHashOnly && rEvents.includes("modified"),
-          group_wait_s: rThrottle === "immediate" ? rGroupWait : 0,
-          digest_window: rThrottle === "digest" ? rDigest : null,
-          repeat_interval_s: repeat,
+          ...timings,
           channel_ids: rChannels,
           group_by: ["event_type", "library_id", "rule_id", ...rGroupExtras],
           inhibited_by: rInhibitedBy,
-          inhibit_window_s: rInhibitWindow,
         });
+        resetRuleForm();
       }
-      resetRuleForm();
       await refresh();
     } catch (err) {
       rlErr = errorMessage(err, { verb: "manage alerts" });
@@ -532,22 +563,50 @@
   let evLoading = $state(false);
   let evError = $state("");
 
-  async function loadEvents() {
-    evLoading = true;
+  // B24: pages of EV_PAGE, newest first; "Load more" sends the last row as a
+  // keyset cursor, so events arriving between loads never shift the pages.
+  const EV_PAGE = 100;
+  let evMore = $state(false);
+  let evLoadingMore = $state(false);
+  // Only the newest loadEvents run clears the loading flags: a superseded one
+  // finishing late must not hide the spinner of the run that replaced it.
+  let evSeq = 0;
+
+  async function loadEvents(more = false) {
+    const mine = ++evSeq;
+    if (more) evLoadingMore = true;
+    else evLoading = true;
+    const last = more ? events[events.length - 1] : undefined;
     try {
-      const r = await eventsLoader.run({
+      const page = await eventsLoader.run({
         rule_id: evRule || undefined,
         status: evStatus || undefined,
-        limit: 100,
+        limit: EV_PAGE,
+        before: last ? { occurred_at: last.occurred_at, id: last.id } : undefined,
       });
-      if (r === undefined) return;
-      [events, summary] = r;
+      if (page === undefined) return;
+      if (more) {
+        // Belt and braces: never show a row twice.
+        const seen = new Set(events.map((x) => x.id));
+        events = [...events, ...page.filter((x) => !seen.has(x.id))];
+      } else {
+        events = page;
+      }
+      evMore = page.length === EV_PAGE;
       evError = "";
-      evLoading = false;
     } catch (e) {
       evError = errorMessage(e);
-      evLoading = false;
+    } finally {
+      if (mine === evSeq) {
+        evLoading = false;
+        evLoadingMore = false;
+      }
     }
+  }
+
+  function refreshEvents() {
+    void loadSummary();
+    void loadEvents();
   }
 
   $effect(() => {
@@ -559,8 +618,18 @@
     }
   });
 
+  // The summary is unfiltered by rule, so a total exists only without a rule
+  // filter: the status count, or all three summed.
+  // Locale digit grouping for counts (dates go through format.ts).
+  const nf = new Intl.NumberFormat();
+  const count = (v: number): string => nf.format(v);
+
+  const evTotal = $derived.by(() => {
+    if (!summary || evRule) return null;
+    return evStatus ? summary[evStatus] : summary.delivered + summary.failed + summary.pending;
+  });
+
   const ruleName = (id: string) => rules.find((r) => r.id === id)?.name ?? id.slice(0, 8);
-  const fmt = (s: string | null) => (s ? new Date(s).toLocaleString() : "—");
   // Delivered reads as success, failed as danger, anything else (pending) neutral.
   const evTone = (st: string): Tone => (st === "failed" ? "danger" : st === "delivered" ? "ok" : "neutral");
 
@@ -600,7 +669,8 @@
   <div class="flex justify-end gap-1">
     <Button size="sm" aria-controls={testResults[c.id] ? testPanelId(c.id) : undefined} data-test-for={c.id}
       onclick={() => fireTest(c)}>test</Button>
-    <Button size="sm" onclick={() => startEditChannel(c)}>edit</Button>
+    <Button size="sm" aria-controls={chEditing?.id === c.id ? chPanelId : undefined} data-ch-edit-for={c.id}
+      onclick={() => startEditChannel(c)}>edit</Button>
     <Button size="sm" variant="danger" onclick={() => removeChannel(c)}>delete</Button>
   </div>
 {/snippet}
@@ -622,13 +692,14 @@
 {/snippet}
 {#snippet ruleActionsCell(r: AlertRule)}
   <div class="flex justify-end gap-1">
-    <Button size="sm" onclick={() => startEditRule(r)}>edit</Button>
+    <Button size="sm" aria-controls={rlEditing?.id === r.id ? rlPanelId : undefined} data-rl-edit-for={r.id}
+      onclick={() => startEditRule(r)}>edit</Button>
     {#if !r.is_system}<Button size="sm" variant="danger" onclick={() => removeRule(r)}>delete</Button>{/if}
   </div>
 {/snippet}
 
 <!-- ---- event cells ---- -->
-{#snippet evOccurredCell(ev: AlertEvent)}<span class="whitespace-nowrap text-xs">{fmt(ev.occurred_at)}</span>{/snippet}
+{#snippet evOccurredCell(ev: AlertEvent)}<span class="whitespace-nowrap text-xs" title={fmtUtc(ev.occurred_at)}>{fmtDateTime(ev.occurred_at)}</span>{/snippet}
 {#snippet evTypeCell(ev: AlertEvent)}<span class="text-xs">{ev.event_type}</span>{/snippet}
 {#snippet evLibraryCell(ev: AlertEvent)}<span class="text-xs">{libName(ev.library_id)}</span>{/snippet}
 {#snippet evStatusCell(ev: AlertEvent)}
@@ -643,7 +714,7 @@
   {/if}
 {/snippet}
 {#snippet evDeliveredCell(ev: AlertEvent)}
-  <span class="whitespace-nowrap text-xs">{fmt(ev.delivered_at)}{#if ev.delivery_attempts > 0} ({ev.delivery_attempts} tries){/if}</span>
+  <span class="whitespace-nowrap text-xs" title={ev.delivered_at ? fmtUtc(ev.delivered_at) : undefined}>{fmtDateTime(ev.delivered_at)}{#if ev.delivery_attempts > 0} ({ev.delivery_attempts} tries){/if}</span>
 {/snippet}
 
 <div class="space-y-4">
@@ -673,9 +744,11 @@
       class="w-full rounded-control bg-warn-bg p-3 text-left text-sm text-warn"
       onclick={() => {
         tab = "events";
+        // The count covers every rule, so the list drops any rule filter.
+        evRule = "";
         evStatus = "failed";
       }}>
-      ⚠ {summary.failed} alert{summary.failed === 1 ? "" : "s"} failed to deliver (retries exhausted).
+      ⚠ {count(summary.failed)} alert{summary.failed === 1 ? "" : "s"} failed to deliver (retries exhausted).
       Click to review.
     </button>
   {/if}
@@ -734,7 +807,8 @@
     {/each}
 
     {#if chNew || chEditing}
-      <form class="space-y-3 rounded-panel border border-border p-4" onsubmit={saveChannel} novalidate>
+      <form id={chPanelId} tabindex="-1" aria-label={chEditing ? `Edit channel ${chEditing.name}` : "New channel"}
+        class="space-y-3 rounded-panel border border-border p-4" onsubmit={saveChannel} novalidate>
         <h3 class="font-medium">{chEditing ? "Edit channel" : "New channel"}</h3>
         <div class="grid gap-3 sm:grid-cols-2">
           <Field label="Name" required error={chFieldErr.name}>
@@ -749,55 +823,88 @@
 
         {#if chType === "webhook"}
           <Field label="URL" required error={chFieldErr.url}>
-            <Input bind:value={cWebhookUrl} oninput={onWebhookUrlInput} placeholder="https://…" />
+            <Input bind:value={chForm.webhookUrl} oninput={onWebhookUrlInput} placeholder="https://…" />
           </Field>
           <div class="flex items-start gap-2">
             <Field
               label="Payload format"
               class="flex-1"
               hint="Auto-detected from the URL. generic = Filearr signed JSON; discord / slack reshape the body for those endpoints (and skip the HMAC signature).">
-              <Select bind:value={cWebhookFormat} onchange={() => (chFormatTouched = true)}>
+              <Select bind:value={chForm.webhookFormat} onchange={() => (chFormatTouched = true)}>
                 {#each WEBHOOK_FORMATS as f (f)}<option value={f}>{f}</option>{/each}
               </Select>
             </Field>
             <span class="pt-0.5"><Help text={HELP.webhook_format} label="payload format" /></span>
           </div>
           <Field
-            label="HMAC secret {chEditing ? '(leave blank to keep)' : '(optional)'}"
-            hint={cWebhookFormat !== "generic"
-              ? `Not sent for ${cWebhookFormat} — signature is only added to the generic format.`
-              : undefined}>
-            <Input type="password" autocomplete="new-password" bind:value={cWebhookSecret} />
+            label="HMAC secret {chReentry ? '' : chStoredSecret ? '(leave blank to keep)' : '(optional)'}"
+            required={chReentry && !chForm.clearWebhookSecret}
+            error={chFieldErr.secret}
+            hint={chForm.clearWebhookSecret
+              ? "The stored secret is removed on Save."
+              : chReentry
+                ? "The host changed: re-enter the secret — the stored one is not used for a new destination."
+              : chForm.webhookFormat !== "generic"
+                ? `Not sent for ${chForm.webhookFormat} — signature is only added to the generic format.`
+                : undefined}>
+            <Input type="password" autocomplete="new-password" bind:value={chForm.webhookSecret}
+              disabled={chForm.clearWebhookSecret} />
           </Field>
+          {#if chStoredSecret}
+            <Checkbox label="Clear stored secret" bind:checked={chForm.clearWebhookSecret} />
+          {/if}
         {:else if chType === "email"}
           <div class="grid gap-3 sm:grid-cols-2">
             <Field label="SMTP host" required error={chFieldErr.host}>
-              <Input bind:value={cEmailHost} />
+              <Input bind:value={chForm.emailHost} />
             </Field>
-            <Field label="Port">
-              <Input type="number" bind:value={cEmailPort} />
+            <Field label="Port" hint="Blank = 587." error={chFieldErr.port}>
+              <Input type="number" min="1" max="65535" placeholder="587" bind:value={chForm.emailPort} />
             </Field>
             <Field label="Security">
-              <Select bind:value={cEmailSecurity}>
+              <Select bind:value={chForm.emailSecurity}>
                 <option value="starttls">STARTTLS</option><option value="ssl">SSL</option><option value="plain">plain (insecure)</option>
               </Select>
             </Field>
             <Field label="From" required error={chFieldErr.from}>
-              <Input bind:value={cEmailFrom} />
+              <Input bind:value={chForm.emailFrom} />
             </Field>
+            {#if chForm.emailSecurity === "plain"}
+              <div class="sm:col-span-2">
+                <Checkbox
+                  label="Allow insecure plaintext SMTP"
+                  description="Mail and the SMTP password cross the network unencrypted. Delivery refuses plain SMTP without this."
+                  bind:checked={chForm.allowInsecure} />
+                {#if chFieldErr.allow_insecure}
+                  <p class="mt-1 text-xs text-danger">{chFieldErr.allow_insecure}</p>
+                {/if}
+              </div>
+            {/if}
             <Field label="To (comma-separated)" required error={chFieldErr.to} class="sm:col-span-2">
-              <Input bind:value={cEmailTo} />
+              <Input bind:value={chForm.emailTo} />
             </Field>
             <Field label="Username">
-              <Input bind:value={cEmailUser} />
+              <Input bind:value={chForm.emailUser} />
             </Field>
-            <Field label="Password {chEditing ? '(blank = keep)' : ''}">
-              <Input type="password" autocomplete="new-password" bind:value={cEmailPassword} />
+            <Field label="Password {chStoredSecret && !chReentry ? '(blank = keep)' : ''}"
+              required={chReentry && !chForm.clearEmailPassword}
+              error={chFieldErr.password}
+              hint={chForm.clearEmailPassword
+                ? "The stored password is removed on Save."
+                : chReentry
+                  ? "The server changed: re-enter the password — the stored one is never sent to a new server."
+                  : undefined}>
+              <Input type="password" autocomplete="new-password" bind:value={chForm.emailPassword}
+                disabled={chForm.clearEmailPassword} />
             </Field>
+            {#if chStoredSecret}
+              <Checkbox label="Clear stored password" bind:checked={chForm.clearEmailPassword} />
+            {/if}
           </div>
         {:else}
-          <Field label="Apprise URL {chEditing ? '(blank = keep)' : ''} — the whole URL is stored encrypted">
-            <Input type="password" autocomplete="new-password" bind:value={cAppriseUrl} placeholder="discord://… / tgram://… / ntfy://…" />
+          <Field label="Apprise URL {chEditing ? '(blank = keep)' : ''} — the whole URL is stored encrypted"
+            required={!chEditing} error={chFieldErr.apprise}>
+            <Input type="password" autocomplete="new-password" bind:value={chForm.appriseUrl} placeholder="discord://… / tgram://… / ntfy://…" />
           </Field>
         {/if}
 
@@ -814,7 +921,7 @@
           <Button type="submit" variant="primary" disabled={chBusy}>
             {chBusy ? "Saving…" : "Save"}
           </Button>
-          <Button onclick={resetChannelForm}>Cancel</Button>
+          <Button onclick={cancelChannel}>Cancel</Button>
         </div>
         {#if chErr}
           <Alert tone="danger" onDismiss={() => (chErr = "")}>{chErr}</Alert>
@@ -914,7 +1021,8 @@
     {/each}
 
     {#if rlNew || rlEditing}
-      <form class="space-y-3 rounded-panel border border-border p-4" onsubmit={saveRule} novalidate>
+      <form id={rlPanelId} tabindex="-1" aria-label={rlEditing ? `Edit rule ${rlEditing.name}` : "New rule"}
+        class="space-y-3 rounded-panel border border-border p-4" onsubmit={saveRule} novalidate>
         <h3 class="font-medium">
           {rlEditing ? (isSystem ? "Edit system rule" : "Edit rule") : "New rule"}
         </h3>
@@ -970,10 +1078,12 @@
                 Immediate — group matches for
               </label>
               <div class="w-20">
-                <Input type="number" size="sm" min="0" aria-label="Group wait (seconds)" bind:value={rGroupWait} disabled={rThrottle !== "immediate"} />
+                <Input type="number" size="sm" min="0" placeholder={String(DEFAULT_GROUP_WAIT_S)} aria-label="Group wait (seconds)"
+                  aria-invalid={rlFieldErr.groupWait ? true : undefined} bind:value={rGroupWait} disabled={rThrottle !== "immediate"} />
               </div>
-              seconds
+              seconds <span class="text-xs text-muted">(blank = {DEFAULT_GROUP_WAIT_S})</span>
             </div>
+            {#if rlFieldErr.groupWait}<p class="text-xs text-danger">{rlFieldErr.groupWait}</p>{/if}
             <div class="flex flex-wrap items-center gap-2">
               <label class="flex items-center gap-2">
                 <input type="radio" name="rule-throttle" class="size-4 accent-accent" value="digest" bind:group={rThrottle} />
@@ -993,7 +1103,7 @@
           {rShowAdvanced ? "Hide" : "Show"} advanced
         </Button>
         {#if rShowAdvanced}
-          <Field label="Repeat interval (seconds; blank = never re-notify)" class="w-80 max-w-full">
+          <Field label="Repeat interval (seconds; blank = never re-notify)" class="w-80 max-w-full" error={rlFieldErr.repeat}>
             <Input bind:value={rRepeat} placeholder="e.g. 3600" />
           </Field>
           {#if !rlEditing?.is_system}
@@ -1019,10 +1129,13 @@
             <div class="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted">
               Mute this rule while any selected rule has fired in the last
               <div class="w-20">
-                <Input size="sm" type="number" min="0" max="86400" aria-label="Inhibit window (seconds)" bind:value={rInhibitWindow} />
+                <Input size="sm" type="number" min="0" max="86400" placeholder={String(DEFAULT_INHIBIT_WINDOW_S)}
+                  aria-label="Inhibit window (seconds)" aria-invalid={rlFieldErr.inhibitWindow ? true : undefined}
+                  bind:value={rInhibitWindow} />
               </div>
-              seconds
+              seconds (blank = {DEFAULT_INHIBIT_WINDOW_S})
             </div>
+            {#if rlFieldErr.inhibitWindow}<p class="text-xs text-danger">{rlFieldErr.inhibitWindow}</p>{/if}
             <p class="text-xs text-muted">
               (same library, or a library-wide inhibitor). Muted batches are recorded as
               "suppressed: inhibited by …" and never sent — e.g. let <em>agent offline</em>
@@ -1058,7 +1171,7 @@
           <Button type="submit" variant="primary" disabled={rlBusy}>
             {rlBusy ? "Saving…" : "Save"}
           </Button>
-          <Button onclick={resetRuleForm}>Cancel</Button>
+          <Button onclick={cancelRule}>Cancel</Button>
         </div>
         {#if rlErr}
           <Alert tone="danger" onDismiss={() => (rlErr = "")}>{rlErr}</Alert>
@@ -1083,11 +1196,13 @@
         </Select>
       </Field>
       {#if summary}
+        <!-- Summary counts cover every rule, whatever the rule filter. -->
         <span class="text-xs text-muted">
-          {summary.delivered} delivered · <span class="text-warn">{summary.failed} failed</span> · {summary.pending} pending
+          {evRule ? "All rules: " : ""}{count(summary.delivered)} delivered ·
+          <span class="text-warn">{count(summary.failed)} failed</span> · {count(summary.pending)} pending
         </span>
       {/if}
-      <Button size="sm" onclick={loadEvents}>Refresh</Button>
+      <Button size="sm" onclick={refreshEvents}>Refresh</Button>
     </div>
 
     {#if evError && events.length}
@@ -1111,12 +1226,22 @@
       bind:sort={evSort}
       loading={evLoading}
       error={events.length ? null : evError || null}
-      onRetry={loadEvents}
+      onRetry={() => loadEvents()}
       emptyMessage="No events match these filters. Events appear here once a rule fires; widen the filters to see more." />
     {#if events.length}
-      <!-- Only the newest 100 events are fetched, so a column sort reorders
-           those, not the whole history. -->
-      <p class="mt-1 text-xs text-muted">Sorting applies to the events shown on this page.</p>
+      <!-- Pages load newest first, so a column sort reorders the loaded
+           events, not the whole history. -->
+      <div class="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted">
+        <span>
+          Showing {count(events.length)}{#if evTotal != null} of {count(evTotal)}{/if}
+          event{(evTotal ?? events.length) === 1 ? "" : "s"}. Sorting applies to the loaded events.
+        </span>
+        {#if evMore}
+          <Button size="sm" disabled={evLoadingMore || evLoading} onclick={() => loadEvents(true)}>
+            {evLoadingMore ? "Loading…" : `Load ${EV_PAGE} more`}
+          </Button>
+        {/if}
+      </div>
     {/if}
   {/if}
 </div>

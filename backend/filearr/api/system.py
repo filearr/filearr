@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import __version__, errors
+from filearr.buildinfo import build_info
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.embed_stats import semantic_snapshot
@@ -35,39 +36,23 @@ async def health() -> dict:
 
 @router.get("/version")
 async def version() -> dict:
-    """Identify the RUNNING build. ``build_stamp`` is written into the image
-    by the deploy script (backend/.build-stamp -> /app/.build-stamp) and is
-    the ground truth for "which source is this container actually running" —
-    the same stamp the deploy's verify step checks. Null outside deployed
-    images (dev checkouts have no stamp)."""
+    """Identify the RUNNING build. ``build`` is never null: it resolves from the
+    deploy stamp, the image's baked build args, a git checkout, or (last) the
+    package version — ``build.source`` says which (see :mod:`filearr.buildinfo`)."""
     from starlette.concurrency import run_in_threadpool
 
     # ``source_url`` (AGPL-3.0 §13, FILEARR_SOURCE_URL) is served here so the
     # footer "Source" link can point at a fork's modified source at RUNTIME
     # without a frontend rebuild -- the Vite __SOURCE_URL__ is only the fallback.
+    build = await run_in_threadpool(build_info)
     return {
         "app_version": __version__,
-        "build_stamp": await run_in_threadpool(_read_stamp),
+        "build": build,
         "source_url": get_settings().source_url,
         # P5-T1: whether the distributed-agent fleet surface is enabled (drives
         # the Admin -> Agents panel's visibility). Opt-in, default off.
         "agents_enabled": get_settings().agents_enabled,
     }
-
-
-def _read_stamp() -> str | None:
-    import pathlib as _pl
-
-    candidates = (
-        _pl.Path("/app/.build-stamp"),
-        _pl.Path(__file__).resolve().parents[2] / ".build-stamp",
-    )
-    for cand in candidates:
-        try:
-            return cand.read_text().strip() or None
-        except OSError:
-            continue
-    return None
 
 
 # Rate limit for the over-budget WARNING: /stats is polled by the UI, and the
@@ -514,9 +499,11 @@ async def failed_jobs_view(
 
     Returns ``{items, total, limit, offset}`` so the UI can render a real pager
     (the failed-jobs list used to grow unbounded on screen — FIX-8). ``total`` is
-    the full failed-row count; ``items`` is the requested page. procrastinate 3.9
-    does not persist per-job error text in the DB, so each item's ``error`` is
-    null and ``attempted_at`` (last event time) is the actionable signal.
+    the full failed-row count; ``items`` is the requested page. Each item's
+    ``error``/``traceback`` come from the ``job_errors`` table written by the
+    ``filearr.joberrors`` worker middleware (procrastinate itself stores no
+    error text); they are null only for failures recorded before that
+    middleware existed or whose capture failed.
     """
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
@@ -913,10 +900,10 @@ async def about_view(session: AsyncSession = Depends(get_session)) -> dict:
 
     from filearr import about
 
-    stamp = await run_in_threadpool(_read_stamp)
+    build = await run_in_threadpool(build_info)
     # One hop to the threadpool for the whole blocking half (dependency metadata
     # scan, host-tool subprocesses, HF cache stat) rather than one per section.
-    payload = await run_in_threadpool(about.sync_sections, stamp)
+    payload = await run_in_threadpool(about.sync_sections, build)
     payload["services"] = await about.services_section(session)
     payload["agents"] = await about.agent_fleet(session)
     # BK-T1: the key-fingerprint guard's live verdict, hung off ``application``

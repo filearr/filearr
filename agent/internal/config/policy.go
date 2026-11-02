@@ -52,9 +52,6 @@ type Policy struct {
 	ScanOnStart         *bool   `json:"scan_on_start"`
 
 	// Config-group settings central merges under "group" (P10 config groups).
-	// scan_schedule_cron was defined + validated centrally from the start but
-	// never consumed agent-side until the in-daemon scheduler; the documented
-	// precedence holds: an operator-authored top-level policy key wins.
 	Group *GroupSettings `json:"group"`
 
 	// P7-T4 local query surface keys. Absent (nil) → the never-contacted default
@@ -398,7 +395,6 @@ func (p Policy) OverlayScan(s ScanSettings) ScanSettings {
 // from the policy's "group" section. Only the keys the agent consumes are
 // declared; the rest of the group document passes through unparsed.
 type GroupSettings struct {
-	ScanScheduleCron *string `json:"scan_schedule_cron"`
 	// LogLevel (2026-08-20): central management of the process log threshold.
 	// When set, the daemon live-retunes agentlog on every policy apply; absent
 	// = the local flag/env/sidecar resolution stands.
@@ -432,8 +428,8 @@ type PolicyDoc struct {
 	// VerifiedAt is the last time central CONFIRMED this cache is current — set on
 	// a 200 (fresh body) AND a 304 (cache still current). It is the freshness
 	// clock for the P7-T4 offline-grace / web-UI fail-closed rule (a 304 keeps the
-	// cache fresh even though the body did not change). Absent (zero) in caches
-	// written before P7-T4 → freshness falls back to FetchedAt.
+	// cache fresh even though the body did not change). Zero = never confirmed
+	// current → stale.
 	VerifiedAt time.Time       `json:"verified_at"`
 	Policy     json.RawMessage `json:"policy"`
 }
@@ -441,21 +437,12 @@ type PolicyDoc struct {
 // Parsed decodes the honored-key view of the stored policy body.
 func (d PolicyDoc) Parsed() (Policy, error) { return ParsePolicy(d.Policy) }
 
-// freshnessAt is the effective last-confirmed-current time: VerifiedAt when set,
-// else FetchedAt (backward compatibility with pre-P7-T4 caches).
-func (d PolicyDoc) freshnessAt() time.Time {
-	if !d.VerifiedAt.IsZero() {
-		return d.VerifiedAt
-	}
-	return d.FetchedAt
-}
-
 // GraceExpiresAt is when the cached policy goes stale: last-confirmed-current +
 // the (policy-tuned) grace window. def is the caller-supplied default window
 // (DefaultOfflineGrace). A zero freshness clock (never successfully contacted)
 // yields the zero time — treat as already stale (see Stale).
 func (d PolicyDoc) GraceExpiresAt(def time.Duration) time.Time {
-	f := d.freshnessAt()
+	f := d.VerifiedAt
 	if f.IsZero() {
 		return time.Time{}
 	}
@@ -466,7 +453,7 @@ func (d PolicyDoc) GraceExpiresAt(def time.Duration) time.Time {
 // Stale reports whether the cached policy is past its offline-grace window at
 // now. A cache that was never confirmed current (zero freshness clock) is stale.
 func (d PolicyDoc) Stale(now time.Time, def time.Duration) bool {
-	f := d.freshnessAt()
+	f := d.VerifiedAt
 	if f.IsZero() {
 		return true
 	}

@@ -79,7 +79,6 @@ to confirm a change actually reached the containers.
 | `FILEARR_AUTH_RATELIMIT_WINDOW_SECONDS` | `120` | Find window. |
 | `FILEARR_AUTH_RATELIMIT_LOCK_SECONDS` | `300` | Lockout duration. |
 | `FILEARR_TRUSTED_PROXIES` | *(unset)* | Comma-separated IPs/CIDRs of reverse proxies whose `X-Forwarded-For` is believed (real client IPs in the audit log, sessions and rate limit). Not needed for the shipped Caddy sidecar — it proves itself with `X-Filearr-Proxy-Trust` = `FILEARR_PROXY_SHARED_SECRET`. |
-| `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR` | `false` | Legacy: trust the leftmost `X-Forwarded-For` unconditionally. Prefer the two mechanisms above. |
 | `FILEARR_AUDIT_READS` | `false` | Record a per-query search event (high volume). |
 
 OIDC (`FILEARR_OIDC_*`) and LDAP (`FILEARR_LDAP_*`) are extensive provider

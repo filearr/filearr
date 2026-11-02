@@ -21,7 +21,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import select
@@ -53,10 +53,42 @@ _FALLBACK_POLL_INTERVAL = 5.0
 _bearer = HTTPBearer(auto_error=False)
 
 
+# Every ScanRun.status the scan task / endpoints ever write: the live states
+# (`running`, `stopping`) plus the terminal ones. Used to validate the
+# `GET /scans?status=` filter so a typo is a 422, not a silently empty list.
+SCAN_STATUSES = frozenset({"running", "stopping", *_TERMINAL})
+
+
 @router.get("", response_model=list[ScanOut], dependencies=[Depends(require_scope("read"))])
-async def list_scans(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(ScanRun).order_by(ScanRun.started_at.desc()).limit(50))
-    return result.scalars().all()
+async def list_scans(
+    status: str | None = Query(
+        default=None,
+        description="Comma-separated ScanRun statuses to include "
+        "(running, stopping, finished, failed, cancelled, stopped).",
+    ),
+    library_id: uuid.UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+):
+    """Scan runs, newest first. Without filters this is the global recent-runs
+    window; ``?status=running,stopping`` returns the live set regardless of how
+    many newer (e.g. hot-folder) runs exist, and ``library_id`` narrows to one
+    library's history (B9)."""
+    stmt = select(ScanRun)
+    if status is not None:
+        wanted = {s.strip() for s in status.split(",") if s.strip()}
+        unknown = sorted(wanted - SCAN_STATUSES)
+        if unknown or not wanted:
+            raise HTTPException(
+                422,
+                f"unknown scan status {unknown or [status]}; "
+                f"one of {sorted(SCAN_STATUSES)}",
+            )
+        stmt = stmt.where(ScanRun.status.in_(sorted(wanted)))
+    if library_id is not None:
+        stmt = stmt.where(ScanRun.library_id == library_id)
+    stmt = stmt.order_by(ScanRun.started_at.desc(), ScanRun.id.desc()).limit(limit)
+    return (await session.execute(stmt)).scalars().all()
 
 
 @router.post("/{scan_id}/cancel", dependencies=[Depends(require_scope("write"))])

@@ -10,13 +10,32 @@ export class ApiError extends Error {
   status: number;
   body: string;
   detail: unknown;
-  constructor(status: number, body: string) {
+  /** Seconds from the response's ``Retry-After`` header (delta-seconds or an
+   *  HTTP-date, see ``parseRetryAfter``); null when absent or malformed. */
+  retryAfter: number | null;
+  constructor(status: number, body: string, retryAfter: number | null = null) {
     super(`${status}: ${body}`);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
     this.detail = parseDetail(body);
+    this.retryAfter = retryAfter;
   }
+}
+
+/** A ``Retry-After`` header value → whole seconds from ``now``, or null.
+ *  RFC 9110 allows delta-seconds (digits only) or an HTTP-date; a date in the
+ *  past is 0. A bare number with a dot or sign is malformed (``Date.parse``
+ *  would happily read "1.5" as a year), so only digit strings are seconds and
+ *  only strings with a word in them are tried as dates. */
+export function parseRetryAfter(v: string | null | undefined, now: number = Date.now()): number | null {
+  const s = (v ?? "").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  if (!/[A-Za-z]{3}/.test(s)) return null;
+  const t = Date.parse(s);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.ceil((t - now) / 1000));
 }
 
 /** ``fetch`` itself rejected (offline, DNS, refused, CORS): no HTTP status.
@@ -99,6 +118,11 @@ function statusSentence(status: number, verb: string | undefined): string {
 /** Any thrown value → a user-facing sentence. Never the raw ``"ApiError: …"``. */
 export function errorMessage(e: unknown, opts: { verb?: string } = {}): string {
   if (e instanceof ApiError) {
+    if (e.status === 429 && e.retryAfter !== null) {
+      // Ruling 9: say when, not "shortly", when the server told us.
+      const text = detailText(e.detail).replace(/[.\s]+$/, "") || "Too many requests";
+      return `${text}. Try again in ${e.retryAfter} s.`;
+    }
     // 401/403/404 always get the status sentence: the backend's detail there
     // ("Missing bearer token") is not user language.
     if (e.status !== 401 && e.status !== 403 && e.status !== 404) {

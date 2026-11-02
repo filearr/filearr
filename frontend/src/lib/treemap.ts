@@ -182,6 +182,28 @@ export function squarify(
 }
 
 // --------------------------------------------------------------------------- //
+// Drawable vs. list fallback (B39)                                             //
+// --------------------------------------------------------------------------- //
+
+/** Smallest side (viewBox units) a cell needs to be drawn and focused: below
+ *  this the 2-unit inset leaves (almost) nothing to see or hit. */
+export const MIN_CELL = 4;
+
+/** Split laid-out rects into the ones worth drawing and the ones too small (or
+ *  zero-byte) to draw. Order is preserved, so `small` is still largest-first.
+ *  The renderer lists `small` beside the map so every counted folder stays
+ *  reachable — the caption count must match what a user can actually open. */
+export function partitionDrawable(
+  rects: readonly TreemapRect[],
+  minSide: number = MIN_CELL,
+): { drawn: TreemapRect[]; small: TreemapRect[] } {
+  const drawn: TreemapRect[] = [];
+  const small: TreemapRect[] = [];
+  for (const r of rects) (r.w >= minSide && r.h >= minSide ? drawn : small).push(r);
+  return { drawn, small };
+}
+
+// --------------------------------------------------------------------------- //
 // Label fitting                                                                //
 // --------------------------------------------------------------------------- //
 

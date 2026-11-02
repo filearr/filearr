@@ -46,13 +46,6 @@ from filearr.tenant_tokens import scope_ancestors
 
 logger = logging.getLogger(__name__)
 
-# Single source of truth for the attribute lists is ``filearr.meili_ops`` (P9-T1);
-# these module-level names are kept as back-compat aliases (older imports / tests
-# referenced them here). Do NOT re-hardcode — always mirror meili_ops.
-SEARCHABLE = list(SEARCHABLE_ATTRIBUTES)
-FILTERABLE = list(FILTERABLE_ATTRIBUTES)
-SORTABLE = list(SORTABLE_ATTRIBUTES)
-
 # Meili's own default (100); pinned explicitly so a ``GET /settings`` drift check
 # never reports phantom drift on the faceting sub-object just because we omitted it.
 MAX_VALUES_PER_FACET = 100

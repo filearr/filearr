@@ -10,12 +10,10 @@ import pytest
 
 from filearr.presets import (
     CACHEDIR_TAG_SIGNATURE,
-    EXTENSION_GROUPS,
     PRESET_BUNDLES,
     build_exclusion_spec,
     get_preset,
     is_cachedir_tagged,
-    validate_extension_group_names,
     validate_preset_names,
 )
 from filearr.tasks.scoped_scan import ScanPathRule, resolve_scan_path
@@ -70,29 +68,6 @@ def test_get_preset_and_validation():
         get_preset("nope")
     assert validate_preset_names(["system_files", "os_metadata"]) == []
     assert validate_preset_names(["system_files", "bogus"]) == ["bogus"]
-
-
-# --- Extension groups ------------------------------------------------------
-
-
-def test_extension_groups_typed_and_bare_ext():
-    assert EXTENSION_GROUPS["raw_photos"].file_category == "image"
-    assert "cr2" in EXTENSION_GROUPS["raw_photos"].extensions
-    for name, grp in EXTENSION_GROUPS.items():
-        assert grp.extensions, name
-        for ext in grp.extensions:
-            assert ext == ext.lower() and not ext.startswith("."), (name, ext)
-
-
-def test_multiple_groups_per_mediatype_allowed():
-    """R5: >1 group may target the same MediaType (union semantics)."""
-    image_groups = [n for n, g in EXTENSION_GROUPS.items() if g.file_category == "image"]
-    assert {"raw_photos", "jpeg_family"} <= set(image_groups)
-
-
-def test_validate_extension_group_names():
-    assert validate_extension_group_names(["office_docs"]) == []
-    assert validate_extension_group_names(["office_docs", "x"]) == ["x"]
 
 
 # --- build_exclusion_spec --------------------------------------------------

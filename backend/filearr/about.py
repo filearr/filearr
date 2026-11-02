@@ -51,6 +51,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import __version__, toolversions
+from filearr.buildinfo import build_info
 from filearr.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -66,17 +67,16 @@ _MAX_TEXT = 200
 # --------------------------------------------------------------------------- #
 
 
-def application_section(build_stamp: str | None) -> dict:
+def application_section(build: dict | None = None) -> dict:
     """Identity of the running application itself.
 
-    ``build_stamp`` is passed in rather than read here because the endpoint
-    already offloads that file read to a threadpool for ``/version``; sharing
-    the one helper keeps the About page and the deploy verifier reading the
-    same ground truth instead of two implementations that can drift."""
+    ``build`` is passed in by the endpoint (already resolved off the event
+    loop); both it and ``/version`` read the one cached ``build_info()``."""
     s = get_settings()
     return {
         "app_version": __version__,
-        "build_stamp": build_stamp,
+        # Never-null identity of the running build (filearr.buildinfo).
+        "build": build if build is not None else build_info(),
         "source_url": s.source_url,
         # AGPL-3.0-or-later is the project licence, declared in
         # backend/pyproject.toml; §13 is why ``source_url`` sits next to it.
@@ -739,11 +739,11 @@ def embedding_model() -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def sync_sections(build_stamp: str | None) -> dict[str, Any]:
+def sync_sections(build: dict | None = None) -> dict[str, Any]:
     """The blocking half — subprocesses and filesystem stats — in one call so
     the endpoint offloads exactly once to a threadpool."""
     return {
-        "application": application_section(build_stamp),
+        "application": application_section(build),
         "python_packages": python_dependencies(),
         "host_tools": host_tools(),
         "embedding": embedding_model(),

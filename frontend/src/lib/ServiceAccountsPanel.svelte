@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDateTime } from "./format";
   // P6-T10: service accounts -- the non-human principals that own API keys.
   import {
     listServiceAccounts,
@@ -94,7 +95,7 @@
     }
   }
   function fmt(iso: string | null): string {
-    return iso ? new Date(iso).toLocaleString() : "—";
+    return iso ? fmtDateTime(iso) : "—";
   }
 </script>
 

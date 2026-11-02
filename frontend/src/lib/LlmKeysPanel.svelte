@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDateTime } from "./format";
   // LLM API keys (M1): mint role-scoped keys for LLM tool clients (OpenWebUI,
   // Ollama loops, MCP). The key material is shown exactly once at mint time;
   // the panel also surfaces the per-key system-prompt / capabilities URLs.
@@ -136,7 +137,7 @@
   }
 
   function fmt(iso: string | null): string {
-    return iso ? new Date(iso).toLocaleString() : "—";
+    return iso ? fmtDateTime(iso) : "—";
   }
 </script>
 

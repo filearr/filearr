@@ -65,25 +65,16 @@ func TestResolveScanSchedulePolicyWinsOverEnv(t *testing.T) {
 	}
 }
 
-func TestResolveScanScheduleGroupCron(t *testing.T) {
-	// Config-group settings arrive under the policy "group" section; the
-	// documented precedence is top-level policy key > group > env.
+func TestResolveScanScheduleIgnoresRemovedGroupCron(t *testing.T) {
+	// group.scan_schedule_cron was removed 2026-11-02 (central migrated it into
+	// policy scan_cron); a stale cached document carrying it must not schedule.
 	dir := t.TempDir()
 	savePolicy(t, dir, map[string]any{
 		"group": map[string]any{"scan_schedule_cron": "0 4 * * *"},
 	})
 	spec := resolveScanSchedule(dir, env(map[string]string{envScanCron: "0 6 * * *"}), discard())
-	if spec.cronStr != "0 4 * * *" {
-		t.Fatalf("group cron must beat env, got %q", spec.cronStr)
-	}
-
-	savePolicy(t, dir, map[string]any{
-		"scan_cron": "0 2 * * *",
-		"group":     map[string]any{"scan_schedule_cron": "0 4 * * *"},
-	})
-	spec = resolveScanSchedule(dir, env(nil), discard())
-	if spec.cronStr != "0 2 * * *" {
-		t.Fatalf("top-level policy cron must beat group, got %q", spec.cronStr)
+	if spec.cronStr != "0 6 * * *" {
+		t.Fatalf("the removed group key must not schedule, got %q", spec.cronStr)
 	}
 }
 
@@ -154,14 +145,7 @@ func TestResolveScanSchedulePrecedenceCentralLocalEnvDefault(t *testing.T) {
 		t.Fatalf("central policy must beat the local override: %+v", spec)
 	}
 
-	// (4) a config group's cron is CENTRAL too, so it also beats local.
-	savePolicy(t, dir, map[string]any{"group": map[string]any{"scan_schedule_cron": "0 6 * * *"}})
-	spec = resolveScanSchedule(dir, envAll, discard())
-	if spec.cronStr != "0 6 * * *" {
-		t.Fatalf("group cron must beat the local override: %q", spec.cronStr)
-	}
-
-	// (5) with no policy at all, the local override is back in charge, and a
+	// (4) with no policy at all, the local override is back in charge, and a
 	// knob it does NOT set still falls through to env.
 	dir2 := t.TempDir()
 	saveLocal(t, dir2, agentcfg.LocalSettings{ScanCron: sp("0 1 * * *")})

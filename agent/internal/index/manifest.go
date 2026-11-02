@@ -105,16 +105,6 @@ func (s *Store) Roots(ctx context.Context) ([]RootRef, error) {
 	return out, rows.Err()
 }
 
-// CountActive returns the total number of status='active' items across all roots.
-// Used by the reconcile sweep to qualify the "outbox empty but items exist"
-// rebuilt fallback (an empty outbox on a never-scanned agent is not a rebuild).
-func (s *Store) CountActive(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM items WHERE status = ?`, StatusActive).Scan(&n)
-	return n, err
-}
-
 // ActiveItems returns every status='active' item for a root, ordered by rel_path.
 // Sidecars ARE included: they replicate as plain items (agentsync apply_batch),
 // so central's manifest of this root contains them too — excluding them here

@@ -116,6 +116,14 @@ COPY --from=agentdist /out ./agent-dist
 COPY scripts/manage-windows-agent.ps1 ./agentscripts/manage-windows-agent.ps1
 
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app
+# Build identity for /version (filearr.buildinfo): CI passes the commit, ref
+# and build time; a local `docker build` without them falls through to the
+# runtime fallback (still non-null). Declared late so a new commit only
+# invalidates this metadata layer, not the dependency layers above.
+ARG BUILD_COMMIT=
+ARG BUILD_REF=
+ARG BUILD_DATE=
+ENV FILEARR_BUILD_COMMIT=$BUILD_COMMIT FILEARR_BUILD_REF=$BUILD_REF FILEARR_BUILD_DATE=$BUILD_DATE
 EXPOSE 8000
 # Entrypoint auto-runs the idempotent scripts/init_db.py bootstrap for the APP
 # command only (waits for Postgres; FILEARR_AUTO_INIT_DB=false opts out) — an

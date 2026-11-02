@@ -129,6 +129,11 @@ def parse_cron(cron: str | None, off: int) -> dict:
         if dom is None:
             return adv
         ds, tod = _utc_to_local(ho, mi, off)
+        if ds != 0:
+            # Ruling 10 (P7): the builder refuses a monthly time whose UTC
+            # conversion crosses midnight, so such a stored cron opens in
+            # Advanced verbatim instead of as a day-shifted monthly choice.
+            return adv
         return {
             "mode": "monthly",
             "hour": tod // 60,
@@ -162,6 +167,9 @@ def test_round_trip_generate_parse(vec):
     cron = vec["cron"]
     # generate(parse(x)) == x for every builder-generated cron.
     assert generate_cron(parse_cron(cron, off), off) == cron
+    if vec.get("refused"):
+        # A refused (day-shifted monthly) cron round-trips via Advanced.
+        assert parse_cron(cron, off) == {"mode": "advanced", "cron": cron}
 
 
 @pytest.mark.parametrize("vec", _VECTORS, ids=_id)

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtClock, fmtDate, fmtUtc } from "./format";
   import { onMount } from "svelte";
   import {
     listMySessions, revokeMySession, revokeAllMySessions,
@@ -183,8 +184,11 @@
     }
   }
 
+  // Seconds matter here (event ordering, last activity): local date + HH:mm:ss,
+  // with the UTC instant as the tooltip (as LogsPanel).
   function when(ts: string): string {
-    try { return new Date(ts).toLocaleString(); } catch { return ts; }
+    const d = fmtDate(ts);
+    return d === "—" ? d : `${d} ${fmtClock(ts)}`;
   }
   function ua(s: string | null): string {
     return s ? (s.length > 60 ? s.slice(0, 60) + "…" : s) : "unknown client";
@@ -199,7 +203,7 @@
   <span class="ml-2">{ua(s.user_agent)}</span>
   {#if s.current}<Badge tone="ok" class="ml-2">this session</Badge>{/if}
 {/snippet}
-{#snippet lastSeenCell(s: AuthSession)}<span class="text-xs text-muted">{when(s.last_seen_at)}</span>{/snippet}
+{#snippet lastSeenCell(s: AuthSession)}<span class="whitespace-nowrap tabular-nums text-xs text-muted" title={fmtUtc(s.last_seen_at)}>{when(s.last_seen_at)}</span>{/snippet}
 {#snippet revokeCell(s: AuthSession)}
   {#if !s.current}
     <div class="flex justify-end">

@@ -109,12 +109,7 @@ class Settings(BaseSettings):
     auth_ratelimit_max_attempts: int = 3  # failures within the window → lock
     auth_ratelimit_window_seconds: int = 120  # 2-min find window
     auth_ratelimit_lock_seconds: int = 300  # 5-min lockout
-    # When TRUE, the client IP is read from the LEFTMOST X-Forwarded-For entry
-    # (the Caddy TLS sidecar sets it). Leave FALSE unless a trusted proxy is in
-    # front — otherwise a client could spoof the header to evade the per-IP
-    # bucket (the per-USERNAME bucket is unspoofable regardless).
-    auth_ratelimit_trust_forwarded_for: bool = False
-    # Preferred proxy trust (2026-08-19): comma-separated IPs/CIDRs of reverse
+    # Proxy trust (2026-08-19): comma-separated IPs/CIDRs of reverse
     # proxies whose X-Forwarded-For may be believed (rightmost-untrusted walk).
     # The shipped Caddy sidecar needs NO entry here — it proves itself with the
     # X-Filearr-Proxy-Trust header (= FILEARR_PROXY_SHARED_SECRET) instead. Set

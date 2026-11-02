@@ -630,6 +630,33 @@ async def defer_index_sync(item_ids: list[str]) -> None:
         ).defer_async(item_ids=item_ids)
 
 
+#: Ids per ``delete_documents`` job when a library delete prunes its search docs:
+#: one bounded Meili delete task per job, and a multi-hundred-thousand-item
+#: library fans out into many small retryable jobs instead of one giant payload.
+DELETE_DOCS_BATCH = 10_000
+
+
+async def defer_delete_docs(item_ids: list[str]) -> int:
+    """Queue the Meili prune for hard-deleted items (B17: ``DELETE /libraries``)
+    as ``index_sync.delete_documents`` jobs of :data:`DELETE_DOCS_BATCH` ids,
+    inserted in ONE round-trip. Callers defer only AFTER their Postgres delete
+    committed (invariant 5), so a failed commit never prunes live docs. Returns
+    the number of jobs queued (0 for an empty list)."""
+    if not item_ids:
+        return 0
+    chunks = [
+        item_ids[start : start + DELETE_DOCS_BATCH]
+        for start in range(0, len(item_ids), DELETE_DOCS_BATCH)
+    ]
+    async with open_pool_if_needed():
+        await proc_app.configure_task(
+            "filearr.tasks.index_sync.delete_documents",
+            queue="index",
+            priority=get_settings().index_priority,
+        ).batch_defer_async(*({"item_ids": chunk} for chunk in chunks))
+    return len(chunks)
+
+
 async def defer_permission_ingest(command_id: str) -> None:
     """Ingest a stored inventory-result blob's permission records off the
     request path (2026-08-25). Keyed on the command id so a redelivered upload

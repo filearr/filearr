@@ -116,15 +116,10 @@ func resolveScanSchedule(dataDir string, getenv func(string) string, log *slog.L
 	}
 	var spec schedSpec
 
-	// Cron precedence: top-level policy key > config-group settings
-	// (group.scan_schedule_cron) > local override > env. Both policy sources are
-	// CENTRAL, so both outrank the local file.
+	// Cron precedence: central policy scan_cron > local override > env.
 	cronStr := getenv(envScanCron)
 	if local.ScanCron != nil {
 		cronStr = *local.ScanCron
-	}
-	if ok && pol.Group != nil && pol.Group.ScanScheduleCron != nil {
-		cronStr = *pol.Group.ScanScheduleCron
 	}
 	if ok && pol.ScanCron != nil {
 		cronStr = *pol.ScanCron

@@ -129,13 +129,13 @@ def test_bucket_10_percent_tier_selects_about_a_tenth():
 # --------------------------------------------------------------------------- #
 def test_compose_document_shape_is_frozen():
     doc = compose_document(
-        {"log_level": "debug", "scan_schedule_cron": "0 3 * * *"},
+        {"log_level": "debug"},
         {"watch_mode": True, "poll_interval_seconds": 120},
     )
     assert doc == {
         "watch_mode": True,
         "poll_interval_seconds": 120,
-        "group": {"log_level": "debug", "scan_schedule_cron": "0 3 * * *"},
+        "group": {"log_level": "debug"},
     }
 
 

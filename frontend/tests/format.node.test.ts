@@ -7,7 +7,7 @@ process.env.TZ = "Asia/Tokyo";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { fmtBytes, fmtDate, fmtDateTime, fmtDuration, fmtUtc, relTime } from "../src/lib/format.ts";
+import { fmtBytes, fmtClock, fmtDate, fmtDateTime, fmtDuration, fmtUtc, relTime } from "../src/lib/format.ts";
 
 test("fmtBytes: base 1024, integer bytes, one decimal above, exact multiples bare", () => {
   const cases: [number, string][] = [
@@ -95,6 +95,13 @@ test("fmtDuration: negative, NaN and absent are a dash", () => {
   for (const v of [-1, Number.NaN, null, undefined, Number.POSITIVE_INFINITY]) {
     assert.equal(fmtDuration(v), "—", `fmtDuration(${v})`);
   }
+});
+
+test("fmtClock: local HH:mm:ss", () => {
+  assert.equal(fmtClock(Date.UTC(2024, 0, 15, 20, 5, 9)), "05:05:09");
+  assert.equal(fmtClock("2019:07:04 18:22:05"), "18:22:05");
+  assert.equal(fmtClock(null), "—");
+  assert.equal(fmtClock("nope"), "—");
 });
 
 test("relTime: boundaries against a fixed now", () => {

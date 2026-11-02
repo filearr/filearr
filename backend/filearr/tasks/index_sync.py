@@ -72,6 +72,23 @@ async def sync_items(item_ids: list[str]) -> None:
         await delete_docs(gone)
 
 
+@proc_app.task(
+    queue="index",
+    name="filearr.tasks.index_sync.delete_documents",
+    retry=MEILI_RETRY,
+    priority=get_settings().index_priority,
+)
+async def delete_documents(item_ids: list[str]) -> int:
+    """Prune search documents by EXPLICIT id for rows already hard-deleted from
+    Postgres (B17: deferred by ``DELETE /libraries/{id}`` after its commit, so a
+    large library's prune no longer runs inside the request). The ids are uuidv7
+    item PKs of rows that no longer exist, so there is no TOCTOU concern; a lost
+    job leaves orphans the hourly ``reconcile_meili`` sweep removes."""
+    if item_ids:
+        await delete_docs(item_ids)
+    return len(item_ids)
+
+
 #: How many item ids ride one ``reproject_library`` batch. Matches the batch size
 #: the NFO/reclassify re-projection paths already use, so a big library fans out
 #: into many small retryable Meili writes rather than one giant payload.

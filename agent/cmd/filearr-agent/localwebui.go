@@ -427,11 +427,11 @@ func webExtras(cache *agentcfg.ETagCache, ops *opState) func() map[string]any {
 
 		// --- sidecar (never the enrollment token) ---
 		out["sidecar"] = map[string]any{
-			"agent_name":   sc.AgentName,
-			"config_group": sc.ConfigGroup,
-			"log_dir":      sc.LogDir,
-			"ffmpeg_path":  sc.FFmpegPath,
-			"central_url":  sc.CentralURL,
+			"agent_name":         sc.AgentName,
+			"config_group_names": sc.ConfigGroupNames,
+			"log_dir":            sc.LogDir,
+			"ffmpeg_path":        sc.FFmpegPath,
+			"central_url":        sc.CentralURL,
 		}
 
 		// --- policy keys honoured but never displayed ---
@@ -460,9 +460,6 @@ func webExtras(cache *agentcfg.ETagCache, ops *opState) func() map[string]any {
 						if pol.Group.LogLevel != nil {
 							px["group_log_level"] = *pol.Group.LogLevel
 							logging["level"], logging["level_source"] = *pol.Group.LogLevel, "central (group log_level)"
-						}
-						if pol.Group.ScanScheduleCron != nil {
-							px["group_scan_schedule_cron"] = *pol.Group.ScanScheduleCron
 						}
 						if pol.Group.Inventory != nil {
 							out["inventory_config"] = pol.Group.Inventory

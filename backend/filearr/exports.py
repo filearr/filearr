@@ -78,17 +78,14 @@ def scope_clause_from_snapshot(snapshot: dict | None, action: str, column=None):
         return None
     from filearr import rbac, rbac_sql
 
-    # Prefer the ceiling/bypass snapshotted at enqueue (custom roles, and the
-    # worker has no roles registry); older snapshots carry only the name.
-    if "ceiling" in snapshot:
-        role = rbac.Role(
-            snapshot["role"],
-            frozenset(snapshot["ceiling"]),
-            frozenset(),
-            bool(snapshot.get("bypass")),
-        )
-    else:
-        role = rbac.role_from_name(snapshot["role"])
+    # Use the ceiling/bypass snapshotted at enqueue (custom roles can change
+    # later, and the worker has no roles registry).
+    role = rbac.Role(
+        snapshot["role"],
+        frozenset(snapshot["ceiling"]),
+        frozenset(),
+        bool(snapshot.get("bypass")),
+    )
     grants = [
         rbac.PathGrant(path=g["path"], action=g["action"], allow=g["allow"])
         for g in snapshot.get("grants", [])

@@ -20,6 +20,7 @@
     mintTransferEventsToken,
     type TransferEvent,
   } from "./api";
+  import { connectSse } from "./sse";
   import { Alert, Button } from "./ui";
 
   let { itemId, filename }: { itemId: string; filename: string } = $props();
@@ -47,10 +48,10 @@
   // A29: a failed Download (probe 409/401/403/network) — one shared slot under
   // the action row, shown whatever the phase.
   let downloadError = $state("");
-  let es: EventSource | null = null;
-  // A29: the 2 s reconnect timer, cleared on close / item change / unmount so
-  // a pending retry never reopens a stream on a destroyed panel.
-  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  // The live stream's owner (sse.ts): aborting it closes the source and
+  // cancels a pending reconnect, so close / item change / unmount never leave
+  // a retry that reopens a stream on a destroyed panel (A29).
+  let stream: AbortController | null = null;
   // A29: Cancel pressed while initiate is still in flight (no id yet); honoured
   // as soon as initiateTransfer resolves. State (item 18): Cancel reads
   // "Cancelling…" and is disabled until then.
@@ -93,10 +94,8 @@
   };
 
   function closeStream() {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = undefined;
-    es?.close();
-    es = null;
+    stream?.abort();
+    stream = null;
   }
 
   function applyEvent(d: TransferEvent) {
@@ -141,58 +140,26 @@
     }
   }
 
-  let opening = false;
-
-  async function openStream(id: string) {
-    if (opening) return;
-    opening = true;
+  function openStream(id: string) {
     closeStream();
-    const gen = generation;
-    // EventSource can't set headers, so mint a single-use scoped stream token
-    // (?stream_token=) per connect — the real API key never rides the URL. A
-    // failed mint tries tokenless (works with auth off; 401s into the error
-    // path with auth on).
-    let token = "";
-    try {
-      token = (await mintTransferEventsToken(id)).token;
-    } catch {
-      /* tokenless attempt below */
-    }
-    opening = false;
-    // Unmounted / item changed during the mint: open nothing.
-    if (gen !== generation) return;
-    es = new EventSource(transferEventsUrl(id, token));
-    let terminated = false;
-    const onFrame = (ev: MessageEvent) => {
-      try {
-        applyEvent(JSON.parse(ev.data));
-      } catch {
-        /* ignore a malformed frame */
-      }
-    };
-    es.addEventListener("progress", onFrame);
-    es.addEventListener("offline_timeout", onFrame);
-    es.addEventListener("done", (ev) => {
-      terminated = true;
-      onFrame(ev as MessageEvent);
-      closeStream();
-    });
-    es.addEventListener("error", (ev) => {
-      // A named server `error` frame carries `.data` (failed transfer / unknown
-      // id); a bare connection drop does not. The browser's native reconnect
-      // would replay the SAME (already-consumed) stream token and 401, so we
-      // reconnect ourselves with a freshly-minted token instead.
-      if ((ev as MessageEvent).data) {
-        onFrame(ev as MessageEvent);
-      } else if (terminated) {
-        closeStream();
-      } else {
-        closeStream();
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = undefined;
-          if (transferId === id && !opening) openStream(id);
-        }, 2000);
-      }
+    const ctl = new AbortController();
+    stream = ctl;
+    // A server `error` frame (failed transfer / unknown id) and `done` are
+    // terminal and carry the final state; a bare drop reconnects with a
+    // freshly-minted token every 2 s (the browser's native retry would replay
+    // the consumed token and 401). Unmount / item change aborts `ctl`, which
+    // also covers a mint still in flight.
+    connectSse({
+      mint: async () => (await mintTransferEventsToken(id)).token,
+      url: (token) => transferEventsUrl(id, token),
+      frames: ["progress", "offline_timeout"],
+      onFrame: (d) => applyEvent(d as TransferEvent),
+      onTerminal: (t) => {
+        if (stream === ctl) stream = null;
+        if (t.data && typeof t.data === "object") applyEvent(t.data as TransferEvent);
+      },
+      signal: ctl.signal,
+      backoff: { initialMs: 2000, maxMs: 2000 },
     });
   }
 

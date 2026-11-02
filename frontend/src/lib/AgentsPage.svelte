@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { relTime } from "./format";
+  import { fmtDateTime, relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { COPY_FAILED, copyText } from "./clipboard";
@@ -251,7 +251,7 @@
   onDestroy(() => summaryPoller?.stop());
 
   function fmt(iso: string | null): string {
-    return iso ? new Date(iso).toLocaleString() : "—";
+    return iso ? fmtDateTime(iso) : "—";
   }
   /** Countdown to a FUTURE timestamp, to the minute ("in 2h 15m"), with a
    *  "due now" floor — finer than the shared `relTime`'s "in 2 h". */
@@ -267,11 +267,11 @@
     return `in ${Math.floor(h / 24)}d ${h % 24}h`;
   }
   // Compact tooltip from the agent's self-reported health snapshot (rides its
-  // command poll; stored verbatim on the agent row). Pre-2026-08 agent builds
-  // send none — the tooltip degrades to the last-seen timestamp alone.
+  // command poll; stored verbatim on the agent row). Before an agent's first
+  // report there is none — the tooltip degrades to the last-seen timestamp alone.
   function healthTitle(a: AgentOut): string {
     const lines: string[] = [
-      a.last_seen_at ? `last seen ${new Date(a.last_seen_at).toLocaleString()}` : "never seen",
+      a.last_seen_at ? `last seen ${fmtDateTime(a.last_seen_at)}` : "never seen",
     ];
     const h = a.health;
     if (h) {
@@ -301,8 +301,8 @@
             : "";
         const when =
           rx.complete && typeof rx.finished === "string"
-            ? `completed ${new Date(rx.finished).toLocaleString()}`
-            : `in progress since ${new Date(rx.started).toLocaleString()}`;
+            ? `completed ${fmtDateTime(rx.finished)}`
+            : `in progress since ${fmtDateTime(rx.started)}`;
         lines.push(`re-extract: ${when}${enriched}`);
       }
       // QH-T6: the quick_hash migration. Same fixed-key-list caveat as the block
@@ -318,8 +318,8 @@
             : "";
         const when =
           rh.complete && typeof rh.finished === "string"
-            ? `completed ${new Date(rh.finished).toLocaleString()}`
-            : `in progress since ${new Date(rh.started).toLocaleString()}`;
+            ? `completed ${fmtDateTime(rh.finished)}`
+            : `in progress since ${fmtDateTime(rh.started)}`;
         lines.push(`hash migration: ${when}${counts}`);
       }
       // 2026-08-10 local scan controls. Same reason as the re-extract block
@@ -339,7 +339,7 @@
         if (typeof lo.scan_on_start === "boolean")
           bits.push(`on start ${lo.scan_on_start ? "yes" : "no"}`);
         if (typeof lo.roots_edited_at === "string")
-          bits.push(`roots edited ${new Date(lo.roots_edited_at).toLocaleString()}`);
+          bits.push(`roots edited ${fmtDateTime(lo.roots_edited_at)}`);
         if (bits.length) lines.push(`local overrides: ${bits.join(", ")}`);
       }
       // 2026-08-10 share mappings. Same fixed-key-list caveat as above. Central
@@ -356,7 +356,7 @@
           line += `, ${rejected} malformed entr${rejected === 1 ? "y" : "ies"} skipped (fix them on the agent)`;
         lines.push(line);
       }
-      if (a.health_at) lines.push(`health as of ${new Date(a.health_at).toLocaleString()}`);
+      if (a.health_at) lines.push(`health as of ${fmtDateTime(a.health_at)}`);
     }
     return lines.join("\n");
   }
@@ -1183,7 +1183,6 @@
      *  key callouts and the raw-JSON escape hatch. */
     storedPolicy: AgentPolicyDoc;
     logLevel: string;
-    cron: string;
     inventoryEnabled: boolean;
     collectorsText: string;
     invScheduleCron: string;
@@ -1615,7 +1614,6 @@
       policyPassthrough: {},
       storedPolicy: {},
       logLevel: "",
-      cron: "",
       inventoryEnabled: false,
       collectorsText: "",
       invScheduleCron: "",
@@ -1655,7 +1653,6 @@
       policyPassthrough: passthroughFromDoc(policy, policyForm),
       storedPolicy: policy,
       logLevel: s.log_level ?? "",
-      cron: s.scan_schedule_cron ?? "",
       inventoryEnabled: s.inventory?.enabled ?? false,
       collectorsText: (s.inventory?.collectors ?? []).join(", "),
       invScheduleCron: s.inventory?.schedule_cron ?? "",
@@ -1751,7 +1748,6 @@
     if (f.webUI) settings.web_ui_enabled = f.webUI === "on";
     if (f.localAccess) settings.local_access_enabled = f.localAccess === "on";
     if (f.authRequired) settings.auth_required = f.authRequired === "on";
-    if (f.cron.trim()) settings.scan_schedule_cron = f.cron.trim();
     if (emitsInventory(f, collectors)) {
       const inventory: InventoryConfig = {
         enabled: f.inventoryEnabled,
@@ -2562,7 +2558,7 @@
               <Badge tone="ok">extraction{caps.extract_schema ? ` · schema ${caps.extract_schema}` : ""}</Badge>
             </span>
           {:else}
-            <span title="This agent advertises no extraction pass — either an older build, or extraction is unavailable on the host. Its items carry identity only (path/size/mtime/hashes).">
+            <span title="This agent advertises no extraction pass — extraction is unavailable on the host. Its items carry identity only (path/size/mtime/hashes).">
               <Badge>no extraction</Badge>
             </span>
           {/if}
@@ -2892,8 +2888,8 @@
                    a different statement from "everything is absent". -->
               <p class="mt-1 text-muted">
                 This agent has never sent a capability advertisement — it has not polled
-                yet (a fresh enrollment), or it runs a build older than the capability
-                channel. Nothing below is missing; there is nothing yet to report.
+                yet (a fresh enrollment). Nothing below is missing; there is nothing yet
+                to report.
               </p>
             {/if}
 
@@ -3118,7 +3114,7 @@
             bind:value={insName} />
         </Field>
         <fieldset
-          title="Writes config_group_names into the sidecar, so the agent joins these configuration groups at enrollment instead of needing an assignment afterwards. Global is implicit. The sidecar also keeps the legacy single-group config_group key (the first name) so an older agent binary still reads one of them.">
+          title="Records these configuration groups on the enrollment token (and as config_group_names in the sidecar), so the agent joins them at enrollment instead of needing an assignment afterwards. Global is implicit.">
           <legend class="text-xs font-medium text-fg">configuration groups</legend>
           <div class="mt-1 flex flex-wrap gap-2 text-xs">
             {#each groups.filter((g) => !g.is_system) as g (g.id)}
@@ -3493,7 +3489,6 @@
           <li><span class="font-medium">Host inventory &amp; permission snapshots</span> —
             <span class="font-medium">Inventory &amp; permission snapshots</span> section, <code class="font-mono">inventory.schedule_cron</code>.
             Central enqueues the run on each occurrence (time zone of your choice), the agent executes it; the per-agent <em>inventory</em> action fires the same run now.</li>
-          <li><span class="font-medium">Legacy group scan schedule</span> (<code class="font-mono">scan_schedule_cron</code>) — only shown in the Delivery section when a group still has one; the Scheduling section's <code class="font-mono">scan_cron</code> outranks it.</li>
           <li>Scans of libraries mounted on central itself are scheduled on the Libraries page, not here.</li>
         </ul>
       </Alert>
@@ -3503,7 +3498,7 @@
         <div class="flex flex-wrap gap-4 rounded-control border border-border p-3">
           <Field
             label="Log level"
-            hint="agent ≥ 1.5.3 — live-retunes its log threshold from this on the next policy poll; older builds keep their local flag/env/sidecar level."
+            hint="The agent live-retunes its log threshold from this on the next policy poll; unset keeps its local flag/env/sidecar level."
             class="w-64">
             <Select
               title="Log verbosity for this group's members. Agents ≥ 1.5.3 apply it on the next policy poll (it wins over the local default while set); (unset) omits the key and the local flag/env/sidecar resolution stands."
@@ -3514,20 +3509,6 @@
               {/each}
             </Select>
           </Field>
-          {#if d.cron}
-            <!-- settings.scan_schedule_cron predates the policy scan_cron key
-                 and does the same job one precedence rung lower. It is kept
-                 editable for groups that still carry one (so it can be moved
-                 or switched Off), never offered to groups that don't. -->
-            <div class="min-w-64 max-w-xl flex-1 text-xs text-muted"
-              title="Legacy group scan schedule (settings key scan_schedule_cron). Same job as the Scheduling section's scan_cron policy key — the agent scans itself at these times, on its own local clock — but scan_cron outranks it when both are set. Prefer authoring the schedule in the Scheduling section and switching this Off.">
-              <span class="mb-1 flex flex-wrap items-center gap-1.5">Legacy group scan schedule
-                <Badge tone="warn">superseded by Scheduling → scan_cron</Badge></span>
-              <ScheduleField value={d.cron || null} offsetMinutes={0}
-                tzLabel="each agent's local time" dstNote={false}
-                onChange={(c) => { if (dialog) dialog.cron = c ?? ""; }} />
-            </div>
-          {/if}
         </div>
       {/if}
 

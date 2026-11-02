@@ -48,9 +48,6 @@ import enum
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Select
-
-from filearr.reports import ReportParams
 
 # --------------------------------------------------------------------------- #
 # Vocabularies                                                                 #
@@ -756,54 +753,3 @@ class PermissionSnapshot(Base):
     digest: Mapped[str] = mapped_column(Text)
     raw_native: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # opt-in
 '''
-
-
-# --------------------------------------------------------------------------- #
-# REPORT BUILDERS (§3.4 / §5) — all LIVE, kept as forwarding aliases            #
-# --------------------------------------------------------------------------- #
-# Every builder below is now registered in ``filearr.reports`` and paired with a
-# row serializer + ``CannedReport`` (so each appears in ``list_reports()`` /
-# ``GET /api/v1/reports`` and is RBAC-gated by ``api/reports.py``). What remains
-# here are thin forwarding aliases into that registry — the original scaffold
-# import sites kept working without a churn. As of 2026-08-20 NONE raise: the
-# last stub (``_explicit_ace_outliers``) went live as
-# ``permissions_explicit_outliers``.
-#
-# Each takes the existing ``ReportParams`` (library_id + limit) and returns a
-# single streamable SQLAlchemy ``Select`` over the ``permission_snapshots``
-# table, so it slots into ``stream_report_rows`` / ``render_rows`` unchanged.
-
-
-def permissions_report_access_by_principal(params: ReportParams) -> Select:
-    """LIVE since 2026-08-19 as ``filearr.reports`` report
-    ``permissions_by_principal`` (W7-T7); kept as a forwarding alias."""
-    from filearr.reports import get_report
-
-    return get_report("permissions_by_principal").build(params)  # type: ignore[union-attr]
-
-
-def _broad_access(params: ReportParams) -> Select:
-    """LIVE since 2026-08-19 as ``permissions_broad_access`` (W7-T7)."""
-    from filearr.reports import get_report
-
-    return get_report("permissions_broad_access").build(params)  # type: ignore[union-attr]
-
-
-def _explicit_ace_outliers(params: ReportParams) -> Select:
-    """LIVE since 2026-08-20 as ``permissions_explicit_outliers`` (§4): the
-    by-principal view minus explicit ACEs that merely RESTATE the parent
-    path's ACE for the same (principal, type, verbs), with a ``baseline``
-    column ('deviates' / 'unknown' when the parent has no snapshot). Kept as a
-    forwarding alias — this was the last W7 scaffold."""
-    from filearr.reports import get_report
-
-    return get_report("permissions_explicit_outliers").build(params)  # type: ignore[union-attr]
-
-
-def _permission_drift(params: ReportParams) -> Select:
-    """LIVE since 2026-08-19 as ``permission_changes`` (W7-T9): consecutive
-    snapshot pairs per (agent, path), diffed row-side with :func:`diff_records`.
-    Kept as a forwarding alias."""
-    from filearr.reports import get_report
-
-    return get_report("permission_changes").build(params)  # type: ignore[union-attr]

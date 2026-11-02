@@ -290,3 +290,28 @@ async def test_email_no_recipients_is_permanent(monkeypatch):
     with pytest.raises(ChannelDeliveryError) as ei:
         await send_email(config, RenderedAlert("s", "b"))
     assert ei.value.retryable is False
+
+
+@pytest.mark.parametrize("port_cfg", [{}, {"port": None}])
+async def test_email_missing_or_null_port_defaults_587(monkeypatch, port_cfg):
+    """P7 B23: a cleared UI port arrived as null and crashed int(None) at
+    delivery; missing/null now means the submission default 587."""
+    import smtplib
+
+    ports: list = []
+
+    def _ctor(host, port, timeout=None):
+        ports.append(port)
+        return _FakeSMTP([])
+
+    monkeypatch.setattr(smtplib, "SMTP", _ctor)
+    config = {
+        "host": "smtp.test",
+        "security": "starttls",
+        "from_addr": "a@b.test",
+        "to": ["x@y.test"],
+        **port_cfg,
+    }
+    result = await send_email(config, RenderedAlert("s", "b"))
+    assert result.ok
+    assert ports == [587]

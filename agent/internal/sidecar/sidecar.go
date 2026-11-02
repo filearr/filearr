@@ -37,7 +37,7 @@ const (
 	keyEnrollmentToken = "enrollment_token"
 	keyTokenConsumedAt = "enrollment_token_consumed_at"
 	keyAgentName       = "agent_name"
-	keyConfigGroup     = "config_group"
+	keyConfigGroups    = "config_group_names"
 	keyDataDir         = "data_dir"
 	keyLogLevel        = "log_level"
 	keyLogDir          = "log_dir"
@@ -53,16 +53,19 @@ type Config struct {
 	EnrollmentToken           string
 	EnrollmentTokenConsumedAt string
 	AgentName                 string
-	ConfigGroup               string
-	DataDir                   string
-	LogLevel                  string
-	LogDir                    string
+	// ConfigGroupNames is informational: central records the groups on the
+	// minted enrollment token and applies them at register. Shown by the local
+	// web UI.
+	ConfigGroupNames []string
+	DataDir          string
+	LogLevel         string
+	LogDir           string
 	// FFmpegPath is an explicit ffmpeg binary path. Load-bearing for SERVICE
 	// installs: a Windows service runs with the SYSTEM environment and never
 	// sees a user PATH (where most ffmpeg installers land), so "ffmpeg is on
 	// the PATH" is routinely untrue inside the service process (live
 	// 2026-08-05). Precedence: FILEARR_AGENT_FFMPEG_PATH env > this > PATH.
-	FFmpegPath                string
+	FFmpegPath string
 
 	// Path is the file this config was loaded from, or "" if none was found.
 	Path string
@@ -186,7 +189,12 @@ func LoadFile(path string) (*Config, error) {
 	c.EnrollmentToken = get(keyEnrollmentToken)
 	c.EnrollmentTokenConsumedAt = get(keyTokenConsumedAt)
 	c.AgentName = get(keyAgentName)
-	c.ConfigGroup = get(keyConfigGroup)
+	if v, ok := raw[keyConfigGroups]; ok {
+		var names []string
+		if err := json.Unmarshal(v, &names); err == nil {
+			c.ConfigGroupNames = names // wrong type: ignore, don't fail the whole load
+		}
+	}
 	c.DataDir = get(keyDataDir)
 	c.LogLevel = get(keyLogLevel)
 	c.LogDir = get(keyLogDir)

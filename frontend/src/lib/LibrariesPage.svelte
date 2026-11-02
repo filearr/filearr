@@ -1,17 +1,24 @@
 <script lang="ts">
-  import { fmtBytes, relTime } from "./format";
+  import { fmtBytes, fmtDateTime, fmtUtc, relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
   import { latest } from "./latest";
+  import { connectSse } from "./sse";
+  import {
+    applyFrame, failedReason, fmtCount, fmtScanRun, isActive, isQueued as queuedState,
+    lastScanCounts, mergeRunning, planStreams, rowScan, scanRunReason, scopedSummary, slowScan,
+    type Live,
+  } from "./libraryScanState";
   import { toast } from "./ui/toast.svelte";
+  import { DELETE_SUCCESS_NOTE, deleteBlockedReason, deleteImpactDetails } from "./libraryDelete";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
     libraryHashStatus, listLibraries, listPresets, listScans, listShareMap,
-    deleteLibrary, errorStatus, rehashLibrary,
+    deleteImpact, deleteLibrary, errorStatus, rehashLibrary,
     retryExtracts, retryAllExtracts, scanEventsUrl, mintScanEventsToken, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     libraryStats,
-    type FailedJob, type FailingItem, type Library, type LibraryHashStatus, type LibraryStatsResponse,
+    type FailedJob, type FailingItem, type Library, type LibraryDeleteImpact, type LibraryHashStatus, type LibraryStatsResponse,
     type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
     errorMessage,
   } from "./api";
@@ -83,7 +90,7 @@
     try {
       libStats = await libraryStats();
     } catch {
-      libStats = null; // older backend / transient failure — columns show "—"
+      libStats = null; // transient failure — columns show "—"
     } finally {
       libStatsBusy = false;
     }
@@ -120,7 +127,9 @@
     return parts.join(" · ");
   }
 
-  let scans = $state<ScanRun[]>([]);
+  // The active (running/stopping) runs, from GET /scans?status=running,stopping
+  // so a running full scan never falls out of a recent-runs window (B9).
+  let running = $state<ScanRun[]>([]);
   // Errors by origin: the snapshot load (StateBlock/Alert at the table), row
   // actions (scan, re-hash, retry: an Alert under the table), the two bulk
   // actions and delete (each by its own control), and per-library failing-item
@@ -129,8 +138,18 @@
   let rowError = $state("");
   let retryAllError = $state("");
   let clearFailedError = $state("");
-  let deleteError = $state("");
+  // Delete refusals/failures per library, beside that row's actions (B17).
+  let deleteError = $state<Record<string, string>>({});
   let failingError = $state<Record<string, string>>({});
+  // /stats (error counts + degraded map) and the failed-jobs page load on
+  // mount + the refresh button; their failures are shown, not swallowed (B53).
+  let statsError = $state("");
+  let failedJobsError = $state("");
+  // Stop / Cancel / Force-clear failures, per library, beside its actions (B12).
+  let scanActionError = $state<Record<string, string>>({});
+  let scanActing = $state<Record<string, boolean>>({});
+  // The SSE `error` frame's detail per scan id (Ruling 6: preferred reason).
+  let sseDetail = $state<Record<string, string>>({});
   let busy = $state<Record<string, boolean>>({});
 
   // T11 error surfacing: live per-library extraction-error counts (from /stats),
@@ -144,6 +163,11 @@
   let retrying = $state<Record<string, boolean>>({});
   let expanded = $state<Record<string, boolean>>({});
   let failing = $state<Record<string, FailingItem[]>>({});
+  // B35: the per-library list pages by `offset`; total = the library's count.
+  const FAILING_PAGE = 50;
+  let failingTotal = $state<Record<string, number>>({});
+  let failingMore = $state<Record<string, boolean>>({});
+  const failingSeq: Record<string, number> = {};
   // FIX-8: paginated failed-jobs table (used to grow unbounded on screen).
   const FAILED_PAGE = 25;
   let failedJobsList = $state<FailedJob[]>([]);
@@ -152,7 +176,7 @@
   let clearingFailed = $state(false);
 
   // P2-T5 catalogue (read-only), passed to the edit modal's indexing sections.
-  let presetsMeta = $state<PresetsResponse>({ presets: [], extension_groups: [] });
+  let presetsMeta = $state<PresetsResponse>({ presets: [] });
 
   // UI-T1 modal target, and the library whose delete request is in flight.
   let editing = $state<Library | null>(null);
@@ -217,202 +241,199 @@
   // on mount; an empty tree (service offline) degrades to "all types".
   let taxonomyTree = $state<TaxonomyNode[]>([]);
 
-  // Live scan progress, keyed by scan id, delivered over SSE. Merged over the
-  // scan rows so the table shows batch counter + files/s ticking in real time.
-  type Live = { status: string; seen?: number; new?: number; changed?: number;
-    missing?: number; rate?: number; elapsed?: number;
-    // Files enumerated but skipped, streamed live so a mis-scoped library is
-    // obvious while the scan runs rather than only after it finishes.
-    excluded?: number; bytes_seen?: number };
+  // Live scan progress, keyed by scan id: the running list's persisted stats
+  // plus SSE frames (rate/elapsed only arrive over SSE). libraryScanState.ts.
   let live = $state<Record<string, Live>>({});
 
-  // One EventSource per actively-streamed scan id, plus reconnect backoff state.
-  const streams = new Map<string, EventSource>();
-  const backoff = new Map<string, number>();
-  const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const RETRY_MIN = 1000;
-  const RETRY_MAX = 15000;
+  // One stream owner per streamed scan id (sse.ts). The entry stays while the
+  // helper backs off after a drop, so the poll can't open a second stream and
+  // bypass the backoff (B43). `ended`: ids whose stream already delivered its
+  // terminal frame — never reopened while the running list is still stale.
+  const streams = new Map<string, AbortController>();
+  const ended = new Set<string>();
 
-  // Last-request-wins: a pager click or the safety poll supersedes an older
-  // refresh, so a slow response cannot overwrite a newer page.
-  const snapshot = latest((signal, offset: number) =>
+  // B15: the 30 s poll reads only /libraries and the running set. Heavy
+  // aggregates (/stats, hash-status, catalog footprint, failed jobs) load on
+  // mount and via the refresh button; the share map once on mount.
+  // Last-request-wins: a newer refresh supersedes an older one.
+  const snapshot = latest((signal) =>
     Promise.all([
-      listLibraries(signal), listScans(signal), fetchStats(signal),
-      failedJobs(FAILED_PAGE, offset, signal).catch(() => null),
-      listShareMap(signal).catch(() => [] as ShareMapEntry[]),
-      libraryHashStatus(signal).catch(() => null),
+      listLibraries(signal),
+      listScans({ status: "running,stopping", limit: 500 }, signal),
     ]),
   );
 
+  // Set in onDestroy: every continuation that resumes after an await checks it,
+  // so nothing (in particular no EventSource) is opened after unmount.
+  let destroyed = false;
+
   async function refresh() {
+    if (destroyed) return;
     try {
-      const r = await snapshot.run(failedOffset);
-      if (r === undefined) return;
+      const r = await snapshot.run();
+      if (r === undefined || destroyed) return;
       loadError = "";
-      const [libs, scs, st, jobs, smap, hs] = r;
+      const [libs, act] = r;
       libraries = libs;
-      if (hs) hashStatus = Object.fromEntries(hs.map((r) => [r.library_id, r]));
       loaded = true;
-      shareMap = smap;
-      scans = scs;
-      errorCounts = (st.extract_errors as Record<string, number>) ?? {};
-      statsDegraded = (st.degraded as Record<string, string>) ?? {};
-      if (jobs) {
-        failedJobsList = jobs.items;
-        failedTotal = jobs.total;
-        // Clamp the offset if rows aged out / were cleared under us.
-        if (failedOffset > 0 && failedOffset >= failedTotal) {
-          failedOffset = Math.max(0, (Math.ceil(failedTotal / FAILED_PAGE) - 1) * FAILED_PAGE);
-        }
-      }
-      // UI-T8: fold the fresh scan rows into `live` on EVERY refresh (including
-      // the 30s safety poll) so counters advance even when all SSE streams are
-      // dead. This was the frozen-UI root cause — see mergeScanRows.
-      mergeScanRows();
-      for (const id of Object.keys(expanded)) if (expanded[id]) await loadFailing(id);
+      running = act;
+      // UI-T8: fold the running rows into `live` on EVERY refresh so counters
+      // advance even when every SSE stream is dead; ended runs drop out.
+      live = mergeRunning(live, act);
       syncStreams();
     } catch (e) {
       loadError = errorMessage(e);
     }
   }
 
-  /**
-   * UI-T8 root-cause fix. `fmtStats` renders a RUNNING scan from `live[id]` in
-   * preference to the DB row, so a live SSE snapshot that stops arriving (dropped
-   * stream) freezes the display — the safety poll updated `scans` but the render
-   * kept reading the stale `live` entry. (A full page refresh "fixed" it only
-   * because it reset the empty `live` map, falling back to the fresh row.)
-   *
-   * Fix: whenever we (re)fetch scan rows we ALWAYS merge them into `live`, so the
-   * poll alone advances the counters with SSE dead. SSE-only derived fields
-   * (rate/elapsed) are preserved from any prior snapshot; an ended scan drops out
-   * of `live` so its final persisted stats render straight from the row.
-   */
-  function mergeScanRows() {
-    const merged: Record<string, Live> = { ...live };
-    for (const s of scans) {
-      if (s.status === "running" || s.status === "stopping") {
-        const prev = merged[s.id];
-        merged[s.id] = {
-          ...(s.stats ?? {}),
-          status: s.status,
-          rate: prev?.rate,
-          elapsed: prev?.elapsed,
-        };
-      } else if (merged[s.id]) {
-        delete merged[s.id];
-      }
+  const statsLoader = latest((signal) => fetchStats(signal));
+  async function loadStats() {
+    try {
+      const st = await statsLoader.run();
+      if (st === undefined) return;
+      statsError = "";
+      errorCounts = (st.extract_errors as Record<string, number>) ?? {};
+      statsDegraded = (st.degraded as Record<string, string>) ?? {};
+    } catch (e) {
+      statsError = errorMessage(e);
     }
-    live = merged;
   }
 
-  /** Open SSE streams for running scans; drop streams for scans that ended. */
+  const hashLoader = latest((signal) => libraryHashStatus(signal));
+  async function loadHashStatus() {
+    try {
+      const hs = await hashLoader.run();
+      if (hs) hashStatus = Object.fromEntries(hs.map((r) => [r.library_id, r]));
+    } catch {
+      /* non-fatal: the stale-hash prompt just doesn't show */
+    }
+  }
+
+  const failedLoader = latest((signal, offset: number) => failedJobs(FAILED_PAGE, offset, signal));
+  async function loadFailedJobs() {
+    try {
+      const jobs = await failedLoader.run(failedOffset);
+      if (jobs === undefined) return;
+      failedJobsError = "";
+      failedJobsList = jobs.items;
+      failedTotal = jobs.total;
+      // Clamp the offset if rows aged out / were cleared under us.
+      if (failedOffset > 0 && failedOffset >= failedTotal) {
+        failedOffset = Math.max(0, (Math.ceil(failedTotal / FAILED_PAGE) - 1) * FAILED_PAGE);
+        void loadFailedJobs();
+      }
+    } catch (e) {
+      failedJobsError = errorMessage(e, { verb: "load failed jobs" });
+    }
+  }
+
+  // The refresh button: every heavy aggregate in parallel (B36: nothing is
+  // serialized behind the per-library error lists).
+  let aggregatesBusy = $state(false);
+  async function refreshAggregates() {
+    if (aggregatesBusy) return;
+    aggregatesBusy = true;
+    try {
+      await Promise.all([
+        loadLibStats(),
+        loadStats(),
+        loadHashStatus(),
+        loadFailedJobs(),
+        ...Object.keys(expanded).filter((id) => expanded[id]).map((id) => loadFailing(id)),
+      ]);
+    } finally {
+      aggregatesBusy = false;
+    }
+  }
+
+  /** Open streams for active runs; abort streams whose run ended. */
   function syncStreams() {
-    const running = new Set(
-      scans
-        .filter((s) => s.status === "running" || s.status === "stopping")
-        .map((s) => s.id),
-    );
-    for (const id of running) if (!streams.has(id)) openStream(id);
-    for (const id of [...streams.keys()]) if (!running.has(id)) closeStream(id);
+    if (destroyed) return;
+    const activeIds = running.filter((s) => isActive(s.status)).map((s) => s.id);
+    const activeSet = new Set(activeIds);
+    for (const id of [...ended]) if (!activeSet.has(id)) ended.delete(id);
+    const plan = planStreams(activeIds, streams.keys(), ended);
+    for (const id of plan.close) closeStream(id);
+    for (const id of plan.open) openStream(id);
   }
 
   function closeStream(id: string) {
-    streams.get(id)?.close();
+    streams.get(id)?.abort();
     streams.delete(id);
-    const t = retryTimers.get(id);
-    if (t) clearTimeout(t);
-    retryTimers.delete(id);
-    backoff.delete(id);
   }
 
-  function applySnapshot(id: string, d: Live) {
-    // Reassign (not mutate) so Svelte's $state reactivity re-renders the row.
-    live = { ...live, [id]: d };
+  function openStream(id: string) {
+    if (destroyed) return;
+    const ctl = new AbortController();
+    streams.set(id, ctl);
+    connectSse({
+      // A fresh single-use token per (re)connect; a failed mint tries tokenless.
+      mint: async () => (await mintScanEventsToken(id)).token,
+      url: (token) => scanEventsUrl(id, token),
+      onFrame: (d) => {
+        live = applyFrame(live, id, d);
+      },
+      onTerminal: (t) => {
+        if (streams.get(id) === ctl) streams.delete(id);
+        ended.add(id);
+        // A failed scan's `error` frame carries the reason (B11, Ruling 6).
+        if (t.kind === "error" && t.detail) sseDetail = { ...sseDetail, [id]: t.detail };
+        if (t.kind === "done") live = applyFrame(live, id, t.data);
+        // One authoritative refresh so the row shows the persisted last scan.
+        void refresh();
+        if (historyOpen) void loadHistory();
+      },
+      signal: ctl.signal,
+    });
   }
 
-  // Guards concurrent opens for the same scan while a token mint is in flight
-  // (syncStreams may fire again from the safety poll before the mint returns).
-  const opening = new Set<string>();
-
-  async function openStream(id: string) {
-    if (opening.has(id)) return;
-    opening.add(id);
-    // A prior stream/backoff timer may exist after a drop — clear before reopen.
-    streams.get(id)?.close();
-    // EventSource can't set headers, so mint a single-use scoped stream token
-    // and attach it as ?stream_token= (the real API key never rides the URL).
-    // Tokens are consumed on first use — every (re)connect mints a fresh one.
-    // If the mint fails (auth off / transient), try tokenless: with auth
-    // disabled the stream needs none, and with auth on the 401 lands in the
-    // error handler's normal backoff path.
-    let token = "";
+  // Recent scans: fetched on demand (section opened / its Refresh), not polled.
+  const HISTORY_LIMIT = 20;
+  let historyOpen = $state(false);
+  let history = $state<ScanRun[] | null>(null);
+  let historyError = $state("");
+  let historyBusy = $state(false);
+  const historyLoader = latest((signal) => listScans({ limit: HISTORY_LIMIT }, signal));
+  async function loadHistory() {
+    historyBusy = true;
     try {
-      token = (await mintScanEventsToken(id)).token;
-    } catch {
-      /* tokenless attempt below */
+      const r = await historyLoader.run();
+      if (r === undefined) return;
+      historyError = "";
+      history = r;
+    } catch (e) {
+      historyError = errorMessage(e, { verb: "load recent scans" });
+    } finally {
+      historyBusy = false;
     }
-    opening.delete(id);
-    const es = new EventSource(scanEventsUrl(id, token));
-    streams.set(id, es);
-    // Guards the post-close `error` the browser fires after a clean server end,
-    // so we don't spuriously reconnect a scan that already finished.
-    let terminated = false;
-
-    const onData = (ev: MessageEvent) => {
-      backoff.delete(id); // healthy message → reset backoff
-      try {
-        applySnapshot(id, JSON.parse(ev.data));
-      } catch {
-        /* ignore malformed frame */
-      }
-    };
-
-    es.addEventListener("progress", onData);
-    es.addEventListener("done", (ev) => {
-      terminated = true;
-      onData(ev as MessageEvent);
-      closeStream(id);
-      // Stream ended: one authoritative refresh so the row reflects the final
-      // persisted stats (and any sidecar pass results) exactly.
-      refresh();
-    });
-    es.addEventListener("error", (ev) => {
-      if (terminated) return; // clean close already handled by `done`
-      // A named server `error` frame (scan-not-found / failed-with-detail) carries
-      // `.data`; a transient network drop does not. For a server frame, converge
-      // via a single refresh rather than hammering reconnects.
-      const serverFrame = Boolean((ev as MessageEvent).data);
-      es.close();
-      streams.delete(id);
-      const stillRunning = scans.some(
-        (s) => s.id === id && (s.status === "running" || s.status === "stopping"),
-      );
-      if (serverFrame || !stillRunning) {
-        closeStream(id);
-        refresh();
-        return;
-      }
-      // Transient drop while the scan is still believed running: bounded backoff
-      // reconnect. The safety poll (mergeScanRows) keeps counters live meanwhile.
-      const delay = Math.min(backoff.get(id) ?? RETRY_MIN, RETRY_MAX);
-      backoff.set(id, Math.min(delay * 2, RETRY_MAX));
-      const t = setTimeout(() => openStream(id), delay);
-      retryTimers.set(id, t);
-    });
   }
 
-  async function loadFailing(libId: string) {
+  function toggleHistory() {
+    historyOpen = !historyOpen;
+    if (historyOpen) void loadHistory();
+  }
+
+  // First page (`more` false) or the next page appended (B35). A per-library
+  // sequence drops a response a newer load superseded.
+  async function loadFailing(libId: string, more = false) {
+    const seq = (failingSeq[libId] = (failingSeq[libId] ?? 0) + 1);
+    const offset = more ? (failing[libId]?.length ?? 0) : 0;
+    failingMore = { ...failingMore, [libId]: more };
     try {
-      const res = await libraryErrors(libId);
-      failing = { ...failing, [libId]: res.items };
+      const res = await libraryErrors(libId, FAILING_PAGE, offset);
+      if (seq !== failingSeq[libId]) return;
+      failing = { ...failing, [libId]: more ? [...(failing[libId] ?? []), ...res.items] : res.items };
+      failingTotal = { ...failingTotal, [libId]: res.count };
       errorCounts = { ...errorCounts, [libId]: res.count };
       if (failingError[libId]) {
         const { [libId]: _cleared, ...rest } = failingError;
         failingError = rest;
       }
     } catch (e) {
-      failingError = { ...failingError, [libId]: errorMessage(e) };
+      if (seq !== failingSeq[libId]) return;
+      failingError = { ...failingError, [libId]: errorMessage(e, { verb: "load failing items" }) };
+    } finally {
+      if (seq === failingSeq[libId]) failingMore = { ...failingMore, [libId]: false };
     }
   }
 
@@ -434,14 +455,14 @@
   async function failedPage(delta: number) {
     const next = failedOffset + delta * FAILED_PAGE;
     failedOffset = Math.max(0, Math.min(next, Math.max(0, failedTotal - 1)));
-    await refresh();
+    await loadFailedJobs();
   }
 
   async function clearFailed() {
     if (clearingFailed) return;
     const ok = await confirm({
       title: "Clear failed job history?",
-      message: `Clear all ${failedTotal} failed job record(s)?`,
+      message: `Clear all ${fmtCount(failedTotal)} failed job record(s)?`,
       details: [
         "This only removes the history rows",
         "It does not affect queued or running work",
@@ -455,7 +476,7 @@
     try {
       await clearFailedJobs();
       failedOffset = 0;
-      await refresh();
+      await loadFailedJobs();
     } catch (e) {
       clearFailedError = errorMessage(e, { verb: "clear failed items" });
     } finally {
@@ -465,12 +486,17 @@
 
   let retryingAll = $state(false);
   const errorTotal = $derived(Object.values(errorCounts).reduce((a, b) => a + b, 0));
+  // B36: the counts could not be read (degraded aggregate or a failed /stats):
+  // "Retry all failed" must stay reachable exactly then.
+  const errorsUnknown = $derived(!!statsDegraded.extract_errors || !!statsError);
 
   async function retryAllFailed() {
     if (retryingAll) return;
     const ok = await confirm({
       title: "Retry all failed items?",
-      message: `Re-extract all ${errorTotal.toLocaleString()} failed item(s) across every library?`,
+      message: errorTotal > 0
+        ? `Re-extract all ${fmtCount(errorTotal)} failed item(s) across every library?`
+        : "Re-extract every failed item across every library? (The current count could not be read.)",
       details: [
         "Errors are cleared and the items re-queued",
         "Anything still broken will re-record its error",
@@ -481,9 +507,14 @@
     retryingAll = true;
     retryAllError = "";
     try {
-      await retryAllExtracts();
+      const r = await retryAllExtracts();
+      toast(`Requeued ${fmtCount(r.retried)} item${r.retried === 1 ? "" : "s"} for extraction.`, { tone: "ok" });
       failing = {};
-      await refresh();
+      failingTotal = {};
+      await Promise.all([
+        loadStats(),
+        ...Object.keys(expanded).filter((id) => expanded[id]).map((id) => loadFailing(id)),
+      ]);
     } catch (e) {
       retryAllError = errorMessage(e, { verb: "retry failed items" });
     } finally {
@@ -495,7 +526,9 @@
     retrying[libId] = true;
     rowError = "";
     try {
-      await retryExtracts(libId);
+      const r = await retryExtracts(libId);
+      const name = libraries.find((l) => l.id === libId)?.name ?? "this library";
+      toast(`Requeued ${fmtCount(r.retried)} item${r.retried === 1 ? "" : "s"} in ${name}.`, { tone: "ok" });
       await loadFailing(libId);
     } catch (e) {
       rowError = errorMessage(e, { verb: "retry failed items" });
@@ -504,8 +537,39 @@
     }
   }
 
-  function latestScan(libId: string): ScanRun | undefined {
-    return scans.find((s) => s.library_id === libId); // scans come newest-first
+  // Stop / Cancel / Force-clear (B12): the abort asks first; any failure (403
+  // read-only key, 404, 409 "not running" / "still active; use stop") shows
+  // the server's reason beside that row's actions.
+  async function scanAction(lib: Library, scan: ScanRun, kind: "stop" | "cancel" | "force") {
+    if (scanActing[lib.id]) return;
+    if (kind === "cancel") {
+      const ok = await confirm({
+        title: "Cancel this scan?",
+        message: `Abort the running scan of ${lib.name} immediately?`,
+        details: [
+          "The in-flight batch is discarded",
+          "Stop (keep progress) keeps everything scanned so far instead",
+        ],
+        confirmLabel: "Cancel scan",
+        cancelLabel: "Keep scanning",
+        tone: "danger",
+      });
+      if (!ok) return;
+    }
+    scanActing = { ...scanActing, [lib.id]: true };
+    const { [lib.id]: _prev, ...rest } = scanActionError;
+    scanActionError = rest;
+    try {
+      if (kind === "stop") await stopScan(scan.id);
+      else if (kind === "cancel") await cancelScan(scan.id);
+      else await forceClearScan(scan.id);
+    } catch (e) {
+      const verb = kind === "stop" ? "stop this scan" : kind === "cancel" ? "cancel this scan" : "force-clear this scan";
+      scanActionError = { ...scanActionError, [lib.id]: errorMessage(e, { verb }) };
+    } finally {
+      scanActing = { ...scanActing, [lib.id]: false };
+    }
+    void refresh();
   }
 
   // Optimistic scan feedback. POST /libraries/{id}/scan only DEFERS a job — the
@@ -515,18 +579,13 @@
   // click and let the row report "queued" until its own run appears.
   let queued = $state<Record<string, number>>({});
 
-  // True from the moment a scan is requested until its ScanRun row exists. The
-  // 2s slack absorbs browser/server clock skew so we still recognise our run.
+  // True from the moment a scan is requested until its ScanRun row exists
+  // (libraryScanState.isQueued: an active run, or any run that started after
+  // the request, clears it).
   function isQueued(libId: string): boolean {
-    const at = queued[libId];
-    if (!at) return false;
-    const s = latestScan(libId);
-    if (!s) return true;
-    if (Date.parse(s.started_at) >= at - 2000) return false; // our run exists
-    // The request was DEDUPED into a scan that was already in flight (the API
-    // coalesces rather than stacking runs). That older run is the real state —
-    // show its live progress instead of a "queued" that would never clear.
-    return !(s.status === "running" || s.status === "stopping");
+    const lib = libraries.find((l) => l.id === libId);
+    if (!lib) return false;
+    return queuedState(queued[libId], rowScan(running, libId), lib);
   }
 
   // The worker normally picks the job up within a second or two. Poll a short
@@ -535,8 +594,9 @@
   // button is already re-enabled, so this never blocks another click.
   async function pollUntilStarted(libId: string) {
     for (const delay of [800, 1500, 3000, 5000, 8000]) {
-      if (!isQueued(libId)) return;
+      if (destroyed || !isQueued(libId)) return;
       await new Promise((r) => setTimeout(r, delay));
+      if (destroyed) return;
       await refresh();
     }
   }
@@ -571,46 +631,8 @@
   // After a successful add, close the dialog and reconcile.
   function afterAdd() {
     adding = false;
-    refresh();
-  }
-
-  function fmtStats(s: ScanRun | undefined): string {
-    if (!s) return "never scanned";
-    const active = s.status === "running" || s.status === "stopping";
-    const lv = active ? live[s.id] : undefined;
-    const st: Record<string, number | undefined> = lv
-      ? { seen: lv.seen, new: lv.new, changed: lv.changed, missing: lv.missing,
-          excluded: lv.excluded }
-      : (s.stats ?? {});
-    const status = lv?.status ?? s.status;
-    const inProgress = status === "running" || status === "stopping";
-    const base = `${status}${s.finished_at || !inProgress ? "" : "…"}`;
-    const parts = ["seen", "new", "changed", "missing", "excluded"]
-      .filter((k) => st[k] !== undefined)
-      .map((k) => `${k} ${st[k]}`);
-    if (lv && lv.rate !== undefined) parts.push(`${lv.rate.toFixed(1)}/s`);
-    return parts.length ? `${base} — ${parts.join(", ")}` : base;
-  }
-
-  // §17: "slower than usual" verdict from real history — this run's walk rate
-  // vs the library's rolling median over recent finished full scans. Only
-  // speaks with >=3 runs behind the median (less is noise) and only when the
-  // run was meaningfully slower (< 60% of the median).
-  function slowScan(ls: NonNullable<Library["last_scan"]>): string | null {
-    const rate = ls.files_per_s;
-    const median = ls.median_files_per_s;
-    const runs = ls.throughput_runs ?? 0;
-    if (rate == null || median == null || runs < 3 || median <= 0) return null;
-    if (rate >= median * 0.6) return null;
-    return `This scan walked ${rate.toFixed(1)} files/s vs a ${median.toFixed(1)} files/s median over the last ${runs} full scans — check mount/network health or concurrent load.`;
-  }
-
-  // FIX-10: compact "seen N, new N" counts from a persisted last scan.
-  function lastScanCounts(ls: NonNullable<Library["last_scan"]>): string {
-    return (["seen", "new", "changed", "missing"] as const)
-      .filter((k) => ls[k] != null)
-      .map((k) => `${k} ${ls[k]}`)
-      .join(", ");
+    void refresh();
+    void refreshAggregates();
   }
 
   // Which libraries have their last-scan details panel open (below the table:
@@ -676,12 +698,12 @@
   function excludedDetail(ls: NonNullable<Library["last_scan"]>): string {
     const why: string[] = [];
     if (ls.excluded_gate)
-      why.push(`${ls.excluded_gate} rejected by this library's category/group selection`);
+      why.push(`${fmtCount(ls.excluded_gate)} rejected by this library's category/group selection`);
     if (ls.excluded_filtered)
-      why.push(`${ls.excluded_filtered} rejected by exclusion presets/globs (system files, hidden dotfiles, …)`);
+      why.push(`${fmtCount(ls.excluded_filtered)} rejected by exclusion presets/globs (system files, hidden dotfiles, …)`);
     let s = why.length
-      ? `${ls.excluded} file(s) enumerated but not ingested — ${why.join("; ")}.`
-      : `${ls.excluded} file(s) enumerated but not ingested.`;
+      ? `${fmtCount(ls.excluded ?? 0)} file(s) enumerated but not ingested — ${why.join("; ")}.`
+      : `${fmtCount(ls.excluded ?? 0)} file(s) enumerated but not ingested.`;
 
     // THE DISCREPANCY NOTE. Pruned/unreadable directories are skipped WITHOUT
     // being enumerated, so files inside them are counted nowhere. If the numbers
@@ -703,42 +725,66 @@
   // After a successful edit, close the modal and reconcile everything.
   function afterEdit() {
     editing = null;
-    refresh();
+    void refresh();
   }
 
   // UI-T2: the product's ONE intentional hard-delete, behind a typed-name
-  // confirm. DELETE /libraries/{id}?confirm=<name>; the frozen contract: 404 =
-  // already gone (the outcome asked for), 409 = a scan is running, 422 =
+  // confirm. B16/B17 (Ruling 7): the confirm lists what GET delete-impact says
+  // the cascade removes; a queued/running scan job means the server would 409,
+  // so delete is not offered (reason beside the action). An impact fetch
+  // failure still allows delete, with the counts flagged as unavailable.
+  // DELETE /libraries/{id}?confirm=<name>: 404 = already gone (the outcome
+  // asked for), 409 = a scan is queued/running (server detail shown), 422 =
   // confirm mismatch (the typed-name gate makes it unlikely; surfaced anyway).
+  function setDeleteError(id: string, msg: string) {
+    const { [id]: _prev, ...rest } = deleteError;
+    deleteError = msg ? { ...rest, [id]: msg } : rest;
+  }
+
   async function removeLibrary(lib: Library) {
     if (deletingId) return;
+    deletingId = lib.id;
+    setDeleteError(lib.id, "");
+    let impact: LibraryDeleteImpact | null = null;
+    try {
+      impact = await deleteImpact(lib.id);
+    } catch (e) {
+      if (errorStatus(e) === 404) {
+        deletingId = null;
+        await refresh();
+        return;
+      }
+      impact = null;
+    }
+    const blocked = deleteBlockedReason(impact);
+    if (blocked) {
+      setDeleteError(lib.id, blocked);
+      deletingId = null;
+      return;
+    }
+    // The dialog is open while deletingId is held: no second delete starts.
     const ok = await confirm({
       title: "Delete library?",
-      message:
-        `This permanently removes ${lib.name}, all of its indexed items, and its scan history. ` +
-        "Search results for these items disappear. This is a hard delete and cannot be undone.",
-      details: [
-        "All indexed items and scan history are removed",
-        "Search results for these items disappear",
-        "This cannot be undone",
-      ],
+      message: `This permanently removes ${lib.name} and everything listed below. This is a hard delete.`,
+      details: deleteImpactDetails(impact),
       confirmLabel: "Delete library",
       tone: "danger",
       typedName: lib.name,
     });
-    if (!ok) return;
-    deletingId = lib.id;
-    deleteError = "";
+    if (!ok) {
+      deletingId = null;
+      return;
+    }
     try {
       await deleteLibrary(lib.id, lib.name);
+      toast(`Deleted ${lib.name}. ${DELETE_SUCCESS_NOTE}`, { tone: "ok" });
       await refresh();
+      void refreshAggregates();
     } catch (e) {
       const status = errorStatus(e);
       if (status === 404) await refresh();
-      else if (status === 409)
-        deleteError = "A scan is currently running for this library. Cancel or wait for it to finish, then delete.";
-      else if (status === 422) deleteError = "Confirmation name did not match.";
-      else deleteError = errorMessage(e, { verb: "delete this library" });
+      else if (status === 422) setDeleteError(lib.id, "Confirmation name did not match.");
+      else setDeleteError(lib.id, errorMessage(e, { verb: "delete this library" }));
     } finally {
       deletingId = null;
     }
@@ -746,8 +792,11 @@
 
   let safety: Poller | undefined;
   onMount(() => {
-    refresh();
-    loadLibStats();
+    void refresh();
+    void refreshAggregates();
+    listShareMap()
+      .then((m) => (shareMap = m))
+      .catch(() => (shareMap = []));
     listPresets()
       .then((m) => (presetsMeta = m))
       .catch((e) => (loadError = errorMessage(e)));
@@ -756,12 +805,13 @@
     getTaxonomy()
       .then((t) => (taxonomyTree = t.tree))
       .catch(() => (taxonomyTree = []));
-    // Safety-net refresh; paused while the tab is hidden.
+    // Light safety-net refresh (/libraries + running set); paused while hidden.
     safety = usePolling(refresh, 30000);
   });
   onDestroy(() => {
+    destroyed = true;
     safety?.stop();
-    snapshot.cancel();
+    for (const l of [snapshot, statsLoader, hashLoader, failedLoader, historyLoader]) l.cancel();
     for (const id of [...streams.keys()]) closeStream(id);
   });
 </script>
@@ -827,6 +877,12 @@
   </Button>
 {/snippet}
 
+{#snippet deleteErrorAlert(lib: Library)}
+  {#if deleteError[lib.id]}
+    <Alert tone="danger" class="mt-1 text-left" onDismiss={() => setDeleteError(lib.id, "")}>{deleteError[lib.id]}</Alert>
+  {/if}
+{/snippet}
+
 <!-- Central table cells -->
 {#snippet rootCell(lib: Library)}
   <span class="block min-w-[10rem] max-w-[16rem] font-mono text-xs text-muted break-all">{lib.root_path}</span>
@@ -871,7 +927,9 @@
 {#snippet watchCell(lib: Library)}<span class="text-xs text-muted">{lib.watch_mode ? "on" : "—"}</span>{/snippet}
 
 {#snippet lastScanCell(lib: Library)}
-  {@const scan = latestScan(lib.id)}
+  {@const scan = rowScan(running, lib.id)}
+  {@const reason = scan || isQueued(lib.id) ? null : failedReason(lib.last_scan, sseDetail)}
+  {@const sc = lib.last_scoped_scan}
   <!-- nowrap keeps status + age + counts + the excluded badge on ONE line; the
        breakdown panel below the table carries the long text. -->
   <span class="inline-flex flex-wrap items-center gap-1 text-xs text-muted md:flex-nowrap md:whitespace-nowrap">
@@ -887,13 +945,15 @@
         queued
       </Badge>
       <span>waiting for a worker…</span>
-    {:else if scan && (scan.status === "running" || scan.status === "stopping")}
-      {fmtStats(scan)}
+    {:else if scan}
+      {fmtScanRun(scan, live)}
+      {#if scopedSummary(scan)}<Badge>{scopedSummary(scan)}</Badge>{/if}
     {:else if lib.last_scan}
       {@const ls = lib.last_scan}
       {@const slow = slowScan(ls)}
+      {@const when = ls.finished_at ?? ls.started_at}
       <Badge tone={toneForStatus(ls.status)}>{ls.status}</Badge>
-      <span title={new Date(ls.finished_at ?? ls.started_at).toLocaleString()}>{relTime(ls.finished_at ?? ls.started_at)}</span>
+      <span title={fmtUtc(when)}>{relTime(when)}</span>
       {#if lastScanCounts(ls)}<span>— {lastScanCounts(ls)}</span>{/if}
       <!-- The slow verdict and the exclusion breakdown open the same details
            panel below the table (their full text no longer lives in a title). -->
@@ -935,28 +995,44 @@
       never scanned
     {/if}
   </span>
+  <!-- Ruling 6: a failed full scan says why on the row (SSE detail, else the
+       recorded error / reconcile note, else "no reason recorded"). -->
+  {#if reason}
+    <span class="mt-0.5 block max-w-[28rem] whitespace-normal break-words text-xs text-danger">{reason}</span>
+  {/if}
+  <!-- B10: the newest scoped (hot-folder / targeted) run, compactly; the main
+       line above is always the newest FULL run. -->
+  {#if sc && sc.id !== scan?.id}
+    {@const scWhen = sc.finished_at ?? sc.started_at}
+    {@const scReason = failedReason(sc, sseDetail)}
+    <span class="mt-0.5 block max-w-[28rem] whitespace-normal break-words text-2xs text-muted">
+      {scopedSummary(sc)} · <span title={fmtUtc(scWhen)}>{relTime(scWhen)}</span>{#if sc.status !== "finished"} · {sc.status}{/if}{#if scReason}<span class="text-danger"> — {scReason}</span>{/if}
+    </span>
+  {/if}
 {/snippet}
 
 {#snippet centralActionsCell(lib: Library)}
-  {@const scan = latestScan(lib.id)}
-  {@const running = scan?.status === "running"}
+  {@const scan = rowScan(running, lib.id)}
+  {@const isRunning = scan?.status === "running"}
   {@const stopping = scan?.status === "stopping"}
   <div class="flex flex-wrap items-center justify-end gap-1">
-    {#if running && scan}
+    {#if isRunning && scan}
       <Button
         size="sm"
+        disabled={scanActing[lib.id]}
         title="Finish the current batch and keep everything scanned so far, then end the scan. Skips deletion detection (unvisited files are NOT marked missing). The next scan picks up where this left off."
-        onclick={async () => { await stopScan(scan.id).catch(() => {}); refresh(); }}>
+        onclick={() => scanAction(lib, scan, "stop")}>
         Stop (keep progress)
       </Button>
       <Button
         size="sm"
         variant="danger"
+        disabled={scanActing[lib.id]}
         title="Abort the scan immediately, discarding the in-flight batch. Use Stop to keep what was already scanned."
-        onclick={async () => { await cancelScan(scan.id).catch(() => {}); refresh(); }}>
+        onclick={() => scanAction(lib, scan, "cancel")}>
         Cancel (abort)
       </Button>
-    {:else if stopping}
+    {:else if stopping && scan}
       <span title="Stop requested — finishing the current batch and wrap-up, then the scan ends as stopped.">
         <Badge tone="warn">stopping…</Badge>
       </span>
@@ -966,17 +1042,14 @@
       <Button
         size="sm"
         variant="danger"
+        disabled={scanActing[lib.id]}
         title="Force this stuck scan to a terminal state. Use only if it has been 'stopping' for a while with no progress (its worker likely died). Refused if a live worker is still processing it."
-        onclick={async () => {
-          if (!scan) return;
-          await forceClearScan(scan.id).catch(() => {});
-          refresh();
-        }}>
+        onclick={() => scanAction(lib, scan, "force")}>
         Force clear
       </Button>
     {/if}
     {@render commonActions(lib)}
-    <Button size="sm" variant="primary" disabled={busy[lib.id] || running || stopping} onclick={() => runScan(lib)}>
+    <Button size="sm" variant="primary" disabled={busy[lib.id] || isRunning || stopping} onclick={() => runScan(lib)}>
       {#if busy[lib.id]}
         Starting…
       {:else if isQueued(lib.id)}
@@ -986,6 +1059,16 @@
       {/if}
     </Button>
   </div>
+  {#if scanActionError[lib.id]}
+    <Alert
+      tone="danger"
+      class="mt-1 text-left"
+      onDismiss={() => {
+        const { [lib.id]: _gone, ...rest } = scanActionError;
+        scanActionError = rest;
+      }}>{scanActionError[lib.id]}</Alert>
+  {/if}
+  {@render deleteErrorAlert(lib)}
 {/snippet}
 
 <!-- Agent table cells -->
@@ -994,17 +1077,18 @@
   <Badge tone={toneForStatus(lib.agent_status)}>{lib.agent_status ?? "unknown"}</Badge>
 {/snippet}
 {#snippet lastSyncCell(lib: Library)}
-  <span class="text-muted" title={lib.agent_last_seen_at ? new Date(lib.agent_last_seen_at).toLocaleString() : "the agent has never replicated"}>
+  <span class="text-muted" title={lib.agent_last_seen_at ? fmtUtc(lib.agent_last_seen_at) : "the agent has never replicated"}>
     {lib.agent_last_seen_at ? relTime(lib.agent_last_seen_at) : "never"}
   </span>
 {/snippet}
 {#snippet lastReconcileCell(lib: Library)}
-  <span class="text-muted" title={lib.agent_last_reconcile_at ? new Date(lib.agent_last_reconcile_at).toLocaleString() : "no full-manifest reconcile yet"}>
+  <span class="text-muted" title={lib.agent_last_reconcile_at ? fmtUtc(lib.agent_last_reconcile_at) : "no full-manifest reconcile yet"}>
     {lib.agent_last_reconcile_at ? relTime(lib.agent_last_reconcile_at) : "never"}
   </span>
 {/snippet}
 {#snippet agentActionsCell(lib: Library)}
   <div class="flex flex-wrap justify-end gap-1">{@render commonActions(lib)}</div>
+  {@render deleteErrorAlert(lib)}
 {/snippet}
 
 <!-- Failed-jobs cells -->
@@ -1012,7 +1096,7 @@
 {#snippet jobTaskCell(j: FailedJob)}<span class="font-mono text-xs">{j.task}</span>{/snippet}
 {#snippet jobAttemptsCell(j: FailedJob)}<span class="text-muted">{j.attempts ?? "—"}</span>{/snippet}
 {#snippet jobAttemptedCell(j: FailedJob)}
-  <span class="text-muted">{j.attempted_at ? new Date(j.attempted_at).toLocaleString() : "—"}</span>
+  <span class="text-muted" title={j.attempted_at ? fmtUtc(j.attempted_at) : undefined}>{fmtDateTime(j.attempted_at)}</span>
 {/snippet}
 {#snippet jobErrorCell(j: FailedJob)}
   {#if j.traceback}
@@ -1042,13 +1126,14 @@
       <span class="grow"></span>
       <Button size="sm" variant="ghost" onclick={() => hideErrors(lib.id)}>Hide</Button>
     </div>
-    {#if failingError[lib.id]}
+    {#if failingError[lib.id] && !failingLoaded}
       <StateBlock state="error" compact message={failingError[lib.id]} onRetry={() => loadFailing(lib.id)} />
     {:else if !failingLoaded}
       <StateBlock state="loading" compact />
     {:else if items.length === 0}
       <StateBlock state="empty" compact message="No failing items — nothing to retry." />
     {:else}
+      {@const total = failingTotal[lib.id] ?? items.length}
       <dl class="mt-1 flex flex-col gap-0.5 text-muted">
         {#each kindsOf(items) as k (k)}
           <div class="flex items-baseline gap-2">
@@ -1066,6 +1151,21 @@
           </li>
         {/each}
       </ul>
+      <!-- B35: the badge shows the full count; the list pages by offset. -->
+      <div class="mt-2 flex flex-wrap items-center gap-3 text-muted">
+        <span>Showing {fmtCount(items.length)} of {fmtCount(total)}</span>
+        {#if items.length < total}
+          <Button size="sm" disabled={failingMore[lib.id]} onclick={() => loadFailing(lib.id, true)}>
+            {failingMore[lib.id] ? "Loading…" : "Load more"}
+          </Button>
+        {/if}
+      </div>
+      {#if failingError[lib.id]}
+        <Alert tone="danger" class="mt-2" onDismiss={() => {
+          const { [lib.id]: _gone, ...rest } = failingError;
+          failingError = rest;
+        }}>{failingError[lib.id]}</Alert>
+      {/if}
     {/if}
   </section>
 {/snippet}
@@ -1080,14 +1180,17 @@
         {libStats.total_files.toLocaleString()} files · {fmtBytes(libStats.total_bytes)}
       </span>
     {/if}
+    <!-- B15: the heavy aggregates are not on the 30 s poll; this reloads
+         them all (catalog footprint, extraction-error counts, hash status,
+         failed jobs, open failing-item lists). -->
     <Button
       size="sm"
       variant="ghost"
-      aria-label="Recount files and sizes"
-      title="Recount files and sizes (one aggregate query over the whole catalog)"
-      onclick={loadLibStats}
-      disabled={libStatsBusy}>
-      <span aria-hidden="true">{libStatsBusy ? "…" : "↻"}</span>
+      aria-label="Refresh counts, sizes, errors and hash status"
+      title="Refresh file counts and sizes, extraction-error counts, hash status and failed jobs (aggregate queries over the whole catalog — not polled)"
+      onclick={refreshAggregates}
+      disabled={aggregatesBusy}>
+      <span aria-hidden="true">{aggregatesBusy ? "…" : "↻"}</span>
     </Button>
     <div class="grow"></div>
     <!-- W8: the taxonomy editor lives on its own route, reachable from here. -->
@@ -1116,11 +1219,24 @@
       </Alert>
     {/if}
   {/each}
-  {#if statsDegraded.extract_errors}
+  {#if errorsUnknown}
+    <!-- B36: when the counts can't be read, "Retry all failed" stays here. -->
     <Alert tone="warn" class="mt-2">
-      Extraction-error counts unavailable ({statsDegraded.extract_errors}) — the
-      Errors column below is blank because it could not be read, not because
-      there are none.
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <span>
+          Extraction-error counts unavailable ({statsDegraded.extract_errors || statsError}) — the
+          Errors column below reads 0 because it could not be read, not because
+          there are none.
+        </span>
+        <span class="flex gap-2">
+          {#if statsError}<Button size="sm" onclick={loadStats}>Reload counts</Button>{/if}
+          {#if errorTotal === 0}
+            <Button size="sm" disabled={retryingAll} onclick={retryAllFailed}>
+              {retryingAll ? "requeuing…" : "Retry all failed"}
+            </Button>
+          {/if}
+        </span>
+      </div>
     </Alert>
   {/if}
   {#if staleHashRows.length}
@@ -1141,7 +1257,7 @@
     <Alert tone="danger" class="mt-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <span class="font-semibold">{errorTotal.toLocaleString()} item{errorTotal === 1 ? "" : "s"} failed extraction.</span>
+          <span class="font-semibold">{fmtCount(errorTotal)} item{errorTotal === 1 ? "" : "s"} failed extraction.</span>
           <span class="text-xs"> Expand a library's Errors count for details, or requeue everything at once.</span>
         </div>
         <Button size="sm" disabled={retryingAll} onclick={retryAllFailed}>
@@ -1154,9 +1270,6 @@
     <Alert tone="danger" class="mt-2" onDismiss={() => (retryAllError = "")}>{retryAllError}</Alert>
   {/if}
 
-  {#if deleteError}
-    <Alert tone="danger" class="mt-3" onDismiss={() => (deleteError = "")}>{deleteError}</Alert>
-  {/if}
   {#if loaded && loadError}
     <!-- A failed refresh keeps the rows already shown; the first load's
          failure replaces the table instead (DataTable error + Retry). -->
@@ -1261,28 +1374,57 @@
   <CustomFieldsPanel {libraries} />
   {#if isAdmin}<PresetsPanel />{/if}
 
-  <h2 class="mt-8 text-lg font-semibold">Recent scans</h2>
-  {#if scans.length}
-    <ul class="mt-2 divide-y divide-border text-sm">
-      {#each scans.slice(0, 10) as s (s.id)}
-        {@const lib = libraries.find((l) => l.id === s.library_id)}
-        <li class="flex flex-wrap items-center gap-3 py-2">
-          <Badge tone={toneForStatus(s.status)}>{s.status}</Badge>
-          <span class="font-medium">{lib?.name ?? s.library_id}</span>
-          <span class="text-muted">{new Date(s.started_at).toLocaleString()}</span>
-          <span class="grow"></span>
-          <span class="text-xs text-muted">{fmtStats(s)}</span>
-        </li>
-      {/each}
-    </ul>
-  {:else if loaded}
-    <StateBlock state="empty" compact message="No scans yet — start one with a library's Scan button." />
+  <!-- Recent scans: on demand (open / Refresh), never polled (B15). -->
+  <div class="mt-8 flex flex-wrap items-center gap-3">
+    <h2 class="text-lg font-semibold">Recent scans</h2>
+    <Button size="sm" variant="ghost" aria-expanded={historyOpen} aria-controls="recent-scans" onclick={toggleHistory}>
+      {historyOpen ? "Hide" : "Show"}
+    </Button>
+    {#if historyOpen}
+      <Button size="sm" disabled={historyBusy} onclick={loadHistory}>{historyBusy ? "Refreshing…" : "Refresh"}</Button>
+    {/if}
+  </div>
+  {#if historyOpen}
+    <div id="recent-scans">
+      {#if historyError}
+        <StateBlock state="error" compact message={historyError} onRetry={loadHistory} />
+      {:else if history === null}
+        <StateBlock state="loading" compact />
+      {:else if history.length === 0}
+        <StateBlock state="empty" compact message="No scans yet — start one with a library's Scan button." />
+      {:else}
+        <ul class="mt-2 divide-y divide-border text-sm">
+          {#each history as s (s.id)}
+            {@const lib = libraries.find((l) => l.id === s.library_id)}
+            {@const why = scanRunReason(s, sseDetail)}
+            <li class="flex flex-wrap items-center gap-3 py-2">
+              <Badge tone={toneForStatus(s.status)}>{s.status}</Badge>
+              <span class="font-medium">{lib?.name ?? s.library_id}</span>
+              {#if scopedSummary(s)}<span class="font-mono text-xs text-muted">{scopedSummary(s)}</span>{/if}
+              <span class="text-muted" title={fmtUtc(s.started_at)}>{fmtDateTime(s.started_at)}</span>
+              <span class="grow"></span>
+              <span class="text-xs text-muted">{fmtScanRun(s, live)}</span>
+              {#if why}<span class="basis-full text-xs text-danger">{why}</span>{/if}
+            </li>
+          {/each}
+        </ul>
+        <p class="mt-1 text-xs text-muted">The newest {HISTORY_LIMIT} runs across all libraries.</p>
+      {/if}
+    </div>
   {/if}
 
+  {#if failedJobsError}
+    <Alert tone="danger" class="mt-8" onDismiss={() => (failedJobsError = "")}>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <span>{failedJobsError}</span>
+        <Button size="sm" onclick={loadFailedJobs}>Retry</Button>
+      </div>
+    </Alert>
+  {/if}
   {#if failedTotal > 0}
     <div class="mt-8 flex items-center gap-3">
       <h2 class="text-lg font-semibold">Failed jobs</h2>
-      <span class="text-xs text-muted">{failedTotal} total</span>
+      <span class="text-xs text-muted">{fmtCount(failedTotal)} total</span>
       <div class="grow"></div>
       <Button
         size="sm"
@@ -1311,7 +1453,7 @@
     />
     <div class="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
       <span>
-        {failedOffset + 1}–{Math.min(failedOffset + FAILED_PAGE, failedTotal)} of {failedTotal}
+        {fmtCount(failedOffset + 1)}–{fmtCount(Math.min(failedOffset + FAILED_PAGE, failedTotal))} of {fmtCount(failedTotal)}
       </span>
       <Button size="sm" onclick={() => failedPage(-1)} disabled={failedOffset === 0}>Prev</Button>
       <Button size="sm" onclick={() => failedPage(1)} disabled={failedOffset + FAILED_PAGE >= failedTotal}>Next</Button>

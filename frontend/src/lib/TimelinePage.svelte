@@ -10,6 +10,7 @@
     errorMessage,
   } from "./api";
   import { encodeSearchHash } from "./searchparams";
+  import { bucketLabel, compactCount, fillTimeline } from "./timelineFill";
   import { Alert, Select, StateBlock } from "./ui";
 
   // ------------------------------------------------------------------ //
@@ -17,6 +18,13 @@
   // or year), rendered as clickable bars (no chart dependency). Clicking //
   // a bar applies an mtime range filter in Search; the "invalid dates"  //
   // bar (future-suspect mtimes, FIX-3) filters mtime beyond +48h.       //
+  //                                                                    //
+  // B38: buckets are UTC calendar periods (backend date_trunc in UTC)  //
+  // and the click range is that same UTC window, so labels stay UTC    //
+  // and the caption says so. Gaps are zero-filled (timelineFill.ts).   //
+  // The backend EXCLUDES sidecars (sidecar_of set) to match Search's   //
+  // default visibility, so totals here are lower than the Libraries    //
+  // page "Items" column, which counts them — the caption says that too.//
   // ------------------------------------------------------------------ //
 
   let bucket = $state<"month" | "year">("month");
@@ -30,6 +38,9 @@
   let error = $state("");
   let loading = $state(false);
 
+  const filled = $derived(
+    data ? fillTimeline(data.buckets, shownBucket) : { buckets: [], sparse: false },
+  );
   const maxCount = $derived(
     data ? Math.max(1, ...data.buckets.map((b) => b.count), data.invalid_count) : 1,
   );
@@ -62,12 +73,8 @@
     }
   }
 
-  function label(b: TimelineBucket): string {
-    const d = new Date(b.start);
-    return shownBucket === "year"
-      ? String(d.getUTCFullYear())
-      : d.toLocaleString(undefined, { timeZone: "UTC", year: "numeric", month: "short" });
-  }
+  const label = (b: TimelineBucket): string => bucketLabel(b.start_epoch, shownBucket);
+  const items = (n: number): string => `${n.toLocaleString()} item${n === 1 ? "" : "s"}`;
 
   // Clicking a bucket bar navigates to Search with the bucket's [start, end)
   // mtime window (end is exclusive, so lte = end_epoch - 1 inclusive).
@@ -148,28 +155,48 @@
       message="No dated items to chart yet. Scan a library (or pick another one) to fill the timeline." />
   {:else if data}
     <p class="mt-4 text-sm text-muted">
-      Click a bar to filter Search by that period.
+      Click a bar to filter Search by that period. Periods are UTC calendar {shownBucket}s.
+      {#if loading}<span class="ml-1" role="status">Updating…</span>{/if}
+    </p>
+    <p class="mt-1 text-xs text-muted">
+      Sidecar files (.nfo, .xmp, artwork) are not counted, so totals are lower than the Libraries page.
+      {#if filled.sparse}Empty periods are not drawn: the date range is too wide.{/if}
     </p>
     <!-- Bars: a horizontally-scrolling row of clickable columns. Each bar's
          height is proportional to its item count; labels sit beneath. A
          refresh keeps the old bars on screen, marked busy. -->
-    <div class="mt-3 overflow-x-auto rounded-control border border-border p-4" aria-busy={loading}>
+    <div
+      class="mt-3 overflow-x-auto rounded-control border border-border p-4 {loading ? 'opacity-60' : ''}"
+      aria-busy={loading}>
       <div class="flex items-end gap-1" style="min-height: 200px;">
-        {#each data.buckets as b (b.start_epoch)}
-          <button
-            type="button"
-            class="group flex shrink-0 flex-col items-center justify-end"
-            style="width: 32px;"
-            title={`${label(b)}: ${b.count} item${b.count === 1 ? "" : "s"}`}
-            onclick={() => openBucket(b)}>
-            <span class="mb-1 text-[10px] tabular-nums text-muted group-hover:text-accent-text"
-              >{b.count}</span>
+        {#each filled.buckets as b (b.start_epoch)}
+          {#if b.count}
+            <button
+              type="button"
+              class="group flex shrink-0 flex-col items-center justify-end"
+              style="width: 32px;"
+              title={`${label(b)} (UTC): ${items(b.count)}`}
+              aria-label={`${label(b)} UTC, ${items(b.count)}`}
+              onclick={() => openBucket(b)}>
+              <span class="mb-1 text-[10px] tabular-nums text-muted group-hover:text-accent-text"
+                >{compactCount(b.count)}</span>
+              <div
+                class="w-5 rounded-t bg-accent/60 group-hover:bg-accent"
+                style={`height: ${barHeight(b.count)}px;`}></div>
+              <span class="mt-1 w-8 -rotate-45 origin-top-left text-[10px] whitespace-nowrap text-muted"
+                >{label(b)}</span>
+            </button>
+          {:else}
+            <!-- An empty period: holds its place on the axis, nothing to open. -->
             <div
-              class="w-5 rounded-t bg-accent/60 group-hover:bg-accent"
-              style={`height: ${barHeight(b.count)}px;`}></div>
-            <span class="mt-1 w-8 -rotate-45 origin-top-left text-[10px] whitespace-nowrap text-muted"
-              >{label(b)}</span>
-          </button>
+              class="flex shrink-0 flex-col items-center justify-end"
+              style="width: 32px;"
+              title={`${label(b)} (UTC): no items`}>
+              <div class="h-px w-5 bg-border"></div>
+              <span class="mt-1 w-8 -rotate-45 origin-top-left text-[10px] whitespace-nowrap text-muted"
+                >{label(b)}</span>
+            </div>
+          {/if}
         {/each}
         {#if data.invalid_count}
           <!-- Future-suspect (invalid) mtimes, surfaced as a separate danger bar. -->
@@ -177,9 +204,9 @@
             type="button"
             class="group ml-4 flex shrink-0 flex-col items-center justify-end"
             style="width: 40px;"
-            title={`${data.invalid_count} item(s) with a suspect future date`}
+            title={`${items(data.invalid_count)} with a suspect future date`}
             onclick={openInvalid}>
-            <span class="mb-1 text-[10px] tabular-nums text-danger">{data.invalid_count}</span>
+            <span class="mb-1 text-[10px] tabular-nums text-danger">{compactCount(data.invalid_count)}</span>
             <div
               class="w-6 rounded-t bg-danger/50 group-hover:bg-danger"
               style={`height: ${barHeight(data.invalid_count)}px;`}></div>

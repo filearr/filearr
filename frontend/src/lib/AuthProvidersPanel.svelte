@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDate } from "./format";
   import { onMount } from "svelte";
   import {
     getAuthConfig, saveAuthConfig, testAuthProvider, fetchLdapCert, friendlyError,
@@ -301,7 +302,7 @@
                                 {#if c.via_aia}<span title="Not presented by the server — retrieved by following the certificate's Authority Information Access pointer"><Badge tone="warn" class="ml-1">via AIA</Badge></span>{/if}</div>
                               <div class="text-muted">issuer: {c.issuer}</div>
                               <div class="font-mono break-all">SHA-256: {c.sha256}</div>
-                              <div class="text-muted">expires {new Date(c.not_after).toLocaleDateString()}</div>
+                              <div class="text-muted">expires {fmtDate(c.not_after)}</div>
                             </div>
                           {/each}
                           <div class="mt-1 text-fg">{fetched.note}</div>

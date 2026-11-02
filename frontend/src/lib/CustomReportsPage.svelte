@@ -1,6 +1,8 @@
 <script lang="ts">
   import { fmtBytes } from "./format";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { latest } from "./latest";
+  import { focusPanel } from "./rowPanel";
   import ItemDetail from "./ItemDetail.svelte";
   import DslHelp from "./DslHelp.svelte";
   import { setBuilderPrefill, takeReportPrefill } from "./handoff";
@@ -14,6 +16,8 @@
     copyCustomReport,
     runCustomReport,
     downloadCustomReport,
+    enqueueCustomReportExport,
+    errorStatus,
     EXPORT_FORMATS,
     type ExportFormat,
     type ReportDefinition,
@@ -22,13 +26,16 @@
     type CustomRunPage,
     errorMessage,
   } from "./api";
-  import { Alert, Button, Checkbox, DataTable, Field, Input, Popover, Select, StateBlock, confirm } from "./ui";
+  import { Alert, Button, Checkbox, DataTable, Field, Input, Popover, StateBlock, confirm } from "./ui";
 
   // ------------------------------------------------------------------ //
   // P11 custom (saved-query) reports. A report is a querydsl string +   //
   // a column projection; the backend validates by PARSING + TRANSLATING //
   // the query on save, and /run streams the same CSV path as canned.    //
   // ------------------------------------------------------------------ //
+
+  // B21: the host refreshes its Exports panel when a background export lands.
+  let { onExportQueued }: { onExportQueued?: () => void } = $props();
 
   let defs = $state<ReportDefinition[]>([]);
   let registry = $state<ColumnRegistry | null>(null);
@@ -39,7 +46,11 @@
   let loaded = $state(false);
   let saveError = $state("");
   let rowError = $state<Record<string, string>>({});
+  let rowNote = $state<Record<string, string>>({});
   let runError = $state("");
+  // B41: one action per report at a time (double-clicks on Copy/Run/Delete/
+  // Download would otherwise fire twice).
+  let busy = $state<Record<string, boolean>>({});
 
   // form state
   let showForm = $state(false);
@@ -48,10 +59,16 @@
   let fQuery = $state("");
   let fSelected = $state<Set<string>>(new Set(["rel_path", "library", "size"]));
   let fExtra = $state(""); // comma-separated free meta./cf. columns
-  let fFormat = $state("csv");
+  // B41: the old "Default format" select is gone: nothing read it (downloads
+  // pick a format from the menu) and the API defaults it, so creates omit it
+  // and edits leave the stored value alone.
   let vErrors = $state<ReportValidationError[]>([]);
-  let vOk = $state(true);
+  // B41: false until a validation of the CURRENT query + columns says ok; any
+  // edit resets it, and `validating` covers the debounce + round trip.
+  let vOk = $state(false);
+  let validating = $state(false);
   let saving = $state(false);
+  const editorId = "custom-report-editor";
 
   // row-open (ItemDetail) + per-report download menu
   let detailId = $state<string | null>(null);
@@ -100,10 +117,21 @@
   }
 
   let validateTimer: ReturnType<typeof setTimeout> | undefined;
+  // Last-request-wins: an older validate answering late never lands.
+  const validator = latest((signal, body: { query: string; columns: string[] }) =>
+    validateCustomReport(body, signal),
+  );
   function scheduleValidate() {
     clearTimeout(validateTimer);
+    validator.cancel();
+    vOk = false;
+    validating = true;
     validateTimer = setTimeout(runValidate, 300);
   }
+  onDestroy(() => {
+    clearTimeout(validateTimer);
+    validator.cancel();
+  });
 
   // FIX-12 (Item B): a "Query syntax" help chip appends its example to the report
   // query and re-validates, teaching the filter DSL by example.
@@ -113,15 +141,15 @@
   }
   async function runValidate() {
     try {
-      const res = await validateCustomReport({
-        query: fQuery,
-        columns: formColumns(),
-      });
+      const res = await validator.run({ query: fQuery, columns: formColumns() });
+      if (res === undefined) return;
       vOk = res.ok;
       vErrors = res.errors;
+      validating = false;
     } catch (e) {
       vOk = false;
       vErrors = [{ error: "request_error", message: errorMessage(e) }];
+      validating = false;
     }
   }
 
@@ -143,11 +171,12 @@
     fQuery = "";
     fSelected = new Set(["rel_path", "library", "size"]);
     fExtra = "";
-    fFormat = "csv";
     vErrors = [];
-    vOk = true;
     saveError = "";
     showForm = true;
+    // An empty query (all items) is valid; checking it now enables Create.
+    scheduleValidate();
+    void focusPanel(editorId);
   }
   function openEdit(d: ReportDefinition) {
     editingId = d.id;
@@ -156,28 +185,52 @@
     const known = new Set(registryColumns());
     fSelected = new Set(d.columns.filter((c) => known.has(c)));
     fExtra = d.columns.filter((c) => !known.has(c)).join(", ");
-    fFormat = d.format;
     vErrors = [];
-    vOk = true;
     saveError = "";
     showForm = true;
     scheduleValidate();
+    void focusPanel(editorId);
   }
   function cancelForm() {
     showForm = false;
     editingId = null;
+    clearTimeout(validateTimer);
+    validator.cancel();
+    validating = false;
+  }
+
+  /** Run `fn` for report `id` unless an action for it is already in flight. */
+  async function guarded(id: string, fn: () => Promise<void>) {
+    if (busy[id]) return;
+    busy[id] = true;
+    try {
+      await fn();
+    } finally {
+      busy[id] = false;
+    }
+  }
+
+  // B41: Run and Download go through /run, which needs the write scope (the
+  // list only needs read): say so instead of a bare permission sentence.
+  function actionError(e: unknown, verb: string): string {
+    if (errorStatus(e) === 403) {
+      return `You don't have permission to ${verb}. Running, downloading or exporting a custom report needs write access; a read-only key or role can list reports but not run them.`;
+    }
+    return errorMessage(e, { verb });
   }
 
   // Round-trip to the visual builder: parse this report's DSL back into rows.
-  async function copyReport(d: ReportDefinition) {
-    rowError[d.id] = "";
-    try {
-      const copy = await copyCustomReport(d.id);
-      defs = await listCustomReports();
-      openEdit(copy); // land straight in the edit form: copy-and-edit in one click
-    } catch (e) {
-      rowError[d.id] = errorMessage(e);
-    }
+  function copyReport(d: ReportDefinition) {
+    return guarded(d.id, async () => {
+      rowError[d.id] = "";
+      try {
+        const copy = await copyCustomReport(d.id);
+        defs = await listCustomReports();
+        openEdit(copy); // land straight in the edit form: copy-and-edit in one click
+      } catch (e) {
+        rowError[d.id] = errorMessage(e, { verb: "copy this report" });
+      }
+    });
   }
 
   function editInBuilder(d: ReportDefinition) {
@@ -186,6 +239,7 @@
   }
 
   async function save() {
+    if (saving || !vOk) return;
     saveError = "";
     saving = true;
     try {
@@ -193,7 +247,6 @@
         name: fName,
         query: fQuery,
         columns: formColumns(),
-        format: fFormat,
       };
       if (editingId) await updateCustomReport(editingId, body);
       else await createCustomReport(body);
@@ -215,20 +268,24 @@
       tone: "danger",
     });
     if (!ok) return;
-    rowError[d.id] = "";
-    try {
-      await deleteCustomReport(d.id);
-      if (runId === d.id) {
-        runId = null;
-        runPage = null;
+    await guarded(d.id, async () => {
+      rowError[d.id] = "";
+      try {
+        await deleteCustomReport(d.id);
+        if (runId === d.id) {
+          runId = null;
+          runPage = null;
+        }
+        if (editingId === d.id) cancelForm();
+        defs = await listCustomReports();
+      } catch (e) {
+        rowError[d.id] = errorMessage(e, { verb: "delete this report" });
       }
-      defs = await listCustomReports();
-    } catch (e) {
-      rowError[d.id] = errorMessage(e, { verb: "delete this report" });
-    }
+    });
   }
 
   async function run(d: ReportDefinition, offset = 0) {
+    if (running) return;
     runError = "";
     running = true;
     // A different report's rows must not linger dimmed under this one's title.
@@ -239,21 +296,60 @@
     try {
       runPage = await runCustomReport(d.id, { limit: RUN_LIMIT, offset });
     } catch (e) {
-      runError = errorMessage(e);
+      runError = actionError(e, "run this report");
       runPage = null;
     } finally {
       running = false;
     }
   }
 
+  // The streaming download in flight (one at a time across reports): Cancel
+  // aborts it, and so does leaving the page.
+  let downloadCtl: AbortController | null = null;
+  let downloadingId = $state<string | null>(null);
+  onDestroy(() => downloadCtl?.abort());
+
   async function download(d: ReportDefinition, format: ExportFormat) {
     downloadMenuId = null;
+    if (downloadingId) return;
     rowError[d.id] = "";
+    rowNote[d.id] = "";
+    const ctl = new AbortController();
+    downloadCtl = ctl;
+    downloadingId = d.id;
     try {
-      await downloadCustomReport(d.id, d.name, format);
+      await downloadCustomReport(d.id, d.name, format, ctl.signal);
     } catch (e) {
-      rowError[d.id] = errorMessage(e);
+      if (!ctl.signal.aborted) rowError[d.id] = actionError(e, "download this report");
+    } finally {
+      if (downloadCtl === ctl) {
+        downloadCtl = null;
+        downloadingId = null;
+      }
     }
+  }
+
+  function cancelDownload() {
+    downloadCtl?.abort();
+    downloadCtl = null;
+    downloadingId = null;
+  }
+
+  // B21 / Ruling 11: custom reports get the background path too — the sync
+  // download is the memory-bound one for big results.
+  function queueBackground(d: ReportDefinition, format: ExportFormat) {
+    downloadMenuId = null;
+    return guarded(d.id, async () => {
+      rowError[d.id] = "";
+      rowNote[d.id] = "";
+      try {
+        await enqueueCustomReportExport(d.id, format);
+        rowNote[d.id] = `Queued a background ${format.toUpperCase()} export — it is listed in the Exports panel below.`;
+        onExportQueued?.();
+      } catch (e) {
+        rowError[d.id] = actionError(e, "export this report");
+      }
+    });
   }
 
   // Paging / retry re-run the report currently shown, at a given offset.
@@ -292,6 +388,8 @@
     // form pre-filled with the compiled DSL + a sensible column projection.
     const pf = takeReportPrefill();
     if (pf) {
+      // openCreate scrolls the editor into view and focuses it: the list sits
+      // above it on a long page, so the hand-off would otherwise land unseen.
       openCreate();
       fQuery = pf.query;
       if (pf.name) fName = pf.name;
@@ -318,16 +416,14 @@
 
   <!-- create / edit form -->
   {#if showForm}
-    <div class="mb-5 rounded-panel border border-border-strong p-4">
+    <div
+      id={editorId}
+      tabindex="-1"
+      aria-label={editingId ? "Edit custom report" : "New custom report"}
+      class="mb-5 rounded-panel border border-border-strong p-4 focus:outline-none">
       <div class="grid gap-3 sm:grid-cols-2">
         <Field label="Name" required>
           <Input bind:value={fName} placeholder="e.g. Low-res videos" />
-        </Field>
-        <Field label="Default format">
-          <Select bind:value={fFormat}>
-            <option value="csv">CSV</option>
-            <option value="json">JSON</option>
-          </Select>
         </Field>
       </div>
 
@@ -357,7 +453,9 @@
         </Field>
       </fieldset>
 
-      {#if vErrors.length}
+      {#if validating}
+        <p class="mt-3 text-xs text-muted">Checking the query…</p>
+      {:else if vErrors.length}
         <!-- Live validation as you type: shown, not announced on every keystroke. -->
         <Alert tone="warn" class="mt-3" live={false}>
           <ul class="space-y-1 text-xs">
@@ -366,7 +464,7 @@
             {/each}
           </ul>
         </Alert>
-      {:else if fQuery || formColumns().length}
+      {:else if vOk}
         <p class="mt-3 text-xs text-ok">Query is valid.</p>
       {/if}
 
@@ -405,7 +503,11 @@
               <div class="truncate font-mono text-xs text-muted">{d.query || "(all items)"}</div>
             </div>
             <div class="grow"></div>
-            <Button size="sm" onclick={() => run(d)}>Run</Button>
+            <Button size="sm" onclick={() => run(d)} disabled={running || busy[d.id]}>Run</Button>
+            {#if downloadingId === d.id}
+              <span class="text-xs text-muted">Preparing…</span>
+              <Button size="sm" onclick={cancelDownload}>Cancel download</Button>
+            {/if}
             <Popover
               bind:open={() => downloadMenuId === d.id, (v) => (downloadMenuId = v ? d.id : null)}
               label="Download"
@@ -416,18 +518,30 @@
               {#each EXPORT_FORMATS as f (f)}
                 <button
                   type="button"
-                  class="block w-full rounded-control px-3 py-1.5 text-left text-sm hover:bg-surface-3"
+                  class="block w-full rounded-control px-3 py-1.5 text-left text-sm hover:bg-surface-3 disabled:opacity-50"
+                  disabled={downloadingId !== null}
                   onclick={() => download(d, f)}>{f.toUpperCase()}</button>
+              {/each}
+              <div class="my-1 border-t border-border"></div>
+              {#each EXPORT_FORMATS as f (f)}
+                <button
+                  type="button"
+                  class="block w-full rounded-control px-3 py-1.5 text-left text-xs text-muted hover:bg-surface-3 hover:text-fg"
+                  onclick={() => queueBackground(d, f)}>Background {f.toUpperCase()}</button>
               {/each}
             </Popover>
             <Button
               size="sm"
               title="Clone this report and open the clone for editing — the original is untouched"
+              disabled={busy[d.id]}
               onclick={() => copyReport(d)}>Copy</Button>
             <Button size="sm" onclick={() => editInBuilder(d)}>Edit in builder</Button>
-            <Button size="sm" onclick={() => openEdit(d)}>Edit</Button>
-            <Button size="sm" variant="danger" onclick={() => remove(d)}>Delete</Button>
+            <Button size="sm" disabled={busy[d.id]} onclick={() => openEdit(d)}>Edit</Button>
+            <Button size="sm" variant="danger" disabled={busy[d.id]} onclick={() => remove(d)}>Delete</Button>
           </div>
+          {#if rowNote[d.id]}
+            <Alert tone="ok" class="mt-2" onDismiss={() => (rowNote[d.id] = "")}>{rowNote[d.id]}</Alert>
+          {/if}
           {#if rowError[d.id]}
             <Alert tone="danger" class="mt-2" onDismiss={() => (rowError[d.id] = "")}>{rowError[d.id]}</Alert>
           {/if}

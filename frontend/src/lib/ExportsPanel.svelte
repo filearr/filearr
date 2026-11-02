@@ -1,20 +1,29 @@
 <script lang="ts">
-  import { fmtBytes } from "./format";
+  import { fmtBytes, fmtDateTime, fmtUtc } from "./format";
   import { onMount, onDestroy } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { latest } from "./latest";
   import {
     listExports,
+    listCustomReports,
     downloadExport,
     type ReportExport,
+    type ReportMeta,
     errorMessage,
   } from "./api";
   import { Alert, Badge, Button, DataTable, toneForStatus, type Tone } from "./ui";
 
   // P11-T5/T11 — background export jobs: a status list + download. Populated by
-  // scheduled deliveries and by "Queue background export" from a report. Polls
-  // while any export is still queued/running so a finished job flips to
-  // downloadable without a manual refresh.
+  // scheduled deliveries and by "Background …" from a canned or custom report.
+  // B21: the host calls `refresh()` right after queueing one (bind:this), and
+  // the list polls fast while anything is queued/running, slowly when idle so
+  // scheduled and other sessions' exports still show up.
+  let { reports = [] }: { reports?: ReportMeta[] } = $props();
+
   let exports = $state<ReportExport[]>([]);
+  // Custom report names by id, for the Report column (B53); refetched only
+  // when an export names a report this panel has not seen.
+  let customNames = $state<Record<string, string>>({});
   // Errors by origin: the list load (DataTable error on first load, an Alert
   // above the kept rows on a later refresh) and a row's download.
   let error = $state("");
@@ -22,21 +31,53 @@
   let downloadError = $state<{ label: string; message: string } | null>(null);
   let loading = $state(false);
   let poller: Poller | undefined;
+  let lastRefresh = 0;
+
+  const FAST_MS = 4000;
+  const IDLE_MS = 60_000;
 
   const anyRunning = $derived(
     exports.some((e) => e.status === "queued" || e.status === "running"),
   );
+  const cannedTitles = $derived(new Map(reports.map((r) => [r.id, r.title])));
 
-  async function refresh() {
+  // Last-request-wins: a refresh right after a queue must not be overwritten by
+  // an older poll that answers later.
+  const loader = latest((signal) => listExports(signal));
+
+  /** Reload the list now. Exported for the host page (bind:this). */
+  export async function refresh() {
     loading = true;
+    lastRefresh = Date.now();
     try {
-      exports = await listExports();
+      const r = await loader.run();
+      if (r === undefined) return;
+      exports = r;
       error = "";
       loaded = true;
+      loading = false;
+      void loadCustomNames(r);
     } catch (e) {
       error = errorMessage(e);
-    } finally {
       loading = false;
+    }
+  }
+
+  // Every definition id already looked up, found or not: an export of a
+  // deleted custom report must not re-fetch the whole list on every refresh.
+  const lookedUp = new Set<string>();
+  async function loadCustomNames(list: ReportExport[]) {
+    const ids = list.map((e) => e.report_definition_id).filter((id): id is string => !!id);
+    if (!ids.some((id) => !lookedUp.has(id))) return;
+    try {
+      const defs = await listCustomReports();
+      customNames = Object.fromEntries(defs.map((d) => [d.id, d.name]));
+      // Missing ids (deleted reports) count as looked up too; a failed fetch
+      // marks nothing, so the next refresh retries.
+      for (const id of ids) lookedUp.add(id);
+      for (const d of defs) lookedUp.add(d.id);
+    } catch {
+      /* names are a nicety: the row falls back to "Custom report" */
     }
   }
 
@@ -53,7 +94,9 @@
   }
 
   function reportLabel(ex: ReportExport): string {
-    return ex.canned_report_key ?? "custom report";
+    if (ex.canned_report_key) return cannedTitles.get(ex.canned_report_key) ?? ex.canned_report_key;
+    const name = ex.report_definition_id ? customNames[ex.report_definition_id] : undefined;
+    return name ?? "Custom report";
   }
 
   // "complete" is this endpoint's success word (the kit vocabulary has
@@ -66,17 +109,27 @@
 
   onMount(() => {
     refresh();
-    // The anyRunning gate lives inside fn so it is read fresh on every tick
-    // (and on return to the tab), not captured once at mount.
-    poller = usePolling(() => {
-      if (anyRunning) refresh();
-    }, 4000);
+    // One fast ticker; the gate is read fresh on every tick (and on return to
+    // the tab): every tick while something runs, else once a minute.
+    poller = usePolling(
+      () => {
+        if (anyRunning || Date.now() - lastRefresh >= IDLE_MS) return refresh();
+      },
+      FAST_MS,
+      { refreshOnReturn: true },
+    );
   });
-  onDestroy(() => poller?.stop());
+  onDestroy(() => {
+    poller?.stop();
+    loader.cancel();
+  });
 </script>
 
 {#snippet reportCell(ex: ReportExport)}
   {reportLabel(ex)}
+  {#if !ex.canned_report_key}
+    <span class="ml-1 text-xs text-muted">(custom)</span>
+  {/if}
   {#if ex.triggered_by === "schedule"}
     <span class="ml-1 text-xs text-muted">(scheduled)</span>
   {/if}
@@ -95,7 +148,7 @@
 {#snippet rowsCell(ex: ReportExport)}<span class="tabular-nums">{ex.row_count ?? "—"}</span>{/snippet}
 {#snippet sizeCell(ex: ReportExport)}<span class="tabular-nums">{fmtBytes(ex.file_size_bytes, { zero: "—" })}</span>{/snippet}
 {#snippet createdCell(ex: ReportExport)}
-  <span class="text-xs text-muted">{ex.created_at ? new Date(ex.created_at).toLocaleString() : ""}</span>
+  <span class="text-xs text-muted" title={fmtUtc(ex.created_at)}>{fmtDateTime(ex.created_at)}</span>
 {/snippet}
 {#snippet actionsCell(ex: ReportExport)}
   <Button size="sm" onclick={() => download(ex)} disabled={!ex.downloadable}>

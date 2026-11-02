@@ -22,7 +22,6 @@ def _library(**over) -> Library:
         include_globs=[],
         exclude_globs=[],
         enabled_presets=[],
-        enabled_extension_groups=[],
     )
     base.update(over)
     return Library(**base)

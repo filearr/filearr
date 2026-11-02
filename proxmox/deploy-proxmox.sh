@@ -1649,15 +1649,9 @@ MODE="${1:-deploy}"
 # --reconfigure re-offers the sections that are otherwise "answered once"; the
 # optional-settings section keys off this (set -u: always defined).
 RECONFIGURE=0
-# legacy migration: project was renamed catalarr -> filearr
-if [[ ! -f "$CONF" && -f "$HOME/.config/catalarr/deploy.conf" ]]; then
-  mkdir -p "$CONF_DIR"
-  cp "$HOME/.config/catalarr/"* "$CONF_DIR"/ 2>/dev/null || true
-  echo "migrated saved settings from ~/.config/catalarr -> $CONF_DIR"
-fi
 [[ -f "$CONF" ]] && source "$CONF"
-# defaults / legacy-key compatibility (conf files written before this fix used HOSTNAME=)
-HOSTNAME_="${HOSTNAME_:-${HOSTNAME:-filearr}}"
+# defaults (never fall back to bash's $HOSTNAME -- that is the machine's own name)
+HOSTNAME_="${HOSTNAME_:-filearr}"
 PRIVILEGED="${PRIVILEGED:-0}"
 IP_MODE="${IP_MODE:-dhcp}"
 WEB_PORT="${WEB_PORT:-8484}"
@@ -1737,22 +1731,6 @@ if [[ -n "${VMID:-}" ]] && pct status "$VMID" >/dev/null 2>&1; then
     echo "!!   pct reboot $VMID    # then copy thumbnails.pre-move/. back in and rerun this deploy"
     echo "!! (find a free mp index with: pct config $VMID | grep ^mp)"
   fi
-  # legacy migration (rename): stop old catalarr stack, disable old mount units,
-  # carry the old .env across with renamed keys (keeps DB credentials working)
-  pct exec "$VMID" -- bash -c '
-    if [[ -d /opt/catalarr ]]; then
-      cd /opt/catalarr && docker compose -p catalarr down 2>/dev/null || true
-      systemctl disable --now "catalarr-mount-*" 2>/dev/null || true
-      for u in /etc/systemd/system/catalarr-mount-*.service; do
-        [[ -f "$u" ]] && systemctl disable --now "$(basename "$u")" 2>/dev/null || true
-      done
-      mkdir -p /opt/filearr
-      if [[ -f /opt/catalarr/.env && ! -f /opt/filearr/.env ]]; then
-        sed "s/CATALARR_/FILEARR_/g" /opt/catalarr/.env > /opt/filearr/.env
-        echo "migrated .env (old DB credentials preserved)"
-      fi
-      mv /opt/catalarr /opt/catalarr.old 2>/dev/null || true
-    fi'
   step "quiesce jobs";      quiesce_scans
   step "update system";     update_system
   step "storage mounts";    setup_storages          # re-applies storage defs

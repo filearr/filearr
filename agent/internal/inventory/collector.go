@@ -98,17 +98,16 @@ func DefaultRegistry() *Registry {
 // Capabilities is the additive advertisement the agent attaches to its command
 // poll so central can store what this agent supports (and the UI can offer only
 // composable collectors). Shape: {inventory_collectors: [...], inventory_version: N,
-// ffmpeg: bool, container: bool, extract: bool, extract_schema: N,
-// tools: {...}, formats: [...]}. “ffmpeg“ (roadmap §20) lets the fleet console
-// show which agents can produce video poster-frames — a missing binary used to be
-// silently absent thumbs with no operator-visible signal.
+// container: bool, extract: bool, extract_schema: N, tools: {...}, formats: [...]}.
+// tools.ffmpeg (roadmap §20) lets the fleet console show which agents can produce
+// video poster-frames — a missing binary used to be silently absent thumbs with
+// no operator-visible signal.
 //
 // The extract/tools/formats block is the agent-parity design contract's runtime
 // capability advertisement (2026-08-09). It is the whole reason there is ONE
 // agent binary instead of an essentials/full split: the heavy capabilities are
 // host tools, so a build degrades PER CAPABILITY at runtime and central's console
 // can tell an operator exactly which policy keys this agent will ignore, and why.
-// “ffmpeg“ stays a top-level key for the older centrals that read it there.
 //
 // 2026-08-11 adds the per-agent ABOUT payload — `tool_paths`, `build` and
 // (budget permitting) `modules`. Two notes on that:
@@ -130,7 +129,6 @@ func Capabilities() map[string]any {
 	caps := map[string]any{
 		"inventory_collectors": sorted,
 		"inventory_version":    CapabilityVersion,
-		"ffmpeg":               HasFFmpeg(),
 		// Containerized agents update by image pull — central flags a newer
 		// build in the console but never offers them the self-update channel.
 		"container": InContainer(),
@@ -144,7 +142,7 @@ func Capabilities() map[string]any {
 		"extract":        true,
 		"extract_schema": extract.Schema,
 		"tools":          Tools(),
-		// The VERSIONS of the tools that are present (2026-08-10). "ffmpeg: true"
+		// The VERSIONS of the tools that are present (2026-08-10). tools.ffmpeg=true
 		// answers whether a capability runs here; it does not answer which build
 		// is running, which is the question an operator hits when OCR quality or
 		// a codec probe looks wrong. Present-but-silent tools are omitted, so the

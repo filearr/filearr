@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtClock, fmtDate, fmtUtc } from "./format";
   // Console Logs panel: tails the unified app+worker log stream (app_logs).
   // Newest first with keyset "load older" paging; level/source/text filters;
   // optional auto-refresh (re-fetches page one — a tail, not a live stream).
@@ -95,17 +96,15 @@
     return "neutral";
   }
 
+  // Seconds matter in a log tail: today's rows show the local time only,
+  // older rows the local date too; the tooltip carries UTC.
   function fmtTs(iso: string): string {
-    const d = new Date(iso);
-    const today = new Date().toDateString() === d.toDateString();
-    return today
-      ? d.toLocaleTimeString()
-      : `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+    return fmtDate(iso) === fmtDate(Date.now()) ? fmtClock(iso) : `${fmtDate(iso)} ${fmtClock(iso)}`;
   }
 </script>
 
 {#snippet tsCell(r: LogRow)}
-  <span class="whitespace-nowrap tabular-nums text-muted" title={new Date(r.ts).toLocaleString()}>{fmtTs(r.ts)}</span>
+  <span class="whitespace-nowrap tabular-nums text-muted" title={fmtUtc(r.ts)}>{fmtTs(r.ts)}</span>
 {/snippet}
 {#snippet levelCell(r: LogRow)}<Badge tone={levelTone(r.level)}>{r.level.toLowerCase()}</Badge>{/snippet}
 {#snippet sourceCell(r: LogRow)}<span class="whitespace-nowrap text-muted">{r.source}</span>{/snippet}

@@ -41,7 +41,7 @@ so repeated searches surface first. List them with:
 Search history stays on this machine and is never sent to the central server.`
 
 // queryCommand is the P7-T3 deliverable: it dials the P7-T2 transport (never the
-// index file directly — that is `search`'s legacy path). Native urfave flags so
+// index file directly). Native urfave flags so
 // shell completion covers them.
 func queryCommand() *cli.Command {
 	return &cli.Command{

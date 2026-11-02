@@ -1,6 +1,6 @@
 """Runtime File Extension Similarity Taxonomy service (W8-A).
 
-The DB-backed, editable successor to ``media_types.detect``. It reads the
+The DB-backed, editable layer over the seed classifiers. It reads the
 ``file_categories`` / ``file_groups`` / ``file_group_extensions`` tables (seeded
 from :mod:`filearr.file_groups`) into a **version-keyed in-process cache** and
 classifies a path into a ``(file_category, file_group)`` pair at scan / extract /

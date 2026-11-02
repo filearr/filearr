@@ -53,7 +53,7 @@ There is no single rule; it is per setting, and the split is deliberate.
 
 | Setting | Policy key | Local fallback | Rule |
 | --- | --- | --- | --- |
-| Scan cron | `scan_cron` | local override, then `FILEARR_AGENT_SCAN_CRON` | The merged `policy` key > the merged `settings` key `scan_schedule_cron` > local override > env |
+| Scan cron | `scan_cron` | local override, then `FILEARR_AGENT_SCAN_CRON` | The merged `policy` key > local override > env |
 | Scan interval | `scan_interval_seconds` | local override, then `FILEARR_AGENT_SCAN_EVERY` | Policy wins whenever the key is present |
 | Scan on start | `scan_on_start` | local override, then `FILEARR_AGENT_SCAN_ON_BOOT` | Policy wins whenever the key is present |
 | Reconcile cadence | `reconcile_interval_seconds` | `FILEARR_AGENT_RECONCILE_INTERVAL` | Env seeds the interval at daemon start; a policy value **live-overrides** it on the next poll, without a restart |
@@ -82,8 +82,6 @@ Two consequences follow, and both are enforced, not merely documented:
   on every poll, so accepting a local edit to a key central owns would mean
   silently reverting it a minute later. Local editing exists to fill in the keys
   central left *unset*.
-- **Config-group settings count as central.** `group.scan_schedule_cron` outranks
-  a local cron for the same reason: it is delivered on the policy channel.
 
 Clearing a local override is a first-class action (the agent's **Clear local
 overrides** button), and it drops the key back to env → sidecar → default rather
@@ -267,8 +265,7 @@ state):
 | `enrollment_token` | Single-use enrollment token | **Erased after a successful enroll** and replaced by `enrollment_token_consumed_at`, so the secret is never left at rest and a re-run cannot attempt a (rejected) replay |
 | `enrollment_token_consumed_at` | RFC3339 stamp | Written by the agent, not by you |
 | `agent_name` | Friendly name in the console | Defaults to the device hostname |
-| `config_group_names` | List of [configuration groups](../agents.md#two-groupings) to join. Global is implicit and never listed | Read at enrollment. The minted token also records the list, so central applies it whatever the agent sends |
-| `config_group` | The first group name, repeated | Read at enrollment by shipped agent builds, which parse this key and not the list. The console's generated sidecar writes both |
+| `config_group_names` | List of [configuration groups](../agents.md#two-groupings) to join. Global is implicit and never listed | Informational: the minted token records the list, so central applies it at enrollment. Shown on the agent's local web UI |
 | `data_dir` | Where key/cert/state/index live | |
 | `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | |
 | `log_dir` | Directory for the rotating log | |
@@ -323,7 +320,7 @@ sidecar key (if any) for the same setting.
 
 | Variable | What it controls | Default | Also settable by |
 | --- | --- | --- | --- |
-| `FILEARR_AGENT_SCAN_CRON` | 5-field cron, in the **agent's local time**, for the in-daemon scan scheduler. Wins over `_SCAN_EVERY`. | unset | Central policy `scan_cron`, then group `scan_schedule_cron`, both of which win over this |
+| `FILEARR_AGENT_SCAN_CRON` | 5-field cron, in the **agent's local time**, for the in-daemon scan scheduler. Wins over `_SCAN_EVERY`. | unset | Central policy `scan_cron` wins |
 | `FILEARR_AGENT_SCAN_EVERY` | Go duration (`6h`, `30m`) between in-daemon scans. | unset | Central policy `scan_interval_seconds` wins |
 | `FILEARR_AGENT_SCAN_ON_BOOT` | Boolean: fire one scan roughly 30 s after the daemon starts. | unset (= off) | Central policy `scan_on_start` wins |
 | `FILEARR_AGENT_HASH_TIMEOUT_SECONDS` | Wall-clock ceiling on hashing **one** file. A corrupt or locked file on a FUSE/network mount can block `read(2)` forever and freeze the whole walk; past the bound the agent skips that file's hashes and logs a warning with its path. `0` removes the bound. | `300` | — |

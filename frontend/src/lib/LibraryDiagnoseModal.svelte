@@ -6,9 +6,11 @@
   // collapsible panels. "Copy report" puts the whole JSON on the clipboard so
   // the operator can paste it into an issue. All dynamic strings render as
   // text (no {@html}).
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { diagnoseLibrary, type Library, type LibraryDiagnosis, type LibraryVerdict, errorMessage } from "./api";
   import { copyText } from "./clipboard";
+  import { fmtDateTime } from "./format";
+  import { safeHref } from "./pathlinks";
   import DiagnoseSection from "./DiagnoseSection.svelte";
   import { Alert, Badge, Button, Modal, StateBlock, toneForStatus, type Tone } from "./ui";
 
@@ -22,10 +24,20 @@
   let copied = $state<"" | "ok" | "fail">("");
   let evidenceOpen = $state<Record<number, boolean>>({});
 
+  // The "Copied" label resets after a moment; the timer is cleared on re-run,
+  // on a second copy and on destroy so it never writes to a dead component.
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearCopied = () => {
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
+    copied = "";
+  };
+  onDestroy(() => clearTimeout(copiedTimer));
+
   async function run() {
     loading = true;
     error = "";
-    copied = "";
+    clearCopied();
     try {
       report = await diagnoseLibrary(library.id);
     } catch (e) {
@@ -38,8 +50,10 @@
 
   async function copyReport() {
     if (!report) return;
-    copied = (await copyText(JSON.stringify(report, null, 2))) ? "ok" : "fail";
-    setTimeout(() => (copied = ""), 2500);
+    const ok = await copyText(JSON.stringify(report, null, 2));
+    clearCopied();
+    copied = ok ? "ok" : "fail";
+    copiedTimer = setTimeout(clearCopied, 2500);
   }
 
   const SEV: Record<LibraryVerdict["severity"], { tone: Tone; border: string; label: string }> = {
@@ -50,7 +64,10 @@
   };
   const sev = (s: string) => SEV[s as LibraryVerdict["severity"]] ?? SEV.info;
 
-  const fmtTs = (s: string | null | undefined) => (s ? new Date(s).toLocaleString() : "—");
+  const fmtTs = (s: string | null | undefined) => fmtDateTime(s);
+  // Server-supplied docs link (a relative `/docs/...` path today). Only http(s)
+  // or a same-origin absolute path is linked; anything else renders no link.
+  const docHref = (d: unknown) => safeHref(d, { schemes: ["http", "https"] });
   const yn = (v: unknown) => (v === true ? "yes" : v === false ? "no" : v == null ? "unknown" : String(v));
   const stat = (st: Record<string, unknown>, k: string) => (st[k] == null ? "—" : String(st[k]));
   const nonEmpty = (o: Record<string, unknown> | null | undefined) => !!o && Object.keys(o).length > 0;
@@ -88,16 +105,19 @@
     <ul class="mt-4 space-y-2">
       {#each report.verdicts as v, i (v.code + i)}
         {@const s = sev(v.severity)}
+        {@const doc = docHref(v.doc)}
         <li class="rounded-control border p-3 {s.border}">
           <div class="flex flex-wrap items-baseline gap-2">
             <Badge tone={s.tone} class="shrink-0 uppercase tracking-wide">{s.label}</Badge>
             <span class="text-sm font-semibold">{v.title}</span>
-            <a
-              class="ml-auto text-xs text-accent-text hover:underline"
-              href={v.doc}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open the troubleshooting docs for {v.code}">Docs ↗</a>
+            {#if doc}
+              <a
+                class="ml-auto text-xs text-accent-text hover:underline"
+                href={doc}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the troubleshooting docs for {v.code}">Docs ↗</a>
+            {/if}
           </div>
           <p class="mt-1 text-sm text-muted break-words">{v.detail}</p>
           {#if v.actions.length}

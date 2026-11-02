@@ -70,7 +70,8 @@ async def client(maker, monkeypatch):
     monkeypatch.setattr(settings, "auth_ratelimit_max_attempts", 3)
     monkeypatch.setattr(settings, "auth_ratelimit_window_seconds", 120)
     monkeypatch.setattr(settings, "auth_ratelimit_lock_seconds", 300)
-    monkeypatch.setattr(settings, "auth_ratelimit_trust_forwarded_for", False)
+    monkeypatch.setattr(settings, "trusted_proxies", None)
+    monkeypatch.setattr(settings, "proxy_shared_secret", None)
     monkeypatch.setattr(settings, "audit_reads", False)
     app = create_app()
 
@@ -121,8 +122,9 @@ async def test_username_lockout_threshold(client):
 
 async def test_distributed_brute_force_caught_by_username_bucket(client):
     c, settings, maker = client
-    monkeypatch_ip = settings
-    monkeypatch_ip.auth_ratelimit_trust_forwarded_for = True
+    # Trust the test transport's peer as a proxy so X-Forwarded-For varies the
+    # source IP (the fixture's monkeypatch restores the setting afterwards).
+    settings.trusted_proxies = "127.0.0.1/32"
     await _bootstrap_admin(c)
     # Each attempt comes from a DIFFERENT source IP — no per-IP bucket ever trips,
     # but the shared username bucket accumulates and locks.

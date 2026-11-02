@@ -489,11 +489,8 @@ came through a proxy you trust:
   in `FILEARR_TRUSTED_PROXIES=10.0.0.5,172.18.0.0/16`. The chain is walked
   from the right, skipping trusted hops; the first untrusted hop is the
   client.
-- `FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR=true` is the **legacy** blunt
-  switch (leftmost entry, no checks). Keep it only if you already rely on it
-  and nothing but the proxy can reach the app port.
 
-Without any of these the proxy's own address is recorded (you will see the
+Without either of these the proxy's own address is recorded (you will see the
 Caddy container IP on every login in the audit log). The per-username bucket
 is unspoofable either way.
 

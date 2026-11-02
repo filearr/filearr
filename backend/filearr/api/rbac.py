@@ -529,7 +529,7 @@ async def create_grant(
         if payload.action not in role.ceiling:
             raise HTTPException(
                 422,
-                f"Role '{role.value}' cannot be granted '{payload.action}' "
+                f"Role '{role.name}' cannot be granted '{payload.action}' "
                 "(exceeds its ceiling)",
             )
     else:
@@ -646,7 +646,7 @@ async def preview(
         allowed=decision.allowed,
         reason=decision.reason,
         action=action,
-        role=role.value,
+        role=role.name,
         item_scope=item_scope,
         winning_grant=winner,
     )

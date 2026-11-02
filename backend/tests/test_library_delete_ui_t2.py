@@ -4,10 +4,11 @@ DELETE /api/v1/libraries/{id}?confirm=<name> (admin scope):
   * 404 unknown library,
   * 422 when confirm != library name,
   * 409 while any ScanRun for it is 'running',
-  * else deletes the row (FK CASCADE removes items/scan_runs), prunes Meili by
-    explicit id after commit, returns 204.
+  * else deletes the row (FK CASCADE removes items/scan_runs), defers the Meili
+    prune by explicit id after commit (B17), returns 204.
 
-The Meilisearch projection call (delete_docs) is monkeypatched to record the ids.
+The deferred prune (``defer_delete_docs``) is monkeypatched to record the ids.
+Queued-scan-job guard + delete-impact live in test_library_delete_impact_p7.
 """
 
 from __future__ import annotations
@@ -51,10 +52,11 @@ async def wired(pg_uri, monkeypatch):
 
     deleted_batches: list[list[str]] = []
 
-    async def _fake_delete_docs(ids):
+    async def _fake_defer_delete_docs(ids):
         deleted_batches.append(list(ids))
+        return 1 if ids else 0
 
-    monkeypatch.setattr(lib_mod, "delete_docs", _fake_delete_docs)
+    monkeypatch.setattr(lib_mod, "defer_delete_docs", _fake_defer_delete_docs)
 
     get_settings.cache_clear()
     monkeypatch.setattr(get_settings(), "auth_enabled", False)
@@ -160,7 +162,7 @@ async def test_delete_cascades_and_prunes_meili(wired):
     id1 = await _mk_item(maker, lib, "a.pdf")
     id2 = await _mk_item(maker, lib, "b.pdf")
     # a finished scan run must not block the delete
-    await _mk_scan_run(maker, lib, "completed")
+    await _mk_scan_run(maker, lib, "finished")
 
     async with _client(wired["app"]) as c:
         r = await c.delete(f"{BASE}/{lib}?confirm=Docs")

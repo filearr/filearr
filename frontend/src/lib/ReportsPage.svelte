@@ -2,6 +2,7 @@
   import { fmtBytes } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { latest } from "./latest";
+  import { reportQuery } from "./reportQuery";
   import CustomReportsPage from "./CustomReportsPage.svelte";
   import ExportsPanel from "./ExportsPanel.svelte";
   import ReportSchedulesPanel from "./ReportSchedulesPanel.svelte";
@@ -21,6 +22,7 @@
     type ReportPage,
     type ReportRunOpts,
     type Library,
+    errorStatus,
     errorMessage,
   } from "./api";
   import { Alert, Button, Checkbox, DataTable, Field, Input, Popover, Select, StateBlock } from "./ui";
@@ -47,10 +49,14 @@
   let dlError = $state("");
   let loading = $state(false);
   let downloading = $state(false);
+  // The in-flight streaming download (B40): Cancel aborts it, and so does
+  // leaving the page.
+  let downloadCtl: AbortController | null = null;
   let downloadOpen = $state(false);
   let showAllColumns = $state(false);
   let detailId = $state<string | null>(null); // open ItemDetail id
   let queued = $state(""); // background-export queued notice
+  let exportsPanel = $state<ReturnType<typeof ExportsPanel>>();
 
   // IN-T3: `largest_folders` gains a treemap MODE. Deliberately a mode of this
   // page, not a separate page or a forked component tree — the report selector,
@@ -66,11 +72,11 @@
   // declares `supports_threshold`. No per-report special-casing here — a future
   // report that declares it gets the input for free.
   let thresholdDays = $state(0);
-  const thresholdParam = $derived(
-    selected?.supports_threshold && thresholdDays > 0 ? thresholdDays : undefined,
-  );
 
   const pageSize = $derived(selected ? selected.default_limit : 100);
+  // The on-screen filter, as reportQuery reads it (B2): it decides per report
+  // whether library/threshold apply and whether an export carries a limit.
+  const filter = $derived({ libraryId: library, thresholdDays });
 
   // Bytes-ish columns get human formatting; everything else prints as text.
   const BYTE_COLUMNS = new Set(["size", "total_bytes", "wasted_bytes"]);
@@ -91,7 +97,7 @@
     const v = row[col];
     if (v == null) return "";
     if (BYTE_COLUMNS.has(col) && typeof v === "number") return fmtBytes(v, { zero: "0" });
-    return String(v);
+    return typeof v === "object" ? JSON.stringify(v) : String(v);
   }
 
   // The interactive affordance for a row, driven by the report's row_link.
@@ -169,12 +175,10 @@
     error = "";
     loading = true;
     try {
-      const r = await reportLoader.run(selected.id, {
-        limit: pageSize,
-        offset,
-        libraryId: selected.supports_library ? library || undefined : undefined,
-        thresholdDays: thresholdParam,
-      });
+      const r = await reportLoader.run(
+        selected.id,
+        reportQuery(selected, { mode: "page", offset, ...filter }),
+      );
       if (r === undefined) return;
       page = r;
       loading = false;
@@ -197,22 +201,31 @@
   }
 
   async function download(format: ExportFormat) {
-    if (!selected) return;
+    if (!selected || downloading) return;
     downloadOpen = false;
     dlError = "";
     downloading = true;
+    const ctl = new AbortController();
+    downloadCtl = ctl;
     try {
-      await downloadReport(selected.id, format, {
-        limit: pageSize,
-        libraryId: selected.supports_library ? library || undefined : undefined,
-        thresholdDays: thresholdParam,
-      });
+      await downloadReport(selected, format, filter, ctl.signal);
     } catch (e) {
-      dlError = errorMessage(e);
+      // A cancel is the user's own doing: nothing to report.
+      if (!ctl.signal.aborted) dlError = errorMessage(e, { verb: "download this report" });
     } finally {
-      downloading = false;
+      if (downloadCtl === ctl) {
+        downloadCtl = null;
+        downloading = false;
+      }
     }
   }
+
+  function cancelDownload() {
+    downloadCtl?.abort();
+    downloadCtl = null;
+    downloading = false;
+  }
+  onDestroy(() => downloadCtl?.abort());
 
   async function queueBackground(format: ExportFormat) {
     if (!selected) return;
@@ -220,25 +233,40 @@
     queued = "";
     dlError = "";
     try {
-      await enqueueReportExport(selected.id, format, {
-        libraryId: selected.supports_library ? library || undefined : undefined,
-        thresholdDays: thresholdParam,
-      });
-      queued = `Queued a background ${format.toUpperCase()} export — see the Exports panel below.`;
+      await enqueueReportExport(selected.id, format, reportQuery(selected, { mode: "export", ...filter }));
+      queued = `Queued a background ${format.toUpperCase()} export — it is listed in the Exports panel below.`;
+      void exportsPanel?.refresh();
     } catch (e) {
-      dlError = errorMessage(e);
+      dlError = errorMessage(e, { verb: "export this report" });
     }
   }
 
+  // B40: the report list and the library list load independently, so a 403 on
+  // libraries (a scoped key) leaves the reports usable with "All libraries".
+  let libsError = $state("");
   async function loadRegistry() {
     listError = "";
     try {
-      [reports, libs] = await Promise.all([listReports(), listLibraries()]);
+      reports = await listReports();
     } catch (e) {
       listError = errorMessage(e);
     }
   }
-  onMount(loadRegistry);
+  async function loadLibraries() {
+    libsError = "";
+    try {
+      libs = await listLibraries();
+    } catch (e) {
+      libs = [];
+      libsError = errorStatus(e) === 403
+        ? "You can't list libraries, so only All libraries is offered."
+        : `Library list unavailable: ${errorMessage(e)}`;
+    }
+  }
+  onMount(() => {
+    void loadRegistry();
+    void loadLibraries();
+  });
 
   // DataTable columns for the current page: one per visible report column,
   // plus the row_link action when the report has one.
@@ -250,8 +278,15 @@
     })),
     ...(rowActionLabel() ? [{ key: "__action", label: "Actions", align: "right" as const, cell: actionCell }] : []),
   ]);
-  // Report rows carry no id; a row's index in the page is stable while shown.
-  const rowIndex = (row: Record<string, unknown>) => page?.rows.indexOf(row) ?? -1;
+  // B40: rows keyed by `item_id` when the page has one per row (item reports);
+  // aggregate rows carry no id, so they fall back to their index in the page.
+  const rowKeys = $derived.by(() => {
+    const rows = page?.rows ?? [];
+    const ids = rows.map((r) => (r.item_id == null ? null : String(r.item_id)));
+    const unique = ids.every((x) => x !== null) && new Set(ids).size === ids.length;
+    return new Map(rows.map((r, i) => [r, unique ? `item:${ids[i]}` : `row:${i}`]));
+  });
+  const rowKey = (row: Record<string, unknown>) => rowKeys.get(row) ?? "";
 </script>
 
 {#snippet actionCell(row: Record<string, unknown>)}
@@ -304,6 +339,7 @@
                 <option value={l.id}>{l.name}</option>
               {/each}
             </Select>
+            {#if libsError}<p class="mt-1 text-xs text-muted">{libsError}</p>{/if}
           </div>
         {/if}
         {#if selected.supports_threshold}
@@ -350,6 +386,9 @@
         <div class="grow"></div>
         <!-- Download menu: CSV / NDJSON / XML streaming exports, plus the same
              formats queued as background exports. -->
+        {#if downloading}
+          <Button size="sm" onclick={cancelDownload}>Cancel download</Button>
+        {/if}
         <Popover bind:open={downloadOpen} ariaLabel="Download" align="end" class="w-40 p-1">
           {#snippet trigger({ props })}
             <Button size="sm" {...props} disabled={downloading}>
@@ -413,7 +452,7 @@
           captionHidden
           columns={tableColumns}
           rows={page?.rows ?? []}
-          rowKey={rowIndex}
+          {rowKey}
           accessor={(row, k) => cell(row, k)}
           {loading}
           error={error || null}
@@ -438,8 +477,10 @@
   <ItemDetail id={detailId} onClose={() => (detailId = null)} onOpen={(nid) => (detailId = nid)} />
 {/if}
 
-<CustomReportsPage />
+<CustomReportsPage onExportQueued={() => void exportsPanel?.refresh()} />
 
-<ReportSchedulesPanel />
+<ReportSchedulesPanel
+  current={selected ? { meta: selected, ...filter } : null}
+  libraries={libs} />
 
-<ExportsPanel />
+<ExportsPanel bind:this={exportsPanel} {reports} />

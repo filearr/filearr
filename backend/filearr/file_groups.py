@@ -28,8 +28,8 @@ Multi-part extensions
 ---------------------
 ``detect_group`` consults a recognized COMPOUND ending first (``.tar.gz``,
 ``.tar.bz2``, ``.tar.xz``, ``.tar.zst``, …) and classifies the whole file as
-``archive``; otherwise only the final extension is used (mirroring
-``media_types.detect``). Because the individual wrapper extensions (``gz``/``xz``/
+``archive``; otherwise only the final extension is used (like
+``detect_category``). Because the individual wrapper extensions (``gz``/``xz``/
 ``zst``/…) also map to ``archive`` on their own, the compound rule mainly guarantees
 consistent, intention-revealing classification. Leading-dot names with no stem
 (``.bashrc``, ``.gitignore``) have no extension and resolve to ``other``.
@@ -492,7 +492,7 @@ _validate_categories()
 # --------------------------------------------------------------------------- #
 # Extension membership (group_id -> extensions). Bare, lowercase, no dot. Long   #
 # data rows are E501-ignored for this module (see pyproject per-file-ignores),   #
-# same rationale as media_types.py.                                              #
+# (lookup tables read better unwrapped).                                         #
 # --------------------------------------------------------------------------- #
 _GROUP_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "raster-photo": (
@@ -811,7 +811,7 @@ _COMPOUND_GROUP_MAP: dict[str, str] = {
 def detect_group(path: str) -> str:
     """Classify ``path`` into a ``file_group`` id (pure; unknown -> ``other``).
 
-    Mirrors :func:`filearr.media_types.detect`: case-insensitive, extension-only.
+    Mirrors :func:`detect_category`: case-insensitive, extension-only.
     A recognised compound ending (``.tar.gz`` …) is consulted first and wins as a
     whole (``archive``); otherwise the final extension decides. A name with no
     usable extension (``.bashrc``, ``README``) resolves to ``other``."""

@@ -37,6 +37,12 @@ from filearr.security import PermissionContext, require_permission
 #: In-flight export statuses that count against the per-principal cap (T11).
 _ACTIVE_EXPORT_STATUSES: tuple[str, ...] = ("queued", "running")
 
+#: ``Retry-After`` (seconds) on the per-principal cap 429. The cap is a count of
+#: in-flight exports, not a rate window, so there is no exact reset time; one
+#: export typically finishes within this, and retrying sooner just re-hits the
+#: cap. A documented constant rather than a derived value (ruling 9).
+EXPORT_CAP_RETRY_AFTER_S = 30
+
 router = APIRouter()
 
 
@@ -87,6 +93,7 @@ async def enqueue_export(
                 429,
                 f"too many active exports ({active}); wait for one to finish "
                 f"(limit {cap})",
+                headers={"Retry-After": str(EXPORT_CAP_RETRY_AFTER_S)},
             )
     params: dict = {}
     if library_id is not None:

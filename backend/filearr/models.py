@@ -125,13 +125,6 @@ class Library(Base):
     # negative sentinels e.g. '-hidden_dotfiles'). NOT the effective set, so the
     # shipped-on default set can evolve without a data migration.
     enabled_presets: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
-    # P2-T3 extension-group presets (a curated per-category ext refinement; union
-    # semantics, R5). SUPERSEDED for scan gating by the taxonomy ``enabled_groups``
-    # above (W8-B) — retained as a validated API/preset surface only, no longer
-    # consulted by the scan walk.
-    enabled_extension_groups: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), server_default=text("'{}'")
-    )
     # Native path prefix on the SOURCE system (e.g. '/mnt/user/media' on Unraid or
     # '\\\\tower\\media'). Mount paths inside this container differ from the origin
     # system; native_prefix lets the API/UI/exports translate container paths back

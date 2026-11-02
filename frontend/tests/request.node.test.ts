@@ -425,3 +425,38 @@ test("canWrite follows the write scope, not the admin scope", () => {
   assert.equal(canWrite({ ...base, global_role: "admin" }), true);
   assert.equal(canWrite({ ...base, global_role: "user" }), false);
 });
+
+// ---- Ruling 9: every non-2xx carries Retry-After -------------------------
+
+test("a 429 carries Retry-After seconds on the ApiError", async () => {
+  stub(() => new Response(JSON.stringify({ detail: "too many active exports (3)" }), {
+    status: 429,
+    headers: { "content-type": "application/json", "retry-after": "30" },
+  }));
+  await assert.rejects(send("POST", "/reports/x/export"), (e: unknown) => {
+    assert.ok(e instanceof ApiError);
+    assert.equal(e.retryAfter, 30);
+    assert.equal(errorMessage(e), "too many active exports (3). Try again in 30 s.");
+    return true;
+  });
+});
+
+test("Retry-After as an HTTP-date, and absent, on non-2xx", async () => {
+  const when = new Date(Date.now() + 60_000).toUTCString();
+  stub(() => new Response("", { status: 503, headers: { "retry-after": when } }));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => {
+    assert.ok(e instanceof ApiError);
+    assert.ok(e.retryAfter !== null && e.retryAfter > 55 && e.retryAfter <= 61, String(e.retryAfter));
+    return true;
+  });
+  stub(() => jsonRes({ detail: "nope" }, 429));
+  await assert.rejects(send("GET", "/x"), (e: unknown) => e instanceof ApiError && e.retryAfter === null);
+});
+
+test("expect response: a non-2xx ApiError carries Retry-After too", async () => {
+  stub(() => new Response("", { status: 429, headers: { "retry-after": "7" } }));
+  await assert.rejects(
+    send("POST", "/x", { expect: "response" }),
+    (e: unknown) => e instanceof ApiError && e.status === 429 && e.retryAfter === 7,
+  );
+});

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDateTime } from "./format";
   // Ordinary API keys: read / write / admin Bearer tokens for *arr-style
   // integrations, scripts and dashboards. Distinct from LLM access keys (those
   // carry a facade role and are pinned to read). Key material is shown exactly
@@ -146,7 +147,7 @@
   }
 
   function fmt(iso: string | null): string {
-    return iso ? new Date(iso).toLocaleString() : "—";
+    return iso ? fmtDateTime(iso) : "—";
   }
 </script>
 

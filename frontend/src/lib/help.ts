@@ -1,7 +1,7 @@
 // UI-T5 — single source of truth for field help text. Every labelled setting in
 // the add-library form and the edit modal references a key here so wording stays
 // consistent and maintainable. Values are PLAIN TEXT and rendered as text (never
-// {@html}) by Help.svelte. Preset/extension-group descriptions that vary per
+// {@html}) by Help.svelte. Preset descriptions that vary per
 // bundle come from GET /presets at runtime (see caveat / label there); the
 // entries below are the general, field-level explanations.
 
@@ -109,31 +109,34 @@ export const HELP: Record<string, string> = {
     + "calling system can pick the one its OS needs.",
 
   enabled:
-    "When off, the library is skipped by scheduled scans and hidden from scan " +
-    "triggers. Existing indexed items remain searchable until re-scanned or deleted.",
+    "When off, automatic scanning pauses: the library's scan schedule and its hot-folder " +
+    "schedules are skipped, and watch mode stops. Manual and targeted scans (Scan now, " +
+    "folder rescans) still run, and existing items stay searchable.",
 
   media_types:
     "Restrict this library to specific media types (video, audio, image, etc.). " +
     "None selected = index every supported type found under the root.",
 
   include_globs:
-    "Optional allowlist of gitignore-style path globs (one per line). When set, ONLY " +
-    "files matching an include glob are considered. Leave empty to include everything " +
-    "not excluded. Matched against the path relative to the root.",
+    "Re-include overrides (one gitignore-style pattern per line, matched against the " +
+    "path relative to the root). Each line is applied after every exclusion, as a " +
+    "`!pattern` negation, so it brings back files an exclude glob or preset removed, " +
+    "e.g. keep one file a preset hides. It does NOT limit indexing to matching files, " +
+    "and it cannot re-include anything inside an excluded folder: excluded folders are " +
+    "skipped without being read. Leave empty for no overrides.",
 
   exclude_globs:
-    "Gitignore-style path globs to skip (one per line), e.g. **/.stfolder/** or " +
-    "**/*.partial. Applied after includes. Prefer preset bundles below for common " +
-    "junk; use this for library-specific exclusions.",
+    "Gitignore-style patterns to skip (one per line, matched against the path relative " +
+    "to the root), e.g. **/.stfolder/ or **/*.partial. Applied together with the preset " +
+    "bundles below, before any re-include line; a pattern that matches a folder skips " +
+    "the whole folder. Re-include lines are applied after these and can bring back " +
+    "individual files. Prefer preset bundles for common junk; use this for " +
+    "library-specific exclusions.",
 
   presets:
     "Reusable exclude bundles for common junk (dotfiles, node_modules, sample/proof " +
     "folders, etc.). Default-on bundles apply automatically unless you opt out here. " +
     "Each bundle lists its exact patterns and any caveat inline.",
-
-  extension_groups:
-    "Narrow a media type to a curated set of extensions (union of the enabled groups " +
-    "for that type). No group enabled = every extension mapped to that type is indexed.",
 
   scan_stop:
     "Stop (keep progress) gracefully ends a running scan: it finishes the " +
@@ -288,10 +291,9 @@ export const HELP_TOPICS: HelpTopic[] = [
     title: "What gets indexed",
     items: [
       ["media_types", "Media types"],
-      ["include_globs", "Include globs"],
+      ["include_globs", "Re-include (overrides excludes)"],
       ["exclude_globs", "Exclude globs"],
       ["presets", "Exclude presets"],
-      ["extension_groups", "Extension groups"],
     ],
   },
   {

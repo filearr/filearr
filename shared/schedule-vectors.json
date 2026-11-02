@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "UI-T11 language-neutral vectors for the friendly scan-schedule builder (frontend/src/lib/schedule.ts). Each vector: a LOCAL builder choice + an offset_minutes (JS getTimezoneOffset(), +west), the expected UTC cron the builder must generate, and UTC due-time samples. The Python port + cron_is_due/cronsim pin the semantic contract the JS must satisfy. Round-trip: generateCron(parseCron(cron)) == cron.",
+  "description": "UI-T11 language-neutral vectors for the friendly scan-schedule builder (frontend/src/lib/schedule.ts). Each vector: a LOCAL builder choice + an offset_minutes (JS getTimezoneOffset(), +west), the expected UTC cron the builder must generate, and UTC due-time samples. The Python port + cron_is_due/cronsim pin the semantic contract the JS must satisfy. Round-trip: generateCron(parseCron(cron)) == cron. A vector with `refused` is one the guarded builder (scheduleCron) must refuse with that code: its cron is the raw arithmetic result, kept to pin the conversion, and parseCron opens it in Advanced (Ruling 10: monthly never stores a day-shifted cron).",
   "dow_convention": "0=Sunday .. 6=Saturday (cron 7 also Sunday)",
   "vectors": [
     {
@@ -314,7 +314,8 @@
           "utc": "2026-07-15T04:00:00",
           "due": false
         }
-      ]
+      ],
+      "refused": "monthly-day-shift"
     },
     {
       "name": "monthly_east_dom_back",
@@ -335,7 +336,8 @@
           "utc": "2026-07-15T16:00:00",
           "due": false
         }
-      ]
+      ],
+      "refused": "monthly-day-shift"
     },
     {
       "name": "monthly_east_day1_wrap",
@@ -356,7 +358,8 @@
           "utc": "2026-07-30T16:00:00",
           "due": false
         }
-      ]
+      ],
+      "refused": "monthly-day-shift"
     },
     {
       "name": "monthly_west_day31_wrap",
@@ -375,6 +378,182 @@
         },
         {
           "utc": "2026-07-31T04:00:00",
+          "due": false
+        }
+      ],
+      "refused": "monthly-day-shift"
+    },
+    {
+      "name": "monthly_east2_day1_0100_refused",
+      "offset_minutes": -120,
+      "builder": {
+        "mode": "monthly",
+        "hour": 1,
+        "minute": 0,
+        "dayOfMonth": 1
+      },
+      "cron": "0 23 31 * *",
+      "refused": "monthly-day-shift",
+      "due": [
+        {
+          "utc": "2026-07-31T23:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-06-30T23:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_west5_day31_2330_refused",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "monthly",
+        "hour": 23,
+        "minute": 30,
+        "dayOfMonth": 31
+      },
+      "cron": "30 4 1 * *",
+      "refused": "monthly-day-shift",
+      "due": [
+        {
+          "utc": "2026-02-01T04:30:00",
+          "due": true
+        },
+        {
+          "utc": "2026-01-31T04:30:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_east2_0200_sameday_edge",
+      "offset_minutes": -120,
+      "builder": {
+        "mode": "monthly",
+        "hour": 2,
+        "minute": 0,
+        "dayOfMonth": 1
+      },
+      "cron": "0 0 1 * *",
+      "due": [
+        {
+          "utc": "2026-07-01T00:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-06-30T00:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_west5_1859_sameday_edge",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "monthly",
+        "hour": 18,
+        "minute": 59,
+        "dayOfMonth": 31
+      },
+      "cron": "59 23 31 * *",
+      "due": [
+        {
+          "utc": "2026-07-31T23:59:00",
+          "due": true
+        },
+        {
+          "utc": "2026-08-01T23:59:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_ist_0530_sameday_edge",
+      "offset_minutes": -330,
+      "builder": {
+        "mode": "monthly",
+        "hour": 5,
+        "minute": 30,
+        "dayOfMonth": 10
+      },
+      "cron": "0 0 10 * *",
+      "due": [
+        {
+          "utc": "2026-07-10T00:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-09T00:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_ist_0529_refused",
+      "offset_minutes": -330,
+      "builder": {
+        "mode": "monthly",
+        "hour": 5,
+        "minute": 29,
+        "dayOfMonth": 10
+      },
+      "cron": "59 23 9 * *",
+      "refused": "monthly-day-shift",
+      "due": [
+        {
+          "utc": "2026-07-09T23:59:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-10T23:59:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_west_sat_to_sun_wrap",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "weekly",
+        "hour": 23,
+        "minute": 0,
+        "daysOfWeek": [
+          6
+        ]
+      },
+      "cron": "0 4 * * 0",
+      "due": [
+        {
+          "utc": "2026-07-05T04:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-04T04:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_ist_mon_to_sun",
+      "offset_minutes": -330,
+      "builder": {
+        "mode": "weekly",
+        "hour": 5,
+        "minute": 15,
+        "daysOfWeek": [
+          1
+        ]
+      },
+      "cron": "45 23 * * 0",
+      "due": [
+        {
+          "utc": "2026-07-05T23:45:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-06T23:45:00",
           "due": false
         }
       ]

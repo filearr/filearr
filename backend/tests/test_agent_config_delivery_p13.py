@@ -197,7 +197,6 @@ async def test_wire_payload_matches_the_go_policy_struct(client):
         },
         settings={
             "log_level": "verbose",
-            "scan_schedule_cron": "30 2 * * *",
             "web_ui_enabled": True,
             "auth_required": False,
         },
@@ -217,7 +216,6 @@ async def test_wire_payload_matches_the_go_policy_struct(client):
     # unknown keys round-trip verbatim (forward-compat contract)
     assert pol["future_key"] == {"deep": [1, 2]}
     # the settings section rides under `group`, which the Go GroupSettings reads
-    assert pol["group"]["scan_schedule_cron"] == "30 2 * * *"
     assert pol["group"]["log_level"] == "verbose"
     # lifted local-surface keys sit at the TOP level for the P7-T4 gate
     assert pol["web_ui_enabled"] is True

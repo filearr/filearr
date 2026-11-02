@@ -53,7 +53,6 @@ from filearr.models import (
     AgentConfigGroupVersion,
     AgentConfigRollout,
 )
-from filearr.schedule import InvalidCronError, validate_cron
 
 # --- W6-R1 preset vocabulary (docs/research/agent-inventory-presets.md §5) ---
 #: The named folder-selection presets the distributed agent offers. ``custom`` is
@@ -481,7 +480,6 @@ class GroupSettings(BaseModel):
     log_level: Literal["error", "warn", "info", "verbose", "debug"] | None = None
     scan_selections: list[ScanSelection] | None = None
     inventory: InventoryConfig | None = None
-    scan_schedule_cron: str | None = None
     # Local-surface gates per CONFIG GROUP (user request 2026-07-27). None =
     # inherit (let a lower-priority group, or the agent default, supply this).
     # Delivery lifts these to the TOP-LEVEL policy keys the agent's P7-T4 gate
@@ -500,19 +498,6 @@ class GroupSettings(BaseModel):
             raise ValueError(
                 f"scan_selections has {len(v)}; max {MAX_SCAN_SELECTIONS}"
             )
-        return v
-
-    @field_validator("scan_schedule_cron")
-    @classmethod
-    def _valid_cron(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
-        if not v.strip():
-            raise ValueError("scan_schedule_cron must be a non-empty cron expression")
-        try:
-            validate_cron(v)
-        except InvalidCronError as err:
-            raise ValueError(f"invalid scan_schedule_cron: {err}") from err
         return v
 
 

@@ -605,6 +605,11 @@ async def test_per_principal_export_cap(env, monkeypatch):
         with pytest.raises(HTTPException) as ei:
             await enqueue_export(s, ctx, canned_report_key="largest_files", fmt="csv")
         assert ei.value.status_code == 429
+        # P7 ruling 9: the refusal tells the client when to retry (FastAPI's
+        # HTTPException handler forwards ``headers`` onto the response).
+        from filearr.api.exports import EXPORT_CAP_RETRY_AFTER_S
+
+        assert ei.value.headers == {"Retry-After": str(EXPORT_CAP_RETRY_AFTER_S)}
         # a finished export frees a slot; a new enqueue is allowed again.
         e1.status = "complete"
         await s.commit()

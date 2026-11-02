@@ -409,16 +409,14 @@ a plain, user-editable JSON file the agent picks up during install:
   "enrollment_token": "fae_…",
   "agent_name": "",
   "config_group_names": ["office-workstations"],
-  "config_group": "office-workstations",
   "log_level": "info"
 }
 ```
 
 `config_group_names` is the full list of [configuration
 groups](#two-groupings) the machine joins at enrollment (Global is implicit and
-never listed). `config_group` repeats the first name because shipped agent
-binaries parse exactly that key — leave both in place unless you are certain
-every machine runs a build that reads the list.
+never listed). The minted enrollment token records the same list, so central
+applies the membership when the agent registers.
 
 **One-command install (recommended):** your central serves the agent binaries
 for every platform itself (`/api/v1/agent-dist` — baked into the Docker image,
@@ -698,7 +696,7 @@ Three rules cover the whole model.
 
 | Section | Unknown keys | What lives there |
 | --- | --- | --- |
-| `settings` | **rejected with 422** | Log level, scan selections, inventory collectors and their permissions block, `scan_schedule_cron`, and the three local-surface gates. [Group settings schema](#group-settings-schema) |
+| `settings` | **rejected with 422** | Log level, scan selections, inventory collectors and their permissions block, and the three local-surface gates. [Group settings schema](#group-settings-schema) |
 | `policy` | **preserved verbatim** | Extraction, watch mode, scan schedule, path scope, poll cadence, the local self-administration permissions, `auto_update`. [Every policy key](#every-policy-key) |
 
 The split is about which validator runs, not about what the setting means. The
@@ -845,7 +843,8 @@ and emits no ETag, so inspecting an agent never perturbs its liveness signals.
     "extract_exif": true,
     "extract_ocr": false,
     "poll_interval_seconds": 60,
-    "group": { "log_level": "info", "scan_schedule_cron": "0 3 * * *" }
+    "scan_cron": "0 3 * * *",
+    "group": { "log_level": "info" }
   },
   "generation": 412,
   "hash": "9f2c1ab4de07",
@@ -918,7 +917,6 @@ top-level keys** (422) — a typo can never silently no-op.
 | `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | unset | Intended agent log level. **Not enforced yet** — see below. |
 | `scan_selections` | list of selections (max 100) | unset | The folder sets the agent should walk. **Drives the agent's scan roots** (agent ≥ 2026-08-18): on every policy poll the agent expands the enabled selections with its shared path-spec engine and rewrites its `scan.json` root list from the result — the local roots editor is locked (`managed_by_central`) while a group manages roots. A bare Windows drive (`D:`) is normalised to the drive root `D:\`. Zero resolved roots is logged as a warning and nothing is scanned. |
 | `inventory` | object | unset | Inventory-collector configuration. **Not enforced yet.** |
-| `scan_schedule_cron` | 5-field cron (agent-local time) | unset | Scan schedule for the group's members. |
 | `web_ui_enabled` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
 | `local_access_enabled` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
 | `auth_required` | bool \| null | null (inherit) | Lifted to the top-level policy key on delivery. |
@@ -1680,7 +1678,6 @@ The group dialog shows this table at the top; here it is in full:
 | --- | --- | --- | --- | --- |
 | **Media scans** — `scan_cron` / `scan_interval_seconds` / `scan_on_start` | **Scheduling (media scans)** section (the `policy` half) | The agent's own in-daemon scheduler | The agent's local clock (no conversion anywhere) | Cataloguing the agent's roots — the normal, recommended scan schedule. `scan_cron` wins over the interval when both are set. |
 | **Host inventory & permission snapshots** — `inventory.schedule_cron` + `schedule_tz` | **Inventory & permission snapshots** section (the `settings` half) | Central enqueues an inventory command on each occurrence; the agent executes it | UTC, a named zone (DST-aware), or each agent's local time — your pick | The collectors over `paths`/`preset`: `stat`/`owner`/`perms`/`permissions` records, hence the permission reports, drift alert and item-detail Permissions. The per-agent **inventory** action fires the same run immediately. |
-| **Legacy group scan schedule** — `scan_schedule_cron` | **Delivery settings** section (`settings` half), shown only when a group still has one | The agent | The agent's local clock | Predates `scan_cron` and does the same job one precedence rung lower; `scan_cron` outranks it. Move the schedule to the Scheduling section and switch this Off. |
 
 Scans of libraries mounted on **central** itself are scheduled on the
 Libraries page, not in any group. All schedules are authored with the same
@@ -1694,8 +1691,7 @@ A service-managed `filearr-agent run` schedules its own scans — no external
 Task Scheduler or cron entry to lose across reinstalls. In any group the agent
 belongs to, set `scan_cron` (5-field cron, agent-local time),
 `scan_interval_seconds` (≥300; cron wins if both are set), and/or
-`scan_on_start` (one scan ~30 s after start) in its `policy` section (the
-legacy `scan_schedule_cron` settings key still works one rung lower — see
+`scan_on_start` (one scan ~30 s after start) in its `policy` section (see
 [Where schedules live](#where-schedules-live)). All absent = scheduler off.
 Scans run as a child process of the daemon (identical to a hand-run
 `filearr-agent scan`, crash-isolated), never overlap, and an edit takes effect

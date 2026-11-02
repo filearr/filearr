@@ -30,7 +30,6 @@ func TestDispatchRoutesToEachHandler(t *testing.T) {
 		{name: "push", args: []string{"push", "-data", tmp}, wantErr: "push: no enrolled identity"},
 		{name: "reconcile", args: []string{"reconcile", "-data", tmp}, wantErr: "reconcile: no enrolled identity"},
 		{name: "policy", args: []string{"policy", "-data", tmp}, wantErr: "", wantStdout: "no cached policy"},
-		{name: "search", args: []string{"search", "-data", tmp}, wantErr: "search: usage: filearr-agent search"},
 		{name: "query", args: []string{"query", "--socket", deadSocket, "kind:video"}, wantErr: "cannot reach the local agent"},
 		{name: "version", args: []string{"version"}, wantErr: "", wantStdout: "filearr-agent "},
 	}

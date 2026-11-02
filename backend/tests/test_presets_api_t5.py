@@ -1,9 +1,9 @@
-"""P2-T5 — presets/extension-groups catalogue endpoint + library validation.
+"""P2-T5 — presets catalogue endpoint + library validation.
 
 Drives the real FastAPI app over an in-process ASGI transport (mirrors
 test_libraries_api_t7): the read-only catalogue, and create/PATCH validation of
-``enabled_presets`` (incl. the ``-name`` opt-out sentinel discipline) and
-``enabled_extension_groups`` (unknown -> 422, round-trip persistence).
+``enabled_presets`` (incl. the ``-name`` opt-out sentinel discipline). The
+extension-group surface was deleted in P7 (B6).
 """
 
 from __future__ import annotations
@@ -74,9 +74,8 @@ async def test_list_presets_shape(client):
     assert hd["default_enabled"] is True
     assert hd["patterns"] == [".*"]
     assert hd["caveat"]
-    groups = {g["name"]: g for g in body["extension_groups"]}
-    assert groups["office_docs"]["file_category"] == "document"
-    assert set(groups["office_docs"]["extensions"]) == {"doc", "docx", "odt", "rtf"}
+    # P7 B6: the dead extension-group catalogue is gone from the payload.
+    assert "extension_groups" not in body
 
 
 async def test_get_single_preset_and_404(client):
@@ -89,32 +88,24 @@ async def test_get_single_preset_and_404(client):
 # --- create validation + round-trip ---------------------------------------
 
 
-async def test_create_echoes_presets_and_groups(client):
+async def test_create_echoes_presets(client):
     r = await client.post(
         LIBS,
         json={
             "name": "L1", "root_path": "/d1",
             "enabled_presets": ["node_modules_build", "-hidden_dotfiles"],
-            "enabled_extension_groups": ["office_docs", "ebooks"],
         },
     )
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["enabled_presets"] == ["node_modules_build", "-hidden_dotfiles"]
-    assert body["enabled_extension_groups"] == ["office_docs", "ebooks"]
+    # P7 B6: the dead column is gone from the read model.
+    assert "enabled_extension_groups" not in body
 
 
 async def test_create_rejects_unknown_preset(client):
     r = await client.post(
         LIBS, json={"name": "Lb", "root_path": "/d", "enabled_presets": ["bogus"]}
-    )
-    assert r.status_code == 422
-
-
-async def test_create_rejects_unknown_group(client):
-    r = await client.post(
-        LIBS,
-        json={"name": "Lc", "root_path": "/d", "enabled_extension_groups": ["nope"]},
     )
     assert r.status_code == 422
 
@@ -142,17 +133,13 @@ async def test_negation_only_valid_for_default_on_bundle(client):
 async def test_patch_updates_and_clears(client):
     created = (await client.post(LIBS, json={"name": "L2", "root_path": "/d2"})).json()
     lib_id = created["id"]
-    r = await client.patch(
-        f"{LIBS}/{lib_id}",
-        json={"enabled_presets": ["caches_temp"], "enabled_extension_groups": ["lossless_audio"]},
-    )
+    r = await client.patch(f"{LIBS}/{lib_id}", json={"enabled_presets": ["caches_temp"]})
     assert r.status_code == 200, r.text
     assert r.json()["enabled_presets"] == ["caches_temp"]
-    assert r.json()["enabled_extension_groups"] == ["lossless_audio"]
     # [] clears (model_fields_set discipline).
-    cleared = await client.patch(f"{LIBS}/{lib_id}", json={"enabled_extension_groups": []})
+    cleared = await client.patch(f"{LIBS}/{lib_id}", json={"enabled_presets": []})
     assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["enabled_extension_groups"] == []
+    assert cleared.json()["enabled_presets"] == []
 
 
 async def test_patch_rejects_unknown(client):

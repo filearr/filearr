@@ -89,13 +89,13 @@ func TestSidecarLoadedIntoActive(t *testing.T) {
       "central_url":"https://c.example.com",
       "enrollment_token":"fae_tok",
       "agent_name":"box-1",
-      "config_group":"prod",
+      "config_group_names":["prod"],
       "log_level":"verbose"
     }`)
 	setupRuntime("test", nil)
 	sc := activeSidecar()
 	if sc.CentralURL != "https://c.example.com" || sc.EnrollmentToken != "fae_tok" ||
-		sc.AgentName != "box-1" || sc.ConfigGroup != "prod" || sc.LogLevel != "verbose" {
+		sc.AgentName != "box-1" || len(sc.ConfigGroupNames) != 1 || sc.ConfigGroupNames[0] != "prod" || sc.LogLevel != "verbose" {
 		t.Fatalf("sidecar not fully loaded: %+v", sc)
 	}
 }

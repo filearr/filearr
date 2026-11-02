@@ -658,8 +658,8 @@ export function validatePolicyForm(
 // --------------------------------------------------------------------------- //
 
 /** The agent's self-reported `capabilities` object (stored verbatim on the agent
- *  row from its command poll). Everything is optional: an older build advertises
- *  fewer keys, and a never-polled agent has no object at all. */
+ *  row from its command poll). Everything is optional: a host may omit keys it
+ *  cannot report, and a never-polled agent has no object at all. */
 export interface AgentCapabilities {
   /** This build has the extraction pass at all. */
   extract?: boolean;
@@ -712,7 +712,7 @@ export interface IgnoredSetting {
  * document and names each dead setting.
  *
  * Deliberately CONSERVATIVE — silence beats a false alarm:
- * - no capabilities object at all (never polled, or a pre-advertisement build)
+ * - no capabilities object at all (never polled)
  *   returns `[]`; we know nothing, so we claim nothing;
  * - only settings that would actually DO something are flagged (a bool must be
  *   `true`, a bound must be present).
@@ -743,8 +743,8 @@ export function ignoredPolicySettings(
         out.push({
           key,
           reason:
-            "this agent advertises no extraction pass (an older build, or " +
-            "extraction is unavailable on the host)",
+            "this agent advertises no extraction pass (extraction is " +
+            "unavailable on the host)",
         });
     }
     return out;

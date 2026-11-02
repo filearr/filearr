@@ -49,6 +49,11 @@ async def test_retry_cap_map_matches_source_constants():
         TASK_RETRY_CAPS["filearr.tasks.index_sync.reproject_library"]
         == MEILI_RETRY_MAX_ATTEMPTS
     )
+    # P7 B17's deferred library-delete prune is a Meili writer too.
+    assert (
+        TASK_RETRY_CAPS["filearr.tasks.index_sync.delete_documents"]
+        == MEILI_RETRY_MAX_ATTEMPTS
+    )
 
     # embed tasks are decorated with a literal ``retry=2`` (no named constant).
     assert TASK_RETRY_CAPS["filearr.tasks.embed.embed_item"] == 2

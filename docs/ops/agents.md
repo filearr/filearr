@@ -686,10 +686,9 @@ curl -s -X POST http://<ct-ip>:8484/api/v1/agents/config-groups \
          "exclude_regex": ["\\.tmp$"],
          "enabled": true}
       ],
-      "inventory": {"enabled": true, "collectors": ["stat", "owner"]},
-      "scan_schedule_cron": "0 3 * * *"
+      "inventory": {"enabled": true, "collectors": ["stat", "owner"]}
     },
-    "policy": {"extract_enabled": true, "extract_exif": false}
+    "policy": {"extract_enabled": true, "extract_exif": false, "scan_cron": "0 3 * * *"}
   }'
 
 curl -s .../api/v1/agents/config-groups          # list, in MERGE ORDER (+member_count,
@@ -801,7 +800,6 @@ is capped at 64 KiB (422 beyond). All keys optional:
 | `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | agent log verbosity |
 | `scan_selections` | list of selection objects | see below (max 100) |
 | `inventory` | `{enabled: bool, collectors: [str]}` | collector names are free strings — W6-D3 defines the vocabulary; central only caps count/length |
-| `scan_schedule_cron` | cron string | cronsim-validated, exactly like `library.scan_cron` |
 
 A **scan selection**: `{preset, paths, include_regex, exclude_regex, enabled}`.
 
@@ -888,7 +886,6 @@ Response (FROZEN contract for the UI, W6-D4):
     "enrollment_token": "fae_…",        // raw, show-once
     "agent_name": "lab-01",
     "config_group_names": ["office-workstations", "low-power"],  // by NAME
-    "config_group": "office-workstations",  // first name, for shipped binaries
     "log_level": "info"
   },
   "token_hash": "…",                     // for show/revoke in the UI
@@ -907,10 +904,7 @@ Notes:
 - `config_group_ids` (if given) must all exist (422 otherwise) and are emitted in
   the sidecar **by name** in `config_group_names`. The membership is ALSO recorded
   on the minted enrollment token (`enrollment_tokens.config_group_names`), which
-  is the authoritative half — central applies it at register whatever the agent
-  sends. `config_group` repeats the first name because shipped agent binaries
-  parse exactly that key and pass it to `/agents/register`; dropping it would
-  silently strip the group from every install done with a current binary.
+  is the authoritative half — central applies it at register.
 - Global is implicit and never listed. An **unknown name at register is
   fail-safe**: the agent enrolls into whichever named groups do exist (Global
   always), and the register response carries a `config_group_warning` naming the
@@ -1177,7 +1171,6 @@ The scheduler is **off until configured**. Knobs, per-key precedence
 | group `policy` (§9) | `scan_cron` | 5-field cron, agent-local time |
 | group `policy` | `scan_interval_seconds` | fixed cadence (≥300); `scan_cron` wins when both set |
 | group `policy` | `scan_on_start` | one scan ~30 s after daemon start |
-| group `settings` (§9) | `scan_schedule_cron` | same as `scan_cron`; a `policy` `scan_cron` overrides it |
 | env | `FILEARR_AGENT_SCAN_CRON` / `FILEARR_AGENT_SCAN_EVERY` / `FILEARR_AGENT_SCAN_ON_BOOT` | local fallbacks for installs that don't author central config (`_EVERY` is a Go duration, e.g. `6h`) |
 
 Example — schedule every enrolled agent nightly at 03:00 plus a catch-up scan

@@ -19,7 +19,8 @@ import type { About } from "./about";
 // ("not reported" vs "version unknown" vs "not installed") and the Markdown
 // dump are pure, so they are unit-tested on Node.
 import type { AgentAbout } from "./agentAbout";
-import { ApiError, NetworkError } from "./apiErrors.ts";
+import { ApiError, NetworkError, parseRetryAfter } from "./apiErrors.ts";
+import { reportQuery as buildReportQuery, type ReportQueryMeta } from "./reportQuery.ts";
 
 export type { About } from "./about";
 export type {
@@ -70,7 +71,7 @@ export function thumbUrl(id: string, tier: "grid" | "preview" = "grid"): string 
 
 // ApiError + the error-to-sentence rules live in ./apiErrors (DOM-free, so they
 // are unit-tested on Node); re-exported so callers keep one import site.
-export { ApiError, NetworkError, errorMessage, errorStatus, friendlyError } from "./apiErrors.ts";
+export { ApiError, NetworkError, errorMessage, errorStatus, friendlyError, parseRetryAfter } from "./apiErrors.ts";
 
 let onUnauthorized: ((path: string) => void) | null = null;
 
@@ -179,7 +180,8 @@ export async function send<T>(method: string, path: string, opts: SendOpts = {})
         /* a broken hook must not replace the ApiError below */
       }
     }
-    throw new ApiError(res.status, await res.text());
+    // Ruling 9: every non-2xx carries Retry-After (429 says when to retry).
+    throw new ApiError(res.status, await res.text(), parseRetryAfter(res.headers.get("retry-after")));
   }
   // Blob/text callers get the body as-is, even when it is empty.
   if (expect === "blob") return (await res.blob()) as T;
@@ -520,8 +522,16 @@ export type HashPolicy = "auto" | "full" | "quick_only";
 
 // FIX-10: most-recent ScanRun for a library, sourced per-library from scan_runs
 // (survives redeploys; not subject to the capped global /scans feed). Null only
-// when the library has genuinely never been scanned.
+// when the library has genuinely never been scanned (in that scope).
+// B10: Library.last_scan is the newest FULL run (rel_path null);
+// Library.last_scoped_scan the newest scoped (hot-folder/targeted) run.
 export interface LastScan {
+  id: string;
+  /** null = full-library run; else the scanned subtree/file. */
+  rel_path: string | null;
+  /** Why a failed run failed, when recorded (stats.error / stats.reconcile_note). */
+  error: string | null;
+  reconcile_note: string | null;
   started_at: string;
   finished_at: string | null;
   status: string;
@@ -580,7 +590,6 @@ export interface Library {
   include_globs: string[];
   exclude_globs: string[];
   enabled_presets: string[];
-  enabled_extension_groups: string[];
   scan_cron: string | null;
   watch_mode: boolean;
   hash_policy: HashPolicy;
@@ -597,6 +606,7 @@ export interface Library {
   count_pruned_files: boolean;
   enabled: boolean;
   last_scan: LastScan | null;
+  last_scoped_scan: LastScan | null;
   // OPS-T7: effective user-facing share prefix + provenance. ``share_prefix``
   // above is the raw manual override; these are computed server-side (manual
   // wins, else the deploy mount map covering the library root, else none).
@@ -624,10 +634,15 @@ export interface ScanRun {
   started_at: string;
   finished_at: string | null;
   status: string;
-  stats: Record<string, number>;
+  /** Persisted scan JSONB: counters plus strings/bools/arrays (`error`,
+   *  `reconcile_note`, `stopped`, `pruned_paths`, …) — read it through
+   *  libraryScanState's `statNum`/`statStr` (B34). */
+  stats: Record<string, unknown>;
+  /** null = full-library run; else the scoped run's subtree/file (B9). */
+  rel_path: string | null;
 }
 
-// ---- P2-T5 presets / extension groups (read-only catalogue) ----
+// ---- P2-T5 presets (read-only catalogue) ----
 export interface Preset {
   name: string;
   label: string;
@@ -638,19 +653,11 @@ export interface Preset {
   builtin?: boolean;
 }
 
-export interface ExtensionGroup {
-  name: string;
-  label: string;
-  file_category: string;
-  extensions: string[];
-}
-
 export interface PresetsResponse {
   presets: Preset[];
-  extension_groups: ExtensionGroup[];
 }
 
-/** The preset bundles (builtin + custom) + extension groups (read scope). */
+/** The preset bundles (builtin + custom) (read scope). */
 export const listPresets = () => request<PresetsResponse>("/presets");
 
 // ---- P2-T7 custom preset bundles (admin) ----
@@ -891,7 +898,6 @@ export const createLibrary = (body: {
   include_globs?: string[];
   exclude_globs?: string[];
   enabled_presets?: string[];
-  enabled_extension_groups?: string[];
   scan_cron?: string | null;
   watch_mode?: boolean;
   hash_policy?: HashPolicy;
@@ -917,7 +923,6 @@ export const updateLibrary = (
     include_globs: string[];
     exclude_globs: string[];
     enabled_presets: string[];
-    enabled_extension_groups: string[];
     scan_cron: string | null;
     watch_mode: boolean;
     hash_policy: HashPolicy;
@@ -931,14 +936,36 @@ export const updateLibrary = (
   }>,
 ) => request<Library>(`/libraries/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
 
+/** What `DELETE /libraries/{id}` would remove (B16; admin scope). Row counts
+ *  the FK cascade deletes, plus queued/running jobs attributable to the library
+ *  (`pending_jobs`; item_ids-list batch jobs are not attributable/counted).
+ *  `scan_job_pending` = a scan job is queued or running, so the delete 409s. */
+export interface LibraryDeleteImpact {
+  library_id: string;
+  name: string;
+  items: number;
+  scan_runs: number;
+  alert_rules: number;
+  /** Events of the library-scoped alert rules (deleted with them). */
+  alert_events: number;
+  path_grants: number;
+  /** Hot folders. */
+  scan_paths: number;
+  pending_jobs: number;
+  scan_job_pending: boolean;
+}
+
+export const deleteImpact = (id: string, signal?: AbortSignal) =>
+  request<LibraryDeleteImpact>(`/libraries/${id}/delete-impact`, { signal });
+
 /**
  * UI-T2 — hard-delete a library (admin scope). The contract requires an exact
  * name match in `?confirm=`; the server returns 204 on success, 409 while a scan
- * is running, 422 on a confirm mismatch, 404 if unknown; failures throw an
- * ``ApiError`` the dialog can classify by status.
+ * is running or a scan job is queued/running, 422 on a confirm mismatch, 404 if
+ * unknown; failures throw an ``ApiError`` the dialog can classify by status.
  */
 export async function deleteLibrary(id: string, confirm: string): Promise<void> {
-  // Cascades the items and prunes Meilisearch inside the request.
+  // Cascades the items in-request; the Meilisearch prune is a deferred job.
   await send("DELETE", `/libraries/${id}?confirm=${encodeURIComponent(confirm)}`, {
     expect: "none",
     timeoutMs: 10 * 60_000,
@@ -1032,7 +1059,20 @@ export const targetedScan = (
     body: JSON.stringify({ path: body.path, recursive: body.recursive ?? true }),
   });
 
-export const listScans = (signal?: AbortSignal) => request<ScanRun[]>("/scans", { signal });
+/** Scan runs, newest first. `status` is a comma list (e.g. "running,stopping":
+ *  the live set, however many newer scoped runs exist); `library_id` narrows
+ *  to one library; `limit` defaults server-side to 50 (max 500) (B9). */
+export function listScans(
+  filters: { status?: string; library_id?: string; limit?: number } = {},
+  signal?: AbortSignal,
+) {
+  const qs = new URLSearchParams();
+  if (filters.status) qs.set("status", filters.status);
+  if (filters.library_id) qs.set("library_id", filters.library_id);
+  if (filters.limit != null) qs.set("limit", String(filters.limit));
+  const q = qs.toString();
+  return request<ScanRun[]>(q ? `/scans?${q}` : "/scans", { signal });
+}
 
 export const stats = (signal?: AbortSignal) => request<Record<string, unknown>>("/stats", { signal });
 
@@ -1137,8 +1177,8 @@ export interface FailedJobPage {
 }
 
 /** Per-library extraction-error count + a paginated page of failing items. */
-export const libraryErrors = (id: string, limit = 50, offset = 0) =>
-  request<LibraryErrors>(`/libraries/${id}/errors?limit=${limit}&offset=${offset}`);
+export const libraryErrors = (id: string, limit = 50, offset = 0, signal?: AbortSignal) =>
+  request<LibraryErrors>(`/libraries/${id}/errors?limit=${limit}&offset=${offset}`, { signal });
 
 /** Library diagnosis report (2026-08-16): ordered verdicts + raw sections.
  *  Write scope. See docs-site/troubleshooting/library-failures.md. */
@@ -1229,12 +1269,24 @@ export const clearFailedJobs = (queue?: string) =>
     { method: "POST", body: JSON.stringify(queue ? { queue } : {}) },
   );
 
-/** Running-build identity: package version + deploy build stamp (null in dev) +
- *  AGPL §13 source_url (FILEARR_SOURCE_URL). */
+/** Identity of the running build (backend ``filearr.buildinfo``). ``id`` and
+ *  ``source`` are always set; ``source`` says where the identity came from —
+ *  the deploy script's stamp, the image's baked build args, a git checkout,
+ *  or ``runtime`` (nothing identified it: package version only). */
+export type BuildInfo = {
+  id: string;
+  commit: string | null;
+  ref: string | null;
+  built_at: string | null;
+  source: "deploy" | "image" | "git" | "runtime";
+};
+
+/** Running-build identity: package version + build identity + AGPL §13
+ *  source_url (FILEARR_SOURCE_URL). */
 export const getVersion = () =>
   request<{
     app_version: string;
-    build_stamp: string | null;
+    build: BuildInfo;
     source_url?: string;
     agents_enabled?: boolean; // P5-T1: gates the Admin -> Agents panel
   }>("/version");
@@ -1473,12 +1525,11 @@ export interface DiskPathStatus {
 
 /** FIX-11 — Jobs-banner disk rollup (worst status + the non-ok paths only). The
  *  monitor additions also carry `paths`: the full per-path detail (every watch
- *  target, with `used`/`is_pg`) the always-on space indicator renders. `paths`
- *  is optional so an older backend (banner-only payload) never breaks the UI. */
+ *  target, with `used`/`is_pg`) the always-on space indicator renders. */
 export interface DiskSummary {
   status: "ok" | "warn" | "critical";
   low: DiskPathStatus[];
-  paths?: (DiskPathStatus & {
+  paths: (DiskPathStatus & {
     used: number;
     is_pg: boolean;
     /** Device-dedupe: the watch roles sharing this physical device (tooltip). */
@@ -1865,23 +1916,8 @@ export type DigestWindow = (typeof DIGEST_WINDOWS)[number];
 export const WEBHOOK_FORMATS = ["generic", "discord", "slack"] as const;
 export type WebhookFormat = (typeof WEBHOOK_FORMATS)[number];
 
-/** Auto-detect a webhook format from its URL (new-channel UI default; the
- *  select stays editable). Mirrors the backend `webhook_formats.detect_format`. */
-export function detectWebhookFormat(url: string): WebhookFormat {
-  try {
-    const u = new URL(url);
-    const host = u.hostname.toLowerCase();
-    const discordHosts = ["discord.com", "discordapp.com"];
-    const isDiscordHost =
-      discordHosts.includes(host) ||
-      discordHosts.some((h) => host.endsWith("." + h));
-    if (isDiscordHost && u.pathname.includes("/api/webhooks")) return "discord";
-    if (host === "hooks.slack.com") return "slack";
-  } catch {
-    // not a parseable URL yet — fall through to generic
-  }
-  return "generic";
-}
+// Webhook format auto-detection lives with the channel config logic (Node-tested).
+export { detectWebhookFormat } from "./alertConfig.ts";
 
 /** Sentinel a client sends to KEEP an existing (encrypted) channel secret. */
 export const UNCHANGED = "__unchanged__";
@@ -2026,7 +2062,14 @@ export interface AlertEvent {
 }
 
 export const listAlertEvents = (
-  filters: { rule_id?: string; library_id?: string; status?: AlertEventStatus; limit?: number } = {},
+  filters: {
+    rule_id?: string;
+    library_id?: string;
+    status?: AlertEventStatus;
+    limit?: number;
+    /** Keyset cursor (B24): the LAST row of the previous page. */
+    before?: { occurred_at: string; id: string };
+  } = {},
   signal?: AbortSignal,
 ) => {
   const qs = new URLSearchParams();
@@ -2034,6 +2077,11 @@ export const listAlertEvents = (
   if (filters.library_id) qs.set("library_id", filters.library_id);
   if (filters.status) qs.set("status", filters.status);
   qs.set("limit", String(filters.limit ?? 100));
+  // Rows strictly older than (occurred_at, id); server orders both DESC.
+  if (filters.before) {
+    qs.set("before_ts", filters.before.occurred_at);
+    qs.set("before_id", filters.before.id);
+  }
   return request<AlertEvent[]>(`/alert-events?${qs}`, { signal });
 };
 
@@ -2173,10 +2221,10 @@ export interface ReportMeta {
   // IN-T2: one generic numeric parameter slot. A report DECLARES that it takes
   // a day threshold (``stale_files`` does; ``bad_mtime``'s 48h stays hardcoded),
   // and the UI renders the input only for those — no per-report special-casing
-  // in the page. Older backends omit these keys, hence the optional types.
-  supports_threshold?: boolean;
-  threshold_label?: string;
-  default_threshold_days?: number;
+  // in the page.
+  supports_threshold: boolean;
+  threshold_label: string;
+  default_threshold_days: number;
 }
 
 /** The streaming machine-readable export formats (JSON stays the paginated
@@ -2270,8 +2318,8 @@ export const folderTree = (
 /** Fetch ``path`` as a blob and save it as a download file. Central so every
  *  export goes send -> blob -> object URL -> synthetic click, with the long
  *  download timeout and an ``ApiError`` (not a saved error page) on failure. */
-async function saveBlob(path: string, filename: string): Promise<void> {
-  const blob = await send<Blob>("GET", path, { expect: "blob", timeoutMs: DOWNLOAD_TIMEOUT_MS });
+async function saveBlob(path: string, filename: string, signal?: AbortSignal): Promise<void> {
+  const blob = await send<Blob>("GET", path, { expect: "blob", timeoutMs: DOWNLOAD_TIMEOUT_MS, signal });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -2286,16 +2334,24 @@ function stampToday(): string {
   return new Date().toISOString().slice(0, 10).replace(/-/g, "");
 }
 
-/** Download a canned report in a chosen streaming format (csv/ndjson/xml). Uses
- *  a blob fetch so the streamed body is saved, not rendered. */
+/** Download a canned report in a chosen streaming format. Uses a blob fetch so
+ *  the streamed body is saved, not rendered. The query comes from
+ *  ``reportQuery`` (B2): ``limit`` only for a capped report, so an uncapped
+ *  report's file holds the whole result, not one page. ``signal`` cancels a
+ *  multi-minute stream. */
 export async function downloadReport(
-  id: string,
+  meta: ReportQueryMeta & { id: string },
   format: ExportFormat,
-  opts: ReportRunOpts = {},
+  opts: { libraryId?: string; thresholdDays?: number | null } = {},
+  signal?: AbortSignal,
 ): Promise<void> {
-  const q = reportQuery({ ...opts, offset: undefined });
+  const q = reportQuery(buildReportQuery(meta, { ...opts, mode: "export" }));
   const sep = q ? "&" : "?";
-  await saveBlob(`/reports/${id}${q}${sep}format=${format}`, `filearr-${id}-${stampToday()}.${format}`);
+  await saveBlob(
+    `/reports/${meta.id}${q}${sep}format=${format}`,
+    `filearr-${meta.id}-${stampToday()}.${format}`,
+    signal,
+  );
 }
 
 // --------------------------------------------------------------------------- //
@@ -2351,8 +2407,8 @@ export const enqueueCustomReportExport = (
   });
 };
 
-export const listExports = () =>
-  request<{ exports: ReportExport[] }>("/exports").then((r) => r.exports);
+export const listExports = (signal?: AbortSignal) =>
+  send<{ exports: ReportExport[] }>("GET", "/exports", { signal }).then((r) => r.exports);
 
 export const getExport = (id: string) => request<ReportExport>(`/exports/${id}`);
 
@@ -2735,14 +2791,17 @@ export const listCustomReports = () =>
 export const getColumnRegistry = () =>
   request<ColumnRegistry>("/custom-reports/columns");
 
-export const validateCustomReport = (body: {
-  query: string;
-  columns: string[];
-  sort?: string | null;
-}) =>
+export const validateCustomReport = (
+  body: {
+    query: string;
+    columns: string[];
+    sort?: string | null;
+  },
+  signal?: AbortSignal,
+) =>
   request<{ ok: boolean; errors: ReportValidationError[] }>(
     "/custom-reports/validate",
-    { method: "POST", body: JSON.stringify(body) },
+    { method: "POST", body: JSON.stringify(body), signal },
   );
 
 export const createCustomReport = (body: {
@@ -2802,11 +2861,12 @@ export async function downloadCustomReport(
   id: string,
   name: string,
   format: ExportFormat,
+  signal?: AbortSignal,
 ): Promise<void> {
   // The server sets a safe Content-Disposition filename; the client name is only
   // a friendly default (sanitised for the filesystem).
   const safe = name.replace(/[^\w.-]+/g, "_") || "report";
-  await saveBlob(`/custom-reports/${id}/run?format=${format}`, `filearr-${safe}-${stampToday()}.${format}`);
+  await saveBlob(`/custom-reports/${id}/run?format=${format}`, `filearr-${safe}-${stampToday()}.${format}`, signal);
 }
 
 // --------------------------------------------------------------------------- //
@@ -3434,7 +3494,7 @@ export interface InventoryConfig {
   schedule_cron?: string | null;
   /** Clock schedule_cron is read against: absent/null = UTC, an IANA zone
    *  name = that zone's wall clock (DST-aware), "agent" = each member agent's
-   *  own local time (self-reported UTC offset; older builds run on UTC). */
+   *  own local time (self-reported UTC offset). */
   schedule_tz?: string | null;
   paths?: string[];
   preset?: string | null;
@@ -3459,7 +3519,6 @@ export interface GroupSettings {
   log_level?: AgentLogLevel | null;
   scan_selections?: ScanSelection[] | null;
   inventory?: InventoryConfig | null;
-  scan_schedule_cron?: string | null;
   /** Per-group local-surface gates. Absent/null = inherit (a lower-priority
    *  group's value, else the agent default). Delivery LIFTS these to the top
    *  level of the document, where a non-null settings value beats the merged
@@ -3797,9 +3856,6 @@ export interface InstallerSidecar {
   agent_name: string | null;
   /** P13: every group the agent joins, by NAME. */
   config_group_names: string[];
-  /** LEGACY single-group key (= config_group_names[0]), still emitted so a
-   *  shipped agent binary that only reads this one keeps working. */
-  config_group: string | null;
   log_level: string | null;
 }
 

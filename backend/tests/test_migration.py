@@ -17,7 +17,10 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # table. Its predecessor c7d2e4a91b38 adds the session-rotation grace columns.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "9b4e7d2c1a55"
+HEAD = "5d1e8f0a2b47"
+# P7 B6: head drops libraries.enabled_extension_groups; its predecessor is the
+# scan_schedule_cron data migration (downgrade restores the column, empty).
+DROP_EXTGROUPS_PRED = "3c8a6f1d9e24"
 # P13's predecessor (reextract command kind) — the downgrade target that brings
 # back policy_versions + the two old grouping columns, EMPTY (structural revert;
 # the layered documents cannot be split back into the scope ladder).
@@ -444,10 +447,15 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         }
         assert "sidecar_of" in _columns(engine, "items")
         assert "fk_items_sidecar_of_items" in _fk_names(engine, "items")
-        # P2-T1: both preset columns present at head.
+        # P2-T1: enabled_presets present at head; P7 B6 dropped the dead
+        # enabled_extension_groups column — a one-step downgrade restores it.
         lib_cols = _columns(engine, "libraries")
         assert "enabled_presets" in lib_cols
-        assert "enabled_extension_groups" in lib_cols
+        assert "enabled_extension_groups" not in lib_cols
+        command.downgrade(cfg, DROP_EXTGROUPS_PRED)
+        assert "enabled_extension_groups" in _columns(engine, "libraries")
+        command.upgrade(cfg, "head")
+        assert "enabled_extension_groups" not in _columns(engine, "libraries")
         # P2-T6: scan_paths table + scan_runs.rel_path scope present at head.
         assert "scan_paths" in inspect(engine).get_table_names()
         sp_cols = _columns(engine, "scan_paths")

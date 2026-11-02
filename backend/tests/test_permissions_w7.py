@@ -320,19 +320,21 @@ def test_diff_allow_vs_deny_same_principal_are_distinct_keys():
 # --------------------------------------------------------------------------- #
 # 5. scaffold invariants: reports inert + DDL documented-only                   #
 # --------------------------------------------------------------------------- #
-def test_permission_report_aliases_forward_to_registry():
-    # All four W7-T7 builders are now live forwarding aliases (the last scaffold,
-    # _explicit_ace_outliers, went live as permissions_explicit_outliers on
-    # 2026-08-20). Each returns a real SQLAlchemy Select, not a NotImplementedError.
+def test_permission_report_builders_return_select():
+    # Every permission report builder is live in the registry and returns a
+    # real SQLAlchemy Select, not a NotImplementedError.
     from sqlalchemy import Select
 
-    from filearr.reports import ReportParams
+    from filearr.reports import ReportParams, get_report
 
     params = ReportParams()
-    assert isinstance(permissions._explicit_ace_outliers(params), Select)
-    assert isinstance(permissions.permissions_report_access_by_principal(params), Select)
-    assert isinstance(permissions._broad_access(params), Select)
-    assert isinstance(permissions._permission_drift(params), Select)
+    for rid in (
+        "permissions_explicit_outliers",
+        "permissions_by_principal",
+        "permissions_broad_access",
+        "permission_changes",
+    ):
+        assert isinstance(get_report(rid).build(params), Select), rid
 
 
 def test_permission_snapshots_is_live_and_reports_registered():

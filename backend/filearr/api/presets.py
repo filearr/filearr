@@ -21,12 +21,11 @@ from filearr.db import get_session
 from filearr.models import Library, PresetBundleRow
 from filearr.presets import (
     BUILTIN_PRESET_BUNDLES,
-    EXTENSION_GROUPS,
     PRESET_BUNDLES,
     PresetBundle,
     is_builtin_preset,
 )
-from filearr.schemas import ExtensionGroupOut, PresetOut, PresetsResponse
+from filearr.schemas import PresetOut, PresetsResponse
 from filearr.security import require_scope
 
 router = APIRouter()
@@ -47,19 +46,10 @@ def _preset_out(name: str, bundle: PresetBundle) -> PresetOut:
 
 @router.get("", response_model=PresetsResponse, dependencies=[Depends(require_scope("read"))])
 async def list_presets(session: AsyncSession = Depends(get_session)) -> PresetsResponse:
-    """All preset bundles (builtin + custom) + extension groups."""
+    """All preset bundles (builtin + custom)."""
     await preset_registry.ensure_loaded(session)
     return PresetsResponse(
         presets=[_preset_out(name, b) for name, b in PRESET_BUNDLES.items()],
-        extension_groups=[
-            ExtensionGroupOut(
-                name=name,
-                label=g.label,
-                file_category=g.file_category,
-                extensions=list(g.extensions),
-            )
-            for name, g in EXTENSION_GROUPS.items()
-        ],
     )
 
 

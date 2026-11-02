@@ -2,9 +2,8 @@
 
 Usage: python -m scripts.init_db  (or: uv run python scripts/init_db.py)
 
-- Fresh database        -> alembic upgrade head (creates full schema)
-- Pre-alembic database  -> stamped with the baseline revision, then upgraded
-- Already migrated      -> upgrade head is a no-op
+- Fresh database   -> alembic upgrade head (creates full schema)
+- Already migrated -> upgrade head is a no-op
 """
 
 import asyncio
@@ -28,32 +27,20 @@ from filearr.profiles import seed_profiles_to_db
 from filearr.search import ensure_index
 from filearr.worker import proc_app
 
-BASELINE_REVISION = "2bfb3fd1d09a"
-
 
 def _alembic_cfg() -> AlembicConfig:
     return AlembicConfig(str(BACKEND_DIR / "alembic.ini"))
 
 
-def _apply_migrations(pre_alembic: bool) -> None:
-    cfg = _alembic_cfg()
-    if pre_alembic:
-        print("filearr: existing pre-alembic schema found, stamping baseline")
-        alembic_command.stamp(cfg, BASELINE_REVISION)
-    alembic_command.upgrade(cfg, "head")
+def _apply_migrations() -> None:
+    alembic_command.upgrade(_alembic_cfg(), "head")
 
 
 async def main() -> None:
     async with engine.begin() as conn:
         # sanity: Postgres 18 uuidv7() must exist
         await conn.execute(text("SELECT uuidv7()"))
-        has_alembic = (
-            await conn.execute(text("SELECT to_regclass('alembic_version')"))
-        ).scalar() is not None
-        has_items = (
-            await conn.execute(text("SELECT to_regclass('items')"))
-        ).scalar() is not None
-    await asyncio.to_thread(_apply_migrations, pre_alembic=(has_items and not has_alembic))
+    await asyncio.to_thread(_apply_migrations)
 
     # procrastinate's apply_schema is NOT idempotent — skip if already applied
     async with engine.begin() as conn:

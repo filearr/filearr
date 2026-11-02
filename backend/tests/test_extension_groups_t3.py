@@ -1,11 +1,10 @@
-"""P2-T3 — extension-group resolution + scan wiring (ruling R5, union semantics).
+"""Taxonomy group gating in the scan walk (W8-B successor to P2-T3).
 
-Two layers:
-  * pure unit tests over ``presets.resolve_enabled_extensions`` (union of groups
-    per MediaType, None when unrefined, defensive enabled_categories gating);
-  * a DB-integration scan over a real on-disk document tree proving the walk's
-    extension filter narrows an enabled type to the union of the enabled groups,
-    while an empty group set reproduces today's all-extensions behaviour.
+The P2-T3 extension-group refinement (``presets.resolve_enabled_extensions`` +
+``libraries.enabled_extension_groups``) was superseded by the taxonomy
+``enabled_groups`` gate and deleted end to end in P7 (B6). What remains is the
+DB-integration scan over a real on-disk document tree proving the walk narrows
+to the enabled categories/groups (R5 union semantics).
 """
 
 from __future__ import annotations
@@ -19,51 +18,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
 from filearr.models import Item, Library, ScanRun
-from filearr.presets import resolve_enabled_extensions
 
 from .conftest import psycopg3_uri
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-
-
-# --- Pure resolution (R5) --------------------------------------------------
-
-
-def test_no_groups_means_no_refinement():
-    assert resolve_enabled_extensions("document", [], []) is None
-
-
-def test_single_group_narrows_type():
-    assert resolve_enabled_extensions("document", [], ["office_docs"]) == {
-        "doc", "docx", "odt", "rtf",
-    }
-
-
-def test_multiple_groups_union_same_type():
-    # R5: office_docs + ebooks both target `document` -> UNION.
-    assert resolve_enabled_extensions(
-        "document", [], ["office_docs", "ebooks"]
-    ) == {"doc", "docx", "odt", "rtf", "epub", "mobi", "azw3", "cbz", "cbr"}
-
-
-def test_group_for_other_type_does_not_refine():
-    # A group targeting `image` leaves `document` unrefined (None).
-    assert resolve_enabled_extensions("document", [], ["raw_photos"]) is None
-    assert resolve_enabled_extensions("image", [], ["raw_photos"]) == {
-        "cr2", "cr3", "nef", "arw", "dng", "raf",
-    }
-
-
-def test_disabled_type_returns_none():
-    # enabled_categories non-empty + type not in it -> gated off elsewhere, no refine.
-    assert resolve_enabled_extensions(
-        "document", ["video"], ["office_docs"]
-    ) is None
-
-
-def test_unknown_group_ignored_in_resolution():
-    # Validation is the API's job; resolution stays total.
-    assert resolve_enabled_extensions("document", [], ["nope"]) is None
 
 
 # --- Integration: extension filter in the scan walk ------------------------

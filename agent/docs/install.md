@@ -58,7 +58,7 @@ preserved on rewrite):
   "central_url": "https://filearr.example.com",
   "enrollment_token": "fae_...",
   "agent_name": "",
-  "config_group": "default",
+  "config_group_names": ["default"],
   "data_dir": "",
   "log_level": "info",
   "log_dir": ""

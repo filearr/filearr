@@ -184,7 +184,7 @@ func (s *Sweeper) sweepRoot(ctx context.Context, root index.RootRef, rebuilt, re
 // low seq_no rows are silently fast-forwarded away as stale — the E2E gap this
 // fixes).
 //
-// Three signals, in priority order:
+// Two signals:
 //
 //  1. RebuiltPending — the DURABLE marker written by index.Open when it
 //     fresh-created OR corruption-rebuilt the database. This is the primary,
@@ -193,29 +193,12 @@ func (s *Sweeper) sweepRoot(ctx context.Context, root index.RootRef, rebuilt, re
 //     rebuilt-carrying sweep.
 //  2. Store.Rebuilt — the in-memory flag for the SAME process that did the
 //     rebuild (redundant with the marker, kept as a belt-and-braces signal).
-//  3. Empty outbox WITH active items — a legacy fallback for a store whose outbox
-//     was emptied out-of-band while items remain. Rarely the sole signal now that
-//     (1) covers fresh-create and rebuild, but harmless and cheap.
 func (s *Sweeper) rebuiltSignal(ctx context.Context) (bool, error) {
 	pending, err := s.store.RebuiltPending(ctx)
 	if err != nil {
 		return false, err
 	}
-	if pending || s.store.Rebuilt {
-		return true, nil
-	}
-	empty, err := s.ob.IsEmpty(ctx)
-	if err != nil {
-		return false, err
-	}
-	if !empty {
-		return false, nil
-	}
-	n, err := s.store.CountActive(ctx)
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return pending || s.store.Rebuilt, nil
 }
 
 // newBatchID returns a UUIDv7 string for the supersede mark's batch_id.

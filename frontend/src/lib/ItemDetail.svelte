@@ -774,7 +774,7 @@
             {/if}
             <dt class="text-muted">Collected</dt>
             <dd class="min-w-0 truncate">
-              {perms.collected_at ? new Date(perms.collected_at).toLocaleString() : "—"}
+              {perms.collected_at ? fmtDateTime(perms.collected_at) : "—"}
               {#if perms.agent_name} · by agent {perms.agent_name}{/if}
               {#if perms.fidelity} · {perms.fidelity}{/if}
             </dd>

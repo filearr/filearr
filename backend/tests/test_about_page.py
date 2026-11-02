@@ -120,8 +120,8 @@ async def test_about_returns_every_section(client):
     assert app["python_version"] == _platform.python_version()
     assert app["machine"] == _platform.machine()
     assert app["source_url"] == get_settings().source_url
-    # A dev checkout has no deploy stamp; the field must still be present.
-    assert "build_stamp" in app
+    # Never null: a test run resolves from git or the runtime fallback.
+    assert app["build"]["id"] and app["build"]["source"]
 
 
 async def test_services_are_named_and_probed(client):

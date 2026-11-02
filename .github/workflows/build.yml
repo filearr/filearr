@@ -92,10 +92,14 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Stamps the agentdist stage's cross-compiled first-install binaries
-          # (served by /api/v1/agent-dist) — same VERSION scheme as agent-image.
+          # VERSION stamps the agentdist stage's cross-compiled first-install
+          # binaries (served by /api/v1/agent-dist) — same scheme as agent-image.
+          # BUILD_* become the runtime /version build identity (buildinfo.py).
           build-args: |
             VERSION=${{ steps.agentver.outputs.version }}@${{ github.sha }}
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_REF=${{ github.ref_name }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           # The ci call's validation build just wrote amd64 layers to the GHA
           # cache at this same ref — reuse them so gating doesn't double the
           # wall time; mode=max also caches arm64 for the next release.

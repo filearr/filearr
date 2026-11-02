@@ -15,6 +15,8 @@ import {
   hashHue,
   labelColor,
   labelFits,
+  MIN_CELL,
+  partitionDrawable,
   rampColor,
   rootColor,
   squarify,
@@ -275,4 +277,34 @@ test("fmtBytes: human sizes, and a hard zero for nothing", () => {
   assert.equal(fmtBytes(512), "512 B");
   assert.equal(fmtBytes(1024), "1 KB");
   assert.equal(fmtBytes(1024 ** 3 * 2), "2 GB");
+});
+
+// B39: cells too small to draw (or zero-byte) must still be reachable, so the
+// renderer splits them out into a list fallback instead of silently skipping.
+test("partitionDrawable: tiny and zero-area rects go to the small list, in size order", () => {
+  const rects = squarify(
+    [
+      { key: "big", value: 1_000_000 },
+      { key: "tiny", value: 1 },
+      { key: "zero", value: 0 },
+      { key: "mid", value: 500_000 },
+    ],
+    1000,
+    520,
+  );
+  const { drawn, small } = partitionDrawable(rects);
+  assert.deepEqual(drawn.map((r) => r.key), ["big", "mid"]);
+  assert.deepEqual(small.map((r) => r.key), ["tiny", "zero"]);
+  assert.equal(drawn.length + small.length, rects.length);
+});
+
+test("partitionDrawable: the threshold applies to BOTH sides", () => {
+  const rects: TreemapRect[] = [
+    { key: "thin", x: 0, y: 0, w: 900, h: MIN_CELL - 0.5 },
+    { key: "ok", x: 0, y: 10, w: MIN_CELL, h: MIN_CELL },
+    { key: "narrow", x: 0, y: 20, w: 1, h: 400 },
+  ];
+  const { drawn, small } = partitionDrawable(rects);
+  assert.deepEqual(drawn.map((r) => r.key), ["ok"]);
+  assert.deepEqual(small.map((r) => r.key), ["thin", "narrow"]);
 });

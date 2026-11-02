@@ -138,7 +138,6 @@ def test_validate_settings_accepts_env_and_glob_specs():
                 }
             ],
             "inventory": {"enabled": True, "collectors": ["stat", "owner"]},
-            "scan_schedule_cron": "0 3 * * *",
         }
     )
 
@@ -154,7 +153,8 @@ def test_validate_settings_all_presets_ok():
         {"log_levl": "debug"},  # unknown top-level key
         {"scan_selections": [{"preset": "nope"}]},
         {"scan_selections": [{"include_regex": ["("]}]},
-        {"scan_schedule_cron": "not a cron"},
+        # Removed 2026-11-02 (folded into policy scan_cron): now an unknown key.
+        {"scan_schedule_cron": "0 3 * * *"},
         {"scan_selections": [{"paths": ["/home/[user"]}]},
     ],
 )
@@ -240,7 +240,7 @@ async def test_create_invalid_settings_or_policy_422(client):
     c, _, _ = client
     bad_settings = await c.post(
         "/api/v1/agents/config-groups",
-        json={"name": "bad1", "settings": {"scan_schedule_cron": "nope"}},
+        json={"name": "bad1", "settings": {"scan_schedule_cron": "0 3 * * *"}},
     )
     assert bad_settings.status_code == 422
     bad_policy = await c.post(
@@ -346,6 +346,29 @@ async def test_rollback_unknown_version_404(client):
     g = await make_group(c, "g")
     r = await c.post(f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 99})
     assert r.status_code == 404
+
+
+async def test_rollback_to_a_snapshot_with_a_removed_settings_key_422(client):
+    """Snapshots are immutable, so pre-2026-11-02 history can still hold the
+    removed ``scan_schedule_cron`` key; republishing it would deliver a key no
+    agent reads (a silently lost schedule), so rollback re-validates."""
+    c, maker, _ = client
+    g = await make_group(c, "g", settings={"log_level": "info"})
+    async with maker() as s:
+        await s.execute(
+            text(
+                "UPDATE agent_config_group_versions SET settings = "
+                "'{\"scan_schedule_cron\": \"0 3 * * *\"}'::jsonb "
+                "WHERE group_id = :g AND version = 1"
+            ),
+            {"g": g["id"]},
+        )
+        await s.commit()
+    await c.patch(f"/api/v1/agents/config-groups/{g['id']}", json={"settings": {}})
+    r = await c.post(f"/api/v1/agents/config-groups/{g['id']}/rollback", json={"version": 1})
+    assert r.status_code == 422
+    after = (await c.get(f"/api/v1/agents/config-groups/{g['id']}")).json()
+    assert after["current_version"] == 2
 
 
 async def test_delete_group_removes_membership(client):
@@ -676,8 +699,7 @@ async def test_installer_config_frozen_shape(client):
     assert sc["enrollment_token"]  # raw token present (show-once)
     assert sc["agent_name"] == "lab-01"
     assert sc["config_group_names"] == ["wg"]
-    # ...and the single-name key shipped binaries still parse.
-    assert sc["config_group"] == "wg"
+    assert "config_group" not in sc
     assert sc["log_level"] == "info"
     assert set(body["install_hint"]) == {"windows", "linux", "macos"}
     for os_hint in body["install_hint"].values():
@@ -701,7 +723,6 @@ async def test_installer_config_base_url_default(client):
     assert r.status_code == 201
     assert r.json()["sidecar"]["central_url"].startswith("http://t")
     assert r.json()["sidecar"]["config_group_names"] == []
-    assert r.json()["sidecar"]["config_group"] is None
 
 
 async def test_installer_config_bad_group_and_log_level_422(client):
@@ -749,47 +770,15 @@ async def test_register_joins_token_groups(client):
     assert {a["id"], b["id"]} == {g["id"] for g in eff["groups"] if not g["is_system"]}
 
 
-async def test_register_sidecar_config_group_is_additive(client):
-    """A shipped binary echoes ONE ``config_group`` from its sidecar; it joins on
-    top of whatever the token already records."""
+async def test_register_unknown_config_group_warns_not_blocks(client):
     c, _, _ = client
-    await make_group(c, "from-token")
-    await make_group(c, "from-sidecar")
+    # The token records a group name that does not exist (deleted after mint).
     raw = (
-        await c.post(
-            "/api/v1/agents/enrollment-tokens",
-            json={"config_group_names": ["from-token"]},
-        )
+        await c.post("/api/v1/agents/enrollment-tokens", json={"config_group_names": ["ghost"]})
     ).json()["token"]
     reg = await c.post(
         "/api/v1/agents/register",
-        json={
-            "token": raw,
-            "hostname": "h",
-            "platform": "linux",
-            "config_group": "from-sidecar",
-        },
-    )
-    assert reg.status_code == 201
-    eff = await effective(c, reg.json()["agent_id"])
-    assert {g["name"] for g in eff["groups"]} == {
-        "Global",
-        "from-token",
-        "from-sidecar",
-    }
-
-
-async def test_register_unknown_config_group_warns_not_blocks(client):
-    c, _, _ = client
-    raw = (await c.post("/api/v1/agents/enrollment-tokens", json={})).json()["token"]
-    reg = await c.post(
-        "/api/v1/agents/register",
-        json={
-            "token": raw,
-            "hostname": "h",
-            "platform": "linux",
-            "config_group": "ghost",
-        },
+        json={"token": raw, "hostname": "h", "platform": "linux"},
     )
     assert reg.status_code == 201  # never blocks enrollment
     assert "ghost" in reg.json()["config_group_warning"]

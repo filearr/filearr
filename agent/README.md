@@ -82,9 +82,7 @@ ln -s filearr-agent /usr/local/bin/filearr      # linux/macOS
 filearr query 'kind:video size:>1G modified:<7d'
 ```
 
-`query` dials the P7-T2 same-user socket/pipe (the supported offline surface);
-the older `search` subcommand opens the index file directly and is retained only
-for local debugging.
+`query` dials the P7-T2 same-user socket/pipe (the offline local query surface).
 
 ## Local web UI (P7-T5)
 

@@ -323,7 +323,9 @@ def _send_email_sync(
     host = config.get("host")
     if not host:
         raise ChannelDeliveryError("email channel missing 'host'", retryable=False)
-    port = int(config.get("port", 587))
+    # Missing or null port = the submission default (B23: a cleared UI field
+    # used to arrive as null and crash int(None) at delivery).
+    port = int(config.get("port") or 587)
     security = str(config.get("security", "starttls")).lower()
     if security not in _VALID_SECURITY:
         raise ChannelDeliveryError(

@@ -1385,33 +1385,6 @@ merge_new_configs() {
   rm -f "$tmp" "$pristine"
 }
 
-# migrate_upstream_refs FILE NAME: an existing my-<name>.xml is the operator's
-# copy and is never regenerated on a plain re-run -- which means the elements
-# that name the PROJECT'S HOME (<Repository>, <TemplateURL>, <Support>,
-# <Project>, <Icon>) keep pointing wherever the template was first fetched
-# from. After the 2026-08-22 move to the filearr GitHub org the old image
-# namespace (ghcr.io/pwsh/*) is frozen: Unraid's update check would keep
-# pulling stale images forever. Rewrite only those references (the image TAG
-# and every <Config> value are untouched) and tell the operator to force an
-# update so the container is re-created from the new registry.
-migrate_upstream_refs() {
-  local file="$1" name="$2" tmp before after
-  before="$(grep -c 'ghcr\.io/pwsh/\|github\.com/pwsh/filearr\|raw\.githubusercontent\.com/pwsh/filearr\|pwsh\.github\.io/filearr/' "$file" 2>/dev/null || true)"
-  [[ "${before:-0}" -gt 0 ]] || return 0
-  tmp="$(mktemp)"
-  sed -e 's#ghcr\.io/pwsh/#ghcr.io/filearr/#g' \
-      -e 's#github\.com/pwsh/filearr#github.com/filearr/filearr#g' \
-      -e 's#raw\.githubusercontent\.com/pwsh/filearr#raw.githubusercontent.com/filearr/filearr#g' \
-      -e 's#pwsh\.github\.io/filearr/#filearr.com/#g' "$file" > "$tmp"
-  cat "$tmp" > "$file"; rm -f "$tmp"
-  after="$(grep -c 'ghcr\.io/filearr/\|github\.com/filearr/filearr' "$file" 2>/dev/null || true)"
-  info "my-${name}.xml: repointed ${before} reference(s) at the project's current home (ghcr.io/filearr, github.com/filearr/filearr)"
-  if grep -q '<Repository>ghcr\.io/filearr/' "$file"; then
-    warn "container '${name}' still RUNS the image from the old registry -- Docker tab -> Check for Updates -> apply update (or Edit -> Apply) to re-create it from ghcr.io/filearr; until then it receives no new releases"
-  fi
-  : "$after"
-}
-
 # Should this container's template be (re)generated? No, if the container
 # already exists — Unraid rewrote my-<name>.xml on Apply and it now holds the
 # operator's own edits. --force overrides.
@@ -1485,7 +1458,6 @@ generate_templates() {
       # ordering and everything else untouched -- so the Edit page shows the
       # new knob at its upstream default after the next Apply.
       if [[ -f "$f" ]]; then
-        migrate_upstream_refs "$f" "$name"
         merge_new_configs "$name" "$f"
         # A wizard-owned secret answered since (--reconfigure) fills its
         # freshly merged field; blank stays blank (anonymous download).

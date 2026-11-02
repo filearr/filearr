@@ -129,11 +129,24 @@ def test_stored_list_cap_independent_of_count(tmp_path):
     _make_zip(tmp_path / "a.zip", [(f"f{i}.txt", b"x") for i in range(10)])
     out = list_archive_members(str(tmp_path / "a.zip"), max_members=100, max_stored=3)
     arc = out["archive"]
-    assert arc["member_count"] == 10  # ALL counted
-    assert arc["truncated"] is False  # count cap not hit
+    assert arc["member_count"] == 10  # ALL counted (count cap not hit)
+    # B50: the stored listing is shorter than member_count -> flagged truncated
+    # so the UI notes the cap instead of silently stopping the list.
+    assert arc["truncated"] is True
     assert len(arc["members"]) == 3  # but only 3 {name,size} stored
     # flat string may hold more names than the stored list (denser packing).
     assert len(out["archive_members"].split("\n")) == 10
+
+
+def test_stored_list_exactly_at_cap_is_not_truncated(tmp_path):
+    # B50 boundary: member_count == max_stored -> every member is listed.
+    _make_zip(tmp_path / "a.zip", [(f"f{i}.txt", b"x") for i in range(3)])
+    arc = list_archive_members(str(tmp_path / "a.zip"), max_members=100, max_stored=3)[
+        "archive"
+    ]
+    assert arc["member_count"] == 3
+    assert len(arc["members"]) == 3
+    assert arc["truncated"] is False
 
 
 def test_index_chars_cap_on_flat_string(tmp_path):

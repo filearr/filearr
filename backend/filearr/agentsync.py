@@ -613,7 +613,6 @@ async def register_agent(
     platform: str,
     name: str | None = None,
     agent_version: str | None = None,
-    config_group: str | None = None,
 ) -> tuple[Any, str, str | None]:
     """P5-T1: consume an enrollment token and assign the authoritative,
     server-side ``agents.id`` (brief §7.1, R3 — registration PRECEDES CSR/cert;
@@ -627,11 +626,9 @@ async def register_agent(
     in the SAME transaction that creates the agent, so a replay finds the token
     already consumed.
 
-    P13 config-group membership: the groups to join are the union of the TOKEN's
-    ``config_group_names`` (recorded when an operator minted the installer config
-    — the authoritative half) and the single ``config_group`` name the enrolling
-    binary echoes from its sidecar (kept because shipped agents send exactly that
-    key). Membership rows are created for each name that resolves; **Global** is
+    P13 config-group membership: the groups to join are the TOKEN's
+    ``config_group_names`` (recorded when an operator minted the installer
+    config). Membership rows are created for each name that resolves; **Global** is
     implicit and needs none. FAIL-SAFE: an UNKNOWN name never blocks enrollment —
     the agent registers without it and the returned ``config_group_warning``
     names what was dropped (surfaced to the operator in the register response).
@@ -661,8 +658,6 @@ async def register_agent(
         raise EnrollmentError(verdict, f"enrollment token {verdict}")
 
     wanted: list[str] = [n for n in (row.config_group_names or []) if isinstance(n, str) and n]
-    if config_group and config_group not in wanted:
-        wanted.append(config_group)
 
     resolved: list[Any] = []
     unknown: list[str] = []

@@ -116,11 +116,6 @@ class RegisterIn(BaseModel):
     platform: str  # windows | macos | linux (validated in agentsync)
     name: str | None = Field(default=None, max_length=255)
     agent_version: str | None = Field(default=None, max_length=64)
-    # Config group by NAME, echoed from the installer sidecar by shipped agent
-    # binaries. Joined ON TOP of whatever groups the enrollment token itself
-    # records (the authoritative half, P13). An unknown name is fail-safe (the
-    # group is skipped + a warning rides the response), never a failed register.
-    config_group: str | None = Field(default=None, max_length=128)
 
 
 class CaBootstrap(BaseModel):
@@ -605,7 +600,6 @@ async def register(
             platform=body.platform,
             name=body.name,
             agent_version=body.agent_version,
-            config_group=body.config_group,
         )
     except EnrollmentError as err:
         await session.rollback()

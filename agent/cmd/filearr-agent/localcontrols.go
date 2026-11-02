@@ -176,11 +176,6 @@ func scheduleSource(dataDir, key string, local agentcfg.LocalSettings, getenv fu
 		if central.CentrallySet(key) {
 			return policySourceLabel(central.Scope, central.Version)
 		}
-		if key == "scan_cron" {
-			if pol, perr := doc.Parsed(); perr == nil && pol.Group != nil && pol.Group.ScanScheduleCron != nil {
-				return "config group (scan_schedule_cron)"
-			}
-		}
 	}
 	switch key {
 	case "scan_cron":

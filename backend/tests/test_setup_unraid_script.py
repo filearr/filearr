@@ -289,20 +289,10 @@ def test_templates_are_not_regenerated_over_existing_containers(code: str):
     assert '[[ "$FORCE" == 1 ]] && return 0' in m.group(1)
 
 
-def test_rerun_repoints_existing_templates_at_the_filearr_org(code: str):
-    """2026-08-22 org move: an existing my-*.xml is never regenerated on a plain
-    re-run, so its <Repository>/<TemplateURL>/<Support>/<Project> kept naming the
-    old ghcr.io/pwsh namespace (frozen — no more releases). The re-run must
-    rewrite those references and call it BEFORE the new-field merge."""
-    assert "migrate_upstream_refs()" in code
-    assert "ghcr.io/filearr/" in code and "github.com/filearr/filearr" in code
-    # the old namespace appears ONLY as the thing being migrated away from
-    assert "s#ghcr\\.io/pwsh/#ghcr.io/filearr/#g" in code
-    body = code[code.index("generate_templates()"):]
-    migrate_at = body.index('migrate_upstream_refs "$f" "$name"')
-    assert migrate_at < body.index('merge_new_configs "$name" "$f"')
-    # the operator is told the running container still uses the old image
-    assert "Check for Updates" in code
+def test_no_reference_to_the_frozen_pwsh_namespace(code: str):
+    """The pre-2026-08-22 ghcr.io/pwsh namespace is frozen (the project lives in
+    the filearr org) and must not be referenced."""
+    assert "ghcr.io/pwsh" not in code and "ghcr\\.io/pwsh" not in code
 
 
 def test_wizard_asks_worker_concurrency_and_persists_it(code: str):

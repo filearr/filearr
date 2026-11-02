@@ -130,8 +130,8 @@ func TestCapabilitiesAdvertisesExtraction(t *testing.T) {
 	if !ok || len(formats) == 0 {
 		t.Fatalf("formats = %v (%T), want a non-empty []string", caps["formats"], caps["formats"])
 	}
-	// The pre-existing keys must survive: older centrals read them.
-	for _, key := range []string{"inventory_collectors", "inventory_version", "ffmpeg", "container"} {
+	// The base keys central reads.
+	for _, key := range []string{"inventory_collectors", "inventory_version", "container"} {
 		if _, ok := caps[key]; !ok {
 			t.Fatalf("capability advertisement dropped %q", key)
 		}

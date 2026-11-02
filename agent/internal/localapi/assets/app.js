@@ -644,7 +644,6 @@
     kvRow(dl, "Include globs", (px.include_globs || []).join(", ") || "none (everything under the roots)");
     kvRow(dl, "EXIF extraction", px.extract_exif_set ? (px.extract_exif ? "on" : "off") : "not set (off)");
     kvRow(dl, "Taxonomy version", px.taxonomy_version !== null && px.taxonomy_version !== undefined ? px.taxonomy_version : "baked-in seed");
-    if (px.group_scan_schedule_cron) kvRow(dl, "Group scan schedule (legacy key)", px.group_scan_schedule_cron);
   }
 
   // ---- Status: logging (2026-08-25) -------------------------------------------
@@ -785,7 +784,8 @@
         kvRow(dl, "Self-update", s.self_update ? "enabled" : "off (image pulls are the update path)");
         var sd = s.sidecar || {};
         if (sd.agent_name) kvRow(dl, "Configured name", sd.agent_name);
-        if (sd.config_group) kvRow(dl, "Configured group", sd.config_group);
+        if (sd.config_group_names && sd.config_group_names.length)
+          kvRow(dl, "Configured groups", sd.config_group_names.join(", "));
         if (sd.ffmpeg_path) kvRow(dl, "ffmpeg path (configured)", sd.ffmpeg_path);
         renderLoggingSection(dl, s);
       })

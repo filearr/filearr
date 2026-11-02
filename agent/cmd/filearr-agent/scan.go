@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,7 +15,6 @@ import (
 	"github.com/filearr/filearr/agent/internal/agentlog"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/index"
-	"github.com/filearr/filearr/agent/internal/query"
 	"github.com/filearr/filearr/agent/internal/scan"
 	"github.com/filearr/filearr/agent/internal/shares"
 	"github.com/filearr/filearr/agent/internal/taxonomy"
@@ -297,86 +295,6 @@ func applyPolicyToScan(dataDir string, sc scanConfig, watch *bool) (out scanConf
 		}
 	}
 	return sc, watchDisabled
-}
-
-// runSearch implements `filearr-agent search <query>` over the full local query
-// DSL (agent/internal/query), executed on a dedicated read-only connection. The
-// typo-tolerance is a LOCAL, bounded edit-distance re-rank (fires only on zero
-// exact hits or an explicit ~ term) — it is NOT central's Meilisearch ranking;
-// results may differ from the central UI.
-//
-// LEGACY PATH: `search` opens the index file directly, bypassing the P7-T2 policy
-// gate + peer-credential boundary. The SUPPORTED local query surface is
-// `filearr-agent query`, which dials the agent's socket/pipe. Prefer it.
-func runSearch(args []string) error {
-	fs := newFlagSet("search")
-	cfg := bindCommonFlags(fs)
-	includeSidecars := fs.Bool("sidecars", false, "include sidecar rows (hidden by default)")
-	limit := fs.Int("limit", 50, "max results")
-	asJSON := fs.Bool("json", false, "emit one JSON object per result line (NDJSON)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	raw := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if raw == "" {
-		return fmt.Errorf("usage: filearr-agent search [--json] [--limit N] [--sidecars] <query>\n  (legacy direct-index path; the supported surface is `filearr-agent query`)")
-	}
-
-	searcher, err := query.NewSearcher(filepath.Join(cfg.DataDir, indexDBName))
-	if err != nil {
-		return fmt.Errorf("open local index (read-only): %w", err)
-	}
-	defer searcher.Close()
-
-	results, err := searcher.Search(context.Background(), raw, *includeSidecars, *limit)
-	if err != nil {
-		var pe *query.ParseError
-		var ee *query.ExecError
-		switch {
-		case errors.As(err, &pe):
-			return fmt.Errorf("query syntax error [%s] at position %d: %s", pe.Code, pe.Position, pe.Reason)
-		case errors.As(err, &ee):
-			return fmt.Errorf("query not runnable locally [%s]: %s", ee.Code, ee.Message)
-		default:
-			return err
-		}
-	}
-
-	fuzzy := false
-	for _, r := range results {
-		if r.FuzzyMatched {
-			fuzzy = true
-		}
-		if *asJSON {
-			row := map[string]any{
-				"id":            r.Item.ID,
-				"rel_path":      r.Item.RelPath,
-				"filename":      r.Item.Filename,
-				"extension":     r.Item.Extension,
-				"size":          r.Item.Size,
-				"mtime_ns":      r.Item.MtimeNs,
-				"file_category": r.Item.FileCategory,
-				"file_group":    r.Item.FileGroup,
-				"status":        r.Item.Status,
-				"fuzzy_matched": r.FuzzyMatched,
-				"score":         r.Score,
-			}
-			buf, _ := json.Marshal(row)
-			fmt.Println(string(buf))
-			continue
-		}
-		flag := ""
-		if r.FuzzyMatched {
-			flag = fmt.Sprintf("\t~fuzzy(%d)", r.Score)
-		}
-		fmt.Printf("%s\t%d\t%s%s\n", r.Item.RelPath, r.Item.Size, r.Item.Status, flag)
-	}
-	if len(results) == 0 {
-		fmt.Fprintln(os.Stderr, "no matches")
-	} else if fuzzy {
-		fmt.Fprintln(os.Stderr, "note: results include local typo-tolerant (fuzzy) matches; central search may rank differently")
-	}
-	return nil
 }
 
 // loadOrInitScanConfig reads scan.json, merges any -root flags (which win and are

@@ -135,7 +135,7 @@ func TestConsumeTokenOneShot(t *testing.T) {
 	content := `{
   "central_url": "https://filearr.example.com",
   "enrollment_token": "fae_secret_value",
-  "config_group": "prod",
+  "config_group_names": ["prod"],
   "future_unknown_key": "keep-me"
 }`
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -167,8 +167,8 @@ func TestConsumeTokenOneShot(t *testing.T) {
 	if perr != nil || ts.Before(before) {
 		t.Fatalf("bad consumed-at %q (err=%v)", reloaded.EnrollmentTokenConsumedAt, perr)
 	}
-	if reloaded.ConfigGroup != "prod" {
-		t.Fatalf("config_group not preserved: %q", reloaded.ConfigGroup)
+	if len(reloaded.ConfigGroupNames) != 1 || reloaded.ConfigGroupNames[0] != "prod" {
+		t.Fatalf("config_group_names not preserved: %q", reloaded.ConfigGroupNames)
 	}
 	if _, ok := reloaded.raw["future_unknown_key"]; !ok {
 		t.Fatal("unknown key lost across rewrite")

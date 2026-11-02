@@ -12,6 +12,7 @@ import { test } from "node:test";
 
 import {
   aboutMarkdown,
+  buildTitle,
   embeddingSummary,
   formatBytes,
   formatWhen,
@@ -200,7 +201,13 @@ test("embeddingSummary: the never-downloaded default reads as normal, not broken
 const ABOUT: About = {
   application: {
     app_version: "0.1.0",
-    build_stamp: null,
+    build: {
+      id: "main-940000d",
+      commit: "940000d9e573194c3df1fa19480429bca8604b70",
+      ref: "main",
+      built_at: "2026-11-01T19:58:14Z",
+      source: "image",
+    },
     source_url: "https://github.com/filearr/filearr",
     license: "AGPL-3.0-or-later",
     license_url: "https://www.gnu.org/licenses/agpl-3.0.html",
@@ -254,7 +261,7 @@ test("aboutMarkdown dumps every section, deterministically", () => {
 test("aboutMarkdown never emits an empty version cell", () => {
   const md = aboutMarkdown(ABOUT, STACK, FIXED_NOW);
   // The unknown states appear as words, not gaps.
-  assert.ok(md.includes("none (dev checkout)"), "a missing build stamp is named");
+  assert.ok(md.includes("| Build | main-940000d (container image"), "the build is identified");
   assert.match(md, /unreachable/);
   assert.ok(md.includes("not installed"), "the absent tesseract is named");
   assert.ok(md.includes("unknown"), "the agent that never reported a version is named");
@@ -329,4 +336,11 @@ test("keyFingerprintLabel: a key removed from the environment still names what t
   const label = keyFingerprintLabel({ state: "missing", recorded: "0123456789abcdef" });
   assert.ok(label.includes("0123456789abcdef"));
   assert.match(label, /not configured/);
+});
+
+test("buildTitle names the build and where its identity came from", () => {
+  const t = buildTitle(ABOUT.application.build);
+  assert.match(t, /^main-940000d \(container image, ref main, commit 940000d9e573, built /);
+  const bare = buildTitle({ id: "0.1.0+unidentified", commit: null, ref: null, built_at: null, source: "runtime" });
+  assert.equal(bare, "0.1.0+unidentified (unidentified build)");
 });

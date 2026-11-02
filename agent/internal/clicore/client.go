@@ -3,10 +3,9 @@
 // current-user named pipe on Windows), issues the read-only POST /v1/query
 // request, and renders the QueryResponse for a terminal.
 //
-// This is the SUPPORTED local query surface. The legacy `search` subcommand opens
-// the SQLite index file directly (the P7-T1 path); that bypasses the P7-T2 policy
-// gate (local_access_enabled) and the peer-credential boundary, so it is retained
-// only for local debugging. New callers go through the transport served here.
+// This is the local query surface: it never opens the SQLite index file
+// directly, so the P7-T2 policy gate (local_access_enabled) and the
+// peer-credential boundary always apply.
 //
 // Offline guarantee: every request rides a filesystem/namespace object the OS
 // access-controls — never a network socket — so `filearr query` answers "where

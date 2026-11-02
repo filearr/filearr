@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from meilisearch_python_sdk.models.settings import MeilisearchSettings
 
+from filearr import meili_ops
 from filearr import search as search_mod
 from filearr.models import Item, ItemStatus
 
@@ -45,8 +46,8 @@ def test_build_doc_marks_sidecar():
 
 
 def test_is_sidecar_is_filterable():
-    assert "is_sidecar" in search_mod.FILTERABLE
-    assert "sidecar_of" in search_mod.FILTERABLE
+    assert "is_sidecar" in meili_ops.FILTERABLE_ATTRIBUTES
+    assert "sidecar_of" in meili_ops.FILTERABLE_ATTRIBUTES
 
 
 @pytest.mark.asyncio

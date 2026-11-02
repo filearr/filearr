@@ -1,8 +1,13 @@
 <script lang="ts">
-  import { fmtBytes, fmtDuration, relTime } from "./format";
+  import { fmtBytes, fmtClock, fmtDateTime, fmtDuration, fmtUtc, relTime } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { usePolling, type Poller } from "./polling";
+  import { assessBackup, startTrack, type BackupFetch, type BackupTrack } from "./backupTrack";
   import { latest } from "./latest";
+  import { refreshGate } from "./refreshGate";
+  import { pushSample, queueEta as etaFor, rateOf, type RateSample } from "./jobsRate";
+  import { intOrNull } from "./numInput";
+  import { cronProblem } from "./scheduleNext";
   import {
     clearFailedJobs,
     downloadBackup,
@@ -25,6 +30,7 @@
     type ScanRunning,
     type AgentReplicationActivity,
     errorMessage,
+    errorStatus,
   } from "./api";
   import FeaturesPanel from "./FeaturesPanel.svelte";
   import LogsPanel from "./LogsPanel.svelte";
@@ -79,38 +85,60 @@
   let reapMsg = $state("");
   let reapError = $state("");
 
-  // UI-T14 — per-queue priority stepper. `prioInput` holds the pending edit per
-  // queue (seeded from the server default the first time a queue is seen);
-  // `prioBusy`/`prioMsg` drive the per-queue apply button + its result note.
-  let prioInput = $state<Record<string, number>>({});
+  // UI-T14 — per-queue priority stepper. `prioInput` holds the raw text of the
+  // pending edit per queue (absent = show the configured default), so typing
+  // "-", clearing the box or entering a negative never snaps to 0 (B48); it is
+  // parsed on blur and on apply, with a field error when it is not a whole
+  // number in range. `prioBusy`/`prioMsg` drive the apply button + its note.
+  const PRIO_MIN = -100;
+  const PRIO_MAX = 100;
+  let prioInput = $state<Record<string, string>>({});
+  let prioFieldErr = $state<Record<string, string>>({});
   let prioBusy = $state<Record<string, boolean>>({});
   let prioMsg = $state<Record<string, string>>({});
   let prioErr = $state<Record<string, string>>({});
 
-  // Effective input value for a queue: the user's pending edit, else the current
-  // server default, else 0.
-  function prioValue(q: string): number {
-    if (prioInput[q] !== undefined) return prioInput[q];
+  function prioDefault(q: string): number {
     return summary?.priorities?.[q] ?? 0;
   }
 
-  function clampPrio(n: number): number {
-    if (!isFinite(n)) return 0;
-    return Math.max(-100, Math.min(100, Math.round(n)));
+  // The input's text: the user's pending edit, else the configured default.
+  function prioText(q: string): string {
+    return prioInput[q] ?? String(prioDefault(q));
+  }
+
+  // Parsed pending value, or null (with the field error set) when invalid.
+  function prioParse(q: string): number | null {
+    const n = intOrNull(prioText(q), { min: PRIO_MIN, max: PRIO_MAX });
+    prioFieldErr[q] = n === null ? `Enter a whole number from ${PRIO_MIN} to ${PRIO_MAX}.` : "";
+    return n;
+  }
+
+  // ± buttons step from the parsed value (or the default when the box holds
+  // something unparsable), clamped to the range.
+  function prioStep(q: string, delta: number) {
+    const base = intOrNull(prioText(q), { min: PRIO_MIN, max: PRIO_MAX }) ?? prioDefault(q);
+    prioInput[q] = String(Math.max(PRIO_MIN, Math.min(PRIO_MAX, base + delta)));
+    prioFieldErr[q] = "";
   }
 
   async function applyPriority(q: string) {
     if (prioBusy[q]) return;
-    const priority = clampPrio(prioValue(q));
-    prioInput[q] = priority;
+    const priority = prioParse(q);
+    if (priority === null) return;
+    prioInput[q] = String(priority);
     prioBusy[q] = true;
     prioMsg[q] = "";
     prioErr[q] = "";
     try {
       const r = await setJobPriority(q, priority);
+      // Apply is a one-shot re-prioritisation of the queue's PENDING jobs; the
+      // configured default for new jobs is unchanged (B37).
       prioMsg[q] =
-        r.updated === 0 ? "no pending jobs" : `updated ${r.updated} pending`;
-      await refresh();
+        r.updated === 0
+          ? `no pending jobs to re-prioritise; new jobs still use the default ${prioDefault(q)}`
+          : `${r.updated} pending job${r.updated === 1 ? "" : "s"} set to ${priority}; new jobs still use the default ${prioDefault(q)}`;
+      await refresh({ force: true });
     } catch (e) {
       prioErr[q] = `failed: ${errorMessage(e)}`;
     } finally {
@@ -121,13 +149,13 @@
   // Local clock so "running for" counters tick between polls (1s cadence).
   let now = $state(Date.now());
 
-  // Rolling throughput samples per counter KEY (generalised from the original
-  // extract-only tracker). Each poll appends {t, done} for a key; the rate is a
-  // delta over the oldest/newest sample in the window. "—" (null) until we have
-  // >=2 samples (the contract). Used for both the extract backlog and the thumbs
-  // queue's completed count.
-  type Sample = { t: number; done: number };
-  const rateSamples: Record<string, Sample[]> = {};
+  // Rolling throughput samples per counter KEY (jobsRate.ts). Each poll appends
+  // {t, done}; the rate is the delta across the window, "—" (null) until there
+  // are 2 samples. A falling counter (the daily history purge) or a gap longer
+  // than a few polls (hidden tab) restarts the window (B47). Used for the
+  // extract backlog and the thumbs queue's completed count.
+  const RATE_OPTS = { window: 6, maxGapMs: POLL_MS * 3 };
+  const rateSamples: Record<string, RateSample[]> = {};
   let rates = $state<Record<string, number | null>>({});
 
   // Cumulative-counter deltas for the I/O + network tiles: keep the previous
@@ -175,11 +203,14 @@
   let maint = $state<MaintenanceTask[]>([]);
   let maintFetched = 0;
   let maintBusy = $state<Record<string, boolean>>({});
+  // Success notes (flashed) and "already queued" notes (kept until the next
+  // action on that task).
   let maintMsg = $state<Record<string, string>>({});
   // A task's failed Run now / schedule save; persists until dismissed or retried.
   let maintErr = $state<Record<string, string>>({});
   let editKey = $state<string | null>(null);
   let editCron = $state("");
+  let cronErr = $state("");
 
   const MAINT_CATS: [MaintenanceTask["category"], string][] = [
     ["cleanup", "Cleanup"],
@@ -189,53 +220,132 @@
     ["ondemand", "On-demand"],
   ];
 
+  // Procrastinate's raw states for a run that is waiting or executing: the
+  // task's queueing lock refuses another run while either holds.
+  function inProgress(t: MaintenanceTask | undefined): boolean {
+    const st = t?.last_run?.status;
+    return st === "todo" || st === "doing";
+  }
+
   async function refreshMaint(force = false) {
     if (!force && Date.now() - maintFetched < MAINT_POLL_MS) return;
     try {
       maint = (await listMaintenance()).tasks;
       maintFetched = Date.now();
+      settleBackup({ ok: true, lastRun: maint.find((t) => t.key === "backup_now")?.last_run });
     } catch {
-      // best-effort panel; the summary error banner covers hard API loss
+      // best-effort panel; the summary error banner covers hard API loss. A
+      // tracked backup counts this as an unknown check (never "finished").
+      settleBackup({ ok: false });
     }
   }
 
   // --- BK-T3 in-app backup ------------------------------------------------
-  // Loaded lazily alongside the maintenance registry. The list is admin-only,
-  // so a read-scoped operator simply sees an empty panel rather than an error.
+  // Fetched on its own 30s throttle with its own error state, so a failing
+  // maintenance list no longer hides it (B27). The list is admin-only: a
+  // read-scoped operator gets a 403 and simply sees an empty panel.
   let backups = $state<BackupBundle[]>([]);
   let backupNote = $state("");
   let backupDir = $state("");
   let backupKeep = $state(0);
+  let backupsFetched = 0;
+  let backupsError = $state("");
   let backupBusy = $state(false);
   let backupMsg = $state("");
   let backupError = $state("");
   let downloadError = $state<{ name: string; message: string } | null>(null);
 
-  async function refreshBackups() {
+  async function refreshBackups(force = false) {
+    if (!force && Date.now() - backupsFetched < MAINT_POLL_MS) return;
+    backupsFetched = Date.now();
     try {
       const r = await listBackups();
       backups = r.bundles;
       backupNote = r.incomplete_note;
       backupDir = r.dir;
       backupKeep = r.keep;
-    } catch {
-      // best-effort panel (403 for a non-admin, 404 on an older backend)
+      backupsError = "";
+    } catch (e) {
+      backupsError = errorStatus(e) === 403 ? "" : errorMessage(e, { verb: "list backups" });
     }
   }
 
+  // A backup job is queued or running: from the maintenance registry (which
+  // also sees a scheduled or other-tab backup), or from our own click / a 409
+  // "already queued" until its outcome is known (backupTrack.ts).
+  const BACKUP_POLL_MS = 3000;
+  let backupTrack = $state<BackupTrack | null>(null);
+  let backupTimer: ReturnType<typeof setTimeout> | undefined;
+  let destroyed = false;
+  let backupActive = $derived(
+    backupTrack !== null || inProgress(maint.find((t) => t.key === "backup_now")),
+  );
+
+  // After each registry fetch (or failed fetch): settle the tracked job when
+  // its outcome is known, then keep the 3 s poll armed while anything is
+  // pending.
+  function settleBackup(fetched: BackupFetch) {
+    if (backupTrack) {
+      const v = assessBackup(backupTrack, fetched);
+      if (v.kind === "pending") {
+        backupTrack = v.track;
+      } else {
+        backupTrack = null;
+        backupMsg = "";
+        backupError = "";
+        if (v.kind === "finished") backupMsg = "backup finished";
+        else if (v.kind === "cancelled") backupMsg = "backup cancelled";
+        else if (v.kind === "ended") backupMsg = `backup job ended (${v.status})`;
+        else if (v.kind === "failed") backupError = "The backup job failed; its error is in Failed jobs above.";
+        else
+          backupError = `Lost track of the backup: ${v.checks} status checks in a row told us nothing. It may still be running — refresh to check.`;
+        void refreshBackups(true); // the finished bundle
+      }
+    }
+    armBackupPoll();
+  }
+
+  function armBackupPoll() {
+    if (backupActive && !backupTimer && !destroyed) {
+      backupTimer = setTimeout(backupTick, BACKUP_POLL_MS);
+    }
+  }
+
+  async function backupTick() {
+    backupTimer = undefined;
+    if (destroyed) return;
+    // Paused while the tab is hidden (as polling.ts): the timer keeps ticking
+    // cheaply, but no request goes out and no check is counted.
+    if (document.visibilityState === "hidden") {
+      armBackupPoll();
+      return;
+    }
+    await Promise.all([refreshMaint(true), refreshBackups(true)]);
+    if (destroyed) return;
+    armBackupPoll();
+  }
+
   async function backupNow() {
+    if (backupBusy || backupActive) return;
     backupBusy = true;
     backupMsg = "";
     backupError = "";
     try {
       const r = await runBackup();
       backupMsg = r.job_id != null ? `queued (job ${r.job_id})` : "queued";
-      // The dump runs on the worker; the bundle appears on a later poll. Give
-      // it one nudge rather than pretending it is instant.
-      setTimeout(() => void refreshBackups(), 4000);
+      // The dump runs on the worker; follow its job until it ends.
+      backupTrack = startTrack(r.job_id);
       await refreshMaint(true);
     } catch (e) {
-      backupError = errorMessage(e, { verb: "run a backup" });
+      if (errorStatus(e) === 409) {
+        // Already queued/running (scheduled or another tab): follow that one;
+        // its outcome replaces this note.
+        backupMsg = errorMessage(e);
+        backupTrack = startTrack(null);
+        await refreshMaint(true);
+      } else {
+        backupError = errorMessage(e, { verb: "run a backup" });
+      }
     } finally {
       backupBusy = false;
     }
@@ -250,22 +360,33 @@
     }
   }
 
+  const flashTimers = new Set<ReturnType<typeof setTimeout>>();
   function flashMaint(key: string, msg: string) {
     maintMsg[key] = msg;
-    setTimeout(() => {
+    const id = setTimeout(() => {
+      flashTimers.delete(id);
       if (maintMsg[key] === msg) maintMsg[key] = "";
     }, 6000);
+    flashTimers.add(id);
   }
 
   async function maintRun(t: MaintenanceTask) {
     maintBusy[t.key] = true;
     maintErr[t.key] = "";
+    maintMsg[t.key] = "";
     try {
       const r = await runMaintenance(t.key);
       flashMaint(t.key, r.job_id != null ? `queued (job ${r.job_id})` : "queued");
       await refreshMaint(true);
     } catch (e) {
-      maintErr[t.key] = errorMessage(e, { verb: "run maintenance tasks" });
+      if (errorStatus(e) === 409) {
+        // Already queued/running, or a task that ticks on its own: the
+        // server's reason is a note, not a failure (B49).
+        maintMsg[t.key] = errorMessage(e);
+        await refreshMaint(true);
+      } else {
+        maintErr[t.key] = errorMessage(e, { verb: "run maintenance tasks" });
+      }
     } finally {
       maintBusy[t.key] = false;
     }
@@ -283,7 +404,30 @@
     }
     editKey = t.key;
     editCron = t.cron ?? "";
+    cronErr = "";
     void focusPanel(cronPanelId(t.key));
+  }
+
+  // Save from the editor: a cron is checked client-side first (same parser as
+  // the schedule previews); a blank box means "reset to default", which is
+  // confirmed rather than implied (B49).
+  async function maintSaveCron(t: MaintenanceTask) {
+    const cron = editCron.trim();
+    if (cron) {
+      cronErr = cronProblem(cron) ?? "";
+      if (cronErr) return;
+      await maintSave(t, { cron });
+      return;
+    }
+    cronErr = "";
+    const ok = await confirm({
+      title: "Reset to the default schedule?",
+      message: t.default_cron
+        ? `The cron box is empty. Saving drops the custom schedule and ${t.title} goes back to its default (${t.default_cron} UTC).`
+        : `The cron box is empty. Saving drops the schedule; ${t.title} has no default, so it will only run when triggered.`,
+      confirmLabel: "Reset to default",
+    });
+    if (ok) await maintSave(t, { cron: null });
   }
 
   async function maintSave(
@@ -292,11 +436,13 @@
   ) {
     maintBusy[t.key] = true;
     maintErr[t.key] = "";
+    maintMsg[t.key] = "";
     try {
       const updated = await updateMaintenance(t.key, body);
       maint = maint.map((x) => (x.key === t.key ? updated : x));
       if ("cron" in body) {
         editKey = null;
+        cronErr = "";
         void focusRowButton("data-cron-for", t.key);
       }
       flashMaint(t.key, "saved — applies within a minute");
@@ -324,8 +470,10 @@
   let poller: Poller | undefined;
   let ticker: Poller | undefined;
 
-  async function refresh() {
-    if (loading) return;
+  // One refresh at a time (refreshGate.ts): a poll tick during a refresh
+  // joins it; an action's `refresh({ force: true })` queues one trailing run
+  // so its result is always reflected (B26).
+  const refresh = refreshGate(async () => {
     loading = true;
     try {
       error = "";
@@ -337,15 +485,14 @@
       computeIoNet(s);
       await refreshFailures();
       await refreshMaint();
-      // Rides the same throttle as the maintenance registry (both are cheap
-      // and neither needs the 4s summary cadence).
-      if (Date.now() - maintFetched < 1000) await refreshBackups();
+      // Own throttle and error state; independent of the maintenance list.
+      await refreshBackups();
     } catch (e) {
       error = errorMessage(e);
     } finally {
       loading = false;
     }
-  }
+  });
 
   // FIX-8 — pull the current failures page. Clamps the offset back into range if
   // rows aged out (retention purge) or were cleared under us between polls.
@@ -396,7 +543,7 @@
     try {
       await clearFailedJobs();
       failuresOffset = 0;
-      await refresh();
+      await refresh({ force: true });
     } catch (e) {
       clearFailedError = `Clear failed: ${errorMessage(e, { verb: "clear failed jobs" })}`;
     } finally {
@@ -431,7 +578,7 @@
     modeError = "";
     try {
       await setMaintenanceMode(!active, reason);
-      await refresh();
+      await refresh({ force: true });
     } catch (e) {
       modeError = `Maintenance mode: ${errorMessage(e, { verb: "change maintenance mode" })}`;
     } finally {
@@ -450,7 +597,7 @@
         r.reaped === 0 && r.pruned_workers === 0
           ? "Nothing stalled"
           : `Reaped ${r.reaped} (retried ${r.retried}, failed ${r.failed}), pruned ${r.pruned_workers} worker${r.pruned_workers === 1 ? "" : "s"}`;
-      await refresh();
+      await refresh({ force: true });
     } catch (e) {
       reapError = `Reap failed: ${errorMessage(e)}`;
     } finally {
@@ -458,34 +605,17 @@
     }
   }
 
-  // Generalised rolling-rate recorder: append {t, done} for `key` and recompute
-  // its per-second rate over the sample window (null with <2 samples; 0 when the
-  // counter is flat/receding so a stalled queue reads "stalled").
+  // Append a sample for `key` and recompute its per-second rate (jobsRate.ts).
   function recordRate(key: string, done: number) {
-    const t = Date.now();
-    const arr = rateSamples[key] ?? (rateSamples[key] = []);
-    const prev = arr[arr.length - 1];
-    arr.push({ t, done });
-    if (arr.length > 6) arr.shift();
-    if (arr.length >= 2 && prev) {
-      const first = arr[0];
-      const last = arr[arr.length - 1];
-      const dt = (last.t - first.t) / 1000;
-      const dd = last.done - first.done;
-      rates[key] = dt > 0 && dd > 0 ? dd / dt : dd <= 0 ? 0 : null;
-    } else {
-      rates[key] = null;
-    }
+    const arr = pushSample(rateSamples[key] ?? [], Date.now(), done, RATE_OPTS);
+    rateSamples[key] = arr;
+    rates[key] = rateOf(arr);
   }
 
-  // ETA string for a queue backlog: depth / rolling-rate. "—" with <2 samples or
-  // an unknown rate; "stalled" when the rate is 0; "0" when nothing is queued.
+  // ETA string for a queue backlog: "0" when empty, "—" when the rate is
+  // unknown, "stalled" at a zero rate, else depth / rate.
   function queueEta(key: string, depth: number): string {
-    if (depth <= 0) return "0";
-    const r = rates[key];
-    if (r == null) return "—";
-    if (r <= 0) return "stalled";
-    return fmtDuration(depth / r);
+    return etaFor(depth, rates[key] ?? null);
   }
 
   // Rolling completion rate for a key, expressed per MINUTE (null with <2 samples).
@@ -544,29 +674,6 @@
   // Auto-scaled byte-rate ("12.4 MB/s").
   function fmtRate(bytesPerSec: number): string {
     return `${fmtBytes(bytesPerSec)}/s`;
-  }
-
-  // Local wall-clock HH:MM for an upcoming ISO instant.
-  function hhmm(iso: string): string {
-    const t = Date.parse(iso);
-    if (isNaN(t)) return "";
-    return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-
-  // Relative "in Xd Yh" / "in Xh Ym" / "in Xm" for an upcoming instant (uses the
-  // reactive `now` clock so it ticks between polls).
-  function relFuture(iso: string): string {
-    const t = Date.parse(iso);
-    if (isNaN(t)) return "";
-    let secs = Math.max(0, (t - now) / 1000);
-    const d = Math.floor(secs / 86400);
-    secs -= d * 86400;
-    const h = Math.floor(secs / 3600);
-    secs -= h * 3600;
-    const m = Math.floor(secs / 60);
-    if (d > 0) return `in ${d}d ${h}h`;
-    if (h > 0) return `in ${h}h ${m}m`;
-    return `in ${m}m`;
   }
 
   // FIX-12 — the "attempts" column used to show procrastinate's raw per-job
@@ -670,19 +777,22 @@
   }
 
   onMount(() => {
-    refresh();
+    void refresh();
     // Poll only while the tab is the visible foreground document; the helper
     // also refreshes immediately when the tab is brought back.
-    poller = usePolling(refresh, POLL_MS);
+    poller = usePolling(() => refresh(), POLL_MS);
     // Local 1s tick for the running-for counters (cheap, no network). Paused
     // while hidden too; refresh-on-return snaps the counters to the real time.
     ticker = usePolling(() => (now = Date.now()), 1000);
   });
 
   onDestroy(() => {
+    destroyed = true;
     poller?.stop();
     ticker?.stop();
     failuresLoader.cancel();
+    clearTimeout(backupTimer);
+    for (const id of flashTimers) clearTimeout(id);
   });
 </script>
 
@@ -690,7 +800,7 @@
 {#snippet replNameCell(a: AgentReplicationActivity)}<span class="font-medium">{a.name}</span>{/snippet}
 {#snippet replSeqCell(a: AgentReplicationActivity)}<span class="tabular-nums text-muted">{a.seq_no.toLocaleString()}</span>{/snippet}
 {#snippet replBatchCell(a: AgentReplicationActivity)}
-  <span class="text-muted" title={new Date(a.last_seen_at).toLocaleString()}>{relTime(a.last_seen_at)}</span>
+  <span class="text-muted" title={fmtUtc(a.last_seen_at)}>{relTime(a.last_seen_at)}</span>
 {/snippet}
 {#snippet replReconcileCell(a: AgentReplicationActivity)}
   <span class="text-muted">{a.last_reconcile_at ? relTime(a.last_reconcile_at) : "never"}</span>
@@ -755,7 +865,7 @@
 {#snippet failQueueCell(j: FailedJob)}<span class="text-muted">{j.queue}</span>{/snippet}
 {#snippet failAttemptsCell(j: FailedJob)}{@render attempts(j.task, j.attempts, j.retry_cap)}{/snippet}
 {#snippet failAttemptedCell(j: FailedJob)}
-  <span class="text-muted">{j.attempted_at ? new Date(j.attempted_at).toLocaleString() : "—"}</span>
+  <span class="text-muted" title={j.attempted_at ? fmtUtc(j.attempted_at) : undefined}>{fmtDateTime(j.attempted_at)}</span>
 {/snippet}
 {#snippet failErrorCell(j: FailedJob)}
   {#if j.traceback}
@@ -799,7 +909,7 @@
 {/snippet}
 {#snippet maintNextCell(t: MaintenanceTask)}
   {#if t.next_run_at && t.enabled}
-    <span class="tabular-nums text-muted" title={new Date(t.next_run_at).toLocaleString()}>{hhmm(t.next_run_at)} · {relFuture(t.next_run_at)}</span>
+    <span class="tabular-nums text-muted" title={fmtUtc(t.next_run_at)}>{fmtDateTime(t.next_run_at)} · {relTime(t.next_run_at, now)}</span>
   {:else}
     <span class="text-muted">—</span>
   {/if}
@@ -808,12 +918,12 @@
   {#if t.last_run}
     <Badge tone={lastRunTone(t.last_run.status)}>{lastRunLabel(t.last_run.status)}</Badge>
     {#if t.last_run.at}
-      <span class="ml-1 tabular-nums text-muted" title={new Date(t.last_run.at).toLocaleString()}>{relTime(t.last_run.at)}</span>
+      <span class="ml-1 tabular-nums text-muted" title={fmtUtc(t.last_run.at)}>{relTime(t.last_run.at)}</span>
     {/if}
     {#if t.last_run.status === "doing" && t.last_run.started_at}
       <span class="ml-1 tabular-nums text-muted" title="Elapsed so far (refreshes with the page poll)">· {fmtDuration((Date.now() - new Date(t.last_run.started_at).getTime()) / 1000)}</span>
     {:else if t.last_run.duration_seconds != null}
-      <span class="ml-1 tabular-nums text-muted" title="Wall time of the last completed run{t.last_run.started_at ? ` (started ${new Date(t.last_run.started_at).toLocaleString()})` : ''}">· took {fmtDuration(t.last_run.duration_seconds)}</span>
+      <span class="ml-1 tabular-nums text-muted" title="Wall time of the last completed run{t.last_run.started_at ? ` (started ${fmtDateTime(t.last_run.started_at)})` : ''}">· took {fmtDuration(t.last_run.duration_seconds)}</span>
     {/if}
   {:else}
     <span class="text-xs text-muted" title="No run within the job-history retention window (succeeded runs are kept ~48h).">no recent run</span>
@@ -825,8 +935,8 @@
       <Button
         size="sm"
         onclick={() => maintRun(t)}
-        disabled={maintBusy[t.key]}
-        title="Queue this task to run immediately (admin).">
+        disabled={maintBusy[t.key] || inProgress(t)}
+        title={inProgress(t) ? "A run is already queued or running." : "Queue this task to run immediately (admin)."}>
         {maintBusy[t.key] ? "…" : "Run now"}</Button>
     {/if}
     {#if t.editable}
@@ -872,7 +982,7 @@
         <span class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-border-strong border-t-accent"
           aria-hidden="true"></span>
       {/if}
-      {#if lastUpdated}updated {new Date(lastUpdated).toLocaleTimeString()}{#if loading} · refreshing…{/if}{:else}loading…{/if}
+      {#if lastUpdated}updated {fmtClock(lastUpdated)}{#if loading} · refreshing…{/if}{:else}loading…{/if}
     </span>
     {#if summary && summary.stalled.total > 0}
       <span title="Jobs stranded in 'doing' by a dead/restarted worker — the reaper will requeue or fail them">
@@ -933,7 +1043,7 @@
             {/if}
             {#if summary.maintenance.started_at}
               <span class="text-xs text-current/70">
-                (since {new Date(summary.maintenance.started_at).toLocaleString()})</span>
+                (since {fmtDateTime(summary.maintenance.started_at)})</span>
             {/if}
             <p class="mt-0.5 text-xs">
               Scan scheduling, nightly maintenance tasks and report exports are
@@ -983,7 +1093,7 @@
     {/if}
     <!-- Resource monitors: always-on disk / CPU / I/O / network / DB tiles. All
          ride the existing jobs-summary poll (no new request). Each tile hides
-         itself when its data is unavailable (older backend without `paths`, a host
+         itself when its data is unavailable (no watched `paths`, a host
          with no load average / no /proc — non-Linux dev backend — or a failed DB
          probe). -->
     {#if (summary?.disk?.paths?.length ?? 0) > 0 || summary?.resources?.cpu?.percent != null || summary?.resources?.io || summary?.resources?.net || summary?.resources?.db}
@@ -1286,24 +1396,29 @@
                running jobs keep the priority they were fetched with. -->
           <div class="mt-3 border-t border-border pt-2">
             <div class="flex items-start gap-2">
-              <Field label="priority" hint="default {summary?.priorities?.[q] ?? 0}">
+              <Field
+                label="priority"
+                hint="new jobs: {prioDefault(q)} (config); apply re-prioritises pending jobs only"
+                error={prioFieldErr[q] || undefined}>
                 <div class="flex items-center gap-1">
                   <Button
                     size="sm"
                     variant="ghost"
                     aria-label="Lower {q} priority"
                     title="lower priority (runs later)"
-                    onclick={() => (prioInput[q] = clampPrio(prioValue(q) - 1))}
+                    onclick={() => prioStep(q, -1)}
                     disabled={prioBusy[q]}>−</Button>
                   <div class="w-16">
                     <Input
                       size="sm"
                       class="text-center tabular-nums"
-                      type="number"
-                      min="-100"
-                      max="100"
-                      value={prioValue(q)}
-                      oninput={(e) => (prioInput[q] = clampPrio(+(e.currentTarget as HTMLInputElement).value))}
+                      inputmode="numeric"
+                      value={prioText(q)}
+                      oninput={(e) => {
+                        prioInput[q] = (e.currentTarget as HTMLInputElement).value;
+                        prioFieldErr[q] = "";
+                      }}
+                      onblur={() => prioParse(q)}
                       disabled={prioBusy[q]} />
                   </div>
                   <Button
@@ -1311,7 +1426,7 @@
                     variant="ghost"
                     aria-label="Raise {q} priority"
                     title="higher priority (runs sooner)"
-                    onclick={() => (prioInput[q] = clampPrio(prioValue(q) + 1))}
+                    onclick={() => prioStep(q, 1)}
                     disabled={prioBusy[q]}>+</Button>
                 </div>
               </Field>
@@ -1338,9 +1453,9 @@
                 {#each summary.upcoming[q] as u (u.label + u.at)}
                   <li
                     class="flex items-baseline justify-between gap-2 text-[11px] text-slate-500"
-                    title="{u.task} — {u.label} at {new Date(u.at).toLocaleString()}">
+                    title="{u.task} — {u.label} at {fmtDateTime(u.at)} ({fmtUtc(u.at)})">
                     <span class="truncate">{u.label}</span>
-                    <span class="shrink-0 tabular-nums text-slate-600 dark:text-slate-400">{hhmm(u.at)} · {relFuture(u.at)}</span>
+                    <span class="shrink-0 tabular-nums text-slate-600 dark:text-slate-400">{relTime(u.at, now)}</span>
                   </li>
                 {/each}
               </ul>
@@ -1382,7 +1497,7 @@
         {#if m.last_failed_task && m.failed_tasks}
           <div class="basis-full text-xs text-danger">
             <span class="font-medium">Latest Meili failure</span>
-            ({m.last_failed_task.type ?? "task"}{m.last_failed_task.finished_at ? `, ${new Date(m.last_failed_task.finished_at).toLocaleString()}` : ""}):
+            ({m.last_failed_task.type ?? "task"}{m.last_failed_task.finished_at ? `, ${fmtDateTime(m.last_failed_task.finished_at)}` : ""}):
             <code class="break-all">{m.last_failed_task.code ?? ""}</code>
             {m.last_failed_task.message}
           </div>
@@ -1516,8 +1631,6 @@
           size="sm"
           onclick={() => failuresPage(1)}
           disabled={failuresOffset + FAILED_PAGE >= failuresTotal}>Next</Button>
-        <span class="grow"></span>
-        <span>Error text isn't stored in the queue DB (a known Procrastinate limitation) — check the worker logs for tracebacks.</span>
       </div>
       {#if failuresError}
         <Alert tone="danger" class="mt-2" onDismiss={() => (failuresError = "")}>{failuresError}</Alert>
@@ -1574,12 +1687,18 @@
               <div class="flex flex-wrap items-end gap-2">
                 <Field
                   label="cron (UTC) — {t.title}"
-                  hint="five fields: min hour day month weekday — e.g. “0 4 * * *” = daily 04:00 UTC">
-                  <Input size="sm" class="font-mono" bind:value={editCron} placeholder={t.default_cron ?? ""} />
+                  hint="five fields: min hour day month weekday — e.g. “0 4 * * *” = daily 04:00 UTC; empty = reset to default"
+                  error={cronErr || undefined}>
+                  <Input
+                    size="sm"
+                    class="font-mono"
+                    bind:value={editCron}
+                    oninput={() => (cronErr = "")}
+                    placeholder={t.default_cron ?? ""} />
                 </Field>
                 <Button
                   size="sm"
-                  onclick={() => maintSave(t, { cron: editCron.trim() || null })}
+                  onclick={() => maintSaveCron(t)}
                   disabled={maintBusy[t.key]}>Save</Button>
                 {#if t.overridden}
                   <Button
@@ -1626,16 +1745,21 @@
     <Button
       size="sm"
       onclick={backupNow}
-      disabled={backupBusy}
-      title="Queue a pg_dump + manifest bundle into the config volume (admin). Runs on the worker; the bundle appears below when it finishes.">
-      {backupBusy ? "…" : "Back up now"}</Button>
+      disabled={backupBusy || backupActive}
+      title={backupActive
+        ? "A backup is queued or running; the list refreshes until it finishes."
+        : "Queue a pg_dump + manifest bundle into the config volume (admin). Runs on the worker; the bundle appears below when it finishes."}>
+      {backupBusy ? "…" : backupActive ? "Backing up…" : "Back up now"}</Button>
     {#if backupDir}
       <span class="text-xs text-muted">
         {backupDir} · keeping the newest {backupKeep}
       </span>
     {/if}
-    {#if backupMsg}<span class="text-xs text-muted">{backupMsg}</span>{/if}
+    {#if backupMsg}<span class="text-xs text-muted" role="status">{backupMsg}</span>{/if}
   </div>
+  {#if backupsError}
+    <Alert tone="danger" class="mt-2" onDismiss={() => (backupsError = "")}>{backupsError}</Alert>
+  {/if}
   {#if backupError}
     <Alert tone="danger" class="mt-2" onDismiss={() => (backupError = "")}>{backupError}</Alert>
   {/if}

@@ -42,10 +42,8 @@ func (Collector) Name() string { return CollectorName }
 // runner's contract.
 //
 // The key matters: the walker merges every collector's map FLAT into the
-// entry, and central looks the record up by collector name. Until 2026-08-23
-// this emitted "record" instead, so central (which only read "permissions")
-// silently ingested nothing from any agent build; central now accepts both
-// keys, and this build emits the self-describing one.
+// entry, and central looks the record up by exactly this key
+// (permission_ingest.COLLECTOR_KEY). A mismatch ingests nothing, silently.
 func (Collector) Collect(_ context.Context, path string, info fs.FileInfo) (map[string]any, error) {
 	rec, err := collectRecord(path, info)
 	if err != nil {

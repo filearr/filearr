@@ -514,13 +514,6 @@ def xlsx_response(
     )
 
 
-def _csv_response(report: CannedReport, params: ReportParams) -> StreamingResponse:
-    """Back-compat shim: stream a report as CSV. Capped reports honour their
-    top-N ``limit`` (applied in the cursor); others stream the full result."""
-    cap = None
-    return export_response(report, params, "csv", cap)
-
-
 @router.post("/{report_id}/export", status_code=202)
 async def enqueue_report_export(
     report_id: str,

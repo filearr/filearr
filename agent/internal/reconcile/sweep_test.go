@@ -420,7 +420,7 @@ func TestSweepRebuiltSignalSetsRebuiltAndResets(t *testing.T) {
 	}
 }
 
-func TestRebuiltSignalOutboxEmptyFallback(t *testing.T) {
+func TestEmptyOutboxIsNotARebuiltSignal(t *testing.T) {
 	st := openReconciledStore(t)
 	rid := seedRoot(t, st, "/media")
 	seedItem(t, st, rid, "a.mkv", "active", false) // items exist, outbox never written
@@ -433,8 +433,8 @@ func TestRebuiltSignalOutboxEmptyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Rebuilt || !mock.lastRebuilt {
-		t.Error("empty outbox + present items must be treated as a rebuilt signal")
+	if res.Rebuilt || mock.lastRebuilt {
+		t.Error("an empty outbox alone must not be treated as a rebuilt signal")
 	}
 }
 
@@ -442,14 +442,13 @@ func TestRebuiltSignalOutboxEmptyFallback(t *testing.T) {
 // the sweep layer: a store whose durable marker is set (as index.Open leaves it
 // after a fresh-create/rebuild) makes the sweep send rebuilt=true even though
 // Store.Rebuilt is false (a different process reopened a clean file) and the
-// outbox is NOT empty (a prior scan refilled it) — the exact conditions the old
-// empty-outbox fallback could not detect.
+// outbox is NOT empty (a prior scan refilled it).
 func TestDurableMarkerDrivesRebuiltAcrossProcessBoundary(t *testing.T) {
 	st := openStore(t) // fresh create -> durable marker set
 	st.Rebuilt = false // as if a SEPARATE process reopened the clean file
 	rid := seedRoot(t, st, "/media")
 	seedItem(t, st, rid, "a.mkv", "active", false)
-	seedOutbox(t, st, 3) // a prior scan already refilled the outbox (fallback blind)
+	seedOutbox(t, st, 3) // a prior scan already refilled the outbox
 	if !rebuiltPending(t, st) {
 		t.Fatal("precondition: fresh create must leave the durable marker set")
 	}

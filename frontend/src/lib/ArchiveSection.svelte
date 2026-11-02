@@ -4,7 +4,7 @@
   // is index-only (names + declared sizes), never an unpack. Member NAMES are
   // untrusted strings rendered as plain text (Svelte auto-escapes; never {@html}).
   import { effectiveMeta } from "./cards/keyfacts";
-  import { fmtBytes } from "./cards/format";
+  import { fmtBytes } from "./format";
 
   let { item }: { item: Record<string, unknown> } = $props();
 
@@ -24,12 +24,19 @@
   const memberCount = $derived(
     typeof archive?.member_count === "number" ? archive.member_count : null,
   );
-  const totalBytes = $derived(fmtBytes(archive?.total_uncompressed));
+  // Sizes come from untrusted metadata; an absent/zero size is simply omitted
+  // (an unknown member size is stored as 0, which is not "0 B").
+  const size = (v: unknown): string => (typeof v === "number" && v > 0 ? fmtBytes(v) : "");
+  const totalBytes = $derived(size(archive?.total_uncompressed));
   const format = $derived(typeof archive?.format === "string" ? archive.format : "");
   const truncated = $derived(archive?.truncated === true);
   const members = $derived(
     Array.isArray(archive?.members) ? (archive!.members as Member[]) : [],
   );
+
+  // B50: the stored list is capped server-side (`max_stored`), so it can be
+  // shorter than member_count. Say so, and base "Show N more" on what is stored.
+  const listCapped = $derived(memberCount != null && members.length < memberCount);
 
   // Collapsed by default; a large archive shows the first N with an expander.
   const PREVIEW = 20;
@@ -49,9 +56,13 @@
       </span>
     </h3>
 
-    {#if truncated}
+    {#if listCapped && memberCount != null}
       <p class="mb-2 text-xs text-amber-600 dark:text-amber-400">
-        Listing was capped by a size/count guard — some members are not shown.
+        Showing {members.length.toLocaleString()} of {memberCount.toLocaleString()} members (list capped).
+      </p>
+    {:else if truncated}
+      <p class="mb-2 text-xs text-amber-600 dark:text-amber-400">
+        Listing stopped at a size/count guard — the archive may hold more members than counted.
       </p>
     {/if}
 
@@ -61,8 +72,8 @@
           <li class="flex items-center gap-2">
             <span class="min-w-0 flex-1 truncate" title={String(m.name ?? "")}
               >{String(m.name ?? "")}</span>
-            {#if fmtBytes(m.size)}
-              <span class="shrink-0 text-slate-500">{fmtBytes(m.size)}</span>
+            {#if size(m.size)}
+              <span class="shrink-0 text-slate-500">{size(m.size)}</span>
             {/if}
           </li>
         {/each}
@@ -73,7 +84,7 @@
           class="mt-2 text-xs text-accent-text"
           onclick={() => (expanded = !expanded)}
         >
-          {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
+          {expanded ? "Show fewer" : `Show ${hiddenCount.toLocaleString()} more`}
         </button>
       {/if}
     {/if}

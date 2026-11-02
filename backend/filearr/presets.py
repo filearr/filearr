@@ -1,8 +1,8 @@
-"""Indexing-control preset bundles + extension groups (Phase 2, roadmap §4).
+"""Indexing-control preset bundles (Phase 2, roadmap §4).
 
 This module is **inert scaffolding** for Phase 2 (see
 ``docs/tasks/phase-2-indexing-controls-tasks.md``). It ships the real data
-(``PRESET_BUNDLES``, ``EXTENSION_GROUPS``) and the pure helpers that can be
+(``PRESET_BUNDLES``) and the pure helpers that can be
 implemented and unit-tested today (``get_preset``, ``validate_preset_names``,
 ``build_exclusion_spec``, ``is_cachedir_tagged``). Anything that would touch the
 scan walk, the ORM models, the API, or the scheduler lives in those modules
@@ -61,24 +61,6 @@ class PresetBundle:
     exclude: tuple[str, ...]
     default_enabled: bool = False
     caveat: str | None = None
-
-
-@dataclass(frozen=True)
-class ExtensionGroup:
-    """A named group of file extensions that refines a single taxonomy
-    ``file_category`` (W8-B re-keyed this off the removed ``MediaType``).
-
-    Ruling R5: multiple groups may target the same category and combine with
-    **union** semantics. NOTE (W8-B): these P2-T3 extension-group presets are now
-    SUPERSEDED for scan gating by the DB-backed taxonomy ``enabled_groups`` and are
-    no longer consulted by the scan walk; they remain a validated API/preset
-    surface. Extensions are stored bare (no leading dot), lower-case, matching
-    ``Item.extension`` normalisation.
-    """
-
-    label: str
-    file_category: str
-    extensions: tuple[str, ...]
 
 
 # --- Preset bundles (brief §1.9 / §4.4 Stage A) ----------------------------
@@ -197,48 +179,6 @@ BUILTIN_PRESET_BUNDLES: dict[str, PresetBundle] = {
 }
 
 
-# --- Extension groups (brief §4.4 / P2-T3) ---------------------------------
-EXTENSION_GROUPS: dict[str, ExtensionGroup] = {
-    "raw_photos": ExtensionGroup(
-        label="RAW photos",
-        file_category="image",
-        extensions=("cr2", "cr3", "nef", "arw", "dng", "raf"),
-    ),
-    "editable_images": ExtensionGroup(
-        label="Editable images (Photoshop/TIFF)",
-        file_category="image",
-        # Layered/authoring image formats (OPS-T4): Adobe Photoshop documents
-        # and TIFF masters. Pillow reads a flattened composite of a PSD.
-        extensions=("psd", "tif", "tiff"),
-    ),
-    "jpeg_family": ExtensionGroup(
-        label="JPEG family",
-        file_category="image",
-        extensions=("jpg", "jpeg"),
-    ),
-    "office_docs": ExtensionGroup(
-        label="Office documents",
-        file_category="document",
-        extensions=("doc", "docx", "odt", "rtf"),
-    ),
-    "ebooks": ExtensionGroup(
-        label="E-books",
-        file_category="document",
-        extensions=("epub", "mobi", "azw3", "cbz", "cbr"),
-    ),
-    "lossless_audio": ExtensionGroup(
-        label="Lossless audio",
-        file_category="audio",
-        extensions=("flac", "alac", "wav", "ape", "wv"),
-    ),
-    "lossy_audio": ExtensionGroup(
-        label="Lossy audio",
-        file_category="audio",
-        extensions=("mp3", "ogg", "opus", "m4a", "wma"),
-    ),
-}
-
-
 # --- Pure helpers (implemented + unit-tested now) --------------------------
 
 # --------------------------------------------------------------------------- #
@@ -289,11 +229,6 @@ def get_preset(name: str) -> PresetBundle:
     return PRESET_BUNDLES[name]
 
 
-def get_extension_group(name: str) -> ExtensionGroup:
-    """Return the extension group named ``name``. Raises ``KeyError`` if unknown."""
-    return EXTENSION_GROUPS[name]
-
-
 def validate_preset_names(names: list[str]) -> list[str]:
     """Return the subset of ``names`` that are not known preset bundles.
 
@@ -301,11 +236,6 @@ def validate_preset_names(names: list[str]) -> list[str]:
     non-empty result into a 422, mirroring today's ``scan_cron`` validation.
     """
     return [n for n in names if n not in PRESET_BUNDLES]
-
-
-def validate_extension_group_names(names: list[str]) -> list[str]:
-    """Return the subset of ``names`` that are not known extension groups."""
-    return [n for n in names if n not in EXTENSION_GROUPS]
 
 
 def build_exclusion_spec(
@@ -337,9 +267,40 @@ def build_exclusion_spec(
     if extra_excludes:
         lines.extend(extra_excludes)
     if includes:
-        for inc in includes:
-            lines.append(inc if inc.startswith("!") else "!" + inc)
+        lines.extend(include_line(inc) for inc in includes)
     return GitIgnoreSpec.from_lines(lines)
+
+
+def include_line(pattern: str) -> str:
+    """The gitignore line an ``include_globs`` entry becomes: a negation
+    (``!pattern``), unless the operator already wrote the ``!``."""
+    return pattern if pattern.startswith("!") else "!" + pattern
+
+
+def glob_errors(patterns: list[str], *, include: bool) -> list[str]:
+    """Validate library ``include_globs``/``exclude_globs`` with the SAME
+    ``GitIgnoreSpec`` construction the scan walk uses (:func:`build_exclusion_spec`).
+
+    Returns one human-readable message per bad line (empty = all valid). Each
+    line is compiled on its own so the message names the offending entry; a bad
+    line otherwise makes ``GitIgnoreSpec.from_lines`` raise at scan time and
+    fails EVERY scan of the library. Includes are checked in their negated form,
+    so a blank or bare ``!`` include (which becomes the invalid line ``!``) is
+    rejected rather than silently re-including nothing."""
+    errors: list[str] = []
+    for n, pattern in enumerate(patterns, start=1):
+        line = include_line(pattern) if include else pattern
+        if include and line.strip() == "!":
+            errors.append(
+                f"line {n} {pattern!r}: an include must name a pattern "
+                "(a bare '!' re-includes nothing)"
+            )
+            continue
+        try:
+            GitIgnoreSpec.from_lines([line])
+        except Exception as exc:  # noqa: BLE001 - pathspec raises several types
+            errors.append(f"line {n} {pattern!r}: not a valid gitignore pattern ({exc})")
+    return errors
 
 
 def resolve_effective_presets(enabled_presets: list[str] | None) -> list[str]:
@@ -406,34 +367,6 @@ def build_library_spec(library) -> GitIgnoreSpec:  # noqa: ANN001
         extra_excludes=list(library.exclude_globs or []),
         includes=list(library.include_globs or []),
     )
-
-
-def resolve_enabled_extensions(
-    file_category: str,
-    enabled_categories: list[str],
-    enabled_extension_groups: list[str],
-) -> set[str] | None:
-    """P2-T3: resolve the effective extension allow-list for a ``file_category``.
-
-    NOTE (W8-B): this helper is SUPERSEDED for scan gating by the taxonomy
-    ``enabled_groups`` mechanism (``filearr.taxonomy`` + ``scan.py``) and is no
-    longer called by the scan walk. It is retained as a pure helper for the
-    extension-group preset surface.
-
-    Returns ``None`` when the category imposes no extension-group refinement (all
-    extensions allowed), else the **union** of every enabled group that targets
-    ``file_category`` (ruling R5 union semantics). When ``enabled_categories`` is
-    non-empty and ``file_category`` is not in it, ``None`` is returned (nothing to
-    narrow). Extensions are returned bare (no dot), lower-case. Unknown group names
-    are ignored (validation is :func:`validate_extension_group_names`)."""
-    if enabled_categories and file_category not in enabled_categories:
-        return None
-    allowed: set[str] = set()
-    for name in enabled_extension_groups:
-        group = EXTENSION_GROUPS.get(name)
-        if group is not None and group.file_category == file_category:
-            allowed.update(group.extensions)
-    return allowed or None
 
 
 def prune_dir(spec: GitIgnoreSpec, rel_dir: str, abs_dir: str) -> bool:

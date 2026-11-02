@@ -55,7 +55,9 @@
     setUnauthorizedHandler,
     type AuthMode,
     type AuthPrincipal,
+    type BuildInfo,
   } from "./lib/api";
+  import { buildTitle } from "./lib/about";
   import * as safeStorage from "./lib/safeStorage";
   import { safeHref } from "./lib/pathlinks";
   import { theme, applyTheme, applyServerPreferences } from "./lib/theme.svelte";
@@ -87,7 +89,7 @@
   let browsePath = $state<string>(initialRoute.browsePath);
   // Running-build stamp (deploy-injected). Lets anyone check at a glance that
   // the page/backend match a specific deploy — pairs with the deploy verifier.
-  let buildStamp = $state<string | null>(null);
+  let build = $state<BuildInfo | null>(null);
   // AGPL §13 Source link target. Prefer the runtime value from /version
   // (FILEARR_SOURCE_URL) so a fork can point users at its modified source without
   // a frontend rebuild; fall back to the Vite build-time default.
@@ -99,7 +101,7 @@
   let agentsEnabled = $state(false);
   getVersion()
     .then((v) => {
-      buildStamp = v.build_stamp;
+      build = v.build;
       if (v.source_url) sourceUrl = v.source_url;
       agentsEnabled = !!v.agents_enabled;
     })
@@ -418,9 +420,9 @@
   {/if}
 
   <footer class="mt-12 border-t border-border py-4 text-xs text-muted">
-    <span title={buildStamp ?? "no build stamp (dev)"}>
-      Filearr {__APP_VERSION__}{#if buildStamp}
-        <span class="font-mono text-muted"> · build {buildStamp.slice(0, 12)}</span>
+    <span title={build ? buildTitle(build) : undefined}>
+      Filearr {__APP_VERSION__}{#if build}
+        <span class="font-mono text-muted"> · build {build.id.slice(0, 16)}</span>
       {/if}
     </span>
     <span class="px-1">·</span>

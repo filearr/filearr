@@ -40,26 +40,19 @@ from filearr.models import Agent, Item, Library, PermissionSnapshot
 
 log = logging.getLogger(__name__)
 
+# The agent's walker merges every collector's returned map FLAT into the
+# entry, so this key must be exactly what the permissions collector emits
+# (agent/internal/inventory/permissions/collector.go). A mismatch ingests
+# nothing, silently (2026-08-23, live xenon: weeks of zero snapshots).
 COLLECTOR_KEY = "permissions"
-# 2026-08-23: the agent's walker merges every collector's returned map FLAT
-# into the entry, and the permissions collector (agent <= 1.5.3) returned its
-# Record under the key ``record`` -- so no wire entry ever carried a
-# ``permissions`` key and NOTHING was ever ingested (live: xenon, weeks of
-# "permissions enabled", zero snapshots). Agents >= 1.5.4 emit ``permissions``;
-# the legacy key stays accepted so an un-upgraded fleet starts working the
-# moment central is upgraded.
-LEGACY_COLLECTOR_KEY = "record"
 
 
 def record_of(entry: dict[str, Any]) -> dict[str, Any] | None:
-    """The permissions record carried by an inventory entry, or None. Accepts
-    the current ``permissions`` key and the legacy ``record`` key; normalises a
-    JSON ``null`` ACE list (Go marshals a nil slice as null -- a file whose
+    """The permissions record carried by an inventory entry, or None.
+    Normalises a JSON ``null`` ACE list (Go marshals a nil slice as null -- a file whose
     every ACE was filtered out) to an empty list so it still counts as a
     record."""
     rec = entry.get(COLLECTOR_KEY)
-    if not isinstance(rec, dict):
-        rec = entry.get(LEGACY_COLLECTOR_KEY)
     if not isinstance(rec, dict) or "owner" not in rec:
         return None
     entries = rec.get("entries")
@@ -415,6 +408,6 @@ async def ingest_ndjson_gz(
             obj = json.loads(line)
         except ValueError:
             continue
-        if isinstance(obj, dict) and (COLLECTOR_KEY in obj or LEGACY_COLLECTOR_KEY in obj):
+        if isinstance(obj, dict) and COLLECTOR_KEY in obj:
             entries.append(obj)
     return await ingest_entries(session, agent_id=agent_id, command_id=command_id, entries=entries)

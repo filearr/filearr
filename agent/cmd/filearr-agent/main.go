@@ -1,7 +1,7 @@
 // Command filearr-agent is the per-machine companion to a central Filearr server.
 // It performs enrollment + certificate lifecycle (enroll/run), local scanning +
 // replication (scan/push/reconcile), policy inspection (policy), and local
-// read-only query (search/query).
+// read-only query (query).
 //
 // Dispatch framework — urfave/cli v3 (P7-T3 Architect ruling). The earlier
 // stdlib-flag `switch cmd` in main() was an explicit placeholder pending the CLI
@@ -99,7 +99,7 @@ EXAMPLES:
    env var > sidecar file (filearr-agent.json) > built-in default. The sidecar is
    found via --config, then beside the executable, then the OS config dir; it
    carries central_url, enrollment_token (one-shot; erased after enroll),
-   agent_name, config_group, data_dir, log_level, log_dir.
+   agent_name, config_group_names, data_dir, log_level, log_dir.
 
    Logging: --log-level error|warn|info|verbose|debug (default info); --log-dir
    <dir> writes a rotating filearr-agent.log (10 MiB x5, gzip) and also echoes to
@@ -129,7 +129,6 @@ EXAMPLES:
 			legacyCommand("install", "Install as a system service: copy the binary, optionally enroll, register + start (auto-start, restart-on-failure); idempotent (re-run upgrades in place)", runInstall),
 			legacyCommand("uninstall", "Stop + deregister the service and remove the installed binary [--purge also deletes data/logs/config]", runUninstall),
 			legacyCommand("service", "Manage the installed service: service status|start|stop|restart", runService),
-			legacyCommand("search", "Query the local index by opening the index file directly (legacy debug path; prefer `query`)", runSearch),
 			queryCommand(),
 			versionCommand(),
 		},

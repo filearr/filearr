@@ -220,15 +220,10 @@ class InstallerSidecar(BaseModel):
     central_url: str
     enrollment_token: str  # raw, show-once (rides the mint's show-once contract)
     agent_name: str | None
-    #: P13: the full list of groups to join. Membership is ALSO recorded on the
-    #: minted token, so central applies it at register whatever the agent sends —
-    #: the sidecar copy is informational + forward-looking.
+    #: P13: the full list of groups to join. Membership is recorded on the
+    #: minted token, so central applies it at register — the sidecar copy is
+    #: informational (shown by the agent's local web UI).
     config_group_names: list[str]
-    #: The first group name, kept because shipped agent binaries parse exactly
-    #: this key from the sidecar and pass it to ``/agents/register``. Dropping it
-    #: would silently strip the group from every install done with a current
-    #: binary. ``null`` when no groups were selected.
-    config_group: str | None
     log_level: str | None
 
 
@@ -1024,6 +1019,10 @@ async def rollback_config_group(
     ).scalars().first()
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no such version")
+    # An old snapshot can carry a settings key the validator has since dropped
+    # (e.g. scan_schedule_cron, folded into policy scan_cron 2026-11-02):
+    # republishing it would deliver a key no agent reads anymore.
+    _validate_settings_or_422(target.settings or {})
 
     group.settings = target.settings or {}
     group.policy = target.policy or {}
@@ -1249,10 +1248,8 @@ async def issue_installer_config(
     ``central_url`` = ``central_url_override`` or the derived outward URL.
     ``config_group_ids`` (if given) must all exist (422 otherwise); the group
     NAMES are recorded on the minted TOKEN, so central applies the membership at
-    register regardless of what the enrolling binary sends — which is what lets a
-    multi-group install work with agent binaries that only know how to echo a
-    single ``config_group`` string back. ``log_level`` (if given) must be a known
-    level (422). Audited by token hash + group names (NEVER the raw token)."""
+    register. ``log_level`` (if given) must be a known level (422). Audited by
+    token hash + group names (NEVER the raw token)."""
     settings = get_settings()
 
     if body.log_level is not None and body.log_level not in agent_config.LOG_LEVELS:
@@ -1306,7 +1303,6 @@ async def issue_installer_config(
             enrollment_token=raw,
             agent_name=body.agent_name,
             config_group_names=group_names,
-            config_group=group_names[0] if group_names else None,
             log_level=body.log_level,
         ),
         token_hash=tok.token_hash,

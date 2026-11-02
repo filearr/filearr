@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtClock, fmtDate, fmtUtc } from "./format";
   import { onDestroy, onMount } from "svelte";
   import { latest } from "./latest";
   import { listAudit, friendlyError, type SecurityEvent } from "./api";
@@ -69,8 +70,11 @@
 
   onMount(() => load(true));
 
+  // Seconds matter here (event ordering, last activity): local date + HH:mm:ss,
+  // with the UTC instant as the tooltip (as LogsPanel).
   function when(ts: string): string {
-    try { return new Date(ts).toLocaleString(); } catch { return ts; }
+    const d = fmtDate(ts);
+    return d === "—" ? d : `${d} ${fmtClock(ts)}`;
   }
   function eventTone(t: string): Tone {
     if (t === "login_failure" || t === "lockout" || t === "user_deleted") return "danger";
@@ -79,7 +83,7 @@
   }
 </script>
 
-{#snippet whenCell(e: SecurityEvent)}<span class="whitespace-nowrap text-xs text-muted">{when(e.ts)}</span>{/snippet}
+{#snippet whenCell(e: SecurityEvent)}<span class="whitespace-nowrap tabular-nums text-xs text-muted" title={fmtUtc(e.ts)}>{when(e.ts)}</span>{/snippet}
 {#snippet eventCell(e: SecurityEvent)}<Badge tone={eventTone(e.event_type)}>{e.event_type}</Badge>{/snippet}
 {#snippet whoCell(e: SecurityEvent)}
   <span class="text-xs">{e.username_attempted ?? (e.principal_id ? e.principal_id.slice(0, 8) : "—")}</span>

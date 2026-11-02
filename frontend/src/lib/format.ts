@@ -87,6 +87,14 @@ export function fmtDateTime(v: DateInput): string {
   return `${localDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** Local wall-clock `HH:mm:ss`; "—" when not a date. */
+export function fmtClock(v: DateInput): string {
+  const t = toMs(v);
+  if (t == null) return DASH;
+  const d = new Date(t);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 /** UTC `YYYY-MM-DDTHH:mm:ssZ`, for `title` tooltips; "—" when not a date. */
 export function fmtUtc(v: DateInput): string {
   const t = toMs(v);

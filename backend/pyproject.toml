@@ -196,7 +196,6 @@ ignore = ["B008"]
 # `str(member)` semantics are load-bearing exactly as in models.py.
 "filearr/permissions.py" = ["UP042"]
 # Long extension-map data rows read better on one line than wrapped.
-"filearr/media_types.py" = ["E501"]
 # file_groups.py: same rationale — the extension-group data tuples and the
 # generated-doc intro string are long data rows better left unwrapped.
 "filearr/file_groups.py" = ["E501"]

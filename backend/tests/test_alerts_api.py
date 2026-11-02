@@ -503,3 +503,238 @@ async def test_bulk_rule_update(ctx):
         "rule_ids": ids, "set_throttle": True, "digest_window": "weekly",
     })
     assert r.status_code == 422
+
+
+# --- P7 B23: channel config PATCH merges ----------------------------------- #
+
+async def _stored_config(cid):
+    from filearr.db import SessionLocal
+
+    async with SessionLocal() as s:
+        return (
+            await s.execute(
+                text("SELECT config FROM alert_channels WHERE id = :i"), {"i": cid}
+            )
+        ).scalar_one()
+
+
+def _email_cfg(**over):
+    cfg = {
+        "host": "smtp.test",
+        "port": 25,
+        "security": "plain",
+        "allow_insecure": True,
+        "from_addr": "a@b.test",
+        "to": ["x@y.test"],
+        "username": "u",
+        "password": "pw",
+    }
+    cfg.update(over)
+    return cfg
+
+
+async def test_patch_channel_config_merges_unknown_keys(ctx):
+    """A client that only sends the keys it knows (the UI) must not drop keys it
+    doesn't (e.g. ``allow_insecure`` set via the API), nor the secret."""
+    client, _, _ = ctx
+    cid = (await _mk_channel(client, name="mail", type="email", config=_email_cfg())).json()["id"]
+    before = await _stored_config(cid)
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"from_addr": "c@d.test"}})
+    assert p.status_code == 200, p.text
+    after = await _stored_config(cid)
+    assert after["from_addr"] == "c@d.test"
+    assert after["host"] == "smtp.test"
+    assert after["allow_insecure"] is True
+    assert after["port"] == 25
+    assert after["password"] == before["password"]  # ciphertext untouched
+    assert p.json()["config"]["password"] == "__redacted__"
+
+
+async def test_patch_channel_config_null_removes_key_and_secret(ctx):
+    client, _, _ = ctx
+    cid = (await _mk_channel(client, name="mail", type="email", config=_email_cfg())).json()["id"]
+    p = await client.patch(
+        f"{CH}/{cid}", json={"config": {"allow_insecure": None, "password": None, "port": None}}
+    )
+    assert p.status_code == 200, p.text
+    after = await _stored_config(cid)
+    assert "allow_insecure" not in after
+    assert "password" not in after  # explicit null is the way to clear a secret
+    assert "port" not in after  # delivery falls back to 587
+    assert after["username"] == "u"
+    assert "password" not in p.json()["config"]
+
+
+@pytest.mark.parametrize("keep", ["", "__unchanged__", "__redacted__"])
+async def test_patch_channel_secret_keep_sentinels(ctx, keep):
+    client, _, _ = ctx
+    cid = (await _mk_channel(client)).json()["id"]
+    before = await _stored_config(cid)
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"secret": keep}})
+    assert p.status_code == 200, p.text
+    after = await _stored_config(cid)
+    assert after["secret"] == before["secret"]
+    assert after["url"] == "https://hook.test/x"
+
+
+async def test_patch_webhook_url_keeps_format(ctx):
+    client, _, _ = ctx
+    cid = (
+        await _mk_channel(
+            client,
+            config={"url": "https://hook.test/x", "webhook_format": "slack"},
+        )
+    ).json()["id"]
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"url": "https://hook.test/z"}})
+    assert p.status_code == 200, p.text
+    after = await _stored_config(cid)
+    assert after == {"url": "https://hook.test/z", "webhook_format": "slack"}
+
+
+@pytest.mark.parametrize("port", ["587", 0, 65536, True, 1.5])
+async def test_email_port_validated_on_create_and_patch(ctx, port):
+    client, _, _ = ctx
+    r = await _mk_channel(client, name="bad", type="email", config=_email_cfg(port=port))
+    assert r.status_code == 422, r.text
+    cid = (await _mk_channel(client, name="ok", type="email", config=_email_cfg())).json()["id"]
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"port": port}})
+    assert p.status_code == 422, p.text
+    assert (await _stored_config(cid))["port"] == 25
+
+
+async def test_email_port_optional_on_create(ctx):
+    client, _, _ = ctx
+    cfg = _email_cfg()
+    cfg.pop("port")
+    assert (await _mk_channel(client, name="np", type="email", config=cfg)).status_code == 201
+    r = await _mk_channel(client, name="nul", type="email", config=_email_cfg(port=None))
+    assert r.status_code == 201, r.text
+
+
+# --- P7 review: a stored secret never follows a channel to a new destination #
+
+@pytest.mark.parametrize(
+    "change",
+    [{"host": "evil.test"}, {"port": 2525}, {"port": None}, {"security": "tls"}],
+)
+async def test_email_destination_change_requires_password(ctx, change):
+    client, _, _ = ctx
+    cid = (await _mk_channel(client, name="mail", type="email", config=_email_cfg())).json()["id"]
+    before = await _stored_config(cid)
+    for keep in ({}, {"password": ""}, {"password": "__unchanged__"}):
+        p = await client.patch(f"{CH}/{cid}", json={"config": {**change, **keep}})
+        assert p.status_code == 422, p.text
+        assert "re-enter the password" in p.json()["detail"]
+    assert await _stored_config(cid) == before
+
+
+async def test_email_destination_change_with_new_password_or_null(ctx):
+    client, _, _ = ctx
+    cid = (await _mk_channel(client, name="mail", type="email", config=_email_cfg())).json()["id"]
+    before = await _stored_config(cid)
+    p = await client.patch(
+        f"{CH}/{cid}", json={"config": {"host": "smtp2.test", "password": "pw2"}}
+    )
+    assert p.status_code == 200, p.text
+    after = await _stored_config(cid)
+    assert after["host"] == "smtp2.test"
+    assert after["password"] != before["password"]
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"host": "smtp3.test", "password": None}})
+    assert p.status_code == 200, p.text
+    assert "password" not in await _stored_config(cid)
+
+
+async def test_email_same_destination_normalised_keeps_password(ctx):
+    """Re-sending the same host (case/space) / an equivalent port is not a move."""
+    client, _, _ = ctx
+    cfg = _email_cfg()
+    cfg.pop("port")  # stored missing = 587
+    cid = (await _mk_channel(client, name="mail", type="email", config=cfg)).json()["id"]
+    p = await client.patch(
+        f"{CH}/{cid}", json={"config": {"host": " SMTP.test ", "port": 587, "security": "PLAIN"}}
+    )
+    assert p.status_code == 200, p.text
+
+
+async def test_email_without_stored_password_moves_freely(ctx):
+    client, _, _ = ctx
+    cfg = _email_cfg()
+    cfg.pop("password")
+    cid = (await _mk_channel(client, name="mail", type="email", config=cfg)).json()["id"]
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"host": "other.test"}})
+    assert p.status_code == 200, p.text
+
+
+async def test_webhook_origin_change_requires_secret(ctx):
+    client, _, _ = ctx
+    cid = (await _mk_channel(client)).json()["id"]  # url hook.test + secret
+    # Same origin, new path: not a move.
+    p = await client.patch(f"{CH}/{cid}", json={"config": {"url": "https://hook.test/y"}})
+    assert p.status_code == 200, p.text
+    for url in ("https://evil.test/x", "http://hook.test/x", "https://hook.test:8443/x"):
+        p = await client.patch(f"{CH}/{cid}", json={"config": {"url": url}})
+        assert p.status_code == 422, p.text
+        assert "re-enter the secret" in p.json()["detail"]
+    p = await client.patch(
+        f"{CH}/{cid}", json={"config": {"url": "https://evil.test/x", "secret": "new"}}
+    )
+    assert p.status_code == 200, p.text
+
+
+# --- P7 B24: alert-events keyset cursor ------------------------------------ #
+
+async def test_alert_events_cursor_pages_stably(ctx):
+    """Rows sharing an occurred_at page deterministically (id tie-break): the
+    pages are disjoint and together cover every event exactly once, and a row
+    inserted newer than page 1 between loads never shifts page 2."""
+    from datetime import UTC, datetime, timedelta
+
+    client, maker, _ = ctx
+    rid, lib = await _rule_and_lib(client, maker)
+    same = datetime(2026, 11, 1, tzinfo=UTC)
+
+    async def _insert(key, when):
+        async with maker() as s:
+            await s.execute(
+                text(
+                    "INSERT INTO alert_events (rule_id, library_id, event_type, dedup_key, "
+                    "occurred_at, delivered) VALUES (:r, :l, 'created', :k, :t, true)"
+                ),
+                {"r": rid, "l": lib, "k": key, "t": when},
+            )
+            await s.commit()
+
+    for i in range(6):
+        await _insert(f"k{i}", same)
+    await _insert("old", same - timedelta(seconds=1))
+
+    pages, params = [], {"limit": 3}
+    while True:
+        r = await client.get(EVENTS, params=params)
+        assert r.status_code == 200, r.text
+        rows = r.json()
+        if not rows:
+            break
+        pages.append([e["id"] for e in rows])
+        if len(pages) == 1:
+            await _insert("newer", same + timedelta(seconds=5))  # must not shift pages
+        last = rows[-1]
+        params = {"limit": 3, "before_ts": last["occurred_at"], "before_id": last["id"]}
+    assert [len(p) for p in pages] == [3, 3, 1]
+    flat = [i for p in pages for i in p]
+    assert len(set(flat)) == 7
+    assert flat[:6] == sorted(flat[:6], reverse=True)  # id DESC within the shared timestamp
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"before_ts": "2026-11-01T00:00:00+00:00"},
+        {"before_id": "0190f0b2-0000-7000-8000-000000000000"},
+        {"before_ts": "2026-11-01T00:00:00", "before_id": "0190f0b2-0000-7000-8000-000000000000"},
+        {"offset": 3, "before_ts": "nope", "before_id": "x"},
+    ],
+)
+async def test_alert_events_cursor_rejects_bad_params(ctx, params):
+    client, _, _ = ctx
+    assert (await client.get(EVENTS, params=params)).status_code == 422

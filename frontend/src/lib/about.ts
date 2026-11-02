@@ -11,11 +11,12 @@
 // cell turns "we could not determine this" into "there is nothing here" — the
 // exact misreading that costs an operator twenty minutes mid-incident.
 
+import type { BuildInfo } from "./api.ts";
 import { fmtBytes } from "./format.ts";
 
 export type AboutApplication = {
   app_version: string;
-  build_stamp: string | null;
+  build: BuildInfo;
   source_url: string;
   license: string;
   license_url: string;
@@ -155,6 +156,24 @@ export const formatBytes = (n: number | null | undefined): string => {
 export function shortSha(sha: string | null | undefined): string | null {
   if (!sha) return null;
   return sha.length > 12 ? sha.slice(0, 12) : sha;
+}
+
+const BUILD_SOURCE: Record<BuildInfo["source"], string> = {
+  deploy: "deploy stamp",
+  image: "container image",
+  git: "git checkout",
+  runtime: "unidentified build",
+};
+
+/** One line naming the running build and where that identity came from:
+ *  "main-940000d (container image, ref main, commit 940000d9e573, built …)". */
+export function buildTitle(b: BuildInfo): string {
+  const parts = [BUILD_SOURCE[b.source] ?? b.source];
+  if (b.ref) parts.push(`ref ${b.ref}`);
+  const sha = shortSha(b.commit);
+  if (sha) parts.push(`commit ${sha}`);
+  if (b.built_at) parts.push(`built ${formatWhen(b.built_at)}`);
+  return `${b.id} (${parts.join(", ")})`;
 }
 
 /** ISO timestamp -> local, readable. Invalid/absent input stays honest. */
@@ -305,7 +324,7 @@ export function aboutMarkdown(a: About, fe: FrontendStack | null, now = new Date
       ["Component", "Value"],
       [
         ["Application", `Filearr ${md(app.app_version)}`],
-        ["Build stamp", md(app.build_stamp, "none (dev checkout)")],
+        ["Build", buildTitle(app.build)],
         ["License", link(app.license, app.license_url)],
         ["Source", md(app.source_url)],
         ["Python", `${md(app.python_implementation)} ${md(app.python_version)}`],

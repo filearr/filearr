@@ -14,10 +14,20 @@
 // a FIXED UTC offset, the local wall-time drifts ±1h across DST — that caveat is
 // surfaced in the UI, not corrected here (correcting it would need a tz database).
 //
-// Contract pinned language-neutrally by shared/schedule-vectors.json +
-// backend/tests/test_schedule_vectors_uit11.py (validated with cronsim and
-// cron_is_due). Round-trip invariant: generateCron(parseCron(x)) === x for every
-// cron this module generates.
+// Contract pinned language-neutrally by shared/schedule-vectors.json, checked
+// by tests/schedule.node.test.ts here and backend/tests/
+// test_schedule_vectors_uit11.py (cronsim + cron_is_due). Round-trip invariant:
+// generateCron(parseCron(x)) === x for every cron this module generates.
+//
+// Guards (P7, Ruling 10): `generateCron` is the raw conversion arithmetic; the
+// UI goes through `scheduleCron`, which refuses what must not be stored and
+// says why — a weekly schedule with no day (B18), a missing/out-of-range
+// number (B32), and a MONTHLY time whose UTC conversion crosses midnight (B19):
+// a day-of-month cannot be shifted faithfully (local day 1 at 01:00 in UTC+2
+// would become UTC day 31 and skip every short month), so the user picks a
+// same-day time or writes the UTC cron in Advanced.
+
+import { numOrNull } from "./numInput.ts";
 
 export type ScheduleMode =
   | "off"
@@ -29,10 +39,10 @@ export type ScheduleMode =
 
 export interface Schedule {
   mode: ScheduleMode;
-  /** hourly: minute-past-the-hour (local). */
-  minute?: number;
-  /** daily/weekly/monthly: local hour (0-23). */
-  hour?: number;
+  /** hourly: minute-past-the-hour (local). null = the input is empty. */
+  minute?: number | null;
+  /** daily/weekly/monthly: local hour (0-23). null = the input is empty. */
+  hour?: number | null;
   /** daily/weekly/monthly: local minute (0-59) — also `minute` on hourly. */
   daysOfWeek?: number[]; // weekly: 0=Sun … 6=Sat (local)
   dayOfMonth?: number; // monthly: 1-31 (local)
@@ -149,6 +159,124 @@ export function generateCron(
   }
 }
 
+export type ScheduleIssueCode =
+  | "no-days"
+  | "monthly-day-shift"
+  | "minute-required"
+  | "minute-range"
+  | "time-required"
+  | "time-range"
+  | "day-range"
+  | "cron-required";
+
+export interface ScheduleIssue {
+  code: ScheduleIssueCode;
+  /** One sentence for the field error, rendered as text. */
+  message: string;
+}
+
+const isInt = (n: unknown, min: number, max: number): n is number =>
+  typeof n === "number" && Number.isInteger(n) && n >= min && n <= max;
+
+/**
+ * The LOCAL times whose UTC conversion stays on the same calendar day — the
+ * only times a monthly schedule accepts (Ruling 10). Always non-empty for real
+ * offsets (|offset| < 24h).
+ */
+export function monthlyWindow(offsetMinutes: number): { from: string; to: string } {
+  const from = Math.max(0, -offsetMinutes);
+  const to = Math.min(1439, 1439 - offsetMinutes);
+  return {
+    from: fmtTime(Math.floor(from / 60), from % 60),
+    to: fmtTime(Math.floor(to / 60), to % 60),
+  };
+}
+
+/** Why the builder must not store this schedule, or null when it may. */
+export function scheduleIssue(
+  s: Schedule,
+  offsetMinutes: number = getOffsetMinutes(),
+): ScheduleIssue | null {
+  switch (s.mode) {
+    case "off":
+      return null;
+    case "advanced":
+      return (s.cron ?? "").trim()
+        ? null
+        : { code: "cron-required", message: "Enter a cron expression, or pick Off for no schedule." };
+    case "hourly":
+      if (s.minute == null) {
+        return { code: "minute-required", message: "Enter the minute past the hour (0-59)." };
+      }
+      return isInt(s.minute, 0, 59)
+        ? null
+        : { code: "minute-range", message: "The minute must be a whole number from 0 to 59." };
+  }
+  // daily / weekly / monthly share a local time of day.
+  if (s.hour == null || s.minute == null) {
+    return { code: "time-required", message: "Enter a time of day." };
+  }
+  if (!isInt(s.hour, 0, 23) || !isInt(s.minute, 0, 59)) {
+    return { code: "time-range", message: "Enter a valid time of day (00:00-23:59)." };
+  }
+  if (s.mode === "weekly" && (s.daysOfWeek ?? []).length === 0) {
+    return { code: "no-days", message: "Pick at least one day, or choose Off for no schedule." };
+  }
+  if (s.mode === "monthly") {
+    const day = s.dayOfMonth ?? 1;
+    if (!isInt(day, 1, 31)) {
+      return { code: "day-range", message: "The day of the month must be from 1 to 31." };
+    }
+    const { utcHour, utcMinute, dayShift } = localTimeToUtc(s.hour, s.minute, offsetMinutes);
+    if (dayShift !== 0) {
+      const { from, to } = monthlyWindow(offsetMinutes);
+      const when = dayShift < 0 ? "the previous day" : "the next day";
+      return {
+        code: "monthly-day-shift",
+        message:
+          `${fmtTime(s.hour, s.minute)} local is ${fmtTime(utcHour, utcMinute)} UTC on ${when}, ` +
+          `so the stored schedule would run on a different day of the month (and skip short months). ` +
+          `Pick a time from ${from} to ${to}, or use Advanced (cron) to write the UTC schedule yourself.`,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * The guarded builder the UI stores from: the UTC cron, or null with the
+ * reason it must not be stored. `off` is `{ cron: null, issue: null }`.
+ */
+export function scheduleCron(
+  s: Schedule,
+  offsetMinutes: number = getOffsetMinutes(),
+): { cron: string | null; issue: ScheduleIssue | null } {
+  const issue = scheduleIssue(s, offsetMinutes);
+  if (issue) return { cron: null, issue };
+  return { cron: generateCron(s, offsetMinutes), issue: null };
+}
+
+/**
+ * A minute input's value (number from a bound <input type="number">, or a
+ * string) rounded and clamped to 0-59; null when blank or not a number, so an
+ * emptied field is an explicit error rather than a silent minute 0 (B32).
+ */
+export function parseMinuteInput(v: unknown): number | null {
+  const n = numOrNull(v);
+  if (n === null) return null;
+  return Math.min(59, Math.max(0, Math.round(n)));
+}
+
+/** "HH:MM" (or "HH:MM:SS") from a time input; null when blank or invalid. */
+export function parseTimeInput(v: unknown): { hour: number; minute: number } | null {
+  if (typeof v !== "string") return null;
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(v.trim());
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  return hour <= 23 && minute <= 59 ? { hour, minute } : null;
+}
+
 /**
  * Classify a stored UTC cron back into a LOCAL builder schedule. Anything that
  * is not one of the shapes generateCron emits (custom steps/ranges/lists, a
@@ -200,17 +328,14 @@ export function parseCron(
     return { mode: "weekly", hour, minute, daysOfWeek: local };
   }
 
-  // Monthly: `M H D * *`
+  // Monthly: `M H D * *`. A cron whose local time falls on another day is one
+  // the builder refuses (Ruling 10), so it opens in Advanced, verbatim.
   if (dowF === "*" && domF !== "*") {
     const dom = intField(domF, 1, 31);
     if (dom === null) return advanced;
     const { hour, minute, dayShift } = utcTimeToLocal(ho, mi, offsetMinutes);
-    return {
-      mode: "monthly",
-      hour,
-      minute,
-      dayOfMonth: wrapDom(dom + dayShift),
-    };
+    if (dayShift !== 0) return advanced;
+    return { mode: "monthly", hour, minute, dayOfMonth: dom };
   }
 
   return advanced;

@@ -171,13 +171,11 @@ v_health() {
 }
 
 v_version() {
-  STAMP=$(sed -n 's/.*"build_stamp"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$BODY")
-  if [[ "$HTTP_CODE" == "200" && -n "$STAMP" ]]; then
-    DETAIL="200, build_stamp=${STAMP}"; return 0
-  fi
-  if [[ "$HTTP_CODE" == "200" ]]; then
-    # Deterministic, not transient: say so instead of retrying into the same answer.
-    DETAIL="200 but build_stamp is null (dev checkout, not a deployed image?)"
+  # build.id is never null; build.source says what identified it.
+  BID=$(sed -n 's/.*"build"[[:space:]]*:[[:space:]]*{[^}]*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$BODY")
+  BSRC=$(sed -n 's/.*"build"[[:space:]]*:[[:space:]]*{[^}]*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"$BODY")
+  if [[ "$HTTP_CODE" == "200" && -n "$BID" ]]; then
+    DETAIL="200, build=${BID} (${BSRC:-?})"; return 0
   fi
   return 1
 }

@@ -91,11 +91,6 @@ class Role:
     scopes: frozenset[str] = field(default_factory=frozenset)
     bypass: bool = False
 
-    # Backwards compatibility with the enum this replaced.
-    @property
-    def value(self) -> str:
-        return self.name
-
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Role):
             return self.name == other.name

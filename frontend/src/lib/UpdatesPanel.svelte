@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDate, fmtDateTime, fmtUtc } from "./format";
   // Jobs page Updates card: compares the running central build + agent bake
   // against the GitHub repository head and shows the recent commit messages
   // (the project's changelog) for review. The page load only reads central's
@@ -62,8 +63,8 @@
       Updates
     </h3>
     {#if data?.checked_at}
-      <span class="text-xs text-muted" title={new Date(data.checked_at).toLocaleString()}>
-        checked {new Date(data.checked_at).toLocaleString()}
+      <span class="text-xs text-muted" title={fmtUtc(data.checked_at)}>
+        checked {fmtDateTime(data.checked_at)}
       </span>
     {/if}
     <Button
@@ -114,7 +115,7 @@
               <div class="flex items-baseline gap-2">
                 {#if c.is_new}<span class="text-warn" title="Newer than the running build">•</span>{/if}
                 <code class="text-muted">{c.sha}</code>
-                {#if c.date}<span class="whitespace-nowrap tabular-nums text-muted">{new Date(c.date).toLocaleDateString()}</span>{/if}
+                {#if c.date}<span class="whitespace-nowrap tabular-nums text-muted">{fmtDate(c.date)}</span>{/if}
                 <!-- Bespoke disclosure (commit subject → full message); stays a raw button. -->
                 <button
                   type="button"

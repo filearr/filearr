@@ -87,7 +87,7 @@ async def test_check_shapes_result_and_caches(monkeypatch):
     monkeypatch.setattr(
         updatecheck,
         "_local_identity",
-        lambda: ("3303638699ed-20260807T203554Z", "1.5.0-3303638"),
+        lambda: ("3303638699ed-20260807T203554Z", "1.5.0-3303638", None),
     )
     result = await updatecheck.check(force=True)
     central, agent = result["components"]
@@ -133,7 +133,7 @@ async def test_endpoints(monkeypatch):
 
         monkeypatch.setattr(updatecheck, "_fetch_github", fake_fetch)
         monkeypatch.setattr(
-            updatecheck, "_local_identity", lambda: (None, "1.5.0-cb6cf05")
+            updatecheck, "_local_identity", lambda: (None, "1.5.0-cb6cf05", None)
         )
         r = await c.post("/api/v1/system/update-check")
         assert r.status_code == 200
@@ -144,3 +144,13 @@ async def test_endpoints(monkeypatch):
         # GET now serves the cache
         r = await c.get("/api/v1/system/update-check")
         assert r.json()["checked_at"] == body["checked_at"]
+
+
+async def test_central_row_build_commit_identity():
+    """Image installs carry their commit (filearr.buildinfo) — compared directly
+    against HEAD, ahead of the agent-dist sha heuristic."""
+    same = updatecheck._central_row(None, "1.5.0-0000000", HEAD_SHA, HEAD_DATE, HEAD_SHA)
+    assert same["update_available"] is False
+    assert same["running"] == HEAD_SHA[:7]
+    diff = updatecheck._central_row(None, None, HEAD_SHA, HEAD_DATE, "0" * 40)
+    assert diff["update_available"] is True

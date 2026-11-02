@@ -20,9 +20,6 @@ changes that affect indexed fields.
 **Fresh deploy** — `python -m scripts.init_db` runs `alembic upgrade head`,
 applies the procrastinate schema, and ensures the Meili index.
 
-**Existing pre-alembic DB** — init_db detects tables without
-`alembic_version`, stamps the baseline, then upgrades. Run once; idempotent.
-
 **Upgrading a deployment** — pull new code/image, then rerun init_db (or
 `alembic upgrade head` from `backend/`). Deploy scripts already rerun init_db.
 

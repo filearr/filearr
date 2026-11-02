@@ -9,7 +9,7 @@ published directly, so an attacker hitting it could forge the header to dodge
 the per-IP brute-force bucket or plant a fake address in the audit log.
 
 The header is therefore honoured only when the request demonstrably transited a
-trusted proxy, by any ONE of:
+trusted proxy, by either of:
 
 1. ``X-Filearr-Proxy-Trust`` matches ``FILEARR_PROXY_SHARED_SECRET`` — the
    shipped Caddyfiles stamp it on every ``reverse_proxy`` block, so the managed
@@ -22,9 +22,6 @@ trusted proxy, by any ONE of:
    skipping trusted hops, and the first untrusted address is the client
    (the standard rightmost-untrusted algorithm; immune to a client prepending
    junk).
-3. the legacy ``FILEARR_AUTH_RATELIMIT_TRUST_FORWARDED_FOR=true`` — trusts the
-   LEFTMOST entry unconditionally. Kept for deployments that set it; the two
-   options above are preferred.
 """
 
 from __future__ import annotations
@@ -108,20 +105,11 @@ def forwarded_client(xff: str, *, trusted: tuple[_Net, ...]) -> str | None:
     return hops[0]
 
 
-def client_ip(request: Request, *, trust_forwarded: bool | None = None) -> str | None:
-    """The caller's source IP (see module docstring for the trust rules).
-    ``trust_forwarded`` forces the legacy unconditional-leftmost behaviour on/off
-    (tests and the rate limiter's explicit callers)."""
+def client_ip(request: Request) -> str | None:
+    """The caller's source IP (see module docstring for the trust rules)."""
     settings = get_settings()
     peer = request.client.host if request.client else None
     xff = request.headers.get("x-forwarded-for") or ""
-
-    legacy = (
-        settings.auth_ratelimit_trust_forwarded_for if trust_forwarded is None else trust_forwarded
-    )
-    if legacy:
-        first = xff.split(",")[0].strip() if xff else ""
-        return first or peer
 
     if not xff:
         return peer
