@@ -56,6 +56,24 @@ def _validate_globs(v: list[str] | None, include: bool) -> list[str] | None:
     return v
 
 
+#: Library description cap (characters, after stripping). A note, not a document.
+LIBRARY_DESCRIPTION_MAX = 2000
+
+
+def _clean_description(v: str | None) -> str | None:
+    """Strip; blank -> None (nothing to show); over the cap -> 422."""
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > LIBRARY_DESCRIPTION_MAX:
+        raise ValueError(
+            f"description must be at most {LIBRARY_DESCRIPTION_MAX} characters (got {len(v)})"
+        )
+    return v
+
+
 class _LibraryFields(BaseModel):
     """Every client-settable library field, shared by the write model
     (:class:`LibraryIn`, which adds write-time validation) and the read model
@@ -63,6 +81,8 @@ class _LibraryFields(BaseModel):
     would 500 the listing on a legacy value)."""
 
     name: str
+    # Optional operator note shown under the name in the console (not indexed).
+    description: str | None = None
     root_path: str
     # W8-B taxonomy gating (replaced the MediaType-keyed ``enabled_types``). A file
     # is included iff its file_group is in ``enabled_groups`` OR its file_category is
@@ -119,6 +139,7 @@ class LibraryIn(_LibraryFields):
     _check_extract_overrides = field_validator("extract_overrides")(
         _validate_extract_overrides
     )
+    _check_description = field_validator("description")(_clean_description)
 
     @field_validator("include_globs")
     @classmethod
@@ -136,12 +157,14 @@ class LibraryUpdate(BaseModel):
     scan_cron/watch_mode/root_path edits are re-validated at the API layer.
 
     Null rule: an explicit ``null`` is accepted only for the NULLABLE columns
-    (``scan_cron``, ``native_prefix``, ``share_prefix``, ``hash_full_max_bytes``,
-    ``extract_overrides`` -- null clears them). Every NOT NULL column, lists
+    (``description``, ``scan_cron``, ``native_prefix``, ``share_prefix``,
+    ``hash_full_max_bytes``, ``extract_overrides`` -- null clears them; a blank
+    ``description`` clears it too). Every NOT NULL column, lists
     included, refuses ``null`` with a 422 (``_not_null``): send ``[]`` to clear a
     list, omit the field to leave it unchanged. No null->default coercion."""
 
     name: NonBlankStr | None = None
+    description: str | None = None
     root_path: NonBlankStr | None = None
     enabled_categories: list[str] | None = None
     enabled_groups: list[str] | None = None
@@ -164,6 +187,7 @@ class LibraryUpdate(BaseModel):
     _check_extract_overrides = field_validator("extract_overrides")(
         _validate_extract_overrides
     )
+    _check_description = field_validator("description")(_clean_description)
 
     @field_validator(
         "name",

@@ -79,7 +79,19 @@ class Settings(BaseSettings):
     # 2026-08-15 as "Missing bearer token" while adding a second library. A
     # previous token seen inside the window resolves the session but never
     # rotates again, so exactly one fresh cookie is issued per boundary.
+    # Since 2026-11-02 this window starts when the NEW token is first presented
+    # (not at the rotation): until then the previous token stays valid for up to
+    # ``session_rotation_prev_max_hours`` (see authx.validate_session).
     session_rotation_grace_seconds: int = 60
+    # Hard cap on how long a rotated-away token stays valid while the new token
+    # has never been presented (its Set-Cookie was lost: client abort, 500, a
+    # proxy dropping headers). Also bounded by the effective idle window. After
+    # the in-flight grace, presenting the old token re-issues a fresh cookie, so
+    # this only bites a browser that lost the cookie AND then went idle longer
+    # than the cap. Trade-off: a stolen rotated-away token is usable this long
+    # unless the legitimate browser uses its new token first (which, in normal
+    # operation, happens on its very next request).
+    session_rotation_prev_max_hours: float = 12.0
     # P6-T5 (OIDC SSO): the session-cookie SameSite policy. **Changed from the
     # P6-T1 default of ``strict`` to ``lax`` as a DELIBERATE P6-T5 ruling.** An
     # OIDC callback is a top-level *cross-site* navigation (the browser arrives

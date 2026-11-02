@@ -104,18 +104,37 @@ def _request_is_https(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
-def set_session_cookie(response: Response, request: Request, raw_token: str) -> None:
+def _cookie_max_age(expires_absolute: datetime | None) -> int:
+    """Seconds until the session's absolute expiry. The row's
+    ``expires_absolute`` already encodes the EFFECTIVE TTL (per-user override →
+    GUI app_setting → env, fixed at creation), so the cookie never outlives —
+    nor dies before — the server-side session. Falls back to the env TTL only
+    when the expiry is unknown."""
+    if expires_absolute is None:
+        return get_settings().session_ttl_hours * 3600
+    if expires_absolute.tzinfo is None:
+        expires_absolute = expires_absolute.replace(tzinfo=UTC)
+    return max(0, int((expires_absolute - datetime.now(UTC)).total_seconds()))
+
+
+def set_session_cookie(
+    response: Response,
+    request: Request,
+    raw_token: str,
+    *,
+    expires_absolute: datetime | None = None,
+) -> None:
     """Set the ``filearr_session`` cookie: HttpOnly always, SameSite from
     ``FILEARR_SESSION_COOKIE_SAMESITE`` (default ``lax`` — the P6-T5 ruling that
     lets an OIDC callback's cross-site 302→/ return carry the freshly-minted
     cookie; ``lax`` still blocks the cookie on cross-site POST/PATCH/DELETE so
     CSRF protection on every mutating endpoint is preserved), and Secure whenever
-    the request is https. Max-Age tracks the absolute TTL."""
+    the request is https. Max-Age tracks the session's absolute expiry."""
     settings = get_settings()
     response.set_cookie(
         key=settings.session_cookie_name,
         value=raw_token,
-        max_age=settings.session_ttl_hours * 3600,
+        max_age=_cookie_max_age(expires_absolute),
         httponly=True,
         samesite=settings.session_cookie_samesite,
         secure=_request_is_https(request),
@@ -134,16 +153,26 @@ def clear_session_cookie(response: Response, request: Request) -> None:
     )
 
 
+#: ``request.state`` key carrying a rotated session's ready-made ``Set-Cookie``
+#: header value; :class:`SessionCookieMiddleware` appends it to the response.
+ROTATED_COOKIE_STATE_KEY = "rotated_session_cookie"
+
+
 async def resolve_session_principal(
     request: Request,
-    response: Response,
     session: AsyncSession,
 ) -> Principal | None:
     """Resolve the session-cookie principal for this request, or ``None``.
 
     Validates the cookie token (bumping the inactivity window and rotating the
-    opaque token when due — re-setting the cookie on ``response``), then loads the
-    owning principal. A disabled principal resolves to ``None`` (fails closed)."""
+    opaque token when due), then loads the owning principal. A disabled principal
+    resolves to ``None`` (fails closed).
+
+    A rotated token is NOT set on an injected ``Response``: FastAPI drops those
+    headers whenever the endpoint returns its own Response (204s, downloads,
+    streams) or raises. Instead the ready-made ``Set-Cookie`` value is recorded
+    on ``request.state`` and :class:`SessionCookieMiddleware` appends it to
+    whatever response finally goes out — the single delivery path."""
     settings = get_settings()
     raw = request.cookies.get(settings.session_cookie_name)
     if not raw:
@@ -151,6 +180,17 @@ async def resolve_session_principal(
     validated = await authx.validate_session(session, raw)
     if validated is None:
         return None
+    if validated.rotated is not None:
+        # Recorded BEFORE the principal checks: the rotation is already
+        # committed, so even a 401/403 response must carry the new cookie.
+        carrier = Response()
+        set_session_cookie(
+            carrier,
+            request,
+            validated.rotated.raw,
+            expires_absolute=validated.rotated.expires_absolute,
+        )
+        setattr(request.state, ROTATED_COOKIE_STATE_KEY, carrier.headers["set-cookie"])
     # Roles are data: make sure the registry the synchronous role resolvers
     # read is fresh before anything maps this principal's role to scopes.
     from filearr import roles as roles_registry
@@ -162,9 +202,53 @@ async def resolve_session_principal(
     # Stash the session row id (stable across token rotation) so the session-
     # management UI can flag the caller's CURRENT session (P6-T11).
     request.state.session_id = validated.session_id
-    if validated.rotated is not None:
-        set_session_cookie(response, request, validated.rotated.raw)
     return principal
+
+
+class SessionCookieMiddleware:
+    """Pure-ASGI middleware delivering a rotated session cookie on EVERY response.
+
+    Appends the ``Set-Cookie`` recorded by :func:`resolve_session_principal` to
+    the ``http.response.start`` message — so it reaches the browser for model
+    responses, bare ``Response`` subclasses (204s), ``StreamingResponse`` /
+    ``FileResponse`` and SSE, and error responses rendered by the exception
+    handlers (HTTPException / validation). Only the start message's headers are
+    touched; body messages pass straight through (nothing is buffered, streams
+    keep streaming). A response that already sets the session cookie itself
+    (login, OIDC callback, logout's clear) wins and is left alone.
+
+    Not covered: an UNHANDLED exception rendered by Starlette's outermost
+    ``ServerErrorMiddleware`` (bare 500) — that path never reaches this ``send``.
+    The rotation is committed regardless; the next request presenting the old
+    token after the in-flight grace re-issues the cookie (authx re-issue path)."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # Request.state reads/writes scope["state"]; make sure the dict exists
+        # up-front so routes and this wrapper share the same object.
+        state = scope.setdefault("state", {})
+        cookie_prefix = (get_settings().session_cookie_name + "=").encode("latin-1")
+
+        async def send_wrapper(message) -> None:
+            if message["type"] == "http.response.start":
+                value = state.get(ROTATED_COOKIE_STATE_KEY)
+                if value:
+                    headers = list(message.get("headers") or [])
+                    already = any(
+                        k.lower() == b"set-cookie" and v.startswith(cookie_prefix)
+                        for k, v in headers
+                    )
+                    if not already:
+                        headers.append((b"set-cookie", value.encode("latin-1")))
+                        message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 #: Scope implication used everywhere scopes are compared: admin implies write
@@ -223,7 +307,6 @@ def require_grant_ceiling(requested: frozenset[str], granted: frozenset[str], wh
 def require_scope(scope: str):
     async def dependency(
         request: Request,
-        response: Response,
         creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
         session: AsyncSession = Depends(get_session),
     ) -> None:
@@ -236,7 +319,7 @@ def require_scope(scope: str):
             return
         # 2. Interactive session cookie (P6-T1). A logged-in user's global role
         #    maps onto the read/write/admin scope vocabulary.
-        principal = await resolve_session_principal(request, response, session)
+        principal = await resolve_session_principal(request, session)
         if principal is not None:
             granted = authx.scopes_for_role(principal.global_role)
             if scope not in granted:
@@ -281,7 +364,6 @@ def require_search_scope(scope: str = "read"):
 
     async def dependency(
         request: Request,
-        response: Response,
         creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
         session: AsyncSession = Depends(get_session),
     ) -> str | None:
@@ -293,7 +375,7 @@ def require_search_scope(scope: str = "read"):
             await _verify_credentials(creds.credentials, scope, session, request)
             return None
         # 2. Interactive session cookie (single resolution; rotates if due).
-        principal = await resolve_session_principal(request, response, session)
+        principal = await resolve_session_principal(request, session)
         if principal is not None:
             granted = authx.scopes_for_role(principal.global_role)
             if scope not in granted:
@@ -529,7 +611,6 @@ def require_permission(action: str, *, coarse: str | None = None):
 
     async def dependency(
         request: Request,
-        response: Response,
         creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
         session: AsyncSession = Depends(get_session),
     ) -> PermissionContext:
@@ -541,7 +622,7 @@ def require_permission(action: str, *, coarse: str | None = None):
             await _verify_credentials(creds.credentials, coarse_scope, session, request)
             return PermissionContext(unrestricted=True, action=action)
         # 2. Interactive session cookie (single resolution; rotates if due).
-        principal = await resolve_session_principal(request, response, session)
+        principal = await resolve_session_principal(request, session)
         if principal is not None:
             granted = authx.scopes_for_role(principal.global_role)
             if coarse_scope not in granted:

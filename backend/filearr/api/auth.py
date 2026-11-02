@@ -237,13 +237,12 @@ async def _ldap_eligible(session: AsyncSession, username: str) -> bool:
 
 async def current_principal(
     request: Request,
-    response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> Principal:
     """Dependency: the authenticated session principal, or 401. Session-only
     (Bearer keys are not yet mapped to principals — that is the ApiKey backfill,
     a later additive pass)."""
-    principal = await resolve_session_principal(request, response, session)
+    principal = await resolve_session_principal(request, session)
     if principal is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
     return principal
@@ -418,7 +417,7 @@ async def login(
         from filearr import grant_cache
 
         grant_cache.bump_generation()
-    set_session_cookie(response, request, token.raw)
+    set_session_cookie(response, request, token.raw, expires_absolute=token.expires_absolute)
     user = await _load_user(session, principal.id)
     assert user is not None
     await audit.emit(
@@ -437,7 +436,6 @@ async def login(
 @router.post("/auth/logout", status_code=204)
 async def logout(
     request: Request,
-    response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     settings = get_settings()
@@ -445,20 +443,21 @@ async def logout(
     if raw:
         # Resolve the owning principal for the audit WITHOUT rotating the token
         # (a plain hash lookup — revoke_session would otherwise miss a rotated row).
+        # Matches the previous token too: it stays valid until the rotated one
+        # is first used, and logging out with it must still kill the session.
         row = (
-            await session.execute(
-                select(SessionRow).where(
-                    SessionRow.session_hash == authx.hash_session_token(raw)
-                )
-            )
+            await session.execute(authx.session_row_for_token(raw))
         ).scalar_one_or_none()
         pid = row.principal_id if row is not None else None
         await authx.revoke_session(session, raw)
         await session.commit()
         if pid is not None:
             await audit.emit(audit.LOGOUT, request=request, principal_id=pid)
-    clear_session_cookie(response, request)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # Clear on the RETURNED response: headers set on an injected Response are
+    # dropped by FastAPI when the endpoint returns its own Response object.
+    out = Response(status_code=status.HTTP_204_NO_CONTENT)
+    clear_session_cookie(out, request)
+    return out
 
 
 @router.get("/auth/me", response_model=PrincipalOut)
@@ -532,7 +531,15 @@ def _override_hours(v: float) -> int | None:
             f"timeout must be between {app_settings.MIN_HOURS:.3f} and "
             f"{app_settings.MAX_HOURS} hours (0 clears)",
         )
-    return int(round(v))
+    hours = int(round(v))
+    # Stored as whole hours: a sub-half-hour value would round to 0, which reads
+    # back as "no override" — silently ignoring what the admin asked for.
+    if hours < 1:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "timeout must be at least 1 hour (stored as whole hours; 0 clears)",
+        )
+    return hours
 
 
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,7 @@
 * B9: ``GET /scans`` filters (status list, library_id, limit) + ``rel_path``.
 * B10: ``LibraryOut.last_scan`` = newest FULL run; ``last_scoped_scan`` apart.
 * B11: trigger_scan's pre-defer reap records ``stats.error`` (full runs only).
+* Library ``description``: optional free text, stripped, blank -> null, capped.
 """
 
 from __future__ import annotations
@@ -161,7 +162,14 @@ async def test_patch_null_on_not_null_column_is_422(wired, field):
 
 @pytest.mark.parametrize(
     "field",
-    ["scan_cron", "native_prefix", "share_prefix", "hash_full_max_bytes", "extract_overrides"],
+    [
+        "description",
+        "scan_cron",
+        "native_prefix",
+        "share_prefix",
+        "hash_full_max_bytes",
+        "extract_overrides",
+    ],
 )
 async def test_patch_null_clears_nullable_column(wired, field):
     c = wired["client"]
@@ -520,3 +528,62 @@ async def test_trigger_reap_records_error_full_runs_only(wired, monkeypatch, que
     # a scoped run's job was never checked -> left for the FIX-15 reconciler
     assert rows[ids[2]].status == "running"
     assert "error" not in (rows[ids[2]].stats or {})
+
+
+# --------------------------------------------------------------------------- #
+# Library description — optional note, stripped, blank -> null, capped         #
+# --------------------------------------------------------------------------- #
+async def test_create_with_description_strips_and_lists(wired):
+    c = wired["client"]
+    r = await c.post(
+        LIBS,
+        json={"name": "Docs", "root_path": "/d", "description": "  Scanned PDFs\nfrom the NAS  "},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["description"] == "Scanned PDFs\nfrom the NAS"
+    listed = {lib["name"]: lib for lib in (await c.get(LIBS)).json()}
+    assert listed["Docs"]["description"] == "Scanned PDFs\nfrom the NAS"
+
+
+async def test_create_without_or_blank_description_is_null(wired):
+    c = wired["client"]
+    a = (await c.post(LIBS, json={"name": "A", "root_path": "/a"})).json()
+    b = (await c.post(LIBS, json={"name": "B", "root_path": "/b", "description": "   "})).json()
+    assert a["description"] is None
+    assert b["description"] is None
+
+
+async def test_patch_description_sets_and_blank_clears(wired):
+    c = wired["client"]
+    lib = (await c.post(LIBS, json={"name": "M", "root_path": "/m"})).json()
+    r = await c.patch(f"{LIBS}/{lib['id']}", json={"description": " Films "})
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "Films"
+    # A patch of another field leaves the description alone.
+    r = await c.patch(f"{LIBS}/{lib['id']}", json={"watch_mode": False})
+    assert r.json()["description"] == "Films"
+    r = await c.patch(f"{LIBS}/{lib['id']}", json={"description": ""})
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] is None
+    async with wired["maker"]() as s:
+        row = (await s.execute(select(Library).where(Library.name == "M"))).scalar_one()
+        assert row.description is None
+
+
+async def test_description_length_cap(wired):
+    from filearr.schemas import LIBRARY_DESCRIPTION_MAX
+
+    c = wired["client"]
+    at_cap = "x" * LIBRARY_DESCRIPTION_MAX
+    ok = await c.post(LIBS, json={"name": "Cap", "root_path": "/c", "description": at_cap})
+    assert ok.status_code == 201, ok.text
+    # Surrounding whitespace does not count against the cap.
+    ok2 = await c.patch(f"{LIBS}/{ok.json()['id']}", json={"description": f"  {at_cap}  "})
+    assert ok2.status_code == 200, ok2.text
+    over = "x" * (LIBRARY_DESCRIPTION_MAX + 1)
+    r = await c.post(LIBS, json={"name": "Over", "root_path": "/o", "description": over})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"][0]["loc"][-1] == "description"
+    r = await c.patch(f"{LIBS}/{ok.json()['id']}", json={"description": over})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"][0]["loc"][-1] == "description"

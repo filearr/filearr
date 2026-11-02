@@ -17,7 +17,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # table. Its predecessor c7d2e4a91b38 adds the session-rotation grace columns.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "5d1e8f0a2b47"
+HEAD = "7e2c4b9a1d36"
+# Head adds the nullable libraries.description; its predecessor is the B6 drop.
 # P7 B6: head drops libraries.enabled_extension_groups; its predecessor is the
 # scan_schedule_cron data migration (downgrade restores the column, empty).
 DROP_EXTGROUPS_PRED = "3c8a6f1d9e24"

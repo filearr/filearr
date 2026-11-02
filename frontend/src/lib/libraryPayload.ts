@@ -27,6 +27,9 @@ export interface OverrideField {
 
 const MiB = 1048576;
 
+/** Mirrors schemas.LIBRARY_DESCRIPTION_MAX: characters after trimming. */
+export const LIBRARY_DESCRIPTION_MAX = 2000;
+
 /** Per-library extraction-limit overrides, stored server-side in raw units
  *  (bytes / seconds / ratio); byte fields are edited in MiB. Blank = fall back
  *  to the global FILEARR_* setting. Keys match config.EXTRACT_OVERRIDE_KEYS. */
@@ -54,6 +57,7 @@ export const OVERRIDE_FIELDS: OverrideField[] = [
  *  bind:value wrote (null when emptied). */
 export interface LibraryDraft {
   name: string;
+  description: string;
   root_path: string;
   native_prefix: string;
   share_prefix: string;
@@ -80,6 +84,7 @@ export interface LibraryDraft {
 
 export interface LibraryPayload {
   name?: string;
+  description?: string | null;
   root_path?: string;
   native_prefix?: string | null;
   share_prefix?: string | null;
@@ -118,6 +123,7 @@ export function draftFromLibrary(library: Library | null): LibraryDraft {
   if (library === null) {
     return {
       name: "",
+      description: "",
       root_path: "/data/media/",
       native_prefix: "",
       share_prefix: "",
@@ -141,6 +147,7 @@ export function draftFromLibrary(library: Library | null): LibraryDraft {
   }
   return {
     name: library.name,
+    description: library.description ?? "",
     root_path: library.root_path,
     native_prefix: library.native_prefix ?? "",
     share_prefix: library.share_prefix ?? "",
@@ -236,6 +243,7 @@ function normaliseOriginal(l: Library): Required<LibraryPayload> {
   const ov = l.extract_overrides;
   return {
     name: l.name.trim(),
+    description: blankToNull(l.description ?? ""),
     root_path: l.root_path.trim(),
     native_prefix: blankToNull(l.native_prefix ?? ""),
     share_prefix: blankToNull(l.share_prefix ?? ""),
@@ -265,12 +273,18 @@ export function buildLibraryPayload(draft: LibraryDraft, original?: Library | nu
   const root_path = draft.root_path.trim();
   if (!name) errors.name = "Name is required.";
   if (!root_path) errors.root_path = "Root path is required.";
+  const description = blankToNull(draft.description);
+  if (description !== null && description.length > LIBRARY_DESCRIPTION_MAX) {
+    errors.description =
+      `Keep it to ${LIBRARY_DESCRIPTION_MAX.toLocaleString("en-US")} characters (currently ${description.length.toLocaleString("en-US")}).`;
+  }
   const hash_full_max_bytes = buildHashCeiling(draft, errors);
   const extract_overrides = buildOverrides(draft, errors);
   if (Object.keys(errors).length) return { ok: false, errors };
 
   const full: Required<LibraryPayload> = {
     name,
+    description,
     root_path,
     native_prefix: blankToNull(draft.native_prefix),
     share_prefix: blankToNull(draft.share_prefix),
@@ -313,7 +327,7 @@ export function buildLibraryPayload(draft: LibraryDraft, original?: Library | nu
  *  (scan_cron, presets, …) goes to the banner beside Save instead, so it is
  *  never attached to something invisible. */
 export const ERROR_FIELDS: ReadonlySet<string> = new Set([
-  "name", "root_path", "native_prefix", "share_prefix",
+  "name", "description", "root_path", "native_prefix", "share_prefix",
   "include_globs", "exclude_globs", "hash_policy", "hash_full_max_bytes",
   "extract_overrides", ...OVERRIDE_FIELDS.map((f) => f.key),
 ]);

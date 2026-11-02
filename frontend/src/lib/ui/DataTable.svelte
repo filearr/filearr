@@ -24,6 +24,10 @@
 
   Cell snippets render twice (the table and the card list both stay in the
   DOM), so a cell must not contain a static `id`.
+
+  `stackBelow="lg"` keeps the card list up to the `lg` breakpoint, for a wide
+  table whose columns cannot fit between `md` and `lg` without scrolling
+  sideways.
 -->
 <script lang="ts" generics="T">
   import type { Snippet } from "svelte";
@@ -58,6 +62,7 @@
     keepRowsWhileLoading = true,
     class: className = "",
     onRowClick,
+    stackBelow = "md",
   }: {
     columns: Column[];
     rows: readonly T[];
@@ -73,7 +78,12 @@
     keepRowsWhileLoading?: boolean;
     class?: string;
     onRowClick?: (row: T) => void;
+    stackBelow?: "md" | "lg";
   } = $props();
+
+  // Literal class strings so Tailwind generates both variants.
+  const tableShown = $derived(stackBelow === "lg" ? "lg:block" : "md:block");
+  const cardsHidden = $derived(stackBelow === "lg" ? "lg:hidden" : "md:hidden");
 
   // Computed once so the table and the card list always show the same order.
   const sorted = $derived(sortRows(rows, sort, accessor));
@@ -159,7 +169,7 @@
 <!-- aria-busy only while stale rows are shown: a busy subtree mutes live
      regions, which would silence the loading/error StateBlock. -->
 <div class={className} aria-busy={loading && view === "rows"}>
-  <div class="hidden overflow-x-auto rounded-control border border-border md:block">
+  <div class="hidden overflow-x-auto rounded-control border border-border {tableShown}">
     <table class="w-full text-sm">
       <caption class={captionHidden ? "sr-only" : "px-3 py-2 text-left font-medium"}>{caption}</caption>
       <thead class="bg-surface-2 text-2xs uppercase tracking-wide text-muted">
@@ -218,9 +228,10 @@
     </table>
   </div>
 
-  <!-- Below md the table would scroll sideways; each row becomes a card. The
-       caption is hidden with the table, so it labels the list instead. -->
-  <div class="md:hidden">
+  <!-- Below md (or lg, see stackBelow) the table would scroll sideways; each
+       row becomes a card. The caption is hidden with the table, so it labels
+       the list instead. -->
+  <div class={cardsHidden}>
     <!-- The header buttons are hidden with the table, so sorting needs its own
          control here. -->
     {#if sortable.length > 0}

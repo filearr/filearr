@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { ApiError } from "../src/lib/apiErrors.ts";
 import type { Library } from "../src/lib/api";
 import {
+  LIBRARY_DESCRIPTION_MAX,
   OVERRIDE_FIELDS,
   buildLibraryPayload,
   draftFromLibrary,
@@ -24,6 +25,7 @@ function lib(over: Partial<Library> = {}): Library {
   return {
     id: "L1",
     name: "Movies",
+    description: null,
     root_path: "/data/media/movies",
     native_prefix: null,
     share_prefix: null,
@@ -130,6 +132,20 @@ test("create: full body; empty taxonomy omitted; enabled not sent", () => {
   assert.equal(p.hash_full_max_bytes, null);
   assert.equal(p.extract_overrides, null);
   assert.equal(p.watch_mode, false);
+});
+
+test("create: description trimmed; blank → null (B: library description)", () => {
+  assert.equal(okPayload(buildLibraryPayload(newDraft({ description: "  Films\nfrom the NAS  " }))).description,
+    "Films\nfrom the NAS");
+  assert.equal(okPayload(buildLibraryPayload(newDraft({ description: "  \n " }))).description, null);
+  assert.equal(okPayload(buildLibraryPayload(newDraft())).description, null);
+});
+
+test("description: the cap counts trimmed characters; one over is a field error", () => {
+  const at = "x".repeat(LIBRARY_DESCRIPTION_MAX);
+  assert.equal(okPayload(buildLibraryPayload(newDraft({ description: ` ${at} ` }))).description, at);
+  const e = errs(buildLibraryPayload(newDraft({ description: `${at}x` })));
+  assert.match(e.description, /2,?000/);
 });
 
 test("glob textareas → lines verbatim; only \\r stripped, blank lines dropped", () => {
@@ -283,6 +299,26 @@ test("edit: changing one override sends the whole overrides object", () => {
   });
 });
 
+test("edit: description set, whitespace-only change ignored, cleared → null", () => {
+  const l = lib({ description: "Films" });
+  const d = draftFromLibrary(l);
+  assert.equal(d.description, "Films");
+  assert.deepEqual(okPayload(buildLibraryPayload(d, l)), {});
+  d.description = " Films ";
+  assert.deepEqual(okPayload(buildLibraryPayload(d, l)), {});
+  d.description = "Feature films";
+  assert.deepEqual(okPayload(buildLibraryPayload(d, l)), { description: "Feature films" });
+  d.description = "   ";
+  assert.deepEqual(okPayload(buildLibraryPayload(d, l)), { description: null });
+});
+
+test("edit: a library with no description seeds a blank draft and sends nothing", () => {
+  const l = lib();
+  const d = draftFromLibrary(l);
+  assert.equal(d.description, "");
+  assert.deepEqual(okPayload(buildLibraryPayload(d, l)), {});
+});
+
 test("edit: enabled is sent when toggled", () => {
   const l = lib();
   const d = draftFromLibrary(l);
@@ -309,6 +345,15 @@ test("422 pydantic loc → field by loc[-1], 'Value error, ' prefix dropped", ()
   const r = libraryServerErrors(e);
   assert.equal(r.fields.include_globs, "line 2 'foo\\\\': not a valid gitignore pattern (x)");
   assert.equal(r.fields.name, "String should have at least 1 character");
+  assert.equal(r.message, null);
+});
+
+test("422 on description → Description field error", () => {
+  const e = new ApiError(422, JSON.stringify({
+    detail: [{ loc: ["body", "description"], msg: "Value error, description must be at most 2000 characters (got 2001)" }],
+  }));
+  const r = libraryServerErrors(e);
+  assert.equal(r.fields.description, "description must be at most 2000 characters (got 2001)");
   assert.equal(r.message, null);
 });
 

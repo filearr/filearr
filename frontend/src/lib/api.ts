@@ -579,6 +579,9 @@ export interface LastScan {
 export interface Library {
   id: string;
   name: string;
+  /** Optional operator note (≤ 2000 chars, trimmed; null = none). Console only,
+   *  not indexed. */
+  description: string | null;
   root_path: string;
   native_prefix: string | null;
   share_prefix: string | null;

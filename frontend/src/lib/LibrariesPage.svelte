@@ -10,6 +10,7 @@
     type Live,
   } from "./libraryScanState";
   import { toast } from "./ui/toast.svelte";
+  import { describeSchedule, parseCron } from "./schedule";
   import { DELETE_SUCCESS_NOTE, deleteBlockedReason, deleteImpactDetails } from "./libraryDelete";
   import {
     cancelScan, clearFailedJobs, forceClearScan, stopScan, failedJobs, libraryErrors,
@@ -819,18 +820,25 @@
 <!-- Cells shared by the central and agent tables. Cells render twice (table +
      card list), so none carries an id, a bind:this or focus management; the
      expandable panels render below the tables, keyed by library. -->
+<!-- Name, then the operator's description (two lines at most; the full text
+     is in the title). The table keeps to its frame: every free-text line here
+     wraps (wrap-anywhere / break-all) instead of widening the column. -->
 {#snippet nameCell(lib: Library)}
-  <span class="font-medium">{lib.name}</span>
+  <span class="font-medium wrap-anywhere">{lib.name}</span>
   {#if !lib.enabled}<Badge class="ml-1">off</Badge>{/if}
+  {#if lib.description}
+    <span class="mt-0.5 line-clamp-2 whitespace-pre-line wrap-anywhere text-xs text-muted" title={lib.description}>{lib.description}</span>
+  {/if}
 {/snippet}
 
+<!-- Item count, the sidecar/extra note, then the size: one column, so the
+     table has room for the rest. -->
 {#snippet itemsCell(lib: Library)}
   <span class="whitespace-nowrap tabular-nums text-xs text-muted" title={statTitle(lib.id)}>{statCell(lib.id, "count")}</span>
-  {#if statExtras(lib.id)}<span class="block whitespace-nowrap text-2xs text-muted">{statExtras(lib.id)}</span>{/if}
-{/snippet}
-
-{#snippet sizeCell(lib: Library)}
-  <span class="whitespace-nowrap tabular-nums text-xs text-muted" title={statTitle(lib.id)}>{statCell(lib.id, "bytes")}</span>
+  {#each statExtras(lib.id) ? statExtras(lib.id).split(" · ") : [] as extra}
+    <span class="block whitespace-nowrap text-2xs text-muted">{extra}</span>
+  {/each}
+  <span class="block whitespace-nowrap tabular-nums text-2xs text-muted" title={statTitle(lib.id)}>{statCell(lib.id, "bytes")}</span>
 {/snippet}
 
 {#snippet errorsCell(lib: Library)}
@@ -884,27 +892,38 @@
 {/snippet}
 
 <!-- Central table cells -->
-{#snippet rootCell(lib: Library)}
-  <span class="block min-w-[10rem] max-w-[16rem] font-mono text-xs text-muted break-all">{lib.root_path}</span>
+{#snippet libraryCell(lib: Library)}
+  <div class="min-w-[9rem]">
+    {@render nameCell(lib)}
+    <span class="mt-0.5 block font-mono text-2xs text-muted break-all">{lib.root_path}</span>
+  </div>
 {/snippet}
 
-{#snippet typesCell(lib: Library)}
-  <span class="inline-flex flex-wrap gap-1">
-    {#if lib.enabled_categories?.length || lib.enabled_groups?.length}
+<!-- Scan settings in one column: schedule (cron verbatim on one line, its
+     meaning in the title) and watch, then file types and hash policy only
+     when they differ from the defaults ("all types", "auto"). -->
+{#snippet settingsCell(lib: Library)}
+  <span class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted">
+    {#if lib.scan_cron}
+      <span class="whitespace-nowrap font-mono" title={describeSchedule(parseCron(lib.scan_cron))}>{lib.scan_cron}</span>
+    {:else}
+      <span class="whitespace-nowrap" title="No automatic scans (manual only).">manual</span>
+    {/if}
+    {#if lib.watch_mode}<span class="whitespace-nowrap" title="Watch mode: changes are picked up as they happen">· watch</span>{/if}
+  </span>
+  {#if lib.enabled_categories?.length || lib.enabled_groups?.length}
+    <span class="mt-1 flex flex-wrap gap-1">
       {#each lib.enabled_categories ?? [] as c}
         <span title="category"><Badge tone="accent"><span class="sr-only">category </span>{c}</Badge></span>
       {/each}
       {#each lib.enabled_groups ?? [] as g}
         <span title="group"><Badge><span class="sr-only">group </span>{g}</Badge></span>
       {/each}
-    {:else}
-      <span class="text-xs text-muted">all</span>
-    {/if}
-  </span>
-{/snippet}
-
-{#snippet hashCell(lib: Library)}
-  <span class="text-xs text-muted">{lib.hash_policy === "quick_only" ? "quick only" : lib.hash_policy}</span>
+    </span>
+  {/if}
+  {#if lib.hash_policy !== "auto"}
+    <span class="mt-0.5 block whitespace-nowrap text-2xs text-muted">hash: {lib.hash_policy === "quick_only" ? "quick only" : lib.hash_policy}</span>
+  {/if}
   {#if hashStatus[lib.id]?.stale}
     {@const hsr = hashStatus[lib.id]}
     <span class="mt-1 flex items-center gap-1 whitespace-nowrap">
@@ -923,16 +942,15 @@
   {/if}
 {/snippet}
 
-{#snippet cronCell(lib: Library)}<span class="font-mono text-xs text-muted">{lib.scan_cron ?? "—"}</span>{/snippet}
-{#snippet watchCell(lib: Library)}<span class="text-xs text-muted">{lib.watch_mode ? "on" : "—"}</span>{/snippet}
 
 {#snippet lastScanCell(lib: Library)}
   {@const scan = rowScan(running, lib.id)}
   {@const reason = scan || isQueued(lib.id) ? null : failedReason(lib.last_scan, sseDetail)}
   {@const sc = lib.last_scoped_scan}
-  <!-- nowrap keeps status + age + counts + the excluded badge on ONE line; the
-       breakdown panel below the table carries the long text. -->
-  <span class="inline-flex flex-wrap items-center gap-1 text-xs text-muted md:flex-nowrap md:whitespace-nowrap">
+  <!-- Wraps (status, age, counts, badges flow onto further lines) so the
+       column never forces the table wider than its frame; the breakdown panel
+       below the table carries the long text. -->
+  <span class="inline-flex min-w-[10rem] flex-wrap items-center gap-1 text-xs text-muted">
     <!-- FIX-10: a running/stopping scan is streamed live; otherwise the
          authoritative last scan comes from lib.last_scan (scan_runs DISTINCT
          ON), which survives redeploys. "never" only when null. -->
@@ -998,15 +1016,15 @@
   <!-- Ruling 6: a failed full scan says why on the row (SSE detail, else the
        recorded error / reconcile note, else "no reason recorded"). -->
   {#if reason}
-    <span class="mt-0.5 block max-w-[28rem] whitespace-normal break-words text-xs text-danger">{reason}</span>
+    <span class="mt-0.5 block max-w-[28rem] whitespace-normal wrap-anywhere text-xs text-danger">{reason}</span>
   {/if}
   <!-- B10: the newest scoped (hot-folder / targeted) run, compactly; the main
        line above is always the newest FULL run. -->
   {#if sc && sc.id !== scan?.id}
     {@const scWhen = sc.finished_at ?? sc.started_at}
     {@const scReason = failedReason(sc, sseDetail)}
-    <span class="mt-0.5 block max-w-[28rem] whitespace-normal break-words text-2xs text-muted">
-      {scopedSummary(sc)} · <span title={fmtUtc(scWhen)}>{relTime(scWhen)}</span>{#if sc.status !== "finished"} · {sc.status}{/if}{#if scReason}<span class="text-danger"> — {scReason}</span>{/if}
+    <span class="mt-0.5 block max-w-[28rem] whitespace-normal wrap-anywhere text-2xs text-muted">
+      {scopedSummary(sc)} · <span title={fmtUtc(scWhen)}>{relTime(scWhen)}</span>{#if sc.status !== "finished"}{" · "}{sc.status}{/if}{#if scReason}<span class="text-danger">{" — "}{scReason}</span>{/if}
     </span>
   {/if}
 {/snippet}
@@ -1015,7 +1033,9 @@
   {@const scan = rowScan(running, lib.id)}
   {@const isRunning = scan?.status === "running"}
   {@const stopping = scan?.status === "stopping"}
-  <div class="flex flex-wrap items-center justify-end gap-1">
+  <!-- Capped width: the buttons wrap onto a second row instead of widening
+       the table past its frame. -->
+  <div class="ml-auto flex max-w-[16rem] flex-wrap items-center justify-end gap-1">
     {#if isRunning && scan}
       <Button
         size="sm"
@@ -1245,7 +1265,7 @@
         {staleHashTotal.toLocaleString()} item{staleHashTotal === 1 ? "" : "s"} across
         {staleHashRows.length} librar{staleHashRows.length === 1 ? "y" : "ies"}
         ({staleHashRows.map((r) => r.name).join(", ")}) still carry hashes computed by an
-        older algorithm. Use <span class="font-medium">update hashes</span> in the Hash
+        older algorithm. Use <span class="font-medium">update hashes</span> in the Settings
         column below — it re-reads the files to refresh their hashes only (no metadata
         extraction, thumbnails or embeddings), far lighter than a full rescan. A full
         rescan also converges them, at full extract cost.
@@ -1280,18 +1300,16 @@
     class="mt-3"
     caption="Libraries"
     captionHidden
+    stackBelow="lg"
     columns={[
-      { key: "name", label: "Name", cell: nameCell },
-      { key: "root_path", label: "Root", cell: rootCell },
+      { key: "name", label: "Library", cell: libraryCell },
       { key: "items", label: "Items", align: "right", cell: itemsCell },
-      { key: "size", label: "Size", align: "right", cell: sizeCell },
-      { key: "types", label: "Types", cell: typesCell },
-      { key: "hash_policy", label: "Hash", cell: hashCell },
-      { key: "scan_cron", label: "Cron", cell: cronCell },
-      { key: "watch_mode", label: "Watch", cell: watchCell },
+      { key: "settings", label: "Settings", cell: settingsCell },
       { key: "errors", label: "Errors", cell: errorsCell },
       { key: "last_scan", label: "Last scan", cell: lastScanCell },
-      { key: "actions", label: "Actions", align: "right", cell: centralActionsCell },
+      // A width hint so the buttons sit two or three to a row rather than
+      // one per line (the cell caps itself at 16rem and wraps beyond that).
+      { key: "actions", label: "Actions", align: "right", width: "14rem", cell: centralActionsCell },
     ]}
     rows={centralLibraries}
     rowKey={(l) => l.id}
@@ -1351,7 +1369,6 @@
       columns={[
         { key: "name", label: "Name", cell: nameCell },
         { key: "items", label: "Items", align: "right", cell: itemsCell },
-        { key: "size", label: "Size", align: "right", cell: sizeCell },
         { key: "agent_name", label: "Agent", cell: agentCell },
         { key: "agent_status", label: "Agent status", cell: agentStatusCell },
         { key: "agent_last_seen_at", label: "Last sync", cell: lastSyncCell },

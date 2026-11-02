@@ -108,6 +108,9 @@ class Library(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
     )
     name: Mapped[str] = mapped_column(Text, unique=True)
+    # Operator note shown under the name in the console. Free text, optional;
+    # not part of provenance and never projected into the search index.
+    description: Mapped[str | None] = mapped_column(Text)
     root_path: Mapped[str] = mapped_column(Text)
     # W8-B File Extension Similarity Taxonomy gating (replaces the old MediaType-keyed
     # ``enabled_types``). A file is INCLUDED iff its ``file_group`` is in
@@ -1456,9 +1459,11 @@ class Session(Base):
     )
     session_hash: Mapped[str] = mapped_column(Text, unique=True)  # sha256 hex, never raw
     # The hash the row carried BEFORE its last rotation, honoured until
-    # ``prev_valid_until`` so requests already in flight with the old cookie do
-    # not 401 (settings.session_rotation_grace_seconds). Cleared on the next
-    # rotation; NULL on a never-rotated row.
+    # ``prev_valid_until``: up to min(session_rotation_prev_max_hours, the idle
+    # window) until the NEW token is first presented, then cut to
+    # session_rotation_grace_seconds so requests already in flight still pass
+    # (authx.validate_session). Replaced on the next rotation; NULL on a
+    # never-rotated row.
     prev_session_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     prev_valid_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

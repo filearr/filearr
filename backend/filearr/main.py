@@ -98,6 +98,12 @@ def create_app() -> FastAPI:
             oauth2_redirect_url=None,
             **asset_kwargs,
         )
+    # Rotated session cookies ride EVERY response (204s, downloads, SSE, error
+    # responses) — pure ASGI, header-only, never buffers a body. See
+    # security.SessionCookieMiddleware.
+    from filearr.security import SessionCookieMiddleware
+
+    app.add_middleware(SessionCookieMiddleware)
     if settings.environment == "development":
         app.add_middleware(
             CORSMiddleware,

@@ -21,7 +21,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import select
@@ -257,7 +257,6 @@ async def force_clear_scan(
 
 async def _require_events_scope(
     request: Request,
-    response: Response,
     scan_id: uuid.UUID,
     stream_token: str | None = None,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -298,7 +297,7 @@ async def _require_events_scope(
         if creds is not None:
             await _verify_credentials(creds.credentials, "read", session, request)
             return
-        principal = await resolve_session_principal(request, response, session)
+        principal = await resolve_session_principal(request, session)
         if principal is not None:
             if "read" not in authx.scopes_for_role(principal.global_role):
                 raise HTTPException(403, "Scope 'read' required")

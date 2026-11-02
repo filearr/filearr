@@ -236,6 +236,14 @@
         <span class="pt-0.5"><Help text={HELP.name} label="name" /></span>
       </div>
 
+      <Field
+        label="Description"
+        hint="Optional note shown under the name on the Libraries page (what lives here, who owns it). Not searchable."
+        error={fieldError("description")}
+      >
+        <Textarea rows={2} placeholder="(optional)" bind:value={draft.description} />
+      </Field>
+
       <div class="flex items-start gap-2">
         <div class="flex min-w-0 flex-1 flex-col gap-1">
           <Field label="Root path" required error={fieldError("root_path")}>

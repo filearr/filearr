@@ -36,8 +36,8 @@ from typing import Protocol, runtime_checkable
 
 from argon2 import PasswordHasher
 from argon2.exceptions import Argon2Error, InvalidHashError, VerifyMismatchError
-from sqlalchemy import and_, delete, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from filearr.config import get_settings
 from filearr.models import Principal, User
@@ -122,6 +122,10 @@ class SessionToken:
 
     raw: str
     session_hash: str
+    #: The owning row's absolute expiry, when known (login / rotation) — the
+    #: cookie ``Max-Age`` is derived from it so a per-user / GUI TTL override is
+    #: honoured instead of the raw env default.
+    expires_absolute: datetime | None = None
 
 
 def hash_session_token(raw: str) -> str:
@@ -189,7 +193,66 @@ async def create_session(
     )
     session.add(row)
     await session.flush()
-    return tok
+    return SessionToken(
+        raw=tok.raw, session_hash=tok.session_hash, expires_absolute=row.expires_absolute
+    )
+
+
+def _prev_token_cap(inactivity_hours: float) -> timedelta:
+    """How long a rotated-away token stays valid when the NEW token is never
+    presented (the response that carried it was lost: client abort, an
+    unhandled 500, a proxy dropping the header).
+
+    ``min(FILEARR_SESSION_ROTATION_PREV_MAX_HOURS, the idle window)``, floored
+    above the in-flight grace so "unconfirmed" stays distinguishable from
+    "confirmed" (see :func:`validate_session`)."""
+    settings = get_settings()
+    grace = max(0, settings.session_rotation_grace_seconds)
+    cap = min(
+        settings.session_rotation_prev_max_hours * 3600.0, inactivity_hours * 3600.0
+    )
+    return timedelta(seconds=max(cap, grace + 60))
+
+
+async def _apply_isolated(session: AsyncSession, stmt) -> bool:
+    """Run one conditional ``UPDATE … RETURNING id`` on the sessions row in its
+    OWN short transaction, committed immediately, and report whether it matched.
+
+    Token-lifecycle writes (rotation / re-rotation / confirmation) must not ride
+    the request's transaction: a request that never commits (``GET /auth/me``)
+    or that rolls back after an error would otherwise undo a rotation whose new
+    cookie was already sent — the browser then holds a token the DB never kept
+    and the very next request 401s. They also must not commit the request's
+    pending work early, so a ``session.commit()`` here is not an option.
+
+    The connection comes from the SAME engine the request session is bound to
+    (so tests that bind sessions to a throwaway database keep working). It is
+    only taken when a lifecycle transition is actually due — at most a couple of
+    times per session per rotation interval — so the extra pooled connection is
+    not a per-request cost. ``lock_timeout`` guards against ever waiting on a
+    row lock held by the caller's own (uncommitted) transaction: on any failure
+    the transition is simply skipped (no new cookie) and the request proceeds on
+    the still-valid presented token."""
+    bind = session.bind
+    try:
+        if isinstance(bind, AsyncEngine):
+            async with bind.begin() as conn:
+                await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+                res = await conn.execute(stmt)
+                return res.first() is not None
+        # Not engine-bound (e.g. a session joined to an outer connection): no
+        # independent transaction is possible, so fall back to the request's.
+        res = await session.execute(
+            stmt, execution_options={"synchronize_session": False}
+        )
+        return res.first() is not None
+    except Exception:  # noqa: BLE001 - a skipped rotation is safe; a 500 is not
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "session token lifecycle update skipped", exc_info=True
+        )
+        return False
 
 
 async def validate_session(
@@ -199,28 +262,52 @@ async def validate_session(
     the token is unknown, past its absolute cap, or idle beyond the inactivity
     window; the stale row is deleted in the latter two cases.
 
-    On success it bumps ``last_seen_at`` (sliding inactivity window) and, if the
-    rotation interval elapsed, re-keys the row to a fresh token and returns it in
-    ``rotated`` so the caller re-sets the cookie. The lookup is by sha256 of the
-    high-entropy token (never the raw value), so there is no exploitable timing
-    channel on the hash comparison."""
+    On success it bumps ``last_seen_at`` (sliding inactivity window, on the
+    caller's session — persisted when the request commits, as before) and drives
+    the token lifecycle. The lookup is by sha256 of the high-entropy token (never
+    the raw value), so there is no exploitable timing channel.
+
+    Token lifecycle (all transitions are conditional UPDATEs committed in their
+    own transaction — :func:`_apply_isolated`):
+
+    * **Rotate** — the CURRENT token is presented and the rotation interval has
+      elapsed: ``prev ← current, current ← new``. Conditional on
+      ``session_hash = presented``, so of N concurrent requests exactly one wins
+      and returns ``rotated``; the losers see 0 rows, issue NO cookie, and are
+      served on the presented token (which the winner just made ``prev``).
+    * **Previous token stays valid until the new one is used.** After a rotation
+      ``prev_valid_until`` is set to a generous cap (:func:`_prev_token_cap`,
+      default 12 h, never beyond the idle window) instead of a fixed 60 s, so a
+      lost Set-Cookie cannot log anyone out.
+    * **Confirm** — the first request presenting the NEW token shrinks the
+      previous token's validity to the short in-flight grace
+      (``FILEARR_SESSION_ROTATION_GRACE_SECONDS``), so sibling requests already
+      on the wire with the old cookie still succeed, and then it dies.
+    * **Re-issue** — the PREVIOUS token is presented, the new one was never
+      confirmed, and the in-flight grace since the rotation has passed: the
+      browser evidently never received the new cookie, so the unconfirmed
+      current token is replaced by a fresh one (``prev`` stays = the presented
+      token) and returned in ``rotated`` to re-deliver it.
+
+    Security trade-off (documented, deliberate): a token that was rotated away
+    stays usable until the new one is first presented (+ the in-flight grace),
+    capped at :func:`_prev_token_cap`. In the normal flow the browser presents
+    the new token on its very next request, so the old one dies within seconds.
+    Only while the new token is unconfirmed can the old one be used — including,
+    after the grace, to re-issue a fresh token — which is exactly the power the
+    old token held before rotation; a stolen token that was still current is no
+    weaker than that. Revocation (logout, revoke-all, disable) deletes the row
+    and kills both hashes instantly."""
     settings = get_settings()
     token_hash = hash_session_token(raw_token)
     now = datetime.now(UTC)
-    # Current hash, OR the just-rotated-away hash inside its grace window: the
-    # SPA's parallel requests all carry whatever cookie they were sent with, and
-    # only the first one across the rotation boundary sees the new value.
     result = await session.execute(
-        select(SessionRow).where(
-            or_(
-                SessionRow.session_hash == token_hash,
-                and_(
-                    SessionRow.prev_session_hash == token_hash,
-                    SessionRow.prev_valid_until.is_not(None),
-                    SessionRow.prev_valid_until > now,
-                ),
-            )
-        )
+        select(SessionRow)
+        .where(_token_matches(token_hash, now))
+        # Another request (or an earlier lifecycle UPDATE in this one) may have
+        # re-keyed the row in its own transaction: never trust a stale identity-
+        # map copy of the hashes.
+        .execution_options(populate_existing=True)
     )
     row = result.scalar_one_or_none()
     if row is None:
@@ -243,31 +330,117 @@ async def validate_session(
     if now - _aware(row.last_seen_at) > timedelta(hours=eff.inactivity_hours):
         await session.delete(row)
         return None
+
+    grace = timedelta(seconds=max(0, settings.session_rotation_grace_seconds))
+    prev_until = _aware(row.prev_valid_until) if row.prev_valid_until is not None else None
+    # "Unconfirmed": the previous token is still on its long cap, i.e. nobody
+    # has presented the current token since the last rotation.
+    unconfirmed = (
+        row.prev_session_hash is not None
+        and prev_until is not None
+        and prev_until > now + grace
+    )
     rotated: SessionToken | None = None
-    # A request that arrived on the previous token never rotates again: the row
-    # already has its fresh hash and exactly one response (the rotating one) is
-    # carrying the new cookie to the browser.
-    if not via_previous and now - _aware(row.rotated_at) >= timedelta(
-        minutes=settings.session_rotation_minutes
-    ):
+    if not via_previous:
+        if now - _aware(row.rotated_at) >= timedelta(minutes=settings.session_rotation_minutes):
+            tok = mint_session_token()
+            won = await _apply_isolated(
+                session,
+                update(SessionRow)
+                .where(SessionRow.id == row.id, SessionRow.session_hash == token_hash)
+                .values(
+                    prev_session_hash=SessionRow.session_hash,
+                    session_hash=tok.session_hash,
+                    rotated_at=now,
+                    prev_valid_until=now + _prev_token_cap(eff.inactivity_hours),
+                )
+                .returning(SessionRow.id),
+            )
+            # Lost the race: a concurrent request rotated first and its response
+            # carries the new cookie; the presented token is now ``prev``.
+            if won:
+                rotated = SessionToken(
+                    raw=tok.raw,
+                    session_hash=tok.session_hash,
+                    expires_absolute=_aware(row.expires_absolute),
+                )
+        elif unconfirmed:
+            # First use of the new token: the old one only needs to outlive the
+            # requests already in flight.
+            await _apply_isolated(
+                session,
+                update(SessionRow)
+                .where(
+                    SessionRow.id == row.id,
+                    SessionRow.session_hash == token_hash,
+                    SessionRow.prev_valid_until > now + grace,
+                )
+                .values(prev_valid_until=now + grace)
+                .returning(SessionRow.id),
+            )
+    elif unconfirmed and now - _aware(row.rotated_at) >= grace:
+        # Old token presented well after the rotation and the new one was never
+        # used: its cookie was lost. Re-issue (replace the unconfirmed current).
         tok = mint_session_token()
-        row.prev_session_hash = row.session_hash
-        row.prev_valid_until = now + timedelta(seconds=settings.session_rotation_grace_seconds)
-        row.session_hash = tok.session_hash
-        row.rotated_at = now
-        rotated = tok
+        won = await _apply_isolated(
+            session,
+            update(SessionRow)
+            .where(
+                SessionRow.id == row.id,
+                SessionRow.prev_session_hash == token_hash,
+                SessionRow.session_hash == row.session_hash,
+            )
+            .values(
+                session_hash=tok.session_hash,
+                rotated_at=now,
+                prev_valid_until=now + _prev_token_cap(eff.inactivity_hours),
+            )
+            .returning(SessionRow.id),
+        )
+        if won:
+            rotated = SessionToken(
+                raw=tok.raw,
+                session_hash=tok.session_hash,
+                expires_absolute=_aware(row.expires_absolute),
+            )
+    # Sliding idle window on the caller's session (only this column is dirtied,
+    # so the ORM UPDATE never writes back the possibly-stale hash columns).
     row.last_seen_at = now
     return ValidatedSession(
         principal_id=str(row.principal_id), session_id=str(row.id), rotated=rotated
     )
 
 
+def _token_matches(token_hash: str, now: datetime):
+    """WHERE clause: the row whose current hash is ``token_hash``, or whose
+    previous hash is and is still inside its validity window."""
+    return or_(
+        SessionRow.session_hash == token_hash,
+        and_(
+            SessionRow.prev_session_hash == token_hash,
+            SessionRow.prev_valid_until.is_not(None),
+            SessionRow.prev_valid_until > now,
+        ),
+    )
+
+
+def session_row_for_token(raw_token: str):
+    """``SELECT`` for the session row a presented token currently resolves to
+    (current OR still-valid previous hash) — no lifecycle side effects."""
+    return select(SessionRow).where(
+        _token_matches(hash_session_token(raw_token), datetime.now(UTC))
+    )
+
+
 async def revoke_session(session: AsyncSession, raw_token: str) -> bool:
     """Delete the session row for ``raw_token`` (logout). Idempotent — returns
-    True if a row was removed. Invalidation is immediate on the next request."""
-    token_hash = hash_session_token(raw_token)
+    True if a row was removed. Invalidation is immediate on the next request.
+    A still-valid PREVIOUS token revokes too (the browser may legitimately still
+    hold it — see :func:`validate_session`)."""
     result = await session.execute(
-        delete(SessionRow).where(SessionRow.session_hash == token_hash)
+        delete(SessionRow).where(
+            _token_matches(hash_session_token(raw_token), datetime.now(UTC))
+        )
     )
     return bool(result.rowcount)
 

@@ -478,7 +478,6 @@ def _inline_sem() -> asyncio.Semaphore:
 
 async def _require_thumb_scope(
     request: Request,
-    response: Response,
     creds: HTTPAuthorizationCredentials | None = Depends(_thumb_bearer),
     api_key: str | None = None,
     session: AsyncSession = Depends(get_session),
@@ -503,7 +502,7 @@ async def _require_thumb_scope(
         await _verify_credentials(token, "read", session, request)
         return PermissionContext(unrestricted=True, action="search_metadata")
     # Interactive session cookie (browser <img>).
-    principal = await resolve_session_principal(request, response, session)
+    principal = await resolve_session_principal(request, session)
     if principal is not None:
         from filearr import authx
 

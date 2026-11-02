@@ -349,7 +349,6 @@ async def test_sse_auth_dependency_holds_no_request_scoped_session(wired, monkey
 
     from fastapi.security import HTTPAuthorizationCredentials
     from starlette.requests import Request
-    from starlette.responses import Response
 
     from filearr.api import transfers as transfers_mod
 
@@ -364,9 +363,9 @@ async def test_sse_auth_dependency_holds_no_request_scoped_session(wired, monkey
     scope = {"type": "http", "method": "GET", "path": "/x", "headers": [], "query_string": b""}
     request = Request(scope)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=key)
-    await scans_mod._require_events_scope(request, Response(), scan_id, None, creds)
+    await scans_mod._require_events_scope(request, scan_id, None, creds)
     assert engine.pool.checkedout() == 0, engine.pool.status()
     # and a wrong key is still refused
     with pytest.raises(Exception):  # noqa: B017 - HTTPException 401
         bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="nope")
-        await scans_mod._require_events_scope(request, Response(), scan_id, None, bad)
+        await scans_mod._require_events_scope(request, scan_id, None, bad)

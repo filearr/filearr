@@ -38,7 +38,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.sse import EventSourceResponse, ServerSentEvent
@@ -312,7 +312,6 @@ async def get_transfer(
 # --------------------------------------------------------------------------- #
 async def _require_transfer_events_scope(
     request: Request,
-    response: Response,
     transfer_id: uuid.UUID,
     stream_token: str | None = None,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -340,7 +339,7 @@ async def _require_transfer_events_scope(
         if creds is not None:
             await _verify_credentials(creds.credentials, "read", session, request)
             return
-        principal = await resolve_session_principal(request, response, session)
+        principal = await resolve_session_principal(request, session)
         if principal is not None:
             if "read" not in authx.scopes_for_role(principal.global_role):
                 raise HTTPException(403, "Scope 'read' required")

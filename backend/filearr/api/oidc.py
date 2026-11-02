@@ -220,5 +220,5 @@ async def oidc_callback(
     response = RedirectResponse(
         url=_safe_return_to(return_to), status_code=status.HTTP_303_SEE_OTHER
     )
-    set_session_cookie(response, request, token.raw)
+    set_session_cookie(response, request, token.raw, expires_absolute=token.expires_absolute)
     return response
