@@ -569,7 +569,7 @@ async def test_embed_missing_caps_and_skips_current(db, monkeypatch):
 # ------------------------------------------------------------- semantic stats
 @pytest.mark.asyncio
 async def test_semantic_snapshot_counts(db, monkeypatch):
-    from filearr.embed_stats import semantic_snapshot
+    from filearr.embed_stats import semantic_counts as semantic_snapshot
 
     s = get_settings()
     monkeypatch.setattr(s, "semantic_enabled", True)
@@ -593,7 +593,7 @@ async def test_semantic_snapshot_counts(db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_semantic_snapshot_disabled(db, monkeypatch):
-    from filearr.embed_stats import semantic_snapshot
+    from filearr.embed_stats import semantic_counts as semantic_snapshot
 
     monkeypatch.setattr(get_settings(), "semantic_enabled", False)
     lib = await _mk_lib(db)

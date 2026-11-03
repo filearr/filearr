@@ -569,6 +569,31 @@ class Settings(BaseSettings):
     # surfaced here so the values are documented in one place and testable.
     worker_concurrency: int = 4
     worker_queues: str = ""  # empty = all queues; else comma-separated list
+    # Procrastinate's psycopg connection pool (per process). psycopg_pool's
+    # default is min=max=4 — exactly the default worker concurrency, leaving
+    # nothing for the worker's own side tasks (fetch loop, 10 s heartbeat,
+    # periodic deferrer, abort poll), which share that pool with every job's
+    # finish_job ack and in-job defers/connector queries. When a few slow
+    # queries hold connections (fetch_job / maintenance reads over a bloated
+    # procrastinate_jobs), a job's completion ack waits 30 s and dies with
+    # PoolTimeout inside procrastinate (live 2026-10-29: "Task exception was
+    # never retrieved … pump_alerts … PoolTimeout"), leaving the job `doing`
+    # until the stalled-job reaper. 0 = auto: max(worker slots) + 6 — see
+    # ``procrastinate_pool_bounds``. Connections are opened lazily up to max.
+    procrastinate_pool_max_size: int = 0
+    procrastinate_pool_min_size: int = 2
+
+    def procrastinate_pool_bounds(self) -> tuple[int, int]:
+        """(min_size, max_size) for procrastinate's AsyncConnectionPool.
+
+        Auto max = the most job slots this process can run (worker_concurrency,
+        or the extract backpressure ceiling if set higher) + 6 headroom: four
+        always-on worker side tasks + two concurrent long reads, so a job's
+        completion ack never queues behind the jobs themselves."""
+        slots = max(self.worker_concurrency, self.extract_backpressure_max_concurrency, 1)
+        mx = self.procrastinate_pool_max_size or slots + 6
+        mn = max(0, min(self.procrastinate_pool_min_size, mx))
+        return mn, mx
 
     # --- UI-T14: per-task-class default job priorities ----------------------
     # Procrastinate orders the ``todo`` queue by ``priority DESC, id ASC`` -- a

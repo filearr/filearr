@@ -223,5 +223,8 @@ try:  # pragma: no cover - import-time side effect, exercised by the worker
     from filearr.logsink import install as _install_logsink
 
     _install_logsink("worker")
+    from filearr.worker import log_startup_pool as _log_pool
+
+    _log_pool()
 except Exception:  # noqa: BLE001
     pass

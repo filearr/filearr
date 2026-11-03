@@ -713,3 +713,22 @@ def swap_dbname(uri: str, dbname: str) -> str:
     head, sep, query = uri.partition("?")
     head = head.rsplit("/", 1)[0] + "/" + dbname
     return head + (sep + query if sep else "")
+
+
+@pytest.fixture(autouse=True)
+def _reset_stats_caches():
+    """The /stats semantic + disk sections are process-level SWR caches
+    (filearr.swrcache); a value cached by one test must not leak into the next
+    (each test also runs on its own event loop). Only touches modules that are
+    already imported, so it costs nothing for unrelated tests."""
+    import sys
+
+    def _reset():
+        if "filearr.api.system" in sys.modules:
+            sys.modules["filearr.api.system"].reset_stats_caches()
+        elif "filearr.embed_stats" in sys.modules:
+            sys.modules["filearr.embed_stats"].reset_cache()
+
+    _reset()
+    yield
+    _reset()

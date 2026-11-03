@@ -17,8 +17,10 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # table. Its predecessor c7d2e4a91b38 adds the session-rotation grace columns.
 # NOTE: this constant has gone stale on nearly every migration since W8 — bump it
 # in the SAME commit as any new revision, or the suite fails on the next batch.
-HEAD = "7e2c4b9a1d36"
-# Head adds the nullable libraries.description; its predecessor is the B6 drop.
+HEAD = "9c3f1e7a2b58"
+# Head adds ix_items_embedding_fp (CONCURRENTLY, /stats semantic counts); its
+# predecessor 7e2c4b9a1d36 adds the nullable libraries.description, whose
+# predecessor is the B6 drop.
 # P7 B6: head drops libraries.enabled_extension_groups; its predecessor is the
 # scan_schedule_cron data migration (downgrade restores the column, empty).
 DROP_EXTGROUPS_PRED = "3c8a6f1d9e24"
@@ -133,6 +135,17 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # 9c3f1e7a2b58: the partial expression index the semantic counts rely
+        # on (excluded from autogenerate, so only this test sees it). Built
+        # CONCURRENTLY in an autocommit block — it must also come out VALID.
+        with engine.connect() as conn:
+            valid = conn.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i JOIN pg_class c "
+                    "ON c.oid = i.indexrelid WHERE c.relname = 'ix_items_embedding_fp'"
+                )
+            ).scalar()
+        assert valid is True
         # BK-T1: the fingerprint table must exist at head — it is what makes a
         # restore under the wrong FILEARR_SECRET_KEY detectable at all.
         assert "instance_meta" in _tables(engine)

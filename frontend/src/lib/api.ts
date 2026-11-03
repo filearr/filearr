@@ -500,13 +500,23 @@ export const similarItems = (id: string, limit = 10) =>
   request<SimilarResponse>(`/items/${id}/similar?limit=${limit}`);
 
 // P3-T8 — the /stats semantic coverage section (present but disabled=false when
-// FILEARR_SEMANTIC_ENABLED is off). Drives the hidden-unless-enabled UI affordances.
+// FILEARR_SEMANTIC_ENABLED is off). Since 2026-11-02 the counts come from a
+// server-side stale-while-revalidate cache: they are `null` until the first
+// background count finishes (`pending_refresh: true` while it runs) — render
+// that as "computing…", never as 0 — and `computed_at` says how old they are
+// (`stale: true` past the 5-minute TTL or after a failed refresh).
 export interface SemanticStats {
   enabled: boolean;
   model: string;
-  embedded_count: number;
-  pending: number;
-  fp_mismatches: number;
+  embedded_count: number | null;
+  pending: number | null;
+  fp_mismatches: number | null;
+  /** ISO-8601 UTC time the counts were taken; null before the first count. */
+  computed_at: string | null;
+  stale: boolean;
+  pending_refresh: boolean;
+  /** Sanitized reason the last background refresh failed (counts kept). */
+  refresh_error?: string;
 }
 export const semanticStats = async (): Promise<SemanticStats | null> => {
   try {

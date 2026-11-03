@@ -22,6 +22,8 @@ _FOREIGN_PREFIXES = ("procrastinate_",)
 #     (COALESCE(item_id, nil-uuid), WHERE NOT delivered; f3b8d2a41c5e).
 #     Autogenerate's expression comparison is textual and brittle across
 #     alembic versions; the migration remains its single source of truth.
+#   * ix_items_embedding_fp — same shape (partial expression index over
+#     metadata ->> '_embedding_fp'; 9c3f1e7a2b58), same reason.
 _RUNTIME_CONDITIONAL_INDEXES = frozenset(
     {
         "ix_items_path_scope_gist",
@@ -29,6 +31,7 @@ _RUNTIME_CONDITIONAL_INDEXES = frozenset(
         "ix_path_grants_scope_gist",
         "ix_path_grants_scope",
         "uq_alert_events_dedup_pending",
+        "ix_items_embedding_fp",
     }
 )
 

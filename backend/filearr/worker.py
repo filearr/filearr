@@ -5,6 +5,7 @@ Queues: scan (walk/diff), extract (per-file metadata), index (Meili sync), maint
 """
 
 import contextlib
+import logging as _logging
 from datetime import UTC, datetime, timedelta
 
 import procrastinate
@@ -39,8 +40,17 @@ async def open_pool_if_needed():
         yield
 
 
+_POOL_MIN, _POOL_MAX = get_settings().procrastinate_pool_bounds()
+# See config.procrastinate_pool_max_size: the psycopg_pool default (4 = the
+# default concurrency) starved the worker's side tasks and job acks (live
+# PoolTimeout 2026-10-29). log_startup_pool() reports the effective bounds.
+
 proc_app = procrastinate.App(
-    connector=PsycopgConnector(conninfo=get_settings().procrastinate_dsn),
+    connector=PsycopgConnector(
+        conninfo=get_settings().procrastinate_dsn,
+        min_size=_POOL_MIN,
+        max_size=_POOL_MAX,
+    ),
     # Roadmap §18: every job runs under the joberrors worker middleware, which
     # persists a sanitized message + capped traceback to `job_errors` when a
     # task raises (then re-raises untouched — retries/reaper/status unchanged).
@@ -72,6 +82,17 @@ proc_app = procrastinate.App(
         "filearr.tasks.reports",
     ],
 )
+
+
+def log_startup_pool() -> None:
+    """Log procrastinate's effective pool bounds once at worker boot (called
+    from the diskmon import seam, after the DB log sink is installed)."""
+    _logging.getLogger("filearr.worker").info(
+        "procrastinate pool: min_size=%d max_size=%d (worker_concurrency=%d, "
+        "extract max concurrency=%d)",
+        _POOL_MIN, _POOL_MAX, get_settings().worker_concurrency,
+        get_settings().extract_backpressure_max_concurrency,
+    )
 
 
 def log_startup_disk_status() -> str:
